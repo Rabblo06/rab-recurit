@@ -9596,7 +9596,10 @@ plain-text password.
     value, then a DO block that reads the value from that setting (never from its own text), runs
     `ALTER ROLE crewflow_owner LOGIN PASSWORD %L` through format() and removes the mark, re-raising any inner error with its
     SQLSTATE only, then `COMMIT;` (re-review N1). An empty setting (lines run separately) is refused with
-    "run all lines together in one go, inside one transaction". Option 2's CREATE ROLE uses the same shape.
+    "run all lines together in one go, inside one transaction". Option 2's CREATE ROLE uses the same shape. Re-check F2-F4:
+    the block starts with `ROLLBACK;` (ends a failed attempt; outside a transaction it only warns), the set_config line
+    returns only `value_set` (no value in a result grid), the SQL is printed between fixed BEGIN SQL / END SQL markers and the
+    instruction says to strip any log prefix, and, on failure, to ROLLBACK, use a NEW value and update the setting.
   The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
   with no password write, so never a loop.
   If the server refuses the passwordless login role too, nothing is created and the reviewed CREATE ROLE + GRANT is printed
@@ -9606,7 +9609,7 @@ plain-text password.
   log (log_min_error_statement) without it, and pg_stat_statements stores the SELECT normalised (constants replaced) and the
   DO block without a value. Proven on the pinned PostgreSQL 16 (harness N1): a refused first value and the real value, run
   statement by statement, appear in no server log line and in no top-level pg_stat_statements row. What remains: the server
-  log at `log_statement = all`; any error when the editor sends ALL lines as ONE message (the whole message is quoted,
+  log at `log_statement = all`, `log_min_duration_statement` or `auto_explain` (they quote the statement text); any error when the editor sends ALL lines as ONE message (the whole message is quoted,
   set_config line included); pg_stat_statements with `track = all`, which records the ALTER / CREATE ROLE run inside the DO
   block WITH the value (seen live: one nested row; the default `track = top` does not record it); `pg_stat_activity` while
   it runs; the provider's own logs, audit and SQL-editor history. The
@@ -9619,8 +9622,8 @@ plain-text password.
 - **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
   login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
   server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Re-review N2: that wrong-password
-  login runs on EVERY run that logs in, right after the successful real login (and once more after a creation or a password
-  change, after COMMIT), so a failure counter that a successful login resets never exceeds 1. **Residual:** a lockout that
+  login runs on EVERY run that logs in, right after the successful real login (and once more after COMMIT after a creation,
+  a password change, or any run whose pre-lock login did not work, e.g. 42501 before the CONNECT grant: re-check F1), so a failure counter that a successful login resets never exceeds 1. **Residual:** a lockout that
   counts total failed logins over a time window can still be reached by many deploys in that window (one failed login each).
 - **The app password's characters** (re-review a). In modes a and b (db-setup creates or sets it) the decoded password,
   built or inside an explicit PG_DATABASE_URL, must be `^[A-Za-z0-9_-]{32,}$`, refused (64) before connecting; it is what

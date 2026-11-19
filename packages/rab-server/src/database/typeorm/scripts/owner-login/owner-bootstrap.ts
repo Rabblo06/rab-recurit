@@ -240,24 +240,24 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   passwordlessCreated: 'crewflow_owner was created WITHOUT a password and NOLOGIN (nothing can log in as it yet), with its database grant.',
   passwordlessKept: 'crewflow_owner exists and does not log in with PG_DATABASE_APP_PASSWORD; its password and LOGIN were left unchanged.',
   setPasswordStep:
-    "Set crewflow_owner's password once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below, replacing <PG_DATABASE_APP_PASSWORD> with that value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it; never a console password reset, which generates a different, shorter password). Run all the lines below together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. Then redeploy: db-setup checks the login and continues.",
+    "Set crewflow_owner's password once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below, replacing <PG_DATABASE_APP_PASSWORD> with that value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it; never a console password reset, which generates a different, shorter password). Copy only the lines between the BEGIN SQL and END SQL markers, and remove any log prefix such as [owner-bootstrap] or db-setup-1 | from each line. Run them all together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. If it fails, run ROLLBACK; (or open a new session) before running it again. A failed run's value can be in the server log, so use a new value and update PG_DATABASE_APP_PASSWORD (or the password inside PG_DATABASE_URL). Then redeploy: db-setup checks the login and continues.",
   passwordVisibilityStep:
-    "The value you type is only in the set_config line. It can remain in the server log (log_statement = all, or any error on these statements: an editor that sends all lines as one message has all of them quoted), in pg_stat_statements when pg_stat_statements.track = all (the ALTER / CREATE ROLE run inside the DO block; the default, top, records it without the value), in pg_stat_activity while it runs, and in your provider's own logs and SQL-editor history. If pg_stat_statements is installed, run SELECT pg_stat_statements_reset(); afterwards where you are permitted to; otherwise treat the value as visible to anyone who can read query statistics.",
+    "The value you type is only in the set_config line. It can remain in the server log (log_statement = all, log_min_duration_statement, auto_explain, or any error on these statements: an editor that sends all lines as one message has all of them quoted), in pg_stat_statements when pg_stat_statements.track = all (the ALTER / CREATE ROLE run inside the DO block; the default, top, does not record it), in pg_stat_activity while it runs, and in your provider's own logs and SQL-editor history. If pg_stat_statements is installed, run SELECT pg_stat_statements_reset(); afterwards where you are permitted to; otherwise treat the value as visible to anyone who can read query statistics.",
   awaitingPassword: 'crewflow_owner has no usable password yet: db-setup exits 64 until crewflow_owner logs in with PG_DATABASE_APP_PASSWORD. Refusing.',
   passwordlessRefused: (stage: WriteStage, sqlstate: string) =>
     `The server also refused to create crewflow_owner without a password (SQLSTATE ${sqlstate} ${stageText(stage)}). Nothing was created.`,
   manualRoleStep:
-    "Create crewflow_owner once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). Run all the lines below together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
+    "Create crewflow_owner once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). Copy only the lines between the BEGIN SQL and END SQL markers, and remove any log prefix such as [owner-bootstrap] or db-setup-1 | from each line. Run them all together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. If it fails, run ROLLBACK; (or open a new session) before running it again. A failed run's value can be in the server log, so use a new value and update PG_DATABASE_APP_PASSWORD (or the password inside PG_DATABASE_URL). Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
   serverIgnoresPassword:
     'The server lets crewflow_owner log in WITHOUT its password (a deliberately wrong password was accepted): a pg_hba trust, peer, cert or similar rule applies to it. Crewflow never runs on a login that needs no password: require password authentication (scram-sha-256) for crewflow_owner, then start again. Refusing.',
   awaitingMarkExpired:
-    "crewflow_owner is NOLOGIN and its 'waiting for its password' mark has expired (24 h). db-setup never re-enables a login an admin may have disabled on purpose. If you do want it, run the password step below yourself (it also makes crewflow_owner LOGIN), or drop the role, then redeploy. Refusing.",
+    "crewflow_owner is NOLOGIN and its 'waiting for its password' mark has expired (24 h). db-setup never re-enables a login an admin may have disabled on purpose. If you do want it, run the password step above yourself (it also makes crewflow_owner LOGIN), or drop the role, then redeploy. Refusing.",
   foreignMembers:
     'Another role is a member of crewflow_owner (beyond this admin login\'s own ADMIN-only grant to manage it): whoever holds that membership could reset or use the app login. It may be your admin login\'s own self-grant with SET or INHERIT (createrole_self_grant); remove that with REVOKE crewflow_owner FROM <your admin login>. Otherwise revoke it (REVOKE crewflow_owner FROM <that role>) or drop crewflow_owner, then start again. Refusing.',
   awaitingNotWritable:
     'crewflow_owner is waiting for its password, and this step would not set one. Nothing was committed. Refusing.',
   resetPasswordStep:
-    "Set the new crewflow_owner password once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below, replacing <PG_DATABASE_APP_PASSWORD> with the new value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32), then put it in PG_DATABASE_URL. Run all the lines below together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead.",
+    "Set the new crewflow_owner password once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below, replacing <PG_DATABASE_APP_PASSWORD> with the new value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32), then put it in PG_DATABASE_URL. Copy only the lines between the BEGIN SQL and END SQL markers, and remove any log prefix such as [owner-bootstrap] or db-setup-1 | from each line. Run them all together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. If it fails, run ROLLBACK; (or open a new session) before running it again. A failed run's value can be in the server log, so use a new value and update PG_DATABASE_APP_PASSWORD (or the password inside PG_DATABASE_URL).",
   appPasswordCharset:
     'The crewflow_owner password (PG_DATABASE_APP_PASSWORD, or the password inside PG_DATABASE_URL) must be 32+ characters of A-Z a-z 0-9 _ - only (openssl rand -hex 32): db-setup creates or sets it, and it goes into printed SQL steps. Value not shown. Refusing before connecting.',
   wrongPasswordProbeUnclear: (code: string) =>
@@ -266,7 +266,7 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   awaitingManualRole: 'crewflow_owner does not exist yet: db-setup exits 64 until you create it with the SQL above. Refusing.',
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: (stage: WriteStage, sqlstate: string) =>
-    // sql-injection-reviewed: a log MESSAGE (printed, never executed); sqlstate is a 5-character SQLSTATE from the driver and stage a fixed WriteStage.
+    // sql-injection-reviewed: a log MESSAGE (printed, never executed); sqlstate comes from errorCode() ([0-9A-Za-z_]{1,40} or 'no-code') and stage is a fixed WriteStage.
     `crewflow_owner changed in another start at the same moment (SQLSTATE ${sqlstate} ${stageText(stage)}: a concurrent CREATE ROLE, ALTER ROLE or GRANT); reading the facts again.`,
   passwordRecheck: 'The database grant was added, and the crewflow_owner password inside PG_DATABASE_URL still does not log in: reading the facts again to set it.',
   raceExhausted: (stage: WriteStage, sqlstate: string) =>
@@ -780,9 +780,16 @@ async function assertPasswordRequired(io: OwnerBootstrapIo): Promise<void> {
 /** Prints a password step: the instruction, the statements (every line indented 2 spaces), then where the value can remain. */
 function logPasswordStep(io: Pick<OwnerBootstrapIo, 'log'>, instruction: string, statements: readonly string[]): void {
   io.log(instruction);
-  for (const statement of statements) for (const line of statement.split('\n')) io.log(`  ${line}`);
+  // Re-check F3 of #259: the log adds its own prefix (and a platform may add another), so the SQL sits between fixed markers.
+  io.log(OWNER_SQL_BEGIN_MARKER);
+  for (const statement of statements) for (const line of statement.split('\n')) io.log(line);
+  io.log(OWNER_SQL_END_MARKER);
   io.log(OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep);
 }
+
+/** The fixed lines around a printed SQL block (re-check F3 of #259). */
+export const OWNER_SQL_BEGIN_MARKER = '----- BEGIN SQL (copy the lines between these markers, without any log prefix) -----';
+export const OWNER_SQL_END_MARKER = '----- END SQL -----';
 
 /** Re-review (a) of #259: the only crewflow_owner passwords db-setup creates or sets (the shape of openssl rand -hex 32). */
 export const OWNER_APP_PASSWORD_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
@@ -790,7 +797,7 @@ export const OWNER_APP_PASSWORD_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
 /** The SQLSTATEs of a login refused for its password (28P01 invalid_password, 28000 invalid_authorization_specification). */
 export const PASSWORD_REQUIRED_SQLSTATES: ReadonlySet<string> = new Set(['28P01', '28000']);
 
-async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNotes: boolean): Promise<WritePlan> {
+async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNotes: boolean): Promise<WritePlan & { wrongPasswordChecked: boolean }> {
   const facts = await readFacts(session);
   // Independent re-review N5 of #259: an expired awaiting mark is refused below; print the step the operator may run.
   if (logNotes && facts.ownerExists && facts.oAwaitingMarkExpired) logPasswordStep(io, OWNER_BOOTSTRAP_MESSAGES.setPasswordStep, OWNER_SET_PASSWORD_SQL);
@@ -800,11 +807,12 @@ async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNo
   // A login that works is trusted only if a wrong password does NOT work: checked on EVERY run, right after the successful
   // real login (re-review N2 of #259), so a failure counter that a successful login resets never goes above 1. A lockout
   // that counts total failures over a time window can still be reached by many runs (one failed login each; documented).
-  if (logNotes && probe?.ok) await assertPasswordRequired(io);
+  const wrongPasswordChecked = logNotes && probe?.ok === true;
+  if (wrongPasswordChecked) await assertPasswordRequired(io);
   const plan = planWrite(facts, probe);
   // L4: the password of an existing role is never set while another database of the cluster uses the role.
   if (plan.needPassword && !plan.create) await assertNoOtherDatabase(session);
-  return plan;
+  return { ...plan, wrongPasswordChecked };
 }
 
 const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null };
@@ -855,9 +863,9 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Attem
     if (after.code === '28P01' && !plan.needPassword) return 'recheck';
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
   }
-  // After a creation or a password change (the pre-lock login did not work then); a grant-only transaction already ran the
-  // check right after its pre-lock login.
-  if (plan.create || plan.needPassword) await assertPasswordRequired(io);
+  // After a creation or a password change (the pre-lock login did not work then), and after any run whose pre-lock login did
+  // not work (re-check F1 of #259: e.g. 42501 before the CONNECT grant existed, then a grant-only transaction).
+  if (plan.create || plan.needPassword || !preLock.wrongPasswordChecked) await assertPasswordRequired(io);
   assertFactsExact(await readFacts(session));
   if (plan.needPassword && !plan.create) io.log(OWNER_BOOTSTRAP_MESSAGES.passwordSet);
   return {

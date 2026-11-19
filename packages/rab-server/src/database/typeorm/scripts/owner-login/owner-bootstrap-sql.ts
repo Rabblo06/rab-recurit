@@ -62,7 +62,9 @@ export function awaitingMarkValidSql(comment: string): string {
 export const OWNER_PASSWORD_STEP_SETTING = 'crewflow.pw';
 
 /** The printed line that puts the operator's value into OWNER_PASSWORD_STEP_SETTING (the ONLY line holding the value). */
-const PASSWORD_STEP_SET_LINE = "SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);";
+const PASSWORD_STEP_SET_LINE = "SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true) IS NOT NULL AS value_set;";
+/** Re-check F2 of #259: the first printed line ends a failed earlier attempt's transaction (outside one it only warns). */
+const PASSWORD_STEP_RESET_LINE = 'ROLLBACK;';
 
 /**
  * A printed DO block that runs `body` (statements that read the value as v_pw) with the value from the setting, never from
@@ -96,6 +98,7 @@ END$$;`;
  * mark (review L1). Fixed text; a spec pins it.
  */
 export const OWNER_SET_PASSWORD_SQL: readonly string[] = Object.freeze([
+  PASSWORD_STEP_RESET_LINE,
   'BEGIN;',
   PASSWORD_STEP_SET_LINE,
   passwordStepDo(`    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', v_pw);
@@ -109,6 +112,7 @@ export const OWNER_SET_PASSWORD_SQL: readonly string[] = Object.freeze([
  * set_config line), changing the password only: no LOGIN, no comment touched (SQL audit of #259).
  */
 export const OWNER_RESET_PASSWORD_SQL: readonly string[] = Object.freeze([
+  PASSWORD_STEP_RESET_LINE,
   'BEGIN;',
   PASSWORD_STEP_SET_LINE,
   passwordStepDo(`    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_pw);`),
@@ -399,6 +403,7 @@ $bootstrap$;`;
  * same way as OWNER_SET_PASSWORD_SQL (re-review N1). Statements, run together in one go. Fixed text; a spec pins it.
  */
 export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
+  PASSWORD_STEP_RESET_LINE,
   'BEGIN;',
   "SET LOCAL createrole_self_grant = '';",
   PASSWORD_STEP_SET_LINE,

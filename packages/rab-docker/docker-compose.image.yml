@@ -24,7 +24,7 @@
 # that release's own compose files (docs/release/OWNER-LOGIN-RECOVERY.md section 4.4).
 #
 # DATABASE SETUP LIKE TWENTY (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): rab-api and rab-worker
-# read PG_DATABASE_URL, ALWAYS the crewflow_owner URL (direct host, sslmode=verify-full), straight from their environment, as
+# read PG_DATABASE_URL, ALWAYS the crewflow_owner URL (direct host, sslmode require, verify-ca or verify-full, all verified fully), straight from their environment, as
 # Twenty's server and worker read the app user's URL (twentyhq/twenty@eedb0a73 helm/twenty/templates/
 # deployment-server.yaml:148-155, deployment-worker.yaml:81-88); only the one-shot db-setup holds an admin login.
 # Interpolation values of compose.env (template env/compose.env.example), three modes:
@@ -40,7 +40,8 @@
 #       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
 #       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
 #       run the printed SQL once, all lines together, then redeploy; Crewflow never sends a plain-text password; the
-#       typed value can stay in server logs and provider logs). PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only
+#       typed value can stay in server logs, pg_stat_statements (track = all), pg_stat_activity and provider logs).
+#       PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only
 #       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
 #       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
 #       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.
@@ -163,7 +164,7 @@ services:
   # pg_isready (the health check) does not authenticate. The image reads the superuser password ONLY when the data volume is
   # empty (first start): changing PG_DATABASE_PASSWORD later does not change it (ALTER ROLE postgres PASSWORD ... first).
   # YOUR OWN DATABASE (like Twenty's Helm db.enabled=false): CREWFLOW_BUNDLED_DB=0, PG_DATABASE_URL (the crewflow_owner
-  # URL) and, to have db-setup create crewflow_owner, PG_ADMIN_URL (its admin URL); direct host, sslmode=verify-full. This service then gets 0 replicas and never starts, and PG_DATABASE_PASSWORD is NOT needed
+  # URL) and, to have db-setup create crewflow_owner, PG_ADMIN_URL (its admin URL); direct host, sslmode require, verify-ca or verify-full, all verified fully. This service then gets 0 replicas and never starts, and PG_DATABASE_PASSWORD is NOT needed
   # (owner decision 2026-11-17: no dummy password): it is required only while this db runs, which its entrypoint, db-setup
   # and the env-file lint / --environment preflight check (a compose `:?` cannot depend on CREWFLOW_BUNDLED_DB).
   # Image: postgres:16 (Debian, 16.16), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name a Debian
@@ -504,7 +505,7 @@ services:
     environment:
       # The database settings (compose.env). db-setup.sh picks the mode; the bootstrap child refuses a non-crewflow_owner
       # PG_DATABASE_URL, a crewflow_owner PG_ADMIN_URL, and two URLs that name different databases:
-      #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode=verify-full; CREWFLOW_BUNDLED_DB=0), THIS
+      #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode require, verify-ca or verify-full, all verified fully; CREWFLOW_BUNDLED_DB=0), THIS
       #       SERVICE ONLY: db-setup creates crewflow_owner with it. rab-api and rab-worker NEVER receive it (pinned "").
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
       PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}

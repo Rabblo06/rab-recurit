@@ -42,7 +42,7 @@ import { join, resolve } from 'node:path';
 
 import { Client } from 'pg';
 
-import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from '../owner-bootstrap';
+import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OWNER_SQL_BEGIN_MARKER, OWNER_SQL_END_MARKER, OwnerBootstrapResult } from '../owner-bootstrap';
 import { OWNER_AWAITING_PASSWORD_MARK, OWNER_MANUAL_ROLE_SQL, OWNER_SET_PASSWORD_SQL } from '../owner-bootstrap-sql';
 
 /** A printed operator statement with its placeholder replaced LITERALLY by `value` (what the operator types). */
@@ -390,7 +390,9 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
         OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
         OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
-        ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
+        OWNER_SQL_BEGIN_MARKER,
+        ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')),
+        OWNER_SQL_END_MARKER,
         OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
         OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
       ]) {
@@ -456,7 +458,9 @@ const scenarios: Array<[string, () => Promise<void>]> = [
           OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
           OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused('commit', 'XX000'),
           OWNER_BOOTSTRAP_MESSAGES.manualRoleStep,
-          ...OWNER_MANUAL_ROLE_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
+          OWNER_SQL_BEGIN_MARKER,
+        ...OWNER_MANUAL_ROLE_SQL.flatMap((st) => st.split('\n')),
+        OWNER_SQL_END_MARKER,
           OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
           OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole,
         ]) {
