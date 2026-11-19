@@ -12,11 +12,12 @@ the service refuses to start if it is set (exit 64); **—** = not given.
 
 | Variable | Set in | db | db-setup | db-harden | rab-api | rab-worker | What it is |
 |---|---|---|---|---|---|---|---|
-| `PG_DATABASE_URL` | `compose.env` (modes b, c); built from `PG_DATABASE_APP_PASSWORD` in mode a | — | yes | yes | yes | yes | The app login, always `crewflow_owner`, at the direct host. On OpenShip, enter it explicitly. |
-| `PG_DATABASE_APP_PASSWORD` | `compose.env` (mode a; planned for the own-database general flow too<!-- VERIFY -->) | — | built | built | built | built | The bundled db's `crewflow_owner` password (`openssl rand -hex 32`), inside `PG_DATABASE_URL` only. Refused as a variable of its own. |
+| `PG_DATABASE_URL` | built by Compose from `PG_DATABASE_APP_PASSWORD` (+ `PG_DATABASE_HOST` / `_PORT` / `_NAME` with your own database); or set in full in `compose.env` (mode c, or instead of the parts) | — | yes | yes | yes | yes | The app login, always `crewflow_owner`, at the direct host. On OpenShip, enter it explicitly. |
+| `PG_DATABASE_APP_PASSWORD` | `compose.env` (modes a and b; never together with a full `PG_DATABASE_URL`) | — | built | built | built | built | The one shared `crewflow_owner` password (`openssl rand -hex 32`), inside `PG_DATABASE_URL` only. Refused as a variable of its own. |
 | `PG_DATABASE_PASSWORD` | `compose.env` (mode a) | yes (superuser) | built | built | refused | refused | The bundled db's superuser password. Read on the volume's first start only. |
 | `PG_ADMIN_URL` | `compose.env` (mode b) | — | yes | yes | refused | refused | Your database's admin connection string, as your provider shows it. |
-| `PG_ADMIN_DIRECT_URL`<!-- VERIFY --> | `compose.env`, only when `PG_ADMIN_URL` is a pooler | — | yes | yes | refused | refused | The admin login's direct (session) endpoint. |
+| `PG_DATABASE_HOST` / `PG_DATABASE_PORT` / `PG_DATABASE_NAME` | `compose.env` (mode b) | — | built | built | built | built | The database's direct address, copied from the admin URL; Compose builds `PG_DATABASE_URL` from them (defaults `db`, `5432`, `crewflow`). `db-setup` checks they match the admin URL. |
+| `PG_ADMIN_DIRECT_URL` | `compose.env`, only when `PG_ADMIN_URL` is a pooler | — | yes | yes | refused (pinned `""`) | refused (pinned `""`) | The direct address of the same admin login and database. |
 | `PG_DATABASE_SESSION_URL` | only when `PG_DATABASE_URL` is a transaction pooler; the compose wiring is pending<!-- VERIFY --> | — | yes | yes | yes | yes | The direct session connection of the same `crewflow_owner` login and database. Used for locks, boot gates, migrations, the upgrade runner, the CLI, `db-setup` and `db-harden`; only the request pool uses `PG_DATABASE_URL` then. Refused with another login or database, the same target as `PG_DATABASE_URL`, `PG_DATABASE_URL_IS_DIRECT=true`, or the legacy `DATABASE_DIRECT_URL`. |
 | `CREWFLOW_BUNDLED_DB` | `compose.env` | replicas | yes | yes | — | — | `1` (default) = the bundled db; `0` = your own database. OpenShip ignores the replica count: switch `db` off there. |
 | `CREWFLOW_BUNDLED_DB_ADMIN_URL` | built by Compose; never set it | — | built | built | — | — | The bundled superuser URL, built from `PG_DATABASE_PASSWORD`. |
@@ -53,5 +54,6 @@ the service refuses to start if it is set (exit 64); **—** = not given.
   driver cannot insist on it; it is refused without TLS.
 - **Mode (b):** `PG_ADMIN_URL` and `PG_DATABASE_URL` (or their direct endpoints) name the same host, port and
   database.
-- **Passwords:** `db-setup` sends a SCRAM verifier first, and plain text over verified TLS only if the server refuses
-  it<!-- VERIFY -->. Provider notes: `OWNER-LOGIN-DEPLOYMENT.md` section 2, "Known provider quirks".
+- **Passwords:** `db-setup` only ever sends a SCRAM verifier, never plain text. A server that refuses it gets option 1
+  (the login created without a password; you run `ALTER ROLE crewflow_owner PASSWORD '...'` in its SQL editor) or option
+  2 (you run the printed CREATE ROLE SQL). Provider notes: `OWNER-LOGIN-DEPLOYMENT.md` section 2, "Known provider quirks".
