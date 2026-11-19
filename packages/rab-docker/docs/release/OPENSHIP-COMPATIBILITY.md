@@ -17,7 +17,8 @@ never drop a security setting silently. Nothing was deployed, imported or connec
 > `required: false` inside `depends_on` are ignored with a warning (`compose-parser.ts:646-649`). The wait for a
 > `service_completed_successfully` / `service_healthy` dependency is `max(120 s, start_period + retries x (interval +
 > timeout))` of the DEPENDENCY's health check (`deploy.service.ts:2789-2796`): 180 s for db-setup (no health check), 1125 s
-> for rab-api (rab-worker's wait). Hence db-setup has no `depends_on` and waits for the database itself (wait-for-db).
+> for rab-api (rab-worker's wait). Hence db-setup has no `depends_on` and waits for the database itself (wait-for-db),
+> by default for 170 s, so it fails with its own line inside that 180 s window.
 > The rows below about `depends_on` describe v0.9.8.
 
 ## 1. What was checked, and the gap

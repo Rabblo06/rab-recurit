@@ -35,7 +35,7 @@
  *     exactly its shape (same image, started through the wait-for-db wrapper (db-setup-wait.cjs: the block of
  *     rab/db-setup.sh, then exec ./db-setup.sh; owner instruction 2026-11-18, Twenty's Helm wait-for-db), restart "no",
  *     no port, no profile, the H1-H6 hardening, NO depends_on (with CREWFLOW_BUNDLED_DB=0 there is no db container),
- *     CREWFLOW_DB_WAIT_SECONDS committed as ${CREWFLOW_DB_WAIT_SECONDS:-300}, the CA read-only and the target volume
+ *     CREWFLOW_DB_WAIT_SECONDS committed as ${CREWFLOW_DB_WAIT_SECONDS:-170}, the CA read-only and the target volume
  *     writable) and rab-api waits for it (service_completed_successfully) and never for db. No service carries any other database URL — no migrator, provisioner,
  *     worker, ops, replica, posture, drift or test URL, no legacy DATABASE_URL* name, no libpq PG* variable, no postgres://
  *     value under another key; no CREWFLOW_DB_MODE (there is no mode switch); nothing from a separated-mode env file
@@ -1184,7 +1184,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (why) problems.push(`${key}: ${why}`);
     if (kind !== 'compose' && key === ADMIN_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only, and rab-api / rab-worker refuse it (an env file here would hand the admin URL to them)`);
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
-    if (kind !== 'compose' && key === WAIT_SECONDS_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup's committed \${${WAIT_SECONDS_KEY}:-300} would silently override a value here`);
+    if (kind !== 'compose' && key === WAIT_SECONDS_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup's committed \${${WAIT_SECONDS_KEY}:-170} would silently override a value here`);
     if (kind === 'compose' && key === WAIT_SECONDS_KEY && waitSecondsProblem(value)) problems.push(waitSecondsProblem(value));
     if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only (its committed \${PG_DATABASE_URL:-...} would override a value here), and rab-api / rab-worker refuse it`);
     if (kind === 'database' && !why && key !== URL_KEY && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);

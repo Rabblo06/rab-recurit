@@ -202,6 +202,31 @@ test('DENIAL bundled db switch: 0 without your own database, any value but 0 or 
   }
 });
 
+// Security review L1: the committed default wait ends inside OpenShip's 180 s window for rab-api -> db-setup
+// (service_completed_successfully on a service without a health check), so db-setup exits 70 with its own line first.
+test('db-setup wait: the default bound is below 180 s and the same in db-setup.sh, both compose wrappers and both environments', () => {
+  const wait = require('./db-setup-wait.cjs');
+  assert.ok(Number(wait.WAIT_SECONDS_DEFAULT) < wait.OPENSHIP_DEPENDENCY_WINDOW_SECONDS && wait.OPENSHIP_DEPENDENCY_WINDOW_SECONDS === 180, wait.WAIT_SECONDS_DEFAULT);
+  assert.equal(wait.WAIT_SECONDS_EXPR, `\${CREWFLOW_DB_WAIT_SECONDS:-${wait.WAIT_SECONDS_DEFAULT}}`);
+  for (const rel of ['rab/db-setup.sh', 'docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const defaults = [...text.matchAll(/CREWFLOW_DB_WAIT_SECONDS:-(\d+)\}/g)].map((m) => m[1]);
+    assert.ok(defaults.length >= 2, `${rel}: ${defaults.length} defaults`);
+    assert.deepEqual([...new Set(defaults)], [wait.WAIT_SECONDS_DEFAULT], rel);
+  }
+});
+
+// Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-setup's wait bound, a compose.env value only, 0-900 seconds.
+test('DENIAL db-setup wait: CREWFLOW_DB_WAIT_SECONDS is 0-900 whole seconds in compose.env, never in database.env / runtime.env', () => {
+  for (const v of ['0', '10', '170', '900', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_DB_WAIT_SECONDS=${v}`), [], v);
+  for (const v of ['901', '1000', '-1', '30s', '1e3', '0300', 'x']) {
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_DB_WAIT_SECONDS=${v}`), /^CREWFLOW_DB_WAIT_SECONDS: must be a whole number of seconds from 0 to 900/);
+  }
+  for (const kind of ['database', 'runtime']) {
+    assertRefused(lintEnvText(kind, 'CREWFLOW_DB_WAIT_SECONDS=170'), /^CREWFLOW_DB_WAIT_SECONDS: set it in compose\.env/);
+  }
+});
+
 test('DENIAL L1: a CREWFLOW_TEST_* seam is refused in every env file and as a container variable', () => {
   for (const name of ['CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS', 'CREWFLOW_TEST_OWNER_SETUP_ABORT', 'CREWFLOW_TEST_ANYTHING']) {
     assert.match(forbiddenReason(name), /a test seam/);
