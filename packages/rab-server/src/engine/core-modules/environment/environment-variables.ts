@@ -340,6 +340,20 @@ export class EnvironmentVariables {
   TRUSTED_PROXY_CIDRS: string = '';
 
   /**
+   * One-time diagnostic for finding the TRUSTED_PROXY_CIDRS value on a host without a shell (hosted OpenShip): `true`
+   * makes the API log, ONCE per process, the socket peer address (`req.socket.remoteAddress`) of the first request whose
+   * peer is not the container's own loopback (the container health check). Nothing else of the request is logged: no
+   * header, no X-Forwarded-For, no path, no query, no body (engine/core-modules/trusted-proxy/first-peer-log.middleware.ts).
+   * Off by default; set it for one deploy, read the line, set TRUSTED_PROXY_CIDRS, then remove it
+   * (packages/rab-docker/docs/release/ENV-REFERENCE.md). Strict like every switch (X3.1): exactly `true` or `false`.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
+  CREWFLOW_LOG_FIRST_PEER: boolean = false;
+
+  /**
    * Selects the email transport driver — see EmailDriverFactory. Defaults
    * to LOGGER so local dev never sends real email unless explicitly
    * configured. SMTP requires EMAIL_SMTP_HOST; RESEND requires

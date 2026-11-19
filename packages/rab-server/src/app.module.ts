@@ -24,6 +24,7 @@ import { StorageModule } from './engine/core-modules/storage/storage.module';
 import { TenantModule } from './engine/core-modules/tenant/tenant.module';
 import { UserDeletionModule } from './engine/core-modules/user-deletion/user-deletion.module';
 import { WorkspaceHostModule } from './engine/core-modules/workspace-host/workspace-host.module';
+import { TrustedProxyModule } from './engine/core-modules/trusted-proxy/trusted-proxy.module';
 import { LoginHandoffModule } from './engine/core-modules/auth/login-handoff/login-handoff.module';
 import { RabThrottlerModule } from './engine/core-modules/throttler/throttler.module';
 import { AllExceptionsFilter } from './engine/filters/all-exceptions.filter';
@@ -75,6 +76,8 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     AuthModule,
     // Wave 3 lane H: host -> workspace routing context, registry-backed origin trust, the wrong-host 404.
     WorkspaceHostModule,
+    // Opt-in CREWFLOW_LOG_FIRST_PEER: logs the first non-loopback request peer address once (TRUSTED_PROXY_CIDRS discovery).
+    TrustedProxyModule,
     LoginHandoffModule,
     IdentityModule,
     MemberAccessModule,
