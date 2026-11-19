@@ -69,7 +69,7 @@ export function transactionScopePreambleSql(settings: TransactionScopeSettings):
   const statement = integerMs('statementTimeoutMs', settings.statementTimeoutMs);
   const idle = integerMs('idleInTransactionTimeoutMs', settings.idleInTransactionTimeoutMs);
   return [
-    'RESET ROLE',
+    // FAIL-FIRST PROBE: RESET ROLE removed on purpose (never merged)
     `SET LOCAL statement_timeout = ${statement}`,
     `SET LOCAL idle_in_transaction_session_timeout = ${idle}`,
     ...(settings.readOnly ? ['SET LOCAL transaction_read_only = on'] : []),
