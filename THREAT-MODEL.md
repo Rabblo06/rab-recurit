@@ -9609,7 +9609,9 @@ Reversal:   a secret store mounted as a file per process (Docker secrets / Kuber
   poisoned (session `SET ROLE rab_secure_owner`, session `rab.organisation_id` of the OTHER organisation, session
   `search_path`) a plain client still runs as `rab_secure_owner` (the control) while every runtime transaction runs as
   `crewflow_owner`, isolated, with no inherited GUC; the probe refuses the PgBouncer URL. Fail-first: with `RESET ROLE`
-  removed from the preamble the poisoned-backend case fails. `transaction-scoped-client.spec.ts` pins the routing (statement
+  removed from the preamble the poisoned-backend case fails (CI job ci-server / test-transaction-pooler, not a required check:
+  the Ubuntu pgbouncer package, 2 server connections; a second step runs the test-only fail-first client and requires the
+  poisoned-backend case to fail). `transaction-scoped-client.spec.ts` pins the routing (statement
   order, SET TRANSACTION first, savepoints, callbacks, refusals, a failed control statement closes the connection).
 
 ```

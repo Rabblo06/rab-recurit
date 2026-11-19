@@ -1,10 +1,18 @@
 import 'reflect-metadata';
-import { execFileSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { DataSource, EntityManager } from 'typeorm';
 
-import { createPgDataSource, isTransactionScopedPool, probePgSessionAffinity, PgSessionProbeError, pgClientConfig, resolvePgEnvironment } from '../../database/postgres';
+import {
+  createPgDataSource,
+  isTransactionScopedPool,
+  probePgSessionAffinity,
+  PgSessionProbeError,
+  pgClientConfig,
+  resolvePgEnvironment,
+  TransactionScopedClient,
+  TransactionScopedClientConfig,
+} from '../../database/postgres';
 import { coreDataSourceOptions } from '../../database/typeorm/core/core.datasource';
 import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
@@ -26,29 +34,38 @@ import { trackFixtureOrganisation } from './helpers/fixture-workspace-tracker';
  *     left behind by a plain client, the G-09 injection model) is neutralised for every later runtime transaction. The
  *     control shows the poison is real: a plain client through the same PgBouncer still runs as rab_secure_owner;
  *   - the capability probe (pg-session-probe.ts) refuses the PgBouncer URL and accepts the direct one (no host matching).
- * Fail-first: with RESET ROLE removed from the per-transaction preamble, the poisoned-backend case fails (the role assertion
- * aborts every runtime transaction on a poisoned backend) — run on InstaBox, recorded in the PR.
+ * Fail-first (CREWFLOW_TEST_PGBOUNCER_FAILFIRST=without-reset-role, test-only, nothing in production code reads it): the
+ * runtime pool uses a client whose preamble has RESET ROLE removed; the poisoned-backend case MUST then fail (the role
+ * assertion aborts every runtime transaction on a poisoned backend). CI runs it as a separate step that requires the failure.
  *
- * Needs Docker (Linux host networking) to start the PgBouncer container (alpine + its pgbouncer package). Skipped, NOT a
- * pass, when docker is not on PATH or the test database is not the owner login.
+ * The PgBouncer is started OUTSIDE the test (CI: helpers/pgbouncer-transaction-mode.cjs writes its configuration for the test
+ * database, the job starts the pgbouncer package): CREWFLOW_TEST_PGBOUNCER_PORT names its port on 127.0.0.1, and
+ * CREWFLOW_TEST_PGBOUNCER_POOL_SIZE its default_pool_size (default 2). Skipped, NOT a pass, without the port or when the test
+ * database is not the owner login.
  */
 const env = integrationTestDatabase();
 const OWNER = env.app.login === 'crewflow_owner';
-const DOCKER = (() => {
-  try {
-    execFileSync('docker', ['version', '--format', '{{.Server.Version}}'], { stdio: 'ignore', timeout: 20_000 });
-    return true;
-  } catch {
-    return false;
-  }
-})();
-const suite = OWNER && DOCKER ? describe : describe.skip;
-if (!(OWNER && DOCKER)) {
+const BOUNCER_PORT = process.env.CREWFLOW_TEST_PGBOUNCER_PORT ?? '';
+const FAIL_FIRST = process.env.CREWFLOW_TEST_PGBOUNCER_FAILFIRST === 'without-reset-role';
+const RUN = OWNER && /^\d{2,5}$/.test(BOUNCER_PORT);
+const suite = RUN ? describe : describe.skip;
+if (!RUN) {
   // eslint-disable-next-line no-console
-  console.warn(`[transaction-pooler] SKIPPED (NOT a pass): ${OWNER ? '' : 'TEST_DATABASE_URL is not crewflow_owner; '}${DOCKER ? '' : 'docker is not available'}`);
+  console.warn(`[transaction-pooler] SKIPPED (NOT a pass): ${OWNER ? '' : 'TEST_DATABASE_URL is not crewflow_owner; '}${/^\d{2,5}$/.test(BOUNCER_PORT) ? '' : 'CREWFLOW_TEST_PGBOUNCER_PORT is not set (no PgBouncer started)'}`);
 }
 
-const POOL_SIZE = 2; // PgBouncer server connections per (user, database): far fewer than clients, so backends are shared.
+/** The fail-first variant: the same client with RESET ROLE removed from its preamble (test-only; never in production code). */
+class WithoutResetRoleClient extends TransactionScopedClient {
+  constructor(config: TransactionScopedClientConfig) {
+    super(config);
+    const self = this as unknown as { preambleSql: string };
+    if (!self.preambleSql.startsWith('RESET ROLE; ')) throw new Error('fail-first: the preamble no longer starts with RESET ROLE');
+    self.preambleSql = self.preambleSql.slice('RESET ROLE; '.length);
+  }
+}
+
+// PgBouncer server connections per (user, database): far fewer than clients, so backends are shared.
+const POOL_SIZE = Number(process.env.CREWFLOW_TEST_PGBOUNCER_POOL_SIZE ?? '2');
 const CLIENTS = 12; // the runtime pool's own max
 const ROWS_PER_ORG = 3;
 
@@ -66,10 +83,8 @@ interface Seen {
 suite('transaction pooler: two workspaces through PgBouncer (transaction mode)', () => {
   jest.setTimeout(600_000);
 
-  const container = `crewflow-pgbouncer-test-${randomBytes(4).toString('hex')}`;
-  const port = 16_000 + Math.floor(Math.random() * 2_000);
+  const port = Number(BOUNCER_PORT);
   const appUrl = new URL(env.appUrl);
-  const password = decodeURIComponent(appUrl.password);
   const bouncerUrl = (() => {
     const u = new URL(`postgres://127.0.0.1:${port}/`);
     u.username = appUrl.username;
@@ -141,48 +156,7 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
   }
 
   beforeAll(async () => {
-    const config = [
-      '[databases]',
-      `* = host=${appUrl.hostname === 'localhost' ? '127.0.0.1' : appUrl.hostname} port=${appUrl.port || '5432'}`,
-      '[pgbouncer]',
-      'listen_addr = 127.0.0.1',
-      `listen_port = ${port}`,
-      'unix_socket_dir =',
-      'auth_type = scram-sha-256',
-      'auth_file = /tmp/pgb/userlist.txt',
-      'pool_mode = transaction',
-      `default_pool_size = ${POOL_SIZE}`,
-      'min_pool_size = 0',
-      'reserve_pool_size = 0',
-      'max_client_conn = 200',
-      'server_tls_sslmode = prefer',
-      'client_tls_sslmode = disable',
-      'ignore_startup_parameters = extra_float_digits',
-      'server_reset_query =',
-      'server_round_robin = 0',
-    ].join('\n');
-    const userlist = `"${decodeURIComponent(appUrl.username)}" "${password.replace(/"/g, '""')}"\n`;
-    const script = [
-      'set -e',
-      'apk add --no-cache pgbouncer >/dev/null',
-      'adduser -D -H pgb 2>/dev/null || true',
-      'mkdir -p /tmp/pgb',
-      'echo "$PGB_CONFIG" | base64 -d > /tmp/pgb/pgbouncer.ini',
-      'echo "$PGB_USERLIST" | base64 -d > /tmp/pgb/userlist.txt',
-      'chown -R pgb /tmp/pgb && chmod 600 /tmp/pgb/userlist.txt',
-      'exec pgbouncer -u pgb /tmp/pgb/pgbouncer.ini',
-    ].join(' && ');
-    execFileSync(
-      'docker',
-      [
-        'run', '-d', '--rm', '--name', container, '--network', 'host',
-        '-e', `PGB_CONFIG=${Buffer.from(config).toString('base64')}`,
-        '-e', `PGB_USERLIST=${Buffer.from(userlist).toString('base64')}`,
-        'alpine:3.21', 'sh', '-c', script,
-      ],
-      { stdio: 'ignore', timeout: 300_000 },
-    );
-    const deadline = Date.now() + 240_000;
+    const deadline = Date.now() + 60_000;
     for (;;) {
       const probe = new Client({ connectionString: bouncerUrl, connectionTimeoutMillis: 3_000 });
       probe.on('error', () => undefined);
@@ -217,6 +191,8 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
       { endpoint: 'runtime', purpose: 'runtime', max: CLIENTS },
       { name: `pooler-runtime-${randomUUID()}`, entities: coreDataSourceOptions.entities, synchronize: false, logging: false },
     );
+    // Fail-first: swap the pool's client class before the pool exists (TypeORM builds it from options.extra at initialize).
+    if (FAIL_FIRST) (runtime.options as unknown as { extra: { Client: unknown } }).extra.Client = WithoutResetRoleClient;
     await runtime.initialize();
     tenant = new TenantContextService(runtime, {} as SchemaResolverService, { get: () => false } as unknown as EnvironmentService);
 
@@ -236,11 +212,6 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
     if (admin?.isInitialized) {
       await admin.query(`DELETE FROM core.role WHERE key LIKE 'pooler-test-%' AND organisation_id IN ($1, $2)`, [orgA, orgB]).catch(() => undefined);
       await admin.destroy().catch(() => undefined);
-    }
-    try {
-      execFileSync('docker', ['rm', '-f', container], { stdio: 'ignore', timeout: 60_000 });
-    } catch {
-      /* already gone */
     }
   });
 
