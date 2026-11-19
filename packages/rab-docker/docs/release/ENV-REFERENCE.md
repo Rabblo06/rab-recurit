@@ -47,9 +47,10 @@ the service refuses to start if it is set (exit 64); **—** = not given.
 
 - **`PG_DATABASE_URL`:** login `crewflow_owner`; the database's **direct** host, or a pooler together with
   `PG_DATABASE_DIRECT_URL`<!-- VERIFY -->; a password of at least 32 characters with at least 10 different characters.
-- **`sslmode`:** `require`, `verify-ca` or `verify-full`, optionally with `channel_binding=require`<!-- VERIFY -->. Crewflow's
-  own verification is what counts: all of them verify the full certificate chain and the host name, the way node-postgres treats `require`. `disable`,
-  `prefer`, `allow` and `no-verify` are refused<!-- VERIFY -->.
+- **`sslmode` (required in production):** `require`, `verify-ca` or `verify-full`, optionally with `channel_binding`.
+  Crewflow's own verification is what counts: all three verify the full certificate chain and the host name, the way node-postgres treats `require`. `disable`,
+  `prefer`, `allow`, `no-verify` and a missing `sslmode` are refused. `channel_binding=require` is accepted, but the
+  driver cannot insist on it; it is refused without TLS.
 - **Mode (b):** `PG_ADMIN_URL` and `PG_DATABASE_URL` (or their direct endpoints) name the same host, port and
   database.
 - **Passwords:** `db-setup` sends a SCRAM verifier first, and plain text over verified TLS only if the server refuses

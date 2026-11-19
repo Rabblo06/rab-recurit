@@ -21,13 +21,13 @@ never drop a security setting silently. Nothing was deployed, imported or connec
 > by default for 170 s, so it fails with its own line inside that 180 s window.
 > The rows below about `depends_on` describe v0.9.8.
 
-> **Your own database and TLS on OpenShip (2026-11-19)<!-- VERIFY -->.** One general flow for every provider: paste your database's
+> **Your own database and TLS on OpenShip (2026-11-19).** One general flow<!-- VERIFY --> for every provider: paste your database's
 > admin connection string into `PG_ADMIN_URL` on db-setup and db-harden, set `CREWFLOW_BUNDLED_DB=0`, switch the `db` service
 > off in OpenShip (it ignores `deploy.replicas`), and deploy. Enter `PG_DATABASE_URL` (the `crewflow_owner` URL) on db-setup,
 > db-harden, rab-api and rab-worker. If a URL is a pooler, add its direct endpoint (`PG_ADMIN_DIRECT_URL` on db-setup and
-> db-harden, `PG_DATABASE_DIRECT_URL` where `PG_DATABASE_URL` goes). TLS is verified on Crewflow's side: `require`, `verify-ca`
-> and `verify-full` (plus `channel_binding=require`) all check the full certificate and host name; `disable`, `prefer`, `allow`
-> and `no-verify` are refused. Provider notes (direct URL, CA): `OWNER-LOGIN-DEPLOYMENT.md` section 2, "Known provider quirks".
+> db-harden, `PG_DATABASE_DIRECT_URL` where `PG_DATABASE_URL` goes). TLS is verified on Crewflow's side (PR #257): every
+> URL must set `sslmode=require`, `verify-ca` or `verify-full`, all checked as full verification (chain and host name);
+> `disable`, `prefer`, `allow`, `no-verify` and a missing `sslmode` are refused; `channel_binding` is accepted. Provider notes (direct URL, CA): `OWNER-LOGIN-DEPLOYMENT.md` section 2, "Known provider quirks".
 
 ## 1. What was checked, and the gap
 
