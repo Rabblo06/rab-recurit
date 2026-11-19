@@ -178,7 +178,8 @@ describeIfDb('first platform admin at API boot, through the HTTP app (integratio
     const { organisation, managers } = await factory.createOrganisationWithManagers(1, { permissions: 'all', workspace: true, label: 'bootn1' });
     const workspaceOwner = managers[0]!;
     const ceo = await factory.createCeo(organisation, { permissions: 'production' });
-    const target = await factory.createInternalManager(organisation, { permissions: 'production', platformAdmin: true, label: 'bootn1pa' });
+    // Same permission set as the workspace owner: both share the organisation's canonical "manager" role (factory rule).
+    const target = await factory.createInternalManager(organisation, { permissions: 'all', platformAdmin: true, label: 'bootn1pa' });
     grantedUserIds.push(target.userId);
     await owner.query(
       `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source) VALUES ($1, $2, $3, 'active', 'write_path') ON CONFLICT DO NOTHING`,
