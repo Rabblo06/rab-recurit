@@ -66,10 +66,11 @@ export interface PgConnectionRequest {
    */
   readOnly?: boolean;
   /**
-   * Security review L-3 (PR #257): `-c search_path=pg_catalog,pg_temp` as a STARTUP option, for sessions that only read the
-   * catalogs to judge the database (the boot gates). A startup option takes precedence over a planted
-   * `ALTER ROLE ... SET search_path` / `ALTER DATABASE ... SET search_path`, so an object planted in another schema can never
-   * shadow what those queries call. Their SQL is fully schema-qualified anyway.
+   * Security review L-3 (PR #257): `-c search_path=pg_catalog,pg_temp` as a STARTUP option (it takes precedence over a planted
+   * `ALTER ROLE ... SET search_path` / `ALTER DATABASE ... SET search_path`). NOT used by the boot gates or the posture monitor
+   * yet: their semantic-posture rendering (format_type / regprocedure) is search_path-dependent, so a pinned session renders
+   * `public.citext` where the golden says `citext` and the gate refuses. Follow-up (THREAT-MODEL, L-3): a search_path-
+   * independent posture rendering, then pin those sessions.
    */
   pinnedSearchPath?: boolean;
 }

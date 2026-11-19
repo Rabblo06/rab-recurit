@@ -9625,6 +9625,22 @@ Reversal:   drop the client-side branch of assertTlsGate (database-boot-gate-rul
   reachability walk now also refuses a reachable role with CREATEROLE (the login's own CREATEROLE keeps its mark rule). The
   role-name lists are one shared module (database/owner-login/privileged-roles.ts), with `pg_checkpoint`,
   `pg_use_reserved_connections`, `alloydbsuperuser` and `tsdbadmin` added; db-setup is to switch to it separately.
+- **Security review of #257 (2026-11-19, APPROVE WITH NITS), fixed here.**
+  - L-1: gate 6 needs a verify-full client config AND an authorized socket in production; pg_stat_ssl.ssl=true alone no
+    longer passes; the TLS gate is production when the process OR the connection factory says so.
+  - I-4: NODE_TLS_REJECT_UNAUTHORIZED=0 is refused at production boot.
+  - L-2: the reachability rule is closed-world. Any role the owner login reaches outside rab_owner, rab_app,
+    rab_secure_owner, crewflow, crewflow_app is refused by name; pg_database_owner is allowed only outside production.
+  - I-3: a role walk without the login's own row is refused.
+  - L-3 (partly): the new ownership columns use OPERATOR(pg_catalog.=).
+- **Follow-up (L-3, open): pin search_path for the boot-gate and posture-monitor sessions, with a search_path-independent
+  posture rendering.** Pinning `search_path=pg_catalog,pg_temp` (startup option; SET LOCAL for the monitor) was tried and
+  reverted the same day: the semantic posture renders types through format_type / regprocedure, which schema-qualify
+  anything outside the path (`public.citext` instead of the golden's `citext`), so the gate refused every start (ci-e2e
+  web-live). Until the rendering is search_path-independent, a planted `ALTER ROLE crewflow_owner SET search_path` or
+  `ALTER DATABASE ... SET search_path` applies to those sessions too; their SQL is schema-qualified, and db-setup already
+  refuses a database-wide or crewflow_owner search_path default (security review H1). The factory option
+  (create-pg-pool.ts `pinnedSearchPath`) exists and is tested, but unused.
 - **Tests.** Unit: pg-tls-sslmode.spec (the full sslmode x environment x channel_binding matrix), pg-config.spec, the boot-gate
   spec (each ownership refusal, fail closed, the client-side gate 6 rule and its four denials), owner-login-posture.spec. Real
   PostgreSQL (InstaBox): pg-tls-ca.integration.spec (wrong CA / wrong host refused with sslmode=require; gate 6 behind a real

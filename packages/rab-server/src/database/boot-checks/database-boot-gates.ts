@@ -146,7 +146,7 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
       gateDataSourceSeq += 1;
       const dataSource = createPgDataSource(
         pg,
-        { endpoint, purpose: 'boot-gates', max: 1, pinnedSearchPath: true },
+        { endpoint, purpose: 'boot-gates', max: 1 },
         {
           name: `db-boot-gates-${processName}-${gateDataSourceSeq}`,
           entities: [],
