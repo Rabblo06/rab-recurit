@@ -9563,3 +9563,70 @@ Reversal:   a secret store mounted as a file per process (Docker secrets / Kuber
   every new refusal. Live (InstaBox, PG16/17/18 + PG15 refusal): the harness incl. M2, L1, L4, the expiry, db-harden happy /
   already / timeout / other-database / mode c, and the CREATEROLE lifecycle with the real migrate child. Docker suites (CI):
   run-prestart-shell-tests (L2, harden mode), the compose gates (db-harden).
+
+## SSL like Twenty, and the extra boot refusals (branch feat/twenty-ssl-boot, owner instruction 2026-11-19; read-only SQL only, no migration)
+
+- **sslmode (every URL the code parses: PG_DATABASE_URL, PG_DATABASE_REPLICA_URL, and PG_ADMIN_URL through the same
+  policy).** Production accepts exactly `sslmode=require`, `verify-ca` and `verify-full`, and all three build the SAME
+  verify-full `ssl` object (certificate chain against PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH or the system store, AND the host
+  name; bound to the IP for an IP host). `require` and `verify-ca` are therefore STRONGER than libpq's (no verification / no
+  host name). `disable`, `allow`, `prefer`, `no-verify` and a MISSING sslmode are refused in production with one fixed message
+  (pg-tls.ts PG_SSLMODE_PRODUCTION_REFUSAL). Behaviour change: a production URL without sslmode used to mean verify-full and
+  is now refused. Outside production nothing changes. Proved through a real TLS handshake (pg-tls-ca.integration.spec.ts):
+  with `sslmode=require` (and verify-ca, each with and without `channel_binding=require`) a wrong CA, a self-signed server,
+  the system store only, and a host the certificate does not name (127.0.0.1, ::1) are all refused; the right CA + host works.
+- **channel_binding=require.** Accepted and passed to pg as `enableChannelBinding` (SCRAM-SHA-256-PLUS whenever the server
+  offers it). Refused on a connection without TLS (outside production only; production always has TLS).
+
+```
+SECURITY TRADE-OFF (TLS-1)
+Decision:   channel_binding=require is accepted although pg 8.23 cannot REQUIRE channel binding: when the server does not
+            offer SCRAM-SHA-256-PLUS (or does not use SCRAM at all) pg silently authenticates without it
+            (pg/lib/crypto/sasl.js startSession).
+Reason:     owner instruction 2026-11-19 (accept the provider string as pasted, e.g. Neon's
+            sslmode=require&channel_binding=require); refusing it would break every pasted Neon URL.
+Risk:       a man in the middle who could terminate TLS could downgrade SCRAM-PLUS to SCRAM. He cannot terminate TLS: every
+            production connection verifies the certificate chain and the host name (above), which is what authenticates the
+            server; channel binding would be a second, redundant proof.
+Mitigation: verify-full on every accepted sslmode; channel_binding=require without TLS is refused.
+Reversal:   enforce it in the connection factory (refuse authenticationOk unless the session's SASL mechanism was
+            SCRAM-SHA-256-PLUS) once pg exposes it, or with a Client subclass.
+```
+
+- **Gate 6 (TLS in use), provider-neutral (owner instruction 2026-11-19: "trust our side of the connection ... No
+  proxy-specific exceptions").** In production the gate's connection must be encrypted. It is satisfied when the gate
+  session's own pg socket is a TLSSocket that Node marked `authorized` (certificate chain AND host name verified) under a
+  config that demanded it (`rejectUnauthorized: true`, and either Node's default host-name check or pg-tls.ts's own IP-bound
+  one: isVerifyFullSsl), whatever `pg_stat_ssl` says behind a TLS-terminating proxy (one warning line then); or when the
+  backend itself reports `pg_stat_ssl.ssl = true`. Otherwise refused, as before. No host, provider name or flag is read. The
+  replica validation keeps the server-side rule.
+
+```
+SECURITY TRADE-OFF (TLS-2)
+Decision:   verified client-side TLS satisfies gate 6 even when the backend reports pg_stat_ssl.ssl=false.
+Reason:     owner instruction 2026-11-19; a provider's TLS-terminating proxy (Neon's, for one) makes every backend report
+            ssl=false, which refused every such production start.
+Risk:       the hop between a terminating proxy and the backend is not visible to us; if the operator points the URL at a
+            TLS terminator they run themselves, that hop is theirs to protect.
+Mitigation: only a socket Node verified (chain + host name) under a verify-full config counts; production refuses every
+            config that could produce an unverified socket (PG_SSL_ALLOW_SELF_SIGNED, no-verify, disable, no sslmode); an
+            unverified or unknown client state falls back to the server-side requirement.
+Reversal:   drop the client-side branch of assertTlsGate (database-boot-gate-rules.ts).
+```
+
+- **Boot refusals added (API, Worker, CLI; production; read-only catalog queries).** The login (crewflow_owner) must not own
+  the current database: directly (`datdba`), through any role it is a member of (`pg_has_role(..., 'MEMBER')`, whatever the
+  INHERIT / SET / ADMIN options), or as a member of `pg_database_owner`. Refused in gate 1 (BOOT_FACTS_SQL, fail closed: a
+  missing column counts as ownership) and in posture rule 1 when production (the boot gate and the posture monitor, so a later
+  `ALTER DATABASE ... OWNER TO` is caught too). Outside production it is not checked (dev/test databases are owned by
+  rab_owner, postgres-init/01-roles.sql). Behaviour change: a production install that came from separated mode with rab_owner
+  still owning the database is refused until the admin runs `ALTER DATABASE <db> OWNER TO <admin>`. In every environment the
+  reachability walk now also refuses a reachable role with CREATEROLE (the login's own CREATEROLE keeps its mark rule). The
+  role-name lists are one shared module (database/owner-login/privileged-roles.ts), with `pg_checkpoint`,
+  `pg_use_reserved_connections`, `alloydbsuperuser` and `tsdbadmin` added; db-setup is to switch to it separately.
+- **Tests.** Unit: pg-tls-sslmode.spec (the full sslmode x environment x channel_binding matrix), pg-config.spec, the boot-gate
+  spec (each ownership refusal, fail closed, the client-side gate 6 rule and its four denials), owner-login-posture.spec. Real
+  PostgreSQL (InstaBox): pg-tls-ca.integration.spec (wrong CA / wrong host refused with sslmode=require; gate 6 behind a real
+  TLS-terminating proxy: verified client TLS accepted with pg_stat_ssl.ssl=false, unverified refused), and
+  owner-login-boot-refusals.integration.spec (direct and role ownership, a reachable CREATEROLE role, the added predefined and
+  provider roles, each planted in a rolled-back transaction).

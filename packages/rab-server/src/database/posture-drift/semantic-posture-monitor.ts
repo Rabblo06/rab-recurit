@@ -78,6 +78,8 @@ export interface SemanticMonitorOptions {
   sink?: SecurityAuditSink;
   log?: (line: string) => void;
   processLabel: string;
+  /** Production: rule 1 also refuses ownership of the current database (owner decision 2026-11-19; owner-login-posture.ts). */
+  production?: boolean;
 }
 
 export interface SemanticMonitorState {
@@ -132,7 +134,7 @@ export class SemanticPostureMonitor {
       const drift = semanticDriftFromSnapshot(this.baseline, now);
       // Re-review R3: an expired CREATEROLE grace period is a role problem too (readiness false, one alert, one event).
       const roleProblems = [
-        ...(await ownerLoginRolePostureProblems(session.query)),
+        ...(await ownerLoginRolePostureProblems(session.query, { refuseDatabaseOwnership: this.options.production === true })),
         ...ownerLoginCreateRoleExpiryProblems((await session.query(OWNER_LOGIN_CREATEROLE_MARK_SQL))[0]),
       ];
       this.state.lastCheckAt = new Date();
