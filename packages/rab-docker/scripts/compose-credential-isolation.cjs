@@ -82,6 +82,11 @@ const OPS_SENTINEL_APP_URL = `postgresql://crewflow_app:${OPS_SENTINEL_PASSWORD}
 const DB_SENTINEL_PASSWORD = 'SENTINELDBPW0b7e41c9d2a8f3561e'; // gitleaks:allow (synthetic marker, not a credential)
 // Owner decision 2026-11-18: the bundled crewflow_owner password (synthetic marker, not a credential; URL-safe hex-like).
 const APP_SENTINEL_PASSWORD = 'SENTINELAPPPW7d2c90e1b4a6f8c35'; // gitleaks:allow (synthetic marker, not a credential)
+// Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL, the optional direct session connection of
+// the same crewflow_owner login. A sentinel of its own, so where it lands is checked separately from PG_DATABASE_URL.
+const SESSION_SENTINEL_PASSWORD = 'SENTINELSESSIONPW4e9b1c7a03d5f'; // gitleaks:allow (synthetic marker, not a credential)
+const SESSION_SENTINEL_URL = `postgresql://crewflow_owner:${SESSION_SENTINEL_PASSWORD}@db-session.example:5432/crewflow?sslmode=verify-full`;
+const SESSION_URL_KEY = 'PG_DATABASE_SESSION_URL';
 const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 
 const PRODUCTION_FILE = 'packages/rab-docker/docker-compose.production.yml';
@@ -127,6 +132,8 @@ const DUMMY_ENV = {
   PG_DATABASE_APP_PASSWORD: APP_SENTINEL_PASSWORD,
   CREWFLOW_DEV_DB_APP_PASSWORD: APP_SENTINEL_PASSWORD,
   CREWFLOW_QA_DB_APP_PASSWORD: APP_SENTINEL_PASSWORD,
+  // The optional session URL, set so that every service it reaches is visible in the rendered model.
+  [SESSION_URL_KEY]: SESSION_SENTINEL_URL,
 };
 
 let failures = 0;
@@ -272,6 +279,34 @@ function appPasswordChecks(rel, services, runtimeNames) {
 }
 
 /**
+ * Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL in one rendered model (rendered with
+ * SESSION_SENTINEL_URL). Pure: [ok, label] pairs. Only the runtime services and db-setup / db-harden may have the variable,
+ * and only under that name; where any of them has it, all four have it with the SAME value (the one compose.env value);
+ * `required` (the production file): all four must have it. No other service, variable or non-environment field holds the
+ * sentinel. Labels name services and variables only.
+ */
+function sessionUrlChecks(rel, services, runtimeNames, { required = false } = {}) {
+  const out = [];
+  const allowed = [...ADMIN_SERVICES, ...runtimeNames];
+  for (const [name, svc] of Object.entries(services)) {
+    const env = envOf(svc ?? {});
+    const may = allowed.includes(name);
+    out.push([may || !Object.prototype.hasOwnProperty.call(env, SESSION_URL_KEY), `${rel}: ${name} has no ${SESSION_URL_KEY} (only ${allowed.join(', ')} may)`]);
+    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(SESSION_SENTINEL_PASSWORD) && !(may && k === SESSION_URL_KEY)).map(([k]) => k);
+    out.push([holders.length === 0, `${rel}: ${name} carries the session URL only as ${SESSION_URL_KEY} of ${allowed.join(', ')}${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    const rest = { ...(svc ?? {}) };
+    delete rest.environment;
+    out.push([!JSON.stringify(rest).includes(SESSION_SENTINEL_PASSWORD), `${rel}: ${name} carries the session URL nowhere outside its environment (health check, command, labels)`]);
+  }
+  const present = allowed.filter((n) => services[n] && Object.prototype.hasOwnProperty.call(envOf(services[n]), SESSION_URL_KEY));
+  if (required) out.push([present.length === allowed.filter((n) => services[n]).length, `${rel}: ${allowed.join(', ')} all pass the optional ${SESSION_URL_KEY}${present.length ? '' : ' (none does)'}`]);
+  const values = new Set(present.map((n) => String(envOf(services[n])[SESSION_URL_KEY] ?? '')));
+  out.push([values.size <= 1, `${rel}: every ${SESSION_URL_KEY} is the same value (one compose.env value)`]);
+  if (required) out.push([values.size === 1 && values.has(SESSION_SENTINEL_URL), `${rel}: ${SESSION_URL_KEY} is exactly the compose.env value (no default, nothing pinned)`]);
+  return out;
+}
+
+/**
  * Owner decision 2026-11-18 (Twenty's way): the retired setup volume never comes back, in ANY file. Pure: [ok, label] pairs
  * over a rendered model: no top-level volume named (or keyed) crewflow-db-target, and no service mounts it or anything at
  * /run/crewflow/db-target (a volume, a bind or a tmpfs).
@@ -326,7 +361,8 @@ function dbSetupContractChecks(rel, services, [apiName, workerName], { requireHa
     out.push([svc.init !== true, `${rel}: ${name} has no compose init (${entrypoint} execs tini itself)`]);
     const env = envOf(svc);
     out.push([setupUrl !== null && setupUrl !== undefined && String(setupUrl) !== '' && String(env.PG_DATABASE_URL ?? '') === String(setupUrl), `${rel}: ${name}'s PG_DATABASE_URL is exactly db-setup's (the crewflow_owner URL db-setup created or checked)`]);
-    const urls = Object.entries(env).filter(([k, v]) => k !== 'PG_DATABASE_URL' && DB_URL_VALUE.test(String(v ?? ''))).map(([k]) => k);
+    // PG_DATABASE_SESSION_URL is the one other URL a runtime service may hold (sessionUrlChecks: same login, same value).
+    const urls = Object.entries(env).filter(([k, v]) => k !== 'PG_DATABASE_URL' && k !== SESSION_URL_KEY && DB_URL_VALUE.test(String(v ?? ''))).map(([k]) => k);
     out.push([urls.length === 0, `${rel}: ${name} carries no other database URL in any variable${urls.length ? ` (found in ${urls.join(', ')})` : ''}`]);
     out.push([Object.prototype.hasOwnProperty.call(env, 'PG_ADMIN_URL') && String(env.PG_ADMIN_URL ?? '') === '', `${rel}: ${name} pins PG_ADMIN_URL to "" (the admin login reaches db-setup only)`]);
     out.push([mountAt(svc, DB_CA_DIR)?.read_only === true, `${rel}: ${name} mounts the db CA read-only`]);
@@ -375,7 +411,7 @@ function dbHardenContractChecks(rel, services, apiName, { required = false } = {
   out.push([mountAt(h, DB_CA_DIR)?.read_only === true, `${rel}: db-harden mounts the db CA read-only`]);
   out.push([!Object.prototype.hasOwnProperty.call(env, 'APP_SECRET'), `${rel}: db-harden has no APP_SECRET`]);
   out.push([String(h.user ?? '') === '1000:1000' && h.read_only === true, `${rel}: db-harden runs as 1000:1000 with a read-only root`]);
-  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL', SESSION_URL_KEY]) {
     out.push([Object.prototype.hasOwnProperty.call(env, key) === Object.prototype.hasOwnProperty.call(setupEnv, key) && String(env[key] ?? '') === String(setupEnv[key] ?? ''), `${rel}: db-harden's ${key} is exactly db-setup's`]);
   }
   return out;
@@ -601,6 +637,7 @@ function main(options = {}) {
     for (const [ok, label] of opsRefusalChecks(rel, services, raw, { production })) check(ok, label);
     for (const [ok, label] of dbPasswordChecks(rel, services)) check(ok, label);
     for (const [ok, label] of appPasswordChecks(rel, services, runtimeNames)) check(ok, label);
+    for (const [ok, label] of sessionUrlChecks(rel, services, runtimeNames, { required: rel === PRODUCTION_FILE })) check(ok, label);
     for (const [ok, label] of retiredTargetVolumeChecks(rel, model)) check(ok, label);
     if (dbSetup) {
       for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames, { requireHarden: rel === PRODUCTION_FILE })) check(ok, label);
@@ -683,6 +720,8 @@ module.exports = {
   opsRefusalChecks,
   dbPasswordChecks,
   appPasswordChecks,
+  sessionUrlChecks,
+  SESSION_SENTINEL_URL,
   retiredTargetVolumeChecks,
   dbSetupContractChecks,
   dbHardenContractChecks,

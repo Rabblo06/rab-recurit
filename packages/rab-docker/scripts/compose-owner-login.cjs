@@ -125,6 +125,8 @@ const COMBOS = Object.freeze([
   // unchanged.
   { name: 'external-no-db', files: ['image'], external: 'admin', staging: false, bundledDb: 0 },
   { name: 'pass-through-no-db', files: ['image'], external: 'owner', staging: false, bundledDb: 0 },
+  // Transaction pooler support (owner instruction 2026-11-19): mode c with PG_DATABASE_SESSION_URL (PG_DATABASE_URL a pooler).
+  { name: 'pooler-session-no-db', files: ['image'], external: 'owner', staging: false, bundledDb: 0, session: true },
   { name: 'staging', files: ['image', 'staging'], external: false, staging: true },
 ]);
 const STATIC_COMBO = Object.freeze({ name: 'static:image', files: ['image'], external: false });
@@ -155,8 +157,15 @@ const ADMIN_URL_KEY = 'PG_ADMIN_URL';
 const RETIRED_ADMIN_URL_KEYS = Object.freeze(['PG_DATABASE_ADMIN_URL']);
 /** db-setup's committed bundled-db superuser URL, built from ${PG_DATABASE_PASSWORD:-}; used only when neither URL is set. */
 const BUNDLED_ADMIN_URL_KEY = 'CREWFLOW_BUNDLED_DB_ADMIN_URL';
+/**
+ * Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL, the OPTIONAL direct session connection of
+ * the same crewflow_owner login and database as PG_DATABASE_URL (which may then be any transaction pooler). A compose.env value
+ * committed as exactly SESSION_URL_EXPR on rab-api, rab-worker, db-setup and db-harden; nowhere else, never an env file.
+ */
+const SESSION_URL_KEY = 'PG_DATABASE_SESSION_URL';
+const SESSION_URL_EXPR = '${PG_DATABASE_SESSION_URL:-}';
 /** db-setup's whole database environment, exactly (names). */
-const DB_SETUP_DB_KEYS = Object.freeze([ADMIN_URL_KEY, 'PG_DATABASE_URL', BUNDLED_DB_KEY, BUNDLED_ADMIN_URL_KEY]);
+const DB_SETUP_DB_KEYS = Object.freeze([ADMIN_URL_KEY, 'PG_DATABASE_URL', BUNDLED_DB_KEY, BUNDLED_ADMIN_URL_KEY, SESSION_URL_KEY]);
 /** Where the app services mount the bundled db's CA volume (read-only), and the db's own volume targets. */
 const DB_CA_VOLUME = 'crewflow-db-ca';
 const DB_CA_TARGET = '/run/crewflow/db-ca';
@@ -221,6 +230,9 @@ const BUNDLED_APP_URL = `postgresql://${OWNER_LOGIN}:${SENTINEL_APP_PW}@db:5432/
 /** The external combination: a provider admin URL in compose.env. */
 const SENTINEL_ADMIN_PW = 'SENTINEL-EXTERNAL-ADMIN-PW-3c91e7'; // gitleaks:allow
 const SENTINEL_ADMIN_URL = `postgresql://doadmin:${SENTINEL_ADMIN_PW}@db-direct.example:5432/crewflow?sslmode=verify-full`;
+/** The pooler combination: compose.env's PG_DATABASE_SESSION_URL (a crewflow_owner URL at another host, same database). */
+const SENTINEL_SESSION_PW = 'SENTINEL-SESSION-URL-PW-a7d203'; // gitleaks:allow
+const SENTINEL_SESSION_URL = `postgresql://${OWNER_LOGIN}:${SENTINEL_SESSION_PW}@db-session.example:5432/crewflow?sslmode=verify-full`;
 /**
  * Every database credential the gate plants: none may appear anywhere in rab-api's or rab-worker's definition OUTSIDE their
  * PG_DATABASE_URL (which carries exactly the crewflow_owner one).
@@ -450,7 +462,7 @@ const DATABASE_ALLOWED = Object.freeze([
   'PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
 /** DB-SETUP: the only non-CREWFLOW_* names compose.env may hold (the two URLs and the bundled db's two passwords). */
-const COMPOSE_DATABASE_KEYS = Object.freeze([ADMIN_URL_KEY, URL_KEY, DB_PASSWORD_KEY, APP_PASSWORD_KEY]);
+const COMPOSE_DATABASE_KEYS = Object.freeze([ADMIN_URL_KEY, URL_KEY, DB_PASSWORD_KEY, APP_PASSWORD_KEY, SESSION_URL_KEY]);
 /**
  * BC-11 opt-ins: database.env only (so rab-api and rab-worker see one value), never committed in compose. O3: the approval
  * mode is no longer one of them (below).
@@ -494,8 +506,8 @@ const NOT_THE_APP_LOGIN = Object.freeze([
 const DB_PASSWORD_SHAPE = /^[A-Za-z0-9._~-]{32,}$/;
 /** The bundled crewflow_owner password: interpolated unencoded into PG_DATABASE_URL; db-setup.sh refuses anything else. */
 const APP_PASSWORD_SHAPE = /^[A-Za-z0-9_-]{32,}$/;
-const POOLER_HINTS = Object.freeze([[/-pooler\./i, 'Neon -pooler host'], [/:6543(\/|$)/, 'port 6543 (Supabase pooler)'],
-  [/:25061(\/|$)/, 'port 25061 (DigitalOcean pool)'], [/:6432(\/|$)/, 'port 6432 (PgBouncer)'], [/\.proxy-[a-z0-9]+\.rds\.amazonaws\.com/i, 'RDS Proxy']]);
+// No host-name pooler hints any more (owner instruction 2026-11-19, "decide by capability"): a pooler in PG_DATABASE_URL is
+// valid with PG_DATABASE_SESSION_URL, and without it the processes' live session probe refuses one.
 const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 
 /**
@@ -517,7 +529,7 @@ const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
  *   a former separated login.
  * `appPasswordSet` must be passed (fail closed: unset = not set, so the bundled mode then reports it missing).
  */
-function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = false, appPasswordSet = false, template = false } = {}) {
+function dbSettingsProblems({ adminUrl, appUrl, sessionUrl, bundled = '1', passwordSet = false, appPasswordSet = false, template = false } = {}) {
   const problems = [];
   const has = (v) => v !== undefined && v !== null && String(v) !== '';
   const own = String(bundled) === '0';
@@ -532,6 +544,7 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
   };
   const admin = target(adminUrl);
   const app = target(appUrl);
+  const session = target(sessionUrl);
   if (!own && !passwordSet) problems.push(`${DB_PASSWORD_KEY}: required for the bundled database (${BUNDLED_DB_KEY} unset or 1; openssl rand -hex 32). With your own database set ${BUNDLED_DB_KEY}=0 and ${URL_KEY} (plus ${ADMIN_URL_KEY}) instead`);
   if (own && passwordSet) problems.push(`${DB_PASSWORD_KEY}: remove it with ${BUNDLED_DB_KEY}=0 (there is no bundled database; it would only sit unused in db-setup's definition)`);
   if (own && appPasswordSet) problems.push(`${APP_PASSWORD_KEY}: remove it with ${BUNDLED_DB_KEY}=0 (your crewflow_owner password is inside ${URL_KEY})`);
@@ -548,10 +561,20 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
   } else if (!has(adminUrl) && app && app.host !== DB_SERVICE) {
     problems.push(`${URL_KEY}: with the bundled db (${BUNDLED_DB_KEY} unset or 1) and no ${ADMIN_URL_KEY}, db-setup creates crewflow_owner in the bundled db, so ${URL_KEY} must name it (host ${DB_SERVICE}) or stay unset (then set ${APP_PASSWORD_KEY}); your own database: ${BUNDLED_DB_KEY}=0`);
   }
-  if (admin && app && (admin.host !== app.host || admin.port !== app.port || admin.database !== app.database)) {
-    problems.push(`${ADMIN_URL_KEY} and ${URL_KEY} name different databases (host, port or database differ): both must name the same database (db-setup creates crewflow_owner there; rab-api and rab-worker connect there)`);
+  // With PG_DATABASE_SESSION_URL, PG_DATABASE_URL is a pooler (another host and port): the admin URL names the session URL's
+  // database (the direct host), and PG_DATABASE_URL only the same database name.
+  const direct = session ?? app;
+  if (admin && direct && (admin.host !== direct.host || admin.port !== direct.port || admin.database !== direct.database)) {
+    problems.push(`${ADMIN_URL_KEY} and ${session ? SESSION_URL_KEY : URL_KEY} name different databases (host, port or database differ): both must name the same database (db-setup creates crewflow_owner there; rab-api and rab-worker connect there)`);
   }
-  for (const [key, url] of [[ADMIN_URL_KEY, adminUrl], [URL_KEY, appUrl]]) {
+  if (has(sessionUrl)) {
+    if (!has(appUrl)) problems.push(`${SESSION_URL_KEY} needs ${URL_KEY}: it is the direct session connection next to a transaction pooler in ${URL_KEY}`);
+    if (!own) problems.push(`${SESSION_URL_KEY}: only with your own database (${BUNDLED_DB_KEY}=0); the bundled db has no transaction pooler in front of it`);
+    if (session && app && session.database !== app.database) problems.push(`${SESSION_URL_KEY} and ${URL_KEY} name different databases: the session URL is the direct connection of the SAME database`);
+    if (session && app && session.host === app.host && session.port === app.port) problems.push(`${SESSION_URL_KEY} names the same host and port as ${URL_KEY}: unset it (${URL_KEY} is then the direct connection)`);
+    if (session && session.host === DB_SERVICE) problems.push(`${SESSION_URL_KEY} names the bundled host ${DB_SERVICE}: use your own database's direct host`);
+  }
+  for (const [key, url] of [[ADMIN_URL_KEY, adminUrl], [URL_KEY, appUrl], [SESSION_URL_KEY, sessionUrl]]) {
     if (!has(url) || placeholder(url)) continue;
     let u = null;
     try { u = new URL(String(url)); } catch { problems.push(`${key}: not a parseable URL`); }
@@ -560,13 +583,13 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
     if (!/^postgres(ql)?:$/.test(u.protocol)) problems.push(`${key}: not a postgres:// URL`);
     if (login === '') problems.push(`${key}: has no login`);
     else if (NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: logs in as a former separated login or schema role (use ${key === ADMIN_URL_KEY ? 'the database admin login' : OWNER_LOGIN})`);
+    else if (key === SESSION_URL_KEY && login !== OWNER_LOGIN) problems.push(`${SESSION_URL_KEY}: must log in as ${OWNER_LOGIN}, exactly like ${URL_KEY} (the same login; only the host and port differ)`);
     else if (key === URL_KEY && login !== OWNER_LOGIN) problems.push(`${URL_KEY}: is the app login and must log in as ${OWNER_LOGIN}; it is never an admin URL (an admin URL goes in ${ADMIN_URL_KEY}, db-setup only)`);
     else if (key === ADMIN_URL_KEY && login === OWNER_LOGIN) problems.push(`${ADMIN_URL_KEY}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead and remove ${ADMIN_URL_KEY} (db-setup then only checks it)`);
     if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
     // Review of PR #230, I-4: the login is the URL's userinfo only; a `?user=` (or `password` / `host` / `dbname`) query
     // parameter would change who logs in or where, behind the login rules above (the URL policy refuses it at start too).
     for (const param of ['user', 'password', 'host', 'hostaddr', 'dbname']) if (u.searchParams.has(param)) problems.push(`${key}: has a ?${param}= query parameter (put the login in the URL's userinfo; never a query parameter)`);
-    for (const [re, label] of POOLER_HINTS) if (re.test(String(url))) problems.push(`${key}: points at a transaction pooler (${label}); use the DIRECT host`);
     if (u.password === '') problems.push(`${key}: has no password`);
   }
   return problems;
@@ -1048,9 +1071,20 @@ function appCredentialProblems(services, p, expectedUrl) {
       if (login !== OWNER_LOGIN) p(`${name}: ${URL_KEY} does not log in as ${OWNER_LOGIN} (login not shown)`);
       if ([SENTINEL_DB_PW, SENTINEL_ADMIN_PW].some((v) => String(url).includes(v))) p(`${name}: ${URL_KEY} carries the bundled db's or the admin's password (it is always the crewflow_owner login)`);
     }
-    // Everything but PG_DATABASE_URL: no credential, no postgres:// value anywhere in the definition.
+    // The optional session URL: '' or a crewflow_owner URL, exactly db-setup's (the one compose.env value).
+    const session = env[SESSION_URL_KEY];
+    if (session === undefined) p(`${name}: ${SESSION_URL_KEY} is missing (committed as ${SESSION_URL_EXPR})`);
+    else if (String(session) !== '') {
+      let login = '';
+      try { login = decodeURIComponent(new URL(String(session)).username); } catch { /* reported as not crewflow_owner */ }
+      if (login !== OWNER_LOGIN) p(`${name}: ${SESSION_URL_KEY} does not log in as ${OWNER_LOGIN} (login not shown)`);
+      if ([SENTINEL_DB_PW, SENTINEL_ADMIN_PW].some((v) => String(session).includes(v))) p(`${name}: ${SESSION_URL_KEY} carries the bundled db's or the admin's password`);
+    }
+    const setupSession = services?.[DB_SETUP_SERVICE]?.environment?.[SESSION_URL_KEY];
+    if (setupSession !== undefined && String(session ?? '') !== String(setupSession)) p(`${name}: ${SESSION_URL_KEY} differs from db-setup's (one compose.env value; value not shown)`);
+    // Everything but PG_DATABASE_URL and the session URL: no credential, no postgres:// value anywhere in the definition.
     const rest = structuredClone(s);
-    if (rest.environment) delete rest.environment[URL_KEY];
+    if (rest.environment) { delete rest.environment[URL_KEY]; delete rest.environment[SESSION_URL_KEY]; }
     const text = JSON.stringify(rest);
     if (DB_CREDENTIAL_SENTINELS.some((v) => text.includes(v))) p(`${name}: carries a database credential outside ${URL_KEY} (environment, health check, command or labels; never)`);
     if (isPgUrl(text)) p(`${name}: holds a postgres:// value outside ${URL_KEY} (a second database identity; never)`);
@@ -1109,6 +1143,7 @@ function checkModel(model, combo) {
     [URL_KEY]: expectedAppUrl,
     [BUNDLED_DB_KEY]: String(combo.bundledDb ?? 1),
     [BUNDLED_ADMIN_URL_KEY]: passwordSet ? BUNDLED_URL : BUNDLED_URL_NO_PASSWORD,
+    [SESSION_URL_KEY]: combo.session ? SENTINEL_SESSION_URL : '',
   };
 
   for (const name of names) {
@@ -1121,7 +1156,13 @@ function checkModel(model, combo) {
       const setupKey = ADMIN_SERVICES.includes(name) && DB_SETUP_DB_KEYS.includes(key);
       const why = setupKey ? null : forbiddenReason(key);
       if (why) p(`${name}: environment has ${key} (${why})`);
-      if (key !== URL_KEY && !setupKey && isPgUrl(value)) p(`${name}: environment ${key} holds a PostgreSQL URL (a second database identity)`);
+      const sessionKey = key === SESSION_URL_KEY && (ADMIN_SERVICES.includes(name) || appServices.includes(name));
+      if (key !== URL_KEY && !setupKey && !sessionKey && isPgUrl(value)) p(`${name}: environment ${key} holds a PostgreSQL URL (a second database identity)`);
+    }
+    if (!ADMIN_SERVICES.includes(name) && !appServices.includes(name) && SESSION_URL_KEY in env) p(`${name}: has ${SESSION_URL_KEY} (only db-setup, db-harden, rab-api and rab-worker)`);
+    if (appServices.includes(name) && String(env[SESSION_URL_KEY] ?? '') !== String(setupWant[SESSION_URL_KEY])) p(`${name}: ${SESSION_URL_KEY} is not compose.env's value (committed as ${SESSION_URL_EXPR}; value not shown)`);
+    for (const [key, value] of Object.entries(env)) {
+      if (String(value ?? '').includes(SENTINEL_SESSION_PW) && !((ADMIN_SERVICES.includes(name) || appServices.includes(name)) && key === SESSION_URL_KEY)) p(`${name}: received the session URL's credential (${key})`);
     }
     if (!ADMIN_SERVICES.includes(name) && ADMIN_URL_KEY in env && !(appServices.includes(name) && env[ADMIN_URL_KEY] === '')) p(`${name}: has ${ADMIN_URL_KEY} (db-setup and db-harden only; rab-api / rab-worker pin it to "")`);
     if (name !== DB_HARDEN_SERVICE && HARDEN_TIMEOUT_KEY in env) p(`${name}: has ${HARDEN_TIMEOUT_KEY} (db-harden's own setting)`);
@@ -1332,6 +1373,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
     if (kind !== 'compose' && key === WAIT_SECONDS_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup's committed \${${WAIT_SECONDS_KEY}:-170} would silently override a value here`);
     if (kind === 'compose' && key === WAIT_SECONDS_KEY && waitSecondsProblem(value)) problems.push(waitSecondsProblem(value));
+    if (kind !== 'compose' && key === SESSION_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup, db-harden, rab-api and rab-worker receive it from the committed ${SESSION_URL_EXPR}, which would override a value here`);
     if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup, rab-api and rab-worker receive it from the committed \${PG_DATABASE_URL:-...} expression, which would override a value here`);
     if (kind === 'database' && !why && key !== URL_KEY && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
     if (kind === 'runtime' && DATABASE_ENV_ONLY.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
@@ -1385,7 +1427,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
       // Owner decision 2026-11-18 (M1): db-harden's bounded wait for the ledger; unset = 1200.
       if (key === HARDEN_TIMEOUT_KEY && value !== '' && !(template && isPlaceholder(value)) && !hardenTimeoutOk(value)) problems.push(`${key}: must be a whole number of seconds from ${HARDEN_TIMEOUT_MIN_S} to ${HARDEN_TIMEOUT_MAX_S} (db-harden's wait for the ledger; unset = 1200)`);
     }
-    if (key !== URL_KEY && !(kind === 'compose' && key === ADMIN_URL_KEY) && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+    if (key !== URL_KEY && !(kind === 'compose' && (key === ADMIN_URL_KEY || key === SESSION_URL_KEY)) && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
   }
   // The database CA: PG_SSL_CA_CERT (PEM text; in an env file one line with \n escapes) or PG_SSL_CA_CERT_PATH, never both
   // (pg-tls.ts refuses both at boot; the lint says so first). The value goes through the app's own rules (pg-ca-pem.cjs, the
@@ -1410,6 +1452,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
     problems.push(...dbSettingsProblems({
       adminUrl: value(ADMIN_URL_KEY),
       appUrl: value(URL_KEY),
+      sessionUrl: value(SESSION_URL_KEY),
       bundled: BUNDLED_DB_VALUES.includes(bundled) ? bundled : '1',
       passwordSet: (value(DB_PASSWORD_KEY) ?? '') !== '',
       appPasswordSet: (value(APP_PASSWORD_KEY) ?? '') !== '',
@@ -1436,6 +1479,14 @@ function databaseExpressionProblems(rel, text) {
     const u = l.split('$$').join('');
     if ((u.includes('${PG_DATABASE_URL') || u.includes('${PG_DATABASE_APP_PASSWORD')) && !urlLine.test(l)) {
       problems.push(`${rel}: interpolates \${PG_DATABASE_URL...} or \${PG_DATABASE_APP_PASSWORD...} other than as the committed line PG_DATABASE_URL: ${APP_URL_EXPR}`);
+    }
+  }
+  // Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL only as the committed line.
+  const sessionLine = new RegExp(`^\\s*${SESSION_URL_KEY}\\s*:\\s*${SESSION_URL_EXPR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`);
+  for (const l of lines) {
+    const u = l.split('$$').join('');
+    if ((u.includes(SESSION_URL_KEY) || u.includes('${PG_DATABASE_SESSION_URL')) && !sessionLine.test(l)) {
+      problems.push(`${rel}: names ${SESSION_URL_KEY} other than as the committed line ${SESSION_URL_KEY}: ${SESSION_URL_EXPR}`);
     }
   }
   // The retired setup volume (owner decision 2026-11-18): never declared or mounted again.
@@ -1524,11 +1575,14 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
       const withoutPassword = fs.readFileSync(envFor[k], 'utf8').split('\n').filter((l) => !l.startsWith(`${DB_PASSWORD_KEY}=`) && !l.startsWith(`${APP_PASSWORD_KEY}=`)).join('\n');
       fs.writeFileSync(envFor[`${k}-no-db`], `${withoutPassword}${BUNDLED_DB_KEY}=0\n`, { mode: 0o600 });
     }
+    // The pooler combination: mode c without the bundled db, plus compose.env's PG_DATABASE_SESSION_URL.
+    envFor['owner-no-db-session'] = path.join(tmp, 'compose.owner-no-db-session.env');
+    fs.writeFileSync(envFor['owner-no-db-session'], `${fs.readFileSync(envFor['owner-no-db'], 'utf8')}${SESSION_URL_KEY}=${SENTINEL_SESSION_URL}\n`, { mode: 0o600 });
     const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_|PG_ADMIN_)/i.test(k)));
     const models = {};
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
-      const envKey = combo.external ? `${combo.external}${combo.bundledDb === 0 ? '-no-db' : ''}` : null;
+      const envKey = combo.external ? `${combo.external}${combo.bundledDb === 0 ? '-no-db' : ''}${combo.session ? '-session' : ''}` : null;
       const args = ['compose', '--env-file', envKey ? envFor[envKey] : composeEnv, '--project-directory', project];
       // A combo names FILES keys; a test may pass a compose file path instead (a weakened copy of a committed file).
       for (const f of combo.files) args.push('-f', FILES[f] ?? f);
@@ -1630,7 +1684,7 @@ module.exports = {
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
-  AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
+  AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET, SESSION_URL_KEY, SESSION_URL_EXPR, SENTINEL_SESSION_URL,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, databaseExpressionProblems, PRODUCTION_FILE, renderModels, staticProblems, main,
 };

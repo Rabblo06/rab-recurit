@@ -645,8 +645,32 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   }
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require' })), /db-setup: PG_ADMIN_URL: sslmode is not verify-full/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=require' })), /db-setup: PG_DATABASE_URL: sslmode is not verify-full/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full', app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })), /db-setup: PG_ADMIN_URL: points at a transaction pooler/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })), /db-setup: PG_DATABASE_URL: points at a transaction pooler/);
+  // Owner instruction 2026-11-19 ("decide by capability"): no host name is classified as a pooler any more.
+  assert.ok(!run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })).some((m) => /pooler/.test(m)));
+  // Transaction pooler support: PG_DATABASE_SESSION_URL, the same compose.env value on the four services (own database).
+  const session = 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=verify-full';
+  const pooler = 'postgresql://crewflow_owner:x@pool.example:6432/d?sslmode=verify-full';
+  const setSession = (value, only) => (v) => {
+    for (const n of only ?? ['db-setup', 'db-harden', 'rab-api', 'rab-worker']) v.services[n].environment.PG_DATABASE_SESSION_URL = value;
+  };
+  const ownPooled = (v) => {
+    setUrls({ app: pooler })(v);
+    setSession(session)(v);
+    for (const n of ['db-setup', 'db-harden']) v.services[n].environment.CREWFLOW_BUNDLED_DB = '0';
+    for (const n of ['db-setup', 'db-harden']) v.services[n].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL = 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full';
+    v.services.db.deploy = { ...v.services.db.deploy, replicas: 0 };
+  };
+  assert.ok(!run({ 'rab-api': ok, 'rab-worker': ok }, ownPooled).some((m) => /PG_DATABASE_SESSION_URL/.test(m)), JSON.stringify(run({ 'rab-api': ok, 'rab-worker': ok }, ownPooled)));
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('db-direct', 'other'), ['rab-worker'])(v); }), /rab-worker: PG_DATABASE_SESSION_URL differs from db-setup's in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('crewflow_owner:', 'doadmin:'), ['rab-api'])(v); }), /rab-api: PG_DATABASE_SESSION_URL does not log in as crewflow_owner in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('crewflow_owner:', 'doadmin:'))(v); }), /db-setup: PG_DATABASE_SESSION_URL: must log in as crewflow_owner/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('/d?', '/other?'))(v); }), /db-setup: PG_DATABASE_SESSION_URL and PG_DATABASE_URL name different databases/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session, ['db-setup'])(v); }), /db-harden: PG_DATABASE_SESSION_URL is not db-setup's/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-redis'].environment = { PG_DATABASE_SESSION_URL: '' }; }), /rab-redis: has PG_DATABASE_SESSION_URL in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_SESSION_URL; }), /db-setup: PG_DATABASE_SESSION_URL is missing in the deployed model/);
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup', 'db-harden']) {
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, [svc]: { ...ok, names: [...ok.names, 'PG_DATABASE_SESSION_URL'] } }), new RegExp(`${svc}: PG_DATABASE_SESSION_URL is set in an env file`));
+  }
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is not set in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } }), /db-setup: PG_ADMIN_URL is set in an env file/);

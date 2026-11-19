@@ -513,6 +513,9 @@ services:
       # unset or empty = 170 (inside OpenShip's 180 s window for rab-api -> db-setup); 0 = do not wait. Not a database
       # credential; read only by the wait above.
       CREWFLOW_DB_WAIT_SECONDS: ${CREWFLOW_DB_WAIT_SECONDS:-170}
+      # Optional: the same PG_DATABASE_SESSION_URL as rab-api / rab-worker (the direct session connection when PG_DATABASE_URL
+      # is a transaction pooler). Only a crewflow_owner URL is accepted (the gates and compose.env lint).
+      PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
     networks: [default, crewflow-db]
@@ -568,6 +571,9 @@ services:
       CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: ${CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS:-1200}
       # How long it first waits for the database to accept connections (db-setup.sh's wait block; the same value as db-setup).
       CREWFLOW_DB_WAIT_SECONDS: ${CREWFLOW_DB_WAIT_SECONDS:-170}
+      # Optional: the same PG_DATABASE_SESSION_URL as rab-api / rab-worker (the direct session connection when PG_DATABASE_URL
+      # is a transaction pooler). Only a crewflow_owner URL is accepted (the gates and compose.env lint).
+      PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
     networks: [default, crewflow-db]
@@ -640,6 +646,10 @@ services:
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      # Transaction pooler (optional, owner instruction 2026-11-19): the DIRECT session connection of the SAME crewflow_owner
+      # login and database as PG_DATABASE_URL. Set it ONLY when PG_DATABASE_URL is a transaction pooler: the request pool then
+      # uses the pooler, everything that needs a session (locks, migrations, gates) uses this. Unset = PG_DATABASE_URL is direct.
+      PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
@@ -774,6 +784,10 @@ services:
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      # Transaction pooler (optional, owner instruction 2026-11-19): the DIRECT session connection of the SAME crewflow_owner
+      # login and database as PG_DATABASE_URL. Set it ONLY when PG_DATABASE_URL is a transaction pooler: the request pool then
+      # uses the pooler, everything that needs a session (locks, migrations, gates) uses this. Unset = PG_DATABASE_URL is direct.
+      PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'

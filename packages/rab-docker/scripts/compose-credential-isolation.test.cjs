@@ -569,3 +569,43 @@ test('a parser that returns no services is a FAILED input check for every file (
   }
   assert.ok(!lines.some((l) => /all checks passed/.test(l)));
 });
+
+// ---- Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL on the four services only.
+const sessionModel = () => {
+  const S = isolation.SESSION_SENTINEL_URL;
+  const s = withHarden();
+  for (const n of ['db-setup', 'db-harden', 'server', 'worker']) s[n].environment.PG_DATABASE_SESSION_URL = S;
+  return s;
+};
+
+test('PG_DATABASE_SESSION_URL: the API, the Worker, db-setup and db-harden pass the same compose.env value; it is no other database URL', () => {
+  assert.deepEqual(failedLabels(isolation.sessionUrlChecks('f.yml', sessionModel(), RUNTIME, { required: true })), []);
+  assert.deepEqual(failedLabels(isolation.dbSetupContractChecks('f.yml', sessionModel(), RUNTIME, { requireHarden: true })), []);
+  // A file without it (dev, QA, local-build) passes when not required.
+  assert.deepEqual(failedLabels(isolation.sessionUrlChecks('f.yml', withHarden(), RUNTIME)), []);
+});
+
+test('DENIAL PG_DATABASE_SESSION_URL: on any other service, under another name, in another field, different values, or missing where required', () => {
+  const S = isolation.SESSION_SENTINEL_URL;
+  for (const [edit, re] of [
+    [(s) => { s.db.environment.PG_DATABASE_SESSION_URL = S; }, /db has no PG_DATABASE_SESSION_URL/],
+    [(s) => { s.front = { environment: { PG_DATABASE_SESSION_URL: '' } }; }, /front has no PG_DATABASE_SESSION_URL/],
+    [(s) => { s.server.environment.OTHER = S; }, /server carries the session URL only as PG_DATABASE_SESSION_URL .*\(found in OTHER\)/],
+    [(s) => { s.db.environment.X = S; }, /db carries the session URL only as PG_DATABASE_SESSION_URL/],
+    [(s) => { s.worker.healthcheck = { test: ['CMD', S] }; }, /worker carries the session URL nowhere outside its environment/],
+    [(s) => { s.worker.environment.PG_DATABASE_SESSION_URL = S.replace('db-session', 'elsewhere'); }, /every PG_DATABASE_SESSION_URL is the same value/],
+    [(s) => { delete s['db-harden'].environment.PG_DATABASE_SESSION_URL; }, /all pass the optional PG_DATABASE_SESSION_URL/],
+    [(s) => { for (const n of ['db-setup', 'db-harden', 'server', 'worker']) s[n].environment.PG_DATABASE_SESSION_URL = ''; }, /is exactly the compose\.env value/],
+  ]) {
+    const s = sessionModel();
+    edit(s);
+    refusedBy(isolation.sessionUrlChecks('f.yml', s, RUNTIME, { required: true }), re);
+  }
+  // db-harden's value must be exactly db-setup's; a runtime service's other URL variables stay refused.
+  const h = sessionModel();
+  h['db-harden'].environment.PG_DATABASE_SESSION_URL = OWNER_URL;
+  refusedBy(isolation.dbSetupContractChecks('f.yml', h, RUNTIME, { requireHarden: true }), /db-harden's PG_DATABASE_SESSION_URL is exactly db-setup's/);
+  const o = sessionModel();
+  o.server.environment.PG_DATABASE_DIRECT_URL = OWNER_URL;
+  refusedBy(isolation.dbSetupContractChecks('f.yml', o, RUNTIME), /server carries no other database URL .*\(found in PG_DATABASE_DIRECT_URL\)/);
+});
