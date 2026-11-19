@@ -316,11 +316,15 @@ test('DENIAL DB-SETUP compose env: the URL still needs verify-full, the direct h
   }
   for (const login of ['doadmin', 'crewflow_owner']) {
     const withUrl = (url) => `${OWN}\n${login === 'doadmin' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${url.replace('crewflow_owner', login)}`;
-    // Owner decision 2026-11-19: the admin URL may say require (treated as verify-full); PG_DATABASE_URL keeps verify-full.
-    if (login === 'doadmin') assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))).some((p) => /sslmode/.test(p)));
-    else assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'disable'))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
+    // Owner rule 2026-11-19: require / verify-ca / verify-full everywhere (all mean full verification), with or without
+    // channel_binding=require; disable / allow / prefer / no-verify / none refused.
+    for (const mode of ['require', 'verify-ca', 'verify-full', 'require&channel_binding=require', 'verify-full&channel_binding=require']) {
+      assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('verify-full', mode))).some((p) => /sslmode|channel_binding/.test(p)), `${login} ${mode}`);
+    }
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) {
+      assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', mode))), /sslmode must be require, verify-ca or verify-full/);
+    }
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be require, verify-ca or verify-full/);
     // No host-name or port rule for a pooler (provider-neutral; db-setup decides by capability).
     for (const address of ['pool-a.internal.example:6432', 'db.internal.example:6543']) {
       assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example:5432', address))).some((p) => /pooler/.test(p)));
@@ -1223,4 +1227,16 @@ test('owner decision 2026-11-19: compose.env holds PG_ADMIN_DIRECT_URL and PG_DA
   }
   // Never on rab-api / rab-worker, in any form (placement rule: db-setup and db-harden only).
   assertRefused(lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n'), /PG_ADMIN_DIRECT_URL in service rab-api/);
+});
+
+test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL)', () => {
+  assert.deepEqual([...gate.ACCEPTED_SSLMODES], ['require', 'verify-ca', 'verify-full']);
+  for (const key of ['PG_DATABASE_URL', 'PG_DATABASE_SESSION_URL', 'PG_ADMIN_URL', 'PG_ADMIN_DIRECT_URL']) {
+    for (const mode of ['require', 'verify-ca', 'verify-full']) assert.equal(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), null);
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), new RegExp(`^${key}: sslmode must be`));
+    assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be/);
+  }
+  const r = gate.dbSettingsProblems;
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK.replace('verify-full', 'verify-ca'), adminDirectUrl: ADMIN_OK.replace('verify-full', 'require&channel_binding=require'), appUrl: URL_OK.replace('verify-full', 'require') }), []);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, adminDirectUrl: ADMIN_OK.replace('verify-full', 'prefer'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: sslmode must be/);
 });

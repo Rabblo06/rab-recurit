@@ -643,8 +643,9 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
     assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: `postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full` })), /db-setup: PG_ADMIN_URL: logs in as a former separated login/);
     assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: `postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full` })), /db-setup: PG_DATABASE_URL: logs in as a former separated login/);
   }
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require' })), /db-setup: PG_ADMIN_URL: sslmode is not verify-full/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=require' })), /db-setup: PG_DATABASE_URL: sslmode is not verify-full/);
+  // Owner rule 2026-11-19: require / verify-ca / verify-full all mean full verification; disable / prefer / none are refused.
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=prefer' })), /db-setup: PG_ADMIN_URL: sslmode must be require, verify-ca or verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=disable' })), /db-setup: PG_DATABASE_URL: sslmode must be require, verify-ca or verify-full/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full', app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })), /db-setup: PG_ADMIN_URL: points at a transaction pooler/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })), /db-setup: PG_DATABASE_URL: points at a transaction pooler/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);

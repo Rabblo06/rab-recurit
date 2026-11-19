@@ -511,10 +511,17 @@ const APP_PASSWORD_SHAPE = /^[A-Za-z0-9_-]{32,}$/;
 /**
  * Owner decision 2026-11-19 (provider-neutral, by capability): no host-name or port rule for a connection pooler. db-setup
  * refuses a pooled admin connection by what it does (08P01 for its session settings, or the session-affinity probe).
- * sslmode: the admin URLs accept require as well as verify-full (pg-tls.ts treats require as verify-full), so a provider's
- * admin URL can be pasted as-is; PG_DATABASE_URL keeps verify-full.
+ * sslmode (owner rule 2026-11-19, the same at runtime, #257): require, verify-ca and verify-full are accepted for EVERY database
+ * URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL) and all mean FULL verification (certificate
+ * and host name); disable, allow, prefer, no-verify and a missing sslmode are refused. channel_binding=require is accepted.
  */
-const ADMIN_SSLMODES = Object.freeze(['verify-full', 'require']);
+const ACCEPTED_SSLMODES = Object.freeze(['require', 'verify-ca', 'verify-full']);
+/** The sslmode rule above for one parsed URL (null = fine). Exported for the PG_DATABASE_SESSION_URL rule of PR #258. */
+function sslmodeProblem(key, u) {
+  return ACCEPTED_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')
+    ? null
+    : `${key}: sslmode must be require, verify-ca or verify-full (all mean full verification); disable, allow, prefer, no-verify or none are refused`;
+}
 const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 
 /**
@@ -618,9 +625,8 @@ function dbSettingsProblems({
     else if (NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: logs in as a former separated login or schema role (use ${key === ADMIN_URL_KEY ? 'the database admin login' : OWNER_LOGIN})`);
     else if (key === URL_KEY && login !== OWNER_LOGIN) problems.push(`${URL_KEY}: is the app login and must log in as ${OWNER_LOGIN}; it is never an admin URL (an admin URL goes in ${ADMIN_URL_KEY}, db-setup only)`);
     else if (key !== URL_KEY && login === OWNER_LOGIN) problems.push(`${key}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead and remove ${key} (db-setup then only checks it)`);
-    if (key === URL_KEY ? u.searchParams.get('sslmode') !== 'verify-full' : !ADMIN_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')) {
-      problems.push(`${key}: sslmode is not verify-full${key === URL_KEY ? '' : ' (or require, which db-setup treats as verify-full)'}`);
-    }
+    const sslProblem = sslmodeProblem(key, u);
+    if (sslProblem) problems.push(sslProblem);
     // Review of PR #230, I-4: the login is the URL's userinfo only; a `?user=` (or `password` / `host` / `dbname`) query
     // parameter would change who logs in or where, behind the login rules above (the URL policy refuses it at start too).
     for (const param of ['user', 'password', 'host', 'hostaddr', 'dbname']) if (u.searchParams.has(param)) problems.push(`${key}: has a ?${param}= query parameter (put the login in the URL's userinfo; never a query parameter)`);
@@ -1689,7 +1695,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY, RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_URL_NO_PASSWORD, DB_SETUP_DB_KEYS, dbSettingsProblems,
+  ACCEPTED_SSLMODES, sslmodeProblem, ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY, RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_URL_NO_PASSWORD, DB_SETUP_DB_KEYS, dbSettingsProblems,
   APP_PASSWORD_KEY, APP_URL_EXPR, APP_PASSWORD_SHAPE, SENTINEL_APP_PW, BUNDLED_APP_URL, OWNER_PASSWORD_SENTINELS,
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
