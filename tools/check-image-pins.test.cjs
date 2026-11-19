@@ -250,10 +250,108 @@ test('a ci-images manifest needs exactly one key, image, with a tag and a digest
 test('dockerImages ignores docker exec / compose and comments', () => {
   assert.deepEqual(
     dockerImages(
-      'docker exec pg pg_isready\ndocker compose pull\n# docker run redis:7\necho docker run-ish',
+      'docker exec pg pg_isready\ndocker compose pull\n# docker run redis:7\ncommand -v docker > /dev/null\nwhich skopeo || true\nsudo apt-get install -y skopeo\necho rab-docker run',
     ),
     [],
   );
+});
+
+// Re-review of #249: a subcommand that is not a bare literal word must be refused, not skipped.
+test('a container-tool subcommand that is not a literal word is refused (quoted, variable, wrapper function, odd chars)', () => {
+  const forms = [
+    'docker "run" redis:7-alpine',
+    "docker 'pull' redis:7-alpine",
+    'docker $SUB redis:7-alpine',
+    'docker ${SUB} redis:7-alpine',
+    'docker `echo run` redis:7-alpine',
+    'docker "$(echo run)" redis:7-alpine',
+    'd() { docker "$@"; }; d run redis:7-alpine',
+    'docker r""un redis:7-alpine',
+    'docker run-ish redis:7-alpine',
+    'docker container "run" redis:7-alpine',
+    'docker image $PULL redis:7-alpine',
+  ];
+  for (const s of forms) {
+    const d = dockerImages(s);
+    assert.ok(
+      d.some((x) => x.problem && /is not a literal word/.test(x.problem)),
+      `not refused: ${s} -> ${JSON.stringify(d)}`,
+    );
+    assert.ok(
+      problems({ '.github/workflows/a.yaml': wf(runStep(s)) }).length >= 1,
+      s,
+    );
+  }
+});
+
+test('podman, nerdctl and skopeo are checked like docker', () => {
+  for (const s of [
+    'podman run docker.io/library/redis:7-alpine',
+    'nerdctl pull redis:7-alpine',
+    'podman container run --rm redis:7-alpine',
+    'podman "run" redis:7-alpine',
+    'P=podman; $P run redis:7-alpine',
+    'skopeo copy docker://redis:7-alpine oci:/tmp/r',
+    'skopeo inspect docker://redis:7-alpine',
+    'skopeo copy "docker://$IMG" oci:/tmp/r',
+    'skopeo "copy" docker://redis:7-alpine oci:/tmp/r',
+  ]) {
+    assert.ok(
+      problems({ '.github/workflows/a.yaml': wf(runStep(s)) }).length >= 1,
+      `not refused: ${s}`,
+    );
+  }
+  for (const s of [
+    `podman run --rm ${REDIS}`,
+    `nerdctl pull ${REDIS}`,
+    `skopeo copy --all docker://${REDIS} oci:/tmp/r`,
+    `skopeo inspect docker://${REDIS}`,
+    'skopeo --version',
+  ]) {
+    assert.deepEqual(
+      problems({ '.github/workflows/a.yaml': wf(runStep(s)) }),
+      [],
+      s,
+    );
+  }
+});
+
+test('an env image name that any step of the job (or a local action it uses) writes to $GITHUB_ENV is not trusted', () => {
+  const env = `    env:\n      IMG: ${REDIS}\n`;
+  const steps = (first) =>
+    `    steps:\n      - run: |\n${first
+      .split('\n')
+      .map((l) => `          ${l}`)
+      .join('\n')}\n      - run: docker pull "$IMG"\n`;
+  assert.deepEqual(
+    problems({
+      '.github/workflows/a.yaml': wf(`${env}${steps('echo hello')}`),
+    }),
+    [],
+  );
+  for (const first of [
+    'echo "IMG=redis:7-alpine" >> "$GITHUB_ENV"',
+    '{\n  echo "OTHER=1"\n  echo "IMG=redis:7"\n} >> "$GITHUB_ENV"',
+    'echo "IMG<<EOF" >> $GITHUB_ENV',
+  ]) {
+    const p = problems({
+      '.github/workflows/a.yaml': wf(`${env}${steps(first)}`),
+    });
+    assert.equal(p.length, 1, first);
+    assert.match(p[0], /writes to \$GITHUB_ENV/, first);
+  }
+  const action =
+    'name: x\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo "IMG=redis:7-alpine" >> "$GITHUB_ENV"\n';
+  const viaAction = `${env}    steps:\n      - uses: ./.github/actions/x\n      - run: docker pull "$IMG"\n`;
+  const p = problems({
+    '.github/actions/x/action.yml': action,
+    '.github/workflows/a.yaml': wf(viaAction),
+  });
+  assert.equal(p.length, 1);
+  assert.match(p[0], /writes to \$GITHUB_ENV/);
+  // another job writing the name does not matter: GITHUB_ENV is per job
+  const twoJobs = `name: t\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "IMG=x" >> "$GITHUB_ENV"\n  b:\n    runs-on: ubuntu-latest\n${env}${steps('true')}`;
+  assert.deepEqual(problems({ '.github/workflows/a.yaml': twoJobs }), []);
 });
 
 test('ref.sh prints the pinned reference and refuses bad names, missing and unpinned manifests', (t) => {

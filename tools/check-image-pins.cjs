@@ -11,13 +11,17 @@
 //      These are exactly the keys Dependabot's docker ecosystem reads, so whatever it can renew is pinned.
 //   2. .github/ci-images/<name>/image.yaml holds exactly one top-level `image: <repo>:<tag>@sha256:<64 hex>` (the tag is
 //      required there: Dependabot needs it to find the next digest of the same tag), read by .github/ci-images/ref.sh.
-//   3. Every `docker run|create|pull` (also `docker container run|create`, `docker image pull`) in a `run:` script names
+//   3. Every `docker|podman|nerdctl run|create|pull` (also `container run|create`, `image pull`) in a `run:` script names
 //      its image as either a pinned literal, a "$VAR" set exactly once in the same script, before the command, from
 //      `.github/ci-images/ref.sh <name>` (and <name> exists), or a "$VAR" from a workflow/job/step `env:` whose literal
-//      value is pinned and which the script never redefines. `docker` is found wherever it is a command word: in $( ),
-//      backticks, a subshell, by path (/usr/bin/docker), quoted ("docker"), inside sh -c "..." / bash -c '...'. docker
-//      reached through a variable, an alias or `$(command -v docker)` is refused, as is anything else this check cannot
-//      place (an unknown docker option, a global option before the subcommand, unbalanced quotes, an expression).
+//      value is pinned, which the script never redefines and which no step of the job (nor a local composite action it
+//      uses) writes to $GITHUB_ENV. `skopeo copy|sync|inspect|delete` may name only pinned literal docker:// references.
+//      The tool is found wherever it is a command word: in $( ), backticks, a subshell, by path (/usr/bin/docker, \docker),
+//      quoted ("docker"), inside sh -c "..." / bash -c '...'. Refused: the tool reached through a variable, an alias or
+//      `$(command -v docker)`; a subcommand that is not a bare literal word (`docker "run"`, `docker $SUB`, a wrapper
+//      `d() { docker "$@"; }`); and anything else this check cannot place (an unknown option, a global option before the
+//      subcommand, unbalanced quotes, an expression). Deliberate obfuscation (`d""ocker`, `source some-file.sh`) is beyond
+//      a static check; code review is the control for it (CODEOWNERS owns .github/ and tools/).
 //   4. One tag, one digest: two different digests for the same `<repo>:<tag>` across .github/ fail (a partial update).
 //
 // `uses: docker://...` is tools/check-action-pins.cjs's job (#236). Dependencies: Node built-ins and the root devDependency
@@ -201,15 +205,32 @@ function words(line) {
   return out;
 }
 
-// `docker` as a command word: after start of line, whitespace, ; & | ( $ " ' ` or / (so `$(docker`, `"docker"`,
-// `/usr/bin/docker`, `sh -c "docker`, `bash -c 'docker` are all found), and followed by whitespace (after an optional
-// closing quote). `rab-docker`, `dockerfile`, `docker-compose` are not command words.
-const DOCKER_WORD_RE = /(^|[\s;&|($"'`/])docker(?=["']?(?:[ \t]|$))/gm;
-// docker reached through a variable or an alias: refused, because the check cannot see what such a command runs.
-const DOCKER_INDIRECT_RES = [
-  /(?:^|[\s;&|(`])(?:alias\s+|export\s+|local\s+|readonly\s+|typeset\s+|declare\s+(?:-\w+\s+)*)?[A-Za-z_][A-Za-z0-9_]*=["']?(?:[^\s"';|&()]*\/)?docker["']?(?=[\s;&|)`]|$)/m,
-  /\$\(\s*(?:command\s+-v|which|type\s+-[pP])\s+docker\s*\)/,
-  /\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?["']?\s+(?:(?:container|image)\s+)?(?:run|create|pull)(?=[\s;&|)`"']|$)/m,
+// A container tool as a command word: docker, podman, nerdctl (same run/create/pull syntax) and skopeo (copy/sync/inspect/
+// delete with docker:// references). Found after start of line, whitespace, ; & | ( $ " ' ` / or \ (so `$(docker`,
+// `"docker"`, `/usr/bin/docker`, `\docker`, `sh -c "docker`, `bash -c 'docker` are all found), and followed by whitespace
+// (after an optional closing quote). `rab-docker`, `dockerfile`, `docker-compose` are not command words. Deliberate
+// obfuscation (`d""ocker`, `do\cker`, a script pulled in with `source`) is out of reach of a static check; review is the
+// control for that.
+const TOOL_WORD_RE =
+  /(^|[\s;&|($"'`/\\])(docker|podman|nerdctl|skopeo)(?=["']?(?:[ \t]|$))/gm;
+const RUNNERS = new Set(['docker', 'podman', 'nerdctl']);
+const SKOPEO_IMAGE_SUBS = new Set(['copy', 'sync', 'inspect', 'delete']);
+// A lookup of the tool (`command -v docker`, `which skopeo`), not a call. `$(command -v docker)` USED as a command is
+// refused by TOOL_INDIRECT_RES below.
+const LOOKUP_BEFORE_RE =
+  /(?:command\s+-[vV]|which|type(?:\s+-[aptfP]+)?|hash)\s+$/;
+// A container tool reached through a variable, an alias, a lookup or a variable command: refused, because the check
+// cannot see what such a command runs.
+const TOOL = '(?:docker|podman|nerdctl|skopeo)';
+const TOOL_INDIRECT_RES = [
+  new RegExp(
+    `(?:^|[\\s;&|(\`])(?:alias\\s+|export\\s+|local\\s+|readonly\\s+|typeset\\s+|declare\\s+(?:-\\w+\\s+)*)?[A-Za-z_][A-Za-z0-9_]*=["']?(?:[^\\s"';|&()]*\\/)?${TOOL}["']?(?=[\\s;&|)\`]|$)`,
+    'm',
+  ),
+  new RegExp(
+    `\\$\\(\\s*(?:command\\s+-v|which|type\\s+-[pP])\\s+${TOOL}\\s*\\)`,
+  ),
+  /\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?["']?\s+(?:(?:container|image)\s+)?(?:run|create|pull|copy|sync)(?=[\s;&|)`"']|$)/m,
 ];
 
 // Quote context at index p: the quote of the innermost $( ) / backtick frame ('"', "'" or null).
@@ -281,8 +302,10 @@ function commandEnd(text, from, enc) {
   return stack.length === 1 && stack[0].q === null ? text.length : -1;
 }
 
-// Every docker run/create/pull in a script: [{ index, command, image }] or [{ index, command, problem }]. A form the
-// parser cannot place is a problem, never skipped.
+// Every container image a script's docker/podman/nerdctl run|create|pull or skopeo copy|sync|inspect|delete names:
+// [{ index, command, image }] or [{ index, command, problem }]. A form the parser cannot place is a problem, never
+// skipped: a subcommand that is not a literal word (`docker "run"`, `docker $SUB`, `docker "$@"` in a wrapper function),
+// a global option before the subcommand, unbalanced quotes, an unknown option, a missing image.
 function dockerImages(script) {
   const out = [];
   const text = script
@@ -290,45 +313,90 @@ function dockerImages(script) {
     .split(/\r?\n/)
     .map((l) => (/^\s*#/.test(l) ? '' : l))
     .join('\n');
-  for (const re of DOCKER_INDIRECT_RES) {
+  for (const re of TOOL_INDIRECT_RES) {
     const m = re.exec(text);
     if (m) {
       out.push({
         index: m.index,
         command: m[0].trim(),
         problem:
-          'docker invoked through a variable, alias or lookup cannot be checked; call docker directly',
+          'a container tool invoked through a variable, alias or lookup cannot be checked; call it directly',
       });
     }
   }
-  for (const m of text.matchAll(DOCKER_WORD_RE)) {
+  // The next raw word at `from` (after blanks): null when the command ends there.
+  const nextWord = (from) => {
+    const ws = /^[ \t]*/.exec(text.slice(from))[0];
+    const start = from + ws.length;
+    const after = text.slice(start);
+    if (after === '' || /^[;&|)\n]/.test(after)) return null;
+    const raw = /^[^\s;&|)]+/.exec(after)[0];
+    return { raw, end: start + raw.length };
+  };
+  for (const m of text.matchAll(TOOL_WORD_RE)) {
+    const tool = m[2];
     const at = m.index + m[1].length;
-    let i = at + 'docker'.length;
+    const lineStart = text.lastIndexOf('\n', at - 1) + 1;
+    if (LOOKUP_BEFORE_RE.test(text.slice(lineStart, at))) continue;
+    let i = at + tool.length;
     if (text[i] === '"' || text[i] === "'") i++;
     const enc = enclosingQuote(text, at);
-    const sm =
-      /^[ \t]+(?:(container)[ \t]+)?(?:(image)[ \t]+)?([^\s"';&|)`]+)/.exec(
-        text.slice(i),
-      );
-    if (!sm) continue;
-    const sub = sm[3];
-    if (sub.startsWith('-')) {
-      // docker --context x run ...: global options are not parsed; refused when a run/create/pull follows.
+    const refuse = (problem, upTo) => {
+      const e = commandEnd(text, at + tool.length, enc);
+      out.push({
+        index: at,
+        command: text
+          .slice(at, upTo !== undefined ? upTo : e < 0 ? text.length : e)
+          .trim(),
+        problem,
+      });
+    };
+    let w1 = nextWord(i);
+    if (!w1) continue; // the bare tool name, nothing to run
+    if (w1.raw.startsWith('-')) {
+      // docker --context x run ...: global options are not parsed; refused when an image subcommand follows.
       const end0 = commandEnd(text, i, enc);
       const tail = text.slice(i, end0 < 0 ? text.length : end0);
-      if (/(?:^|\s)(?:run|create|pull)(?=\s|$)/.test(tail)) {
-        out.push({
-          index: at,
-          command: `docker${tail}`.trim(),
-          problem: `docker global option ${sub} before the subcommand is not supported by this check`,
-        });
+      if (
+        /(?:^|\s)(?:run|create|pull|copy|sync|inspect|delete)(?=\s|$)/.test(
+          tail,
+        )
+      ) {
+        refuse(
+          `${tool} global option ${w1.raw} before the subcommand is not supported by this check`,
+        );
       }
       continue;
     }
-    if (sm[1] && !['run', 'create'].includes(sub)) continue;
-    if (sm[2] && sub !== 'pull') continue;
-    if (!['run', 'create', 'pull'].includes(sub)) continue;
-    const argsFrom = i + sm[0].length;
+    if (!/^[A-Za-z]+$/.test(w1.raw)) {
+      refuse(
+        `${tool} subcommand ${w1.raw} is not a literal word; this check cannot tell what it runs`,
+      );
+      continue;
+    }
+    let sub = w1.raw;
+    let argsFrom = w1.end;
+    if (RUNNERS.has(tool) && (sub === 'container' || sub === 'image')) {
+      const w2 = nextWord(argsFrom);
+      if (!w2) continue;
+      if (!/^[A-Za-z]+$/.test(w2.raw)) {
+        refuse(
+          `${tool} ${sub} subcommand ${w2.raw} is not a literal word; this check cannot tell what it runs`,
+        );
+        continue;
+      }
+      if (
+        (sub === 'container' && !['run', 'create'].includes(w2.raw)) ||
+        (sub === 'image' && w2.raw !== 'pull')
+      )
+        continue;
+      sub = w2.raw;
+      argsFrom = w2.end;
+    } else if (RUNNERS.has(tool) && !['run', 'create', 'pull'].includes(sub)) {
+      continue;
+    } else if (tool === 'skopeo' && !SKOPEO_IMAGE_SUBS.has(sub)) {
+      continue;
+    }
     const end = commandEnd(text, argsFrom, enc);
     const command = text.slice(at, end < 0 ? text.length : end).trim();
     if (end < 0) {
@@ -340,6 +408,27 @@ function dockerImages(script) {
     const w = words(args);
     if (!w) {
       out.push({ index: at, command, problem: 'unbalanced quotes' });
+      continue;
+    }
+    if (tool === 'skopeo') {
+      // Every registry reference must be a pinned literal docker://<repo>[:<tag>]@sha256:<digest>; local transports
+      // (oci:, dir:, docker-archive:, ...) are files of this run. A variable or expression cannot be checked.
+      let bad = null;
+      for (const t of w) {
+        if (t.includes('$'))
+          bad = `skopeo ${sub} argument ${t} cannot be verified`;
+        else if (
+          t.startsWith('docker://') &&
+          !PINNED_RE.test(t.slice('docker://'.length))
+        )
+          bad = `skopeo ${sub} reference ${t} is not pinned by digest`;
+        if (bad) break;
+      }
+      out.push(
+        bad
+          ? { index: at, command, problem: bad }
+          : { index: at, command, skopeo: true },
+      );
       continue;
     }
     const [valueOpts, flags] = OPTS[sub];
@@ -361,10 +450,10 @@ function dockerImages(script) {
         continue;
       }
       if (flags.has(t)) continue;
-      problem = `docker ${sub} option ${t} is not known to this check (add it to the option tables)`;
+      problem = `${tool} ${sub} option ${t} is not known to this check (add it to the option tables)`;
       break;
     }
-    if (!problem && !image) problem = `no image found in: docker ${sub}`;
+    if (!problem && !image) problem = `no image found in: ${tool} ${sub}`;
     out.push(
       problem ? { index: at, command, problem } : { index: at, command, image },
     );
@@ -422,6 +511,16 @@ function locator(text) {
   };
 }
 
+// Names a script may write to $GITHUB_ENV (every NAME= / NAME<< in a script that mentions GITHUB_ENV; an
+// over-approximation on purpose). A later step of the job sees such a value instead of the `env:` literal this check
+// read, so an env name any step of the job (or a local composite action it uses) writes there is not trusted.
+function githubEnvWrites(script) {
+  if (typeof script !== 'string' || !script.includes('GITHUB_ENV')) return [];
+  return [...script.matchAll(/([A-Za-z_][A-Za-z0-9_]*)(?:=|<<)/g)].map(
+    (m) => m[1],
+  );
+}
+
 function check(root) {
   const problems = [];
   const pins = new Map(); // repo:tag -> Set(digest)
@@ -432,6 +531,28 @@ function check(root) {
       if (e.isDirectory()) ciImages.add(e.name);
   }
   const files = listYamlFiles(root);
+  // GITHUB_ENV writes of each local composite action, keyed by its `uses:` path (./.github/actions/<name>).
+  const actionEnvWrites = new Map();
+  for (const file of files) {
+    const rel = path.relative(root, file).split(path.sep).join('/');
+    const am = /^(\.github\/actions\/[^/]+)\/action\.ya?ml$/.exec(rel);
+    if (!am) continue;
+    let doc;
+    try {
+      doc = YAML.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      continue; // reported as unparseable below
+    }
+    const names = new Set();
+    for (const st of (doc &&
+      doc.runs &&
+      Array.isArray(doc.runs.steps) &&
+      doc.runs.steps) ||
+      []) {
+      for (const n of githubEnvWrites(st && st.run)) names.add(n);
+    }
+    actionEnvWrites.set(`./${am[1]}`, names);
+  }
   let images = 0;
   let dockerCmds = 0;
 
@@ -522,9 +643,23 @@ function check(root) {
     const scripts = [];
     const stepsOf = (steps, env) => {
       if (!Array.isArray(steps)) return;
+      // Names any step of this job (or composite action) writes to $GITHUB_ENV, including local actions it uses.
+      const written = new Set();
+      for (const s of steps) {
+        if (!s || typeof s !== 'object') continue;
+        for (const n of githubEnvWrites(s.run)) written.add(n);
+        if (typeof s.uses === 'string') {
+          const key = s.uses.replace(/\/+$/, '');
+          for (const n of actionEnvWrites.get(key) || []) written.add(n);
+        }
+      }
       for (const s of steps) {
         if (s && typeof s.run === 'string')
-          scripts.push({ script: s.run, env: { ...env, ...(s.env || {}) } });
+          scripts.push({
+            script: s.run,
+            env: { ...env, ...(s.env || {}) },
+            written,
+          });
       }
     };
     for (const v of values) {
@@ -537,7 +672,7 @@ function check(root) {
       }
       if (v.runs && typeof v.runs === 'object') stepsOf(v.runs.steps, {});
     }
-    for (const { script, env } of scripts) {
+    for (const { script, env, written } of scripts) {
       const assigned = refShAssignments(script);
       for (const d of dockerImages(script)) {
         dockerCmds++;
@@ -546,6 +681,7 @@ function check(root) {
           problems.push(`${at}: ${d.problem} (${d.command})`);
           continue;
         }
+        if (d.skopeo) continue; // every docker:// reference was a pinned literal
         const img = d.image;
         const varM =
           /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/.exec(
@@ -576,13 +712,14 @@ function check(root) {
             typeof ev === 'string' &&
             !ev.includes('${{') &&
             PINNED_RE.test(ev.trim()) &&
-            definitions(script, name) === 0
+            definitions(script, name) === 0 &&
+            !written.has(name)
           ) {
             recordPin(ev.trim());
             continue;
           }
           problems.push(
-            `${at}: docker image $${name} is neither set once from .github/ci-images/ref.sh in this script nor a pinned literal env value the script leaves alone`,
+            `${at}: docker image $${name} is neither set once from .github/ci-images/ref.sh in this script nor a pinned literal env value that no script of the job redefines or writes to $GITHUB_ENV`,
           );
           continue;
         }
@@ -613,6 +750,7 @@ module.exports = {
   words,
   refShAssignments,
   definitions,
+  githubEnvWrites,
   PINNED_RE,
 };
 
