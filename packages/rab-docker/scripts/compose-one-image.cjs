@@ -196,7 +196,31 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
     if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
   }
-  return problems.concat(retiredTargetVolumeProblems(model, label), checkRedisPrivate(model, label));
+  return problems.concat(retiredTargetVolumeProblems(model, label), checkRedisPrivate(model, label), sessionUrlProblems(model, label));
+}
+
+/**
+ * Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL, the optional direct session connection
+ * of the same crewflow_owner login. In every deploy combination (no-interpolate render) rab-api, rab-worker, db-setup and
+ * db-harden each carry it as EXACTLY `${PG_DATABASE_SESSION_URL:-}` (one compose.env value, no default, nothing pinned), and
+ * no other service carries the variable at all. Its value rules are compose-owner-login.cjs's / verify-image-compose.cjs's.
+ */
+const SESSION_URL_KEY = 'PG_DATABASE_SESSION_URL';
+const SESSION_URL_EXPR = '${PG_DATABASE_SESSION_URL:-}';
+const SESSION_URL_SERVICES = Object.freeze(['rab-api', 'rab-worker', 'db-setup', 'db-harden']);
+function sessionUrlProblems(model, label) {
+  const problems = [];
+  for (const [name, s] of Object.entries(model?.services ?? {})) {
+    const env = envOfService(s);
+    const has = Object.prototype.hasOwnProperty.call(env, SESSION_URL_KEY);
+    if (SESSION_URL_SERVICES.includes(name)) {
+      if (!has) problems.push(`${label}: ${name}: ${SESSION_URL_KEY} is missing (committed as ${SESSION_URL_EXPR}, the optional session connection)`);
+      else if (String(env[SESSION_URL_KEY]) !== SESSION_URL_EXPR) problems.push(`${label}: ${name}: ${SESSION_URL_KEY} must be exactly ${SESSION_URL_EXPR} (one compose.env value; no default, nothing pinned)`);
+    } else if (has) {
+      problems.push(`${label}: ${name}: has ${SESSION_URL_KEY} (only ${SESSION_URL_SERVICES.join(', ')})`);
+    }
+  }
+  return problems;
 }
 
 /**
@@ -361,5 +385,5 @@ function main() {
   console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after; no Redis port is reachable from the host in any of the ${DEPLOY_COMBOS.length + REDIS_ONLY_COMBOS.length} combinations`);
 }
 
-module.exports = { checkModel, checkRedisPrivate, retiredTargetVolumeProblems, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
+module.exports = { checkModel, checkRedisPrivate, sessionUrlProblems, SESSION_URL_EXPR, retiredTargetVolumeProblems, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
 if (require.main === module) main();

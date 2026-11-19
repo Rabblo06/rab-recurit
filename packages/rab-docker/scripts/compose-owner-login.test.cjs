@@ -317,8 +317,10 @@ test('DENIAL DB-SETUP compose env: the URL still needs verify-full, the direct h
     const withUrl = (url) => `${OWN}\n${login === 'doadmin' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${url.replace('crewflow_owner', login)}`;
     assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
     assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'))), /transaction pooler/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace(':5432', ':6543'))), /transaction pooler/);
+    // Owner instruction 2026-11-19 ("decide by capability"): no host or port is classified as a pooler any more.
+    for (const pooled of [URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'), URL_OK.replace(':5432', ':6543')]) {
+      assert.ok(!lintEnvText('compose', withUrl(pooled)).some((m) => /pooler/.test(m)), 'a pooler-looking host is not refused by its name');
+    }
     assertRefused(lintEnvText('compose', withUrl('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full')), /no password/);
     assertRefused(lintEnvText('compose', withUrl('mysql://root:x@db.internal.example:3306/crewflow?sslmode=verify-full')), /not a postgres:\/\/ URL/);
     assertRefused(lintEnvText('compose', withUrl('not a url')), /not a parseable URL/);
@@ -1025,6 +1027,7 @@ function hardenModel() {
     PG_DATABASE_URL: gate.BUNDLED_APP_URL,
     CREWFLOW_BUNDLED_DB: '1',
     CREWFLOW_BUNDLED_DB_ADMIN_URL: gate.BUNDLED_URL,
+    PG_DATABASE_SESSION_URL: '',
   };
   const oneShot = (entrypoint, extraEnv) => ({
     image,
@@ -1183,4 +1186,64 @@ test('dbSettingsProblems: the shared rule of the compose.env lint and the --envi
     assertRefused(r({ bundled: '0', adminUrl: `${ADMIN_OK}&${param}`, appUrl: URL_OK }), new RegExp(`^PG_ADMIN_URL: has a \\?${param.split('=')[0]}= query parameter`));
     assertRefused(r({ bundled: '0', appUrl: `${URL_OK}&${param}` }), new RegExp(`^PG_DATABASE_URL: has a \\?${param.split('=')[0]}= query parameter`));
   }
+});
+
+// ---- Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL, a compose.env value only.
+const POOLER = 'postgresql://crewflow_owner:Zq81-not-a-real-password-77@pool.internal.example:6432/crewflow?sslmode=verify-full'; // gitleaks:allow
+const SESSION = URL_OK; // the direct host of the same database and login
+
+test('PG_DATABASE_SESSION_URL: compose.env accepts it beside a pooler PG_DATABASE_URL (own database), with or without PG_ADMIN_URL', () => {
+  assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_DATABASE_URL=${POOLER}\nPG_DATABASE_SESSION_URL=${SESSION}`), []);
+  const admin = URL_OK.replace('crewflow_owner:', 'doadmin:');
+  assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${admin}\nPG_DATABASE_URL=${POOLER}\nPG_DATABASE_SESSION_URL=${SESSION}`), []);
+  assert.equal(gate.SESSION_URL_EXPR, '${PG_DATABASE_SESSION_URL:-}');
+  assert.ok(gate.DB_SETUP_DB_KEYS.includes('PG_DATABASE_SESSION_URL'));
+});
+
+test('DENIAL PG_DATABASE_SESSION_URL: another login, another database, the same host, no pooler URL, the bundled db, an env file, TLS, an admin URL elsewhere', () => {
+  const with_ = (session, extra = `PG_DATABASE_URL=${POOLER}`, base = OWN) => lintEnvText('compose', `${base}\n${extra}\nPG_DATABASE_SESSION_URL=${session}`);
+  assertRefused(with_(SESSION.replace('crewflow_owner:', 'doadmin:')), /^PG_DATABASE_SESSION_URL: must log in as crewflow_owner/);
+  assertRefused(with_(SESSION.replace('crewflow_owner:', 'crewflow_app:')), /^PG_DATABASE_SESSION_URL: logs in as a former separated login/);
+  assertRefused(with_(SESSION.replace('/crewflow?', '/other?')), /PG_DATABASE_SESSION_URL and PG_DATABASE_URL name different databases/);
+  assertRefused(with_(POOLER), /PG_DATABASE_SESSION_URL names the same host and port as PG_DATABASE_URL/);
+  assertRefused(with_(SESSION, 'CREWFLOW_IMAGE_TAG_UNUSED='), /PG_DATABASE_SESSION_URL needs PG_DATABASE_URL/);
+  // #259's one sslmode rule (mirrored): require, verify-ca, verify-full (with or without channel_binding=require) pass.
+  for (const mode of ['require', 'verify-ca', 'verify-full']) {
+    for (const extra of ['', '&channel_binding=require']) {
+      assert.ok(!with_(`${SESSION.replace('verify-full', mode)}${extra}`).some((m) => /sslmode/.test(m)), `${mode}${extra}`);
+    }
+  }
+  for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) {
+    assertRefused(with_(SESSION.replace('verify-full', mode)), /^PG_DATABASE_SESSION_URL: sslmode must be require, verify-ca or verify-full/);
+  }
+  assertRefused(with_(SESSION.replace('?sslmode=verify-full', '')), /^PG_DATABASE_SESSION_URL: sslmode must be require, verify-ca or verify-full/);
+  assert.deepEqual([...gate.ACCEPTED_SSLMODES], ['require', 'verify-ca', 'verify-full']);
+  assertRefused(with_('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full'), /PG_DATABASE_SESSION_URL: has no password/);
+  assertRefused(with_(`${SESSION}&user=doadmin`), /PG_DATABASE_SESSION_URL: has a \?user= query parameter/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_SESSION_URL=${SESSION}`), /PG_DATABASE_SESSION_URL: only with your own database/);
+  // The admin URL must name the SESSION URL's database (the direct host), not the pooler's.
+  const admin = URL_OK.replace('crewflow_owner:', 'doadmin:').replace('db.internal.example', 'other.internal.example');
+  assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${admin}\nPG_DATABASE_URL=${POOLER}\nPG_DATABASE_SESSION_URL=${SESSION}`), /PG_ADMIN_URL and PG_DATABASE_SESSION_URL name different databases/);
+  // Never an env file (the committed ${PG_DATABASE_SESSION_URL:-} would override it).
+  for (const kind of ['database', 'runtime']) {
+    assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_SESSION_URL=${SESSION}`), /PG_DATABASE_SESSION_URL: set it in compose\.env/);
+  }
+});
+
+test('DENIAL PG_DATABASE_SESSION_URL raw text: only the committed line `PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-}`', () => {
+  const ok = 'services:\n  rab-api:\n    environment:\n      PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-}\n';
+  assert.ok(!gate.databaseExpressionProblems('f.yml', ok).some((m) => /PG_DATABASE_SESSION_URL/.test(m)));
+  for (const bad of [
+    '      PG_DATABASE_SESSION_URL: ${PG_DATABASE_SESSION_URL:-postgresql://crewflow_owner:x@db:5432/crewflow}',
+    '      PG_DATABASE_SESSION_URL: postgresql://crewflow_owner:x@db:5432/crewflow',
+    '      OTHER: ${PG_DATABASE_SESSION_URL:-}',
+    '      - PG_DATABASE_SESSION_URL=${PG_DATABASE_SESSION_URL}',
+  ]) {
+    assertRefused(gate.databaseExpressionProblems('f.yml', `services:\n  rab-api:\n    environment:\n${bad}\n`), /names PG_DATABASE_SESSION_URL other than as the committed line/);
+  }
+});
+
+test('dbHardenProblems: db-harden\'s PG_DATABASE_SESSION_URL must be db-setup\'s', () => {
+  const out = hardenProblems((s) => { s['db-harden'].environment.PG_DATABASE_SESSION_URL = SESSION; });
+  assert.ok(out.some((m) => /db-harden: PG_DATABASE_SESSION_URL is not db-setup's committed value/.test(m)), JSON.stringify(out));
 });

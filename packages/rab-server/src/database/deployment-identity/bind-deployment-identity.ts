@@ -21,10 +21,10 @@
  * (current_database(), recorded by the definer itself) and the SET of 1 to 5 host names confirmed with repeated
  * --confirm-host (passed to the definer, which validates the shape and stores them sorted). Bind every host name a process
  * of this deployment connects through: typically the direct host (Worker, provisioner, migrations, this command) and, when
- * the API uses one, a session-compatible proxy host. Only the host this command itself connects to is verified by a live
- * connection; any other confirmed host is the operator's statement. A host name with a documented transaction-pooler
- * shape (Neon `-pooler`, AWS RDS Proxy) is refused here; port-only pooler shapes are decided by the URL policy of each
- * process at start. Every runtime and command identity check then refuses a database whose own name differs or whose
+ * the API and Worker use one, the transaction pooler host of PG_DATABASE_URL (with PG_DATABASE_SESSION_URL set, both hosts are
+ * checked at start). Only the host this command itself connects to is verified by a live connection; any other confirmed
+ * host is the operator's statement. Pooler host names are no longer recognised or refused here (owner instruction
+ * 2026-11-19, capability detection). Every runtime and command identity check then refuses a database whose own name differs or whose
  * connection host is not in the set (a restore, clone, fork or branch elsewhere, or a provider-issued new host name)
  * until this command rebinds it. This command is the only reader allowed to see a marker bound elsewhere (as a warning),
  * because recording the new location is its purpose.
@@ -40,7 +40,7 @@
  * DATABASE_URL_UNPOOLED still names it), resolved by the shared factory exactly as the target guard resolved it (same
  * endpoint, URL policy and TLS), so the database the guard probed is the database written to.
  */
-import { createPgClient, detectTransactionPooler } from '../postgres';
+import { createPgClient } from '../postgres';
 import { BOUND_HOST_PATTERN, MAX_BOUND_HOSTS } from '../typeorm/core/deployment-identity-sql';
 import { assertDbTarget, DbTargetError, ResolvedDbTarget } from '../typeorm/core/database-target';
 import { MIGRATION_IDENTITY_FACTS_QUERY } from '../typeorm/core/migration-identity';
@@ -76,9 +76,9 @@ Arguments (all required unless marked):
   --actor "<who, 1 to 200 characters>"      recorded as bound_by (self-asserted text, not an authenticated identity)
   --confirm-database <name>                 must equal the server's current_database()
   --confirm-host <host>                     REPEAT once per host name a process of this deployment connects through
-                                            (1 to ${MAX_BOUND_HOSTS}, e.g. the direct host and the API's session-compatible proxy
-                                            host); the set must include the host this command connects to; recorded as
-                                            bound_hosts. Transaction-pooler host names (Neon -pooler, RDS Proxy) are refused.
+                                            (1 to ${MAX_BOUND_HOSTS}, e.g. the direct host and the transaction pooler host of
+                                            PG_DATABASE_URL); the set must include the host this command connects to; recorded as
+                                            bound_hosts.
   --confirm-current-deployment-id <uuid>    REQUIRED when the database is already bound: the id bound now
 
 Example (rebind a restored copy of production as staging, run with production command authority):
@@ -131,12 +131,6 @@ export function parseConfirmHosts(values: readonly string[]): string[] {
   for (const host of hosts) {
     if (host.length < 1 || host.length > 253 || !BOUND_HOST.test(host)) {
       throw new BindIdentityError(`--confirm-host "${host}" is not a host name or address (letters, digits, dot, hyphen; IPv6 without brackets).`);
-    }
-    const pooler = detectTransactionPooler(host, 5432);
-    if (pooler) {
-      throw new BindIdentityError(
-        `--confirm-host "${host}" has a documented transaction-pooler shape (${pooler.reason}). Bind direct or session-compatible host names only.`,
-      );
     }
   }
   if (new Set(hosts).size !== hosts.length) throw new BindIdentityError('--confirm-host names the same host twice.');

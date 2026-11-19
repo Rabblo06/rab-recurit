@@ -10,6 +10,8 @@ const test = require('node:test');
 const { checkModel, checkRedisPrivate, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS } = require('./compose-one-image.cjs');
 const { waitWrapperScript, WAIT_SECONDS_EXPR } = require('./db-setup-wait.cjs');
 
+// Transaction pooler support (owner instruction 2026-11-19): the optional session URL, exactly this expression on four services.
+const SESSION = '${PG_DATABASE_SESSION_URL:-}';
 const IMG = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be a digest}';
 
 function good() {
@@ -20,7 +22,7 @@ function good() {
       'rab-api': {
         image: IMG,
         entrypoint: ['./api-prestart.sh'],
-        environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
+        environment: { CREWFLOW_MIGRATE_ON_START: 'true', PG_DATABASE_SESSION_URL: SESSION },
         depends_on: { 'rab-redis': { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
         stop_grace_period: '40s',
       },
@@ -28,17 +30,18 @@ function good() {
         image: IMG,
         // Owner instruction 2026-11-18: the wait-for-db wrapper, no depends_on (as `config --no-interpolate` renders it).
         entrypoint: ['/bin/sh', '-c', waitWrapperScript().split('$').join('$$'), 'db-setup'],
-        environment: { CREWFLOW_DB_WAIT_SECONDS: WAIT_SECONDS_EXPR },
+        environment: { CREWFLOW_DB_WAIT_SECONDS: WAIT_SECONDS_EXPR, PG_DATABASE_SESSION_URL: SESSION },
       },
       // Owner decision 2026-11-18 (M1): the one-shot CREATEROLE hardening; no depends_on.
       'db-harden': {
         image: IMG,
         entrypoint: ['./db-setup.sh', 'harden'],
+        environment: { PG_DATABASE_SESSION_URL: SESSION },
       },
       'rab-worker': {
         image: IMG,
         entrypoint: ['./worker-start.sh'],
-        environment: { DISABLE_DB_MIGRATIONS: 'true', DISABLE_CRON_JOBS_REGISTRATION: 'true' },
+        environment: { DISABLE_DB_MIGRATIONS: 'true', DISABLE_CRON_JOBS_REGISTRATION: 'true', PG_DATABASE_SESSION_URL: SESSION },
         depends_on: {
           'rab-redis': { condition: 'service_healthy' },
           'rab-api': { condition: 'service_healthy', restart: true },
@@ -731,5 +734,21 @@ test('owner decision 2026-11-18 (static): no committed compose file declares or 
   for (const f of ['docker-compose.production.yml', 'docker-compose.image.yml', 'docker-compose.local-build.yml', 'docker-compose.yml', 'docker-compose.qa.yml']) {
     const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/^\s*#.*$/gm, '');
     assert.ok(!/crewflow-db-target|\/run\/crewflow\/db-target/.test(text), `${f}: names the retired setup volume outside a comment`);
+  }
+});
+
+test('PG_DATABASE_SESSION_URL: exactly ${PG_DATABASE_SESSION_URL:-} on rab-api, rab-worker, db-setup and db-harden; nowhere else', () => {
+  for (const [edit, re] of [
+    [(m) => { delete m.services['rab-api'].environment.PG_DATABASE_SESSION_URL; }, /rab-api: PG_DATABASE_SESSION_URL is missing/],
+    [(m) => { delete m.services['db-harden'].environment; }, /db-harden: PG_DATABASE_SESSION_URL is missing/],
+    [(m) => { m.services['rab-worker'].environment.PG_DATABASE_SESSION_URL = '${PG_DATABASE_SESSION_URL:-postgresql://crewflow_owner:x@db:5432/crewflow}'; }, /rab-worker: PG_DATABASE_SESSION_URL must be exactly/],
+    [(m) => { m.services['db-setup'].environment.PG_DATABASE_SESSION_URL = '${PG_DATABASE_URL}'; }, /db-setup: PG_DATABASE_SESSION_URL must be exactly/],
+    [(m) => { m.services['rab-api'].environment.PG_DATABASE_SESSION_URL = ''; }, /rab-api: PG_DATABASE_SESSION_URL must be exactly/],
+    [(m) => { m.services.db.environment = { PG_DATABASE_SESSION_URL: SESSION }; }, /db: has PG_DATABASE_SESSION_URL \(only rab-api, rab-worker, db-setup, db-harden\)/],
+    [(m) => { m.services['rab-redis'].environment = ['PG_DATABASE_SESSION_URL=${PG_DATABASE_SESSION_URL:-}']; }, /rab-redis: has PG_DATABASE_SESSION_URL/],
+  ]) {
+    const m = good();
+    edit(m);
+    refused(m, re);
   }
 });

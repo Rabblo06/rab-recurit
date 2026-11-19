@@ -1,4 +1,5 @@
-import { describePgTarget, detectTransactionPooler, parsePgUrl, PgConfigError, redactPgUrl } from '../pg-url-policy';
+import * as policy from '../pg-url-policy';
+import { describePgTarget, parsePgUrl, PgConfigError, redactPgUrl } from '../pg-url-policy';
 
 // Phase B (B1/B2): the URL parameter policy. Provider shapes are the documented connection-string formats; the
 // credentials are fakes, and every refusal is checked for leaking them.
@@ -9,52 +10,52 @@ describe('pg-url-policy: provider connection strings', () => {
     [
       'Neon pooled (-pooler, sslmode=require, channel_binding=require)',
       `postgresql://neondb_owner:${SECRET}@ep-cool-darkness-123456-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require`,
-      { host: 'ep-cool-darkness-123456-pooler.eu-west-2.aws.neon.tech', port: 5432, user: 'neondb_owner', database: 'neondb', sslmode: 'require', channelBinding: true, pooler: 'neon' },
+      { host: 'ep-cool-darkness-123456-pooler.eu-west-2.aws.neon.tech', port: 5432, user: 'neondb_owner', database: 'neondb', sslmode: 'require', channelBinding: true },
     ],
     [
       'Neon direct with the SNI workaround options=endpoint%3D<id>',
       `postgresql://neondb_owner:${SECRET}@ep-cool-darkness-123456.eu-west-2.aws.neon.tech/neondb?sslmode=verify-full&options=endpoint%3Dep-cool-darkness-123456`,
-      { host: 'ep-cool-darkness-123456.eu-west-2.aws.neon.tech', port: 5432, user: 'neondb_owner', database: 'neondb', sslmode: 'verify-full', channelBinding: false, pooler: null },
+      { host: 'ep-cool-darkness-123456.eu-west-2.aws.neon.tech', port: 5432, user: 'neondb_owner', database: 'neondb', sslmode: 'verify-full', channelBinding: false },
     ],
     [
       'Supabase direct db.<ref>.supabase.co:5432',
       `postgresql://postgres:${SECRET}@db.abcdefghijklmnopqrst.supabase.co:5432/postgres`,
-      { host: 'db.abcdefghijklmnopqrst.supabase.co', port: 5432, user: 'postgres', database: 'postgres', sslmode: null, channelBinding: false, pooler: null },
+      { host: 'db.abcdefghijklmnopqrst.supabase.co', port: 5432, user: 'postgres', database: 'postgres', sslmode: null, channelBinding: false },
     ],
     [
       'Supabase transaction pooler aws-0-<region>.pooler.supabase.com:6543, user postgres.<ref>',
       `postgresql://postgres.abcdefghijklmnopqrst:${SECRET}@aws-0-eu-west-2.pooler.supabase.com:6543/postgres`,
-      { host: 'aws-0-eu-west-2.pooler.supabase.com', port: 6543, user: 'postgres.abcdefghijklmnopqrst', database: 'postgres', sslmode: null, channelBinding: false, pooler: 'supabase' },
+      { host: 'aws-0-eu-west-2.pooler.supabase.com', port: 6543, user: 'postgres.abcdefghijklmnopqrst', database: 'postgres', sslmode: null, channelBinding: false },
     ],
     [
       'Supabase session pooler on :5432 (session mode, not denylisted)',
       `postgresql://postgres.abcdefghijklmnopqrst:${SECRET}@aws-0-eu-west-2.pooler.supabase.com:5432/postgres`,
-      { host: 'aws-0-eu-west-2.pooler.supabase.com', port: 5432, user: 'postgres.abcdefghijklmnopqrst', database: 'postgres', sslmode: null, channelBinding: false, pooler: null },
+      { host: 'aws-0-eu-west-2.pooler.supabase.com', port: 5432, user: 'postgres.abcdefghijklmnopqrst', database: 'postgres', sslmode: null, channelBinding: false },
     ],
     [
       'DigitalOcean managed direct port 25060, defaultdb, sslmode=require',
       `postgresql://doadmin:${SECRET}@db-postgresql-lon1-12345-do-user-1.db.ondigitalocean.com:25060/defaultdb?sslmode=require`,
-      { host: 'db-postgresql-lon1-12345-do-user-1.db.ondigitalocean.com', port: 25060, user: 'doadmin', database: 'defaultdb', sslmode: 'require', channelBinding: false, pooler: null },
+      { host: 'db-postgresql-lon1-12345-do-user-1.db.ondigitalocean.com', port: 25060, user: 'doadmin', database: 'defaultdb', sslmode: 'require', channelBinding: false },
     ],
     [
       'DigitalOcean connection pool port 25061',
       `postgresql://doadmin:${SECRET}@db-postgresql-lon1-12345-do-user-1.db.ondigitalocean.com:25061/app-pool?sslmode=require`,
-      { host: 'db-postgresql-lon1-12345-do-user-1.db.ondigitalocean.com', port: 25061, user: 'doadmin', database: 'app-pool', sslmode: 'require', channelBinding: false, pooler: 'digitalocean' },
+      { host: 'db-postgresql-lon1-12345-do-user-1.db.ondigitalocean.com', port: 25061, user: 'doadmin', database: 'app-pool', sslmode: 'require', channelBinding: false },
     ],
     [
       'AWS RDS instance',
       `postgresql://app:${SECRET}@mydb.abc123xyz.eu-west-2.rds.amazonaws.com:5432/app?sslmode=verify-full`,
-      { host: 'mydb.abc123xyz.eu-west-2.rds.amazonaws.com', port: 5432, user: 'app', database: 'app', sslmode: 'verify-full', channelBinding: false, pooler: null },
+      { host: 'mydb.abc123xyz.eu-west-2.rds.amazonaws.com', port: 5432, user: 'app', database: 'app', sslmode: 'verify-full', channelBinding: false },
     ],
     [
       'AWS RDS Proxy',
       `postgresql://app:${SECRET}@myproxy.proxy-abc123xyz.eu-west-2.rds.amazonaws.com:5432/app`,
-      { host: 'myproxy.proxy-abc123xyz.eu-west-2.rds.amazonaws.com', port: 5432, user: 'app', database: 'app', sslmode: null, channelBinding: false, pooler: 'rds-proxy' },
+      { host: 'myproxy.proxy-abc123xyz.eu-west-2.rds.amazonaws.com', port: 5432, user: 'app', database: 'app', sslmode: null, channelBinding: false },
     ],
     [
       'self-hosted localhost:5432',
       `postgres://crewflow_app:${SECRET}@localhost:5432/rab`,
-      { host: 'localhost', port: 5432, user: 'crewflow_app', database: 'rab', sslmode: null, channelBinding: false, pooler: null },
+      { host: 'localhost', port: 5432, user: 'crewflow_app', database: 'rab', sslmode: null, channelBinding: false },
     ],
   ])('%s', (_name, url, expected) => {
     const t = parsePgUrl(url, 'PG_DATABASE_URL');
@@ -65,7 +66,6 @@ describe('pg-url-policy: provider connection strings', () => {
       database: t.database,
       sslmode: t.sslmode,
       channelBinding: t.channelBinding,
-      pooler: t.transactionPooler?.provider ?? null,
     }).toEqual(expected);
     expect(t.password).toBe(SECRET);
     // The password never appears in an enumerable field (JSON.stringify of the target, a log line).
@@ -79,10 +79,17 @@ describe('pg-url-policy: provider connection strings', () => {
     expect(t.port).toBe(5432);
   });
 
-  it('flags PgBouncer\'s default port 6432 as a suspicion (warning), not a refusal', () => {
-    const t = parsePgUrl(`postgres://u:${SECRET}@db.internal.example:6432/rab`, 'X');
-    expect(t.transactionPooler).toBeNull();
-    expect(t.poolerSuspicion).toMatch(/6432/);
+  it('owner instruction 2026-11-19: no host or port is classified as a pooler (capability detection only)', () => {
+    for (const url of [
+      `postgres://u:${SECRET}@db.internal.example:6432/rab`,
+      `postgresql://u:${SECRET}@ep-cool-darkness-123456-pooler.eu-west-2.aws.neon.tech/neondb`,
+      `postgresql://u:${SECRET}@aws-0-eu-west-2.pooler.supabase.com:6543/postgres`,
+      `postgresql://u:${SECRET}@myproxy.proxy-abc123xyz.eu-west-2.rds.amazonaws.com:5432/app`,
+    ]) {
+      const t = parsePgUrl(url, 'X') as unknown as Record<string, unknown>;
+      expect(t.transactionPooler).toBeUndefined();
+      expect(t.poolerSuspicion).toBeUndefined();
+    }
   });
 
   it('accepts the benign provider boilerplate (ignored) and application_name', () => {
@@ -93,11 +100,8 @@ describe('pg-url-policy: provider connection strings', () => {
     expect(t.applicationName).toBe('ops-shell');
   });
 
-  it('detectTransactionPooler only matches the documented shapes', () => {
-    expect(detectTransactionPooler('ep-x-pooler.c-2.eu-west-2.aws.neon.tech', 5432)?.provider).toBe('neon');
-    expect(detectTransactionPooler('ep-x.c-2.eu-west-2.aws.neon.tech', 5432)).toBeNull();
-    expect(detectTransactionPooler('pooler.example.com', 6543)).toBeNull();
-    expect(detectTransactionPooler('x.db.ondigitalocean.com', 25060)).toBeNull();
+  it('exports no host-name pooler detector any more', () => {
+    expect((policy as Record<string, unknown>).detectTransactionPooler).toBeUndefined();
   });
 });
 

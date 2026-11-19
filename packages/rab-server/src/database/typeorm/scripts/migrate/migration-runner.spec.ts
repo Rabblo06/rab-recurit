@@ -48,10 +48,16 @@ describe('resolveMigrationConnection (P1/P7, through the shared factory)', () =>
   it('production: refuses a PG_DATABASE_URL that came from packages/rab-server/.env', () => {
     expect(() => resolveMigrationConnection({ DB_TARGET: 'production', PG_DATABASE_URL: PROD_MIG }, { PG_DATABASE_URL: PROD_MIG })).toThrow(/\.env/);
   });
-  it('production: a transaction-pooler URL is refused for the migrate process (session advisory lock)', () => {
-    expect(() =>
-      resolveMigrationConnection({ DB_TARGET: 'production', PG_DATABASE_URL: 'postgres://m:p@ep-x-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=verify-full' }),
-    ).toThrow(/pooler/);
+  it('PG_DATABASE_SESSION_URL set: the migration connects to it, never to the (pooled) PG_DATABASE_URL; the guard env carries only it', () => {
+    const c = resolveMigrationConnection({
+      DB_TARGET: 'production',
+      PG_DATABASE_URL: 'postgres://m:p@pool.example.com:6432/neondb?sslmode=verify-full',
+      PG_DATABASE_SESSION_URL: 'postgres://m:p@db.example.com:5432/neondb?sslmode=verify-full',
+    });
+    expect(c).toMatchObject({ endpoint: 'primary', source: 'PG_DATABASE_SESSION_URL', url: 'postgres://m:p@db.example.com:5432/neondb?sslmode=verify-full' });
+    expect(c.resolved.primary.target.host).toBe('db.example.com');
+    const guard = targetGuardEnv({ PG_DATABASE_URL: 'x', PG_DATABASE_SESSION_URL: 'y' }, c.url);
+    expect(guard).toMatchObject({ PG_DATABASE_URL: c.url, PG_DATABASE_SESSION_URL: undefined });
   });
   it('non-production: the deprecated DATABASE_URL_UNPOOLED names the migration endpoint, with a warning', () => {
     const c = resolveMigrationConnection({ DB_TARGET: 'test', DATABASE_URL_UNPOOLED: MIG, DATABASE_URL: APP });

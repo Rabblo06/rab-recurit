@@ -94,7 +94,6 @@ describe('pg-config: primary URL and legacy names (outside production)', () => {
     const direct = `postgres://crewflow_app:${SECRET}@ep-a-1.eu-west-2.aws.neon.tech/neondb?sslmode=require`;
     const r = resolvePgEnvironment({ DATABASE_URL: pooled, DATABASE_DIRECT_URL: direct }, { processRole: 'api' });
     expect(r.lock.source).toBe('DATABASE_DIRECT_URL');
-    expect(r.lock.target.transactionPooler).toBeNull();
     expect(refusal({ DATABASE_URL: APP, DATABASE_DIRECT_URL: `postgres://crewflow_app:${SECRET}@localhost/other` })).toMatch(/different databases/);
   });
 
@@ -194,31 +193,74 @@ describe('pg-config: strict numbers and booleans (the DB_POOL_MAX fallback bug)'
   });
 });
 
-describe('pg-config: pooler policy (P4)', () => {
-  const pooled = `postgres://crewflow_app:${SECRET}@ep-a-1-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`;
+describe('pg-config: transaction pooler support (PG_DATABASE_SESSION_URL; owner instruction 2026-11-19, by capability)', () => {
+  const POOLER = `postgres://crewflow_owner:${SECRET}@pgbouncer.internal.example:6432/rab`;
+  const SESSION = `postgres://crewflow_owner:${SECRET}@db.internal.example:5432/rab`;
+  const NEON_POOLED = `postgres://crewflow_app:${SECRET}@ep-a-1-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`;
 
-  it.each(['worker', 'provisioner', 'migrate'] as const)('the %s process (session advisory locks) refuses a transaction-pooler shape', (role) => {
-    expect(refusal({ PG_DATABASE_URL: pooled }, { processRole: role })).toMatch(new RegExp(`The ${role} process holds session advisory locks`));
-  });
-
-  it('the API and the CLI only warn', () => {
-    for (const role of ['api', 'cli'] as const) {
-      const r = resolvePgEnvironment({ PG_DATABASE_URL: pooled }, { processRole: role });
-      expect(r.warnings.join('\n')).toMatch(/transaction-pooler shape/);
+  it.each(['api', 'worker', 'provisioner', 'migrate', 'cli'] as const)('no host name is matched: a pooler-looking PG_DATABASE_URL alone is neither refused nor warned about (%s); the live probe decides', (role) => {
+    for (const url of [NEON_POOLED, POOLER]) {
+      const r = resolvePgEnvironment({ PG_DATABASE_URL: url }, { processRole: role });
+      expect(r.warnings.join('\n')).not.toMatch(/pooler/);
+      expect(r.pooled).toBeNull();
+      expect(r.direct).toBeNull();
+      expect(r.primary.transactionScoped).toBeUndefined();
     }
   });
 
-  it('enforceProcessPolicy=false (env.validation, before the entrypoint declares its role) only warns', () => {
-    expect(resolvePgEnvironment({ PG_DATABASE_URL: pooled }, { processRole: 'worker', enforceProcessPolicy: false }).warnings.length).toBeGreaterThan(0);
+  it.each(['api', 'worker'] as const)('%s: PG_DATABASE_URL is the transaction-scoped runtime endpoint, PG_DATABASE_SESSION_URL the session and lock endpoint', (role) => {
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION }, { processRole: role });
+    expect(r.pooled).toBe(r.primary);
+    expect(r.primary).toMatchObject({ source: 'PG_DATABASE_URL', transactionScoped: true });
+    expect(r.primary.target.host).toBe('pgbouncer.internal.example');
+    expect(r.direct).toMatchObject({ source: 'PG_DATABASE_SESSION_URL' });
+    expect(r.direct?.transactionScoped).toBeUndefined();
+    expect(r.lock).toBe(r.direct);
+    expect(r.lock.target.host).toBe('db.internal.example');
   });
 
-  it('PG_DATABASE_URL_IS_DIRECT=true on a pooler shape is a contradiction, refused for every process', () => {
-    expect(refusal({ PG_DATABASE_URL: pooled, PG_DATABASE_URL_IS_DIRECT: 'true' }, { processRole: 'api' })).toMatch(/PG_DATABASE_URL_IS_DIRECT=true, but/);
+  it.each(['migrate', 'cli', 'provisioner'] as const)('%s never uses the pooler: its primary and lock ARE PG_DATABASE_SESSION_URL', (role) => {
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION }, { processRole: role });
+    expect(r.pooled).toBeNull();
+    expect(r.primary).toBe(r.direct);
+    expect(r.lock).toBe(r.direct);
+    expect(r.primary.source).toBe('PG_DATABASE_SESSION_URL');
+    expect(r.primary.transactionScoped).toBeUndefined();
+    expect(selectMigrationEndpoint(r, {}).endpoint).toBe(r.direct);
   });
 
-  it('a suspicious port only warns', () => {
-    const r = resolvePgEnvironment({ PG_DATABASE_URL: `postgres://crewflow_app:${SECRET}@db.internal.example:6432/rab` }, { processRole: 'worker' });
-    expect(r.warnings.join('\n')).toMatch(/session probe decides/);
+  it('PG_DATABASE_SESSION_URL must name the same login and database, and not the same target', () => {
+    expect(refusal({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: `postgres://other_login:${SECRET}@db.internal.example:5432/rab` })).toMatch(
+      /must name the same login and database/,
+    );
+    expect(refusal({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: `postgres://crewflow_owner:${SECRET}@db.internal.example:5432/otherdb` })).toMatch(
+      /must name the same login and database/,
+    );
+    expect(refusal({ PG_DATABASE_URL: SESSION, PG_DATABASE_SESSION_URL: SESSION })).toMatch(/names the same host, port, login and database/);
+  });
+
+  it('PG_DATABASE_URL_IS_DIRECT=true with PG_DATABASE_SESSION_URL is a contradiction; the legacy DATABASE_DIRECT_URL beside it is refused', () => {
+    expect(refusal({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION, PG_DATABASE_URL_IS_DIRECT: 'true' }, { processRole: 'api' })).toMatch(
+      /PG_DATABASE_URL_IS_DIRECT=true contradicts PG_DATABASE_SESSION_URL/,
+    );
+    expect(refusal({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION, DATABASE_DIRECT_URL: SESSION })).toMatch(/both set/);
+  });
+
+  it('WORKER_DISPATCH_MODE=event is refused for the pooled API / Worker (its NOTIFY switch is a startup setting), not for other processes', () => {
+    for (const role of ['api', 'worker'] as const) {
+      expect(refusal({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION, WORKER_DISPATCH_MODE: 'event' }, { processRole: role })).toMatch(
+        /WORKER_DISPATCH_MODE=event is refused with PG_DATABASE_SESSION_URL/,
+      );
+    }
+    expect(() => resolvePgEnvironment({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION, WORKER_DISPATCH_MODE: 'event' }, { processRole: 'migrate' })).not.toThrow();
+  });
+
+  it('production accepts PG_DATABASE_SESSION_URL (a PG_* name, not a legacy one) with the same TLS rule', () => {
+    const prodPooler = `postgresql://crewflow_owner:${SECRET}@pool.example.com:6432/rab?sslmode=verify-full`;
+    const prodSession = `postgresql://crewflow_owner:${SECRET}@db.example.com:5432/rab?sslmode=verify-full`;
+    const r = resolvePgEnvironment({ NODE_ENV: 'production', PG_DATABASE_URL: prodPooler, PG_DATABASE_SESSION_URL: prodSession }, { processRole: 'api' });
+    expect(r.pooled?.transactionScoped).toBe(true);
+    expect(r.direct?.ssl).toMatchObject({ rejectUnauthorized: true });
   });
 });
 

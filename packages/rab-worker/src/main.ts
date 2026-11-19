@@ -264,8 +264,10 @@ async function bootstrap(): Promise<void> {
   const gateReport = await runDatabaseBootGates('worker').catch(refuseStartup);
   // ---- end Phase B (A2) ----
   // Phase B (P4): the session-lock connection must be session-stable — a live two-connection probe (pg-session-probe.ts),
-  // run even when PG_DATABASE_URL_IS_DIRECT=true. Strong evidence, not proof; the URL denylist already ran above.
-  await probePgSessionAffinity(pgClientConfig(pg, { endpoint: 'lock', purpose: 'probe', statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }), {
+  // run even when PG_DATABASE_URL_IS_DIRECT=true. Strong evidence, not proof. It is THE pooler check (owner instruction
+  // 2026-11-19, by capability, no host matching): the lock endpoint is PG_DATABASE_SESSION_URL when set (PG_DATABASE_URL is
+  // then a transaction pooler, used only by the transaction-scoped runtime pool), else PG_DATABASE_URL itself.
+  await probePgSessionAffinity(pgClientConfig(pg, { endpoint: 'lock', purpose: 'probe', sessionSettings: false, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }), {
     label: 'the Worker session-lock connection',
   }).catch(refuseStartup);
   const logger = new NestLogger('RabWorker');

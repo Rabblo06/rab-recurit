@@ -52,16 +52,43 @@ export interface DatabaseLoginProbeClient {
 export const DATABASE_LOGIN_PROBE_CLIENT = Symbol('DATABASE_LOGIN_PROBE_CLIENT');
 export type DatabaseLoginProbeClientFactory = () => DatabaseLoginProbeClient;
 
-/** Production factory: one dedicated client, the runtime pool's own connection settings (never a pool checkout). */
-export const createDatabaseLoginProbeClient: DatabaseLoginProbeClientFactory = () =>
-  createPgClient(resolvePgEnvironmentCached(process.env), {
-    endpoint: 'primary',
+/**
+ * Security review I-5: with a transaction-scoped runtime endpoint (a pooler in PG_DATABASE_URL with PG_DATABASE_SESSION_URL,
+ * or any production API), the login is proven on BOTH connections the process uses: the session connection ('primary') and
+ * the runtime pool's own ('runtime', through the transaction-scoped client). Either failing is down. One endpoint otherwise.
+ */
+function combinedProbeClient(clients: DatabaseLoginProbeClient[]): DatabaseLoginProbeClient {
+  if (clients.length === 1) return clients[0]!;
+  return {
+    connect: async () => {
+      for (const c of clients) await c.connect();
+    },
+    query: async (sql: string) => {
+      for (const c of clients) await c.query(sql);
+    },
+    end: async () => {
+      await Promise.all(clients.map((c) => c.end().catch(() => undefined)));
+    },
+    on: (event: 'error', listener: (error: Error) => void) => {
+      for (const c of clients) c.on(event, listener);
+      return undefined;
+    },
+  };
+}
+
+/** Production factory: dedicated clients, the runtime pool's own connection settings (never a pool checkout). */
+export const createDatabaseLoginProbeClient: DatabaseLoginProbeClientFactory = () => {
+  const pg = resolvePgEnvironmentCached(process.env);
+  const request = {
     purpose: 'health',
     readOnly: true,
     connectTimeoutMs: CONNECT_TIMEOUT_MS,
     statementTimeoutMs: QUERY_TIMEOUT_MS,
     queryTimeoutMs: QUERY_TIMEOUT_MS,
-  });
+  } as const;
+  const endpoints = pg.pooled ? (['primary', 'runtime'] as const) : (['primary'] as const);
+  return combinedProbeClient(endpoints.map((endpoint) => createPgClient(pg, { ...request, endpoint })));
+};
 
 /** What failed, for the server log only: the SQLSTATE when it is one (e.g. 28P01), else a fixed word. Never a message. */
 function failureCode(error: unknown): string {

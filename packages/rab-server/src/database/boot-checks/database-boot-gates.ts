@@ -57,7 +57,15 @@
  */
 import { DataSourceOptions } from 'typeorm';
 
-import { createPgDataSource, PgConfigError, resolvePgEnvironmentCached } from '../postgres';
+import { createPgDataSource, PgConfigError, PgEndpoint, PgEndpointName, ResolvedPgEnvironment, resolvePgEnvironmentCached } from '../postgres';
+
+/** The endpoint a boot-gate connection reaches (security review L-3). Exported for its unit test. */
+export function boundEndpointTarget(pg: ResolvedPgEnvironment, endpoint: PgEndpointName): PgEndpoint | null {
+  if (endpoint === 'elevated') return pg.elevated;
+  if (endpoint === 'lock') return pg.lock;
+  if (endpoint === 'runtime') return pg.pooled ?? pg.primary;
+  return pg.direct ?? pg.primary;
+}
 import { selectWorkspaceFingerprintMajor, UnsupportedPostgresVersionError } from '../typeorm/workspace-schema/v1/expected-fingerprints';
 import { coreDataSourceOptions } from '../typeorm/core/core.datasource';
 import {
@@ -117,7 +125,9 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
     throw error;
   }
   const endpoint = options.endpoint ?? (processName === 'provisioner' && pg.elevated ? 'elevated' : 'primary');
-  const endpointTarget = endpoint === 'elevated' ? pg.elevated : pg.primary;
+  // Security review L-3: the endpoint the factory actually connects to for 'primary' (create-pg-pool.ts selectEndpoint):
+  // PG_DATABASE_SESSION_URL when set. The deployment marker's host check must name THAT host.
+  const endpointTarget = boundEndpointTarget(pg, endpoint);
   if (!endpointTarget) throw new DatabaseBootGateError('connect', `${label}: the ${endpoint} database endpoint is not configured.`);
 
   const report = await withDatabaseRetry(

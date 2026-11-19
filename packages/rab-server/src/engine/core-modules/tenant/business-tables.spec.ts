@@ -219,7 +219,7 @@ describe('the binders bind it (and nothing leaks across transactions)', () => {
       return { shift: kept.shift, schema };
     });
     expect(inside).toEqual({ shift: `"${SCHEMA}"."shift"`, schema: SCHEMA });
-    expect(managers[0]!.query).toHaveBeenCalledWith(`SELECT set_config('search_path', $1, true)`, [SCHEMA]); // still bound: behaviour identical
+    expect(managers[0]!.query).toHaveBeenCalledWith(`SELECT set_config('search_path', $1, true)`, [`${SCHEMA}, pg_temp`]); // still bound: behaviour identical
     expect(() => kept!.shift).toThrow(BusinessTablesError);
     expect(() => businessTables(managers[0]!)).toThrow(BusinessTablesError);
 
@@ -297,8 +297,8 @@ describe('the binders bind it (and nothing leaks across transactions)', () => {
 describe('the test-only search_path trap', () => {
   it('is off unless set; with NODE_ENV=test every binder sets search_path to \'\' while businessTables keeps the real schema', async () => {
     expect(searchPathTrapEnabled({ NODE_ENV: 'test' })).toBe(false);
-    expect(businessSearchPath(SCHEMA, { NODE_ENV: 'test' })).toBe(SCHEMA);
-    expect(businessSearchPath('core', { NODE_ENV: 'production' })).toBe('core');
+    expect(businessSearchPath(SCHEMA, { NODE_ENV: 'test' })).toBe(`${SCHEMA}, pg_temp`);
+    expect(businessSearchPath('core', { NODE_ENV: 'production' })).toBe('core, pg_temp');
 
     process.env[SEARCH_PATH_TRAP_VAR] = 'true'; // jest runs with NODE_ENV=test
     expect(businessSearchPath(SCHEMA)).toBe('');

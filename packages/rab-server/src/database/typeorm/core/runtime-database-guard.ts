@@ -67,6 +67,7 @@ import {
   isRemoteDatabaseHost,
 } from '../../deployment-identity/deployment-identity';
 import { unmarkedProductionRefusal } from '../../deployment-identity/unmarked-production-endpoints';
+import { assertTlsGate, BootGateFacts, DatabaseBootGateError } from '../../boot-checks/database-boot-gate-rules';
 import { runtimeEnvRefusal } from './never-in-runtime-env';
 import { checkRuntimeLogin, RuntimeDbConfigError, runtimeDbConfigProblems } from '../../owner-login/runtime-db-config';
 
@@ -229,7 +230,11 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
   }
   // P0.6-1B: the session-lock endpoint is the primary unless a (deprecated) DATABASE_DIRECT_URL names another target.
   const direct = pg.lock !== pg.primary && pg.lock.target.canonicalKey !== pg.primary.target.canonicalKey ? describePgTarget(pg.lock.target) : null;
-  if (direct && !sameEndpoint(direct, app)) {
+  // PG_DATABASE_SESSION_URL (transaction pooler support): the session connection legitimately has another host and port than
+  // the pooler in PG_DATABASE_URL, so the host-based comparison cannot apply. pg-config.ts already requires the same login and
+  // database; that both reach the SAME database is decided by capability below (assertRuntimeDatabaseIdentity probes both and
+  // compares current_database() and the cluster's system identifier, and checks the deployment marker's host on each).
+  if (direct && !pg.direct && !sameEndpoint(direct, app)) {
     throw new RuntimeDbError(
       `${app.label} and ${direct.label} resolve to different databases or endpoints (${app.database}@${app.endpointKey} vs ${direct.database}@${direct.endpointKey}). Refusing to start.`,
     );
@@ -252,7 +257,9 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
       (primaryValue !== undefined &&
         [dotenvValues.PG_DATABASE_URL, dotenvValues.DATABASE_URL, dotenvValues.DATABASE_DIRECT_URL, dotenvValues.DATABASE_URL_UNPOOLED].some(
           (value) => value !== undefined && value.trim() === primaryValue,
-        ))
+        )) ||
+      // Security review I-7: the session URL, too, never comes from a .env file in production.
+      dotenvValues.PG_DATABASE_SESSION_URL !== undefined
     ) {
       throw new RuntimeDbError(
         'production runtime values are present in a .env file. Production authority must come from the deployment environment. Refusing to start.',
@@ -303,6 +310,8 @@ function isLocalIdentity(identity: PgTargetIdentity): boolean {
 }
 
 export interface RuntimeIdentityProbe {
+  /** pg_stat_ssl.ssl of the probed backend (null: no row). */
+  ssl: boolean | null;
   database: string;
   systemIdentifier: string;
   currentUser: string;
@@ -321,7 +330,10 @@ export async function probeRuntimeIdentity(
   endpoint: PgEndpointName,
   identity?: { env: Record<string, string | undefined>; production: boolean; processLabel: string },
 ): Promise<RuntimeIdentityProbe> {
-  const probed = endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : pg.primary;
+  // The endpoint the factory actually connects to (create-pg-pool.ts selectEndpoint): 'primary' is the session connection
+  // (PG_DATABASE_SESSION_URL when set), 'runtime' the (possibly transaction-pooled) PG_DATABASE_URL.
+  const probed =
+    endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : endpoint === 'runtime' ? (pg.pooled ?? pg.primary) : (pg.direct ?? pg.primary);
   const label = probed?.source ?? endpoint;
   let client: ReturnType<typeof createPgClient>;
   try {
@@ -330,11 +342,14 @@ export async function probeRuntimeIdentity(
     if (error instanceof PgConfigError) throw new RuntimeDbError(`${error.message} Refusing to start.`);
     throw error;
   }
-  let row: { db: string; sid: string; usr: string } | undefined;
+  let row: { db: string; sid: string; usr: string; ssl: boolean | null } | undefined;
   try {
     await client.connect();
-    const result = await client.query<{ db: string; sid: string; usr: string }>(
-      `SELECT pg_catalog.current_database() AS db, (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS sid, current_user AS usr`,
+    // ssl: whether THIS backend's connection is TLS (pg_stat_ssl). Through a transaction pooler it is the pooler->PostgreSQL
+    // hop (security review M-1), which the client's own verify-full TLS cannot see.
+    const result = await client.query<{ db: string; sid: string; usr: string; ssl: boolean | null }>(
+      `SELECT pg_catalog.current_database() AS db, (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS sid, current_user AS usr,
+              (SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()) AS ssl`,
     );
     row = result.rows[0];
     if (!row) throw new Error('empty probe');
@@ -344,7 +359,7 @@ export async function probeRuntimeIdentity(
     throw new RuntimeDbError(`Cannot reach the ${label} database for the read-only identity probe (driver code ${code}). Refusing to start.`, code);
   }
   try {
-    const base = { database: row.db, systemIdentifier: row.sid, currentUser: row.usr };
+    const base = { database: row.db, systemIdentifier: row.sid, currentUser: row.usr, ssl: row.ssl ?? null };
     if (!identity) return { ...base, identity: 'not-checked', warnings: [] };
     const decision = await assertDeploymentIdentity(async (sql, params) => (await client.query(sql, params as unknown[])).rows, {
       processLabel: identity.processLabel,
@@ -361,6 +376,26 @@ export async function probeRuntimeIdentity(
     throw new RuntimeDbError(`The ${label} deployment identity check failed (SQLSTATE ${code}). Refusing to start.`);
   } finally {
     await client.end().catch(() => undefined);
+  }
+}
+
+/**
+ * Security review M-1: boot gate 6 (TLS, database-boot-gate-rules.ts assertTlsGate) for the transaction-scoped runtime
+ * connection. `ssl` comes from pg_stat_ssl of the backend the runtime client reached, i.e. behind a pooler the
+ * pooler->PostgreSQL hop: production refuses it when that hop is not TLS. LIMIT (THREAT-MODEL TX-POOL-1): pg_stat_ssl proves
+ * encryption on that hop, NOT that the pooler verified the server certificate (server_tls_sslmode=verify-full is the pooler
+ * operator's setting and is invisible from here).
+ */
+export function assertPooledHopTls(ssl: boolean | null, production: boolean): void {
+  try {
+    assertTlsGate({ ssl } as BootGateFacts, production);
+  } catch (error) {
+    if (error instanceof DatabaseBootGateError) {
+      throw new RuntimeDbError(
+        'the transaction-pooled runtime connection reaches PostgreSQL without TLS (pg_stat_ssl of its backend: the pooler->PostgreSQL hop). Configure the pooler to connect to PostgreSQL over verified TLS (PgBouncer: server_tls_sslmode=verify-full). Refusing to start.',
+      );
+    }
+    throw error;
   }
 }
 
@@ -410,6 +445,24 @@ export async function assertRuntimeDatabaseIdentity(
   }
   // P0.6-1B: the worker's directDataSource (the session-lock pool — see rab-worker/src/main.ts's own doc comment) is probed
   // whenever its endpoint names a different target from the primary (resolveRuntimeDatabase leaves `direct` null otherwise).
+  // Transaction pooler (PG_DATABASE_SESSION_URL set): the pooled runtime connection is probed too, through the transaction-scoped
+  // client, with the deployment marker checked against the POOLER's host (bind both hosts), and must reach the same database
+  // and cluster as the session connection, as the same login.
+  if (resolved.pg.pooled) {
+    const runtimeProbe = await probeRuntimeIdentity(resolved.pg, 'runtime', {
+      env,
+      production: resolved.classification === 'PRODUCTION',
+      processLabel: `${processName} process (transaction-pooled runtime connection)`,
+    });
+    if (
+      runtimeProbe.database !== appProbe.database ||
+      runtimeProbe.systemIdentifier !== appProbe.systemIdentifier ||
+      runtimeProbe.currentUser !== appProbe.currentUser
+    ) {
+      throw new RuntimeDbError('runtime identity mismatch between PG_DATABASE_URL (the transaction pooler) and PG_DATABASE_SESSION_URL. Refusing to start.');
+    }
+    assertPooledHopTls(runtimeProbe.ssl, resolved.classification === 'PRODUCTION');
+  }
   if (resolved.direct) {
     const directProbe = await probeRuntimeIdentity(resolved.pg, 'lock');
     if (directProbe.database !== appProbe.database || directProbe.systemIdentifier !== appProbe.systemIdentifier) {

@@ -272,7 +272,8 @@ export interface DbIdentityCheck {
  * same connection.
  */
 export async function probeDbIdentity(pg: ResolvedPgEnvironment, endpoint: PgEndpointName, identity?: DbIdentityCheck): Promise<DbIdentityProbe> {
-  const probed = endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : pg.primary;
+  const probed =
+    endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : endpoint === 'runtime' ? (pg.pooled ?? pg.primary) : (pg.direct ?? pg.primary);
   const label = probed?.source ?? endpoint;
   const client = asTargetError(() => createPgClient(pg, { endpoint, purpose: 'probe', readOnly: true }));
   let row: { db: string; sid: string } | undefined;

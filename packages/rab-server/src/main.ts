@@ -17,6 +17,7 @@ import { assertHwsStartupInvariants, HwsStartupError } from './database/typeorm/
 import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeorm/core/runtime-database-guard';
 import { runDatabaseBootGates } from './database/boot-checks/database-boot-gates';
 import { installSessionRoleResetOnDataSource } from './database/postgres/session-role-reset';
+import { pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached } from './database/postgres';
 import { startSecurityPostureMonitoring } from './engine/core-modules/health/security-readiness';
 import { installHttpFirstShutdown } from './engine/utils/http-first-shutdown';
 
@@ -37,6 +38,21 @@ function refuseStartup(error: unknown): never {
 async function bootstrap(): Promise<void> {
   // RUNTIME boundary: the database identity is verified BEFORE NestFactory opens any connection or any listener.
   await assertRuntimeDatabaseIdentity('api').catch(refuseStartup);
+  // Security review L-1: BEFORE the boot gates, so a pooler is reported as such, never as a gate failure.
+  // Transaction pooler, decided by CAPABILITY (owner instruction 2026-11-19; no host-name matching): the API's session
+  // connection (PG_DATABASE_SESSION_URL when set, else PG_DATABASE_URL) must be a real session. Without
+  // PG_DATABASE_SESSION_URL this is what refuses a PG_DATABASE_URL that is a transaction pooler: only the transaction-scoped
+  // runtime pool may sit behind one (pg-config.ts). The live two-connection probe (pg-session-probe.ts), no startup settings.
+  await probePgSessionAffinity(
+    pgClientConfig(resolvePgEnvironmentCached(process.env, { processRole: 'api' }), {
+      endpoint: 'primary',
+      purpose: 'probe',
+      sessionSettings: false,
+      statementTimeoutMs: 5_000,
+      queryTimeoutMs: 5_000,
+    }),
+    { label: 'the API session connection' },
+  ).catch(refuseStartup);
   // Phase B boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending migrations), before Nest.
   const gateReport = await runDatabaseBootGates('api').catch(refuseStartup);
   const app = await NestFactory.create(AppModule);

@@ -281,14 +281,13 @@ describe('planDbSetup and selectDbSetupInput (the Twenty way)', () => {
     expect(refusal(() => planDbSetup('postgres://crewflow_owner@db.example.internal:5432/crewflow?sslmode=verify-full'))).toBe(OWNER_CREDENTIAL_MESSAGES.ownerUrlWithoutPassword);
   });
 
-  it('refuses a missing URL and a pooler shape in both modes', () => {
+  it('refuses a missing URL; a pooler-looking host name is not refused any more (owner instruction 2026-11-19: capability, not host names)', () => {
     expect(refusal(() => planDbSetup(''))).toBe(OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing);
     expect(refusal(() => planDbSetup(undefined))).toBe(OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing);
     for (const login of ['doadmin', 'crewflow_owner']) {
-      expect(refusal(() => planDbSetup(`postgres://${login}:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`))).toBe(
-        OWNER_CREDENTIAL_MESSAGES.transactionPooler,
-      );
+      expect(() => planDbSetup(`postgres://${login}:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`)).not.toThrow();
     }
+    expect((OWNER_CREDENTIAL_MESSAGES as Record<string, unknown>).transactionPooler).toBeUndefined();
   });
 
   // Owner decision 2026-11-18: PG_DATABASE_URL (ALWAYS crewflow_owner, always required) + optional PG_ADMIN_URL (db-setup only).
@@ -364,12 +363,11 @@ describe('planDbSetup and selectDbSetupInput (the Twenty way)', () => {
     expect(selectDbSetupInput({ NODE_ENV: 'production', PG_DATABASE_URL: OWN }).mode).toBe('owner-url');
   });
 
-  it('runtimeUrlFacts: the login and the pooler shape, never a value', () => {
-    expect(runtimeUrlFacts(OWN)).toEqual({ owner: true, transactionPooler: false, strongPassword: true });
-    expect(runtimeUrlFacts(ADMIN_URL)).toEqual({ owner: false, transactionPooler: false, strongPassword: true });
+  it('runtimeUrlFacts: the login and the password strength, never a value (no pooler classification by host name)', () => {
+    expect(runtimeUrlFacts(OWN)).toEqual({ owner: true, strongPassword: true });
+    expect(runtimeUrlFacts(ADMIN_URL)).toEqual({ owner: false, strongPassword: true });
     expect(runtimeUrlFacts(`postgres://crewflow_owner:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`)).toEqual({
       owner: true,
-      transactionPooler: true,
       strongPassword: true,
     });
     // Info (re-review): the password floor as a boolean only; the value is never returned.
@@ -416,10 +414,6 @@ describe('planDbSetup and selectDbSetupInput (the Twenty way)', () => {
     expect(RETIRED_ADMIN_URL_NAMES).toEqual(['PG_DATABASE_ADMIN_URL']);
     expect(refusal(() => selectDbSetupInput({ PG_DATABASE_ADMIN_URL: ADMIN_URL }))).toBe(DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL'));
     expect(refusal(() => selectDbSetupInput({ PG_DATABASE_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL'));
-    const pooler = refusal(() =>
-      selectDbSetupInput({ PG_DATABASE_URL: OWN, PG_ADMIN_URL: `postgres://doadmin:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require` }),
-    );
-    expect(pooler).toBe(OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join('PG_ADMIN_URL'));
     for (const m of Object.values(DB_SETUP_INPUT_MESSAGES)) {
       const text = typeof m === 'function' ? m('PG_DATABASE_ADMIN_URL') : m;
       expect(text).not.toContain(ADMIN_PASSWORD);

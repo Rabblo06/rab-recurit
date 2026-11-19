@@ -4,26 +4,15 @@
  * always a bound parameter ($1). Nothing here writes.
  */
 
+import { RLS_GUC_NAMES } from '../../../database/postgres/transaction-scoped-client';
+
 /**
- * Every `rab.*` setting the policies, functions and services read (grep of `'rab.` over packages/rab-server/src, 2026-11-14).
+ * Every `rab.*` setting the policies, functions and services read: the ONE list of the transaction-scoped preamble
+ * (RLS_GUC_NAMES, database/postgres/transaction-scoped-client.ts; security review M-2), plus the test-only `rab.test`.
  * Checked by NAME with current_setting(name, true): custom placeholder settings may not be listed in pg_settings (review N3;
  * the integration spec records what each major does). pg_settings is still scanned for any other `rab.*` name.
  */
-export const KNOWN_RAB_SETTINGS = [
-  'rab.actor_type',
-  'rab.admin_scope',
-  'rab.ai_retention',
-  'rab.ai_synthetic_marker',
-  'rab.ai_usage_retention',
-  'rab.organisation_id',
-  'rab.role',
-  'rab.team_shift_id',
-  'rab.team_staff_id',
-  'rab.test',
-  'rab.upgrade_scope',
-  'rab.user_id',
-  'rab.workspace_id',
-] as const;
+export const KNOWN_RAB_SETTINGS: readonly string[] = Object.freeze([...RLS_GUC_NAMES, 'rab.test'].sort());
 
 const KNOWN_LIST = KNOWN_RAB_SETTINGS.map((n) => `('${n}')`).join(', ');
 

@@ -784,16 +784,6 @@ describe('owner bootstrap: the whole step without a database', () => {
         DB_SETUP_INPUT_MESSAGES.targetMismatch,
       ],
       [
-        'a pooler-shaped app URL',
-        { PG_DATABASE_URL: `postgres://crewflow_owner:${OWNER_PW}@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit` },
-        OWNER_CREDENTIAL_MESSAGES.transactionPooler,
-      ],
-      [
-        'a pooler-shaped admin URL',
-        { PG_DATABASE_URL: APP_URL, PG_ADMIN_URL: `postgres://dbadmin:${ADMIN_PW}@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit` },
-        OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join('PG_ADMIN_URL'),
-      ],
-      [
         'a non-ASCII crewflow_owner password with an admin (no SCRAM verifier)',
         { PG_DATABASE_URL: 'postgres://crewflow_owner:p%C3%A9ssword-0123456789-abcdefghij-KLMNOP@db.internal.example:5432/crewflow_unit', PG_ADMIN_URL: ADMIN_URL },
         OWNER_CREDENTIAL_MESSAGES.nonAsciiScramPassword,

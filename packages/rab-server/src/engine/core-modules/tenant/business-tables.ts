@@ -232,10 +232,15 @@ export function searchPathTrapEnabled(env: Record<string, string | undefined> = 
 }
 
 /**
- * The value a binder passes to set_config('search_path', $n, true) for `schema`: the schema itself, or '' under the trap.
- * The schema is validated the same way as bindBusinessSchema (format only here: the binder binds it with its workspace id).
+ * The value a binder passes to set_config('search_path', $n, true) for `schema`: the schema itself followed by an explicit
+ * `pg_temp`, or '' under the test-only trap (an empty search_path: nothing unqualified resolves; kept as before so the trap's
+ * current_schemas() stays empty). Security review L-4: with pg_temp listed LAST, a temporary table left on a
+ * (pooled) backend can never shadow a real table (unlisted, pg_temp is searched FIRST). Functions and operators are never
+ * looked up in pg_temp either way. The schema is validated the same way as bindBusinessSchema (format only here: the binder
+ * binds it with its workspace id).
  */
+export const BUSINESS_SEARCH_PATH_TEMP_SUFFIX = ', pg_temp';
 export function businessSearchPath(schema: string, env: Record<string, string | undefined> = process.env): string {
   if (schema !== CORE_BUSINESS_SCHEMA && !SCHEMA_NAME.test(schema)) throw new BusinessTablesError('invalid-schema');
-  return searchPathTrapEnabled(env) ? '' : schema;
+  return searchPathTrapEnabled(env) ? '' : `${schema}${BUSINESS_SEARCH_PATH_TEMP_SUFFIX}`;
 }

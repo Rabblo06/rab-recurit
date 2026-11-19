@@ -32,6 +32,13 @@ export type AdvisoryLockResult<T> = { acquired: true; value: T } | { acquired: f
  * gate the externally visible side effect (the email) on a compare-and-set.
  */
 export async function withAdvisoryLock<T>(dataSource: DataSource, name: string, work: () => Promise<T>): Promise<AdvisoryLockResult<T>> {
+  // Transaction pooler support (PG_DATABASE_SESSION_URL): the runtime DataSource may then be transaction-scoped (every
+  // statement in its own transaction, any backend). A session lock there would not hold: refused before any statement.
+  // The marker is the factory's TransactionScopedClient (rab-server database/postgres/transaction-scoped-client.ts).
+  const pool = (dataSource.driver as unknown as { master?: { options?: { Client?: { transactionScoped?: boolean } } } }).master;
+  if (pool?.options?.Client?.transactionScoped === true) {
+    throw new Error('withAdvisoryLock: a session advisory lock needs the direct session DataSource, not the transaction-pooled runtime one. Refusing.');
+  }
   const queryRunner = dataSource.createQueryRunner();
   await queryRunner.connect();
   try {

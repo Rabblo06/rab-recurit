@@ -81,7 +81,7 @@ suite('T-1 tenant-context framing (real PostgreSQL, as crewflow_owner, pool max 
 
   it('ST-01: search_path = core is set by the binding SELECT, transaction-local, and reverts after COMMIT', async () => {
     const inside = await tenant.runInTenantContext(CTX, (m) => snapshot(m));
-    expect(inside).toMatchObject({ pid: baseline.pid, search_path: 'core', read_only: 'off', org: ORG, cu: 'crewflow_owner', su: 'crewflow_owner' });
+    expect(inside).toMatchObject({ pid: baseline.pid, search_path: 'core, pg_temp', read_only: 'off', org: ORG, cu: 'crewflow_owner', su: 'crewflow_owner' });
     const [{ schemas }] = await dataSource.query(`SELECT current_schemas(false)::text AS schemas`);
     const after = await snapshot(dataSource);
     expect(after.pid).toBe(baseline.pid);
@@ -93,12 +93,14 @@ suite('T-1 tenant-context framing (real PostgreSQL, as crewflow_owner, pool max 
 
   it('ST-01: inside, search_path is exactly the one schema core (never a list)', async () => {
     const schemas = await tenant.runInTenantContext(CTX, async (m) => ((await m.query(`SELECT current_schemas(false)::text AS s`)) as Array<{ s: string }>)[0]!.s);
-    expect(schemas).toBe('{core}');
+    // Security review L-4: pg_temp is listed LAST explicitly, so current_schemas() names this backend's temp schema when one
+    // exists (pg_temp_N); the real schema is still the only non-temporary entry.
+    expect(schemas).toMatch(/^\{core(,pg_temp_\d+)?\}$/);
   });
 
   it('ST-02: readOnly puts transaction_read_only = on in the same SELECT; everything reverts after COMMIT and after ROLLBACK', async () => {
     const inside = await tenant.runInTenantContext(CTX, (m) => snapshot(m), { readOnly: true });
-    expect(inside).toMatchObject({ pid: baseline.pid, search_path: 'core', read_only: 'on', org: ORG, cu: 'crewflow_owner' });
+    expect(inside).toMatchObject({ pid: baseline.pid, search_path: 'core, pg_temp', read_only: 'on', org: ORG, cu: 'crewflow_owner' });
     const afterCommit = await snapshot(dataSource);
     expect(afterCommit).toMatchObject({ pid: baseline.pid, search_path: baseline.search_path, read_only: 'off', cu: 'crewflow_owner' });
     expect(unset(afterCommit.org)).toBe(true);
@@ -174,7 +176,7 @@ suite('T-1 tenant-context framing (real PostgreSQL, as crewflow_owner, pool max 
       // Control: without any reset the poisoned role survives COMMIT and the checkout.
       expect((await snapshot(bare)).cu).toBe('rab_secure_owner');
       const inside = await layer2Only.runInTenantContext(CTX, (m) => snapshot(m), { readOnly: true });
-      expect(inside).toMatchObject({ cu: 'crewflow_owner', su: 'crewflow_owner', search_path: 'core', read_only: 'on' });
+      expect(inside).toMatchObject({ cu: 'crewflow_owner', su: 'crewflow_owner', search_path: 'core, pg_temp', read_only: 'on' });
     } finally {
       await bare.query('RESET ROLE').catch(() => undefined);
       await bare.destroy();
@@ -189,7 +191,8 @@ suite('T-1 tenant-context framing (real PostgreSQL, as crewflow_owner, pool max 
         async (m) => ({ ...(await snapshot(m)), schemas: ((await m.query(`SELECT current_schemas(false)::text AS s`)) as Array<{ s: string }>)[0]!.s }),
         { readOnly: true },
       );
-      expect(inside).toMatchObject({ search_path: 'core', schemas: '{core}', org: payload, role_guc: payload, cu: 'crewflow_owner', read_only: 'on' });
+      expect(inside).toMatchObject({ search_path: 'core, pg_temp', org: payload, role_guc: payload, cu: 'crewflow_owner', read_only: 'on' });
+      expect(inside.schemas).toMatch(/^\{core(,pg_temp_\d+)?\}$/);
       const after = await snapshot(dataSource);
       expect(after).toMatchObject({ pid: baseline.pid, search_path: baseline.search_path, cu: 'crewflow_owner', read_only: 'off' });
       expect(unset(after.role_guc)).toBe(true);

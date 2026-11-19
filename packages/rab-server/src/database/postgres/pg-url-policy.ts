@@ -66,13 +66,6 @@ const ALLOWED_PARAMS: ReadonlySet<string> = new Set([...IGNORED_BENIGN_PARAMS, '
 /** Named explicitly so the refusal says WHY (target or security override), not merely "unknown". */
 const TARGET_OVERRIDE_PARAMS: ReadonlySet<string> = new Set(['host', 'hostaddr', 'port', 'user', 'dbname', 'database', 'password', 'passfile', 'service']);
 
-export interface TransactionPoolerShape {
-  /** neon | supabase | digitalocean | rds-proxy */
-  provider: string;
-  /** Plain-English reason, safe to log (no host). */
-  reason: string;
-}
-
 /** The validated target of one connection string. `password` is non-enumerable so a stray JSON.stringify never prints it. */
 export interface PgTarget {
   /** Variable the URL came from, e.g. PG_DATABASE_URL. */
@@ -96,10 +89,6 @@ export interface PgTarget {
    * neither is used.
    */
   routedNeonEndpoint?: string | null;
-  /** A documented transaction-pooler URL shape (session advisory locks unsafe), or null. */
-  transactionPooler: TransactionPoolerShape | null;
-  /** Heuristic only (e.g. PgBouncer's default port 6432): warn, never refuse. */
-  poolerSuspicion: string | null;
   /** user + host + port + database. For equality checks only; never log it (it carries the user name). */
   canonicalKey: string;
   /** host:port/database — safe to log (the existing guards already log host and database). */
@@ -108,35 +97,11 @@ export interface PgTarget {
 
 const NEON_SUFFIX = '.neon.tech';
 
-/** Documented transaction-pooler URL shapes. Each entry says how sure the shape is. */
-export function detectTransactionPooler(host: string, port: number): TransactionPoolerShape | null {
-  const h = host.toLowerCase();
-  const firstLabel = h.split('.')[0] ?? h;
-  // Neon: the pooled hostname inserts `-pooler` after the endpoint id; Neon's pooler is PgBouncer in transaction mode.
-  if (h.endsWith(NEON_SUFFIX) && firstLabel.endsWith('-pooler')) {
-    return { provider: 'neon', reason: 'Neon pooled host (-pooler): PgBouncer in transaction mode' };
-  }
-  // Supabase (Supavisor): port 6543 is the transaction-mode pooler; 5432 on the same host is session mode (allowed).
-  if (h.endsWith('.pooler.supabase.com') && port === 6543) {
-    return { provider: 'supabase', reason: 'Supabase pooler on port 6543: transaction mode' };
-  }
-  // DigitalOcean managed PostgreSQL: the direct port is 25060; connection pools (PgBouncer) are served on 25061. A DO pool
-  // can be configured as transaction, session or statement mode and the URL does not say which, so every pool URL is
-  // refused for session locks (the session probe is the real check for anything that passes this list).
-  if (h.endsWith('.ondigitalocean.com') && port === 25061) {
-    return { provider: 'digitalocean', reason: 'DigitalOcean connection pool port 25061 (PgBouncer; pool mode not visible in the URL)' };
-  }
-  // AWS RDS Proxy: `<name>.proxy-<id>.<region>.rds.amazonaws.com`. Session state pins the client, but AWS documents
-  // pinning as best effort, so it is treated as unsafe for session advisory locks.
-  if (/\.proxy-[a-z0-9]+\.[a-z0-9-]+\.rds\.amazonaws\.com$/.test(h)) {
-    return { provider: 'rds-proxy', reason: 'AWS RDS Proxy endpoint' };
-  }
-  return null;
-}
-
-function poolerSuspicionOf(port: number): string | null {
-  return port === 6432 ? 'port 6432 is PgBouncer\'s default port' : null;
-}
+/*
+ * No host-name pooler detection (owner instruction 2026-11-19, "decide by capability": no provider-specific code, no host
+ * matching). Whether a connection is a real session is decided by the live session-affinity probe (pg-session-probe.ts);
+ * a transaction pooler is supported only through PG_DATABASE_SESSION_URL (pg-config.ts).
+ */
 
 export interface ParsePgUrlOptions {
   /** Accept `options=-c role=<identifier>` (only the migrate process against a local/test target; see the header). */
@@ -280,8 +245,6 @@ export function parsePgUrl(raw: string, label: string, parseOptions: ParsePgUrlO
     providerOptions,
     sessionRoleOption,
     routedNeonEndpoint,
-    transactionPooler: detectTransactionPooler(normalisedHost, port),
-    poolerSuspicion: poolerSuspicionOf(port),
     canonicalKey: `${user}\u0000${normalisedHost}\u0000${port}\u0000${database}`,
     display: `${normalisedHost}:${port}/${database}`,
   };
@@ -300,8 +263,6 @@ export interface PgTargetIdentity {
   database: string;
   /** Neon endpoint id when the host is a Neon host (pooled and direct share it); otherwise host:port. */
   endpointKey: string;
-  /** A Neon `-pooler` host or any documented transaction-pooler shape. */
-  pooled: boolean;
   /** Not a loopback host. */
   remote: boolean;
 }
@@ -315,7 +276,6 @@ export function describePgTarget(target: PgTarget): PgTargetIdentity {
     port: String(target.port),
     database: target.database,
     endpointKey: neon ? `neon:${firstLabel.replace(/-pooler$/, '')}` : `${target.host}:${target.port}`,
-    pooled: /-pooler$/.test(firstLabel) || target.transactionPooler !== null,
     remote: !LOOPBACK_HOSTS.has(target.host),
   };
 }

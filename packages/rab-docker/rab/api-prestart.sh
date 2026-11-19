@@ -59,7 +59,9 @@ refuse() {
 # Security review of PR #230, L-1 (+ follow-up): the names of every variable that holds a database credential in a form the
 # app or libpq would accept: a postgres URL (any case, after leading blanks or quotes, with a driver prefix or suffix such as
 # jdbc:postgresql:// or postgresql+psycopg://), or a libpq keyword DSN with a password (password=... beside host= / hostaddr=
-# / dbname= / user=). The caller's own PG_DATABASE_URL is left out (it has its own refusal). Names only, never a value. The
+# / dbname= / user=). The caller's own PG_DATABASE_URL and PG_DATABASE_SESSION_URL (the direct session connection of the
+# same crewflow_owner login next to a transaction-pooled PG_DATABASE_URL) are left out (each has its own owner-login
+# refusal below). Names only, never a value. The
 # block is identical in api-prestart.sh and worker-start.sh (run-prestart-shell-tests.cjs compares them).
 crewflow_db_url_names() {
   crewflow_re_url="^[A-Za-z_][A-Za-z0-9_]*=[[:space:]\"']*([a-z]+:)?postgres(ql)?(\\+[A-Za-z0-9]+)?://"
@@ -68,7 +70,7 @@ crewflow_db_url_names() {
   {
     env | grep -iE "$crewflow_re_url"
     env | grep -iE "$crewflow_re_pw" | grep -iE "$crewflow_re_kw"
-  } | grep -v '^PG_DATABASE_URL=' | cut -d= -f1 | sort -u
+  } | grep -v -e '^PG_DATABASE_URL=' -e '^PG_DATABASE_SESSION_URL=' | cut -d= -f1 | sort -u
   unset crewflow_re_url crewflow_re_pw crewflow_re_kw
 }
 # END crewflow database-URL refusal
@@ -355,6 +357,15 @@ crewflow_is_owner_login() {
 # END crewflow owner-login check
 if ! crewflow_is_owner_login "$PG_DATABASE_URL"; then
   refuse 'PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL. An admin URL belongs only in PG_ADMIN_URL of db-setup (a compose.env from before 2026-11-18 had the admin URL in PG_DATABASE_URL: move it to PG_ADMIN_URL and put the crewflow_owner URL in PG_DATABASE_URL). Value not shown. Refusing to start.'
+fi
+# Transaction pooler support (owner instruction 2026-11-19): PG_DATABASE_SESSION_URL, when set, is the direct session
+# connection of the SAME crewflow_owner login and database (PG_DATABASE_URL may then be a transaction pooler). The same
+# owner-login refusal; its other rules (same login and database, a live identity comparison) are the process's.
+if [ -n "${PG_DATABASE_SESSION_URL:-}" ]; then
+  if ! crewflow_is_owner_login "$PG_DATABASE_SESSION_URL"; then
+    refuse 'PG_DATABASE_SESSION_URL does not log in as crewflow_owner: it is the direct session connection of the same crewflow_owner login and database as PG_DATABASE_URL. Value not shown. Refusing to start.'
+  fi
+  export PG_DATABASE_SESSION_URL
 fi
 export PG_DATABASE_URL
 crewflow_bundled_db_ca "$PG_DATABASE_URL"

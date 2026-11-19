@@ -215,6 +215,97 @@ jobs:
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
 
+  # Transaction pooler support (owner instruction 2026-11-19, PR #258). NOT a required check (not in ci-server gate's needs):
+  # a real PgBouncer (the Ubuntu pgbouncer package) in pool_mode=transaction with 2 server connections in front of the
+  # disposable owner-login database. Step 1 runs transaction-pooler.integration.spec.ts and must pass. Step 2 runs the same
+  # spec with the test-only fail-first variant (RESET ROLE removed from the per-transaction preamble, chosen by
+  # CREWFLOW_TEST_PGBOUNCER_FAILFIRST; nothing in production code reads it) and must FAIL, in the poisoned-backend case.
+  test-transaction-pooler:
+    needs: changed
+    if: needs.changed.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DB_TARGET: local
+      REDIS_URL: redis://localhost:6379
+      CREWFLOW_TEST_PGBOUNCER_PORT: '16432'
+      CREWFLOW_TEST_PGBOUNCER_POOL_SIZE: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
+        env:
+          TWENTY_PG_CONTAINER: disposable-postgres
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: Install PgBouncer (Ubuntu package; its own service stays stopped)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pgbouncer
+          sudo systemctl stop pgbouncer || true
+          pgbouncer --version
+      - name: Start PgBouncer in transaction mode (2 server connections) in front of the test database
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          eval "$test_env"
+          node packages/rab-server/src/__tests__/integration/helpers/pgbouncer-transaction-mode.cjs "${RUNNER_TEMP}/pgbouncer" "$CREWFLOW_TEST_PGBOUNCER_PORT" "$CREWFLOW_TEST_PGBOUNCER_POOL_SIZE"
+          pgbouncer -d "${RUNNER_TEMP}/pgbouncer/pgbouncer.ini"
+          for i in $(seq 1 30); do (echo > "/dev/tcp/127.0.0.1/${CREWFLOW_TEST_PGBOUNCER_PORT}") 2>/dev/null && break; sleep 1; done
+          grep -E "pool_mode|default_pool_size" "${RUNNER_TEMP}/pgbouncer/pgbouncer.ini"
+      - name: Two workspaces through PgBouncer (transaction mode) - must pass
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          eval "$test_env"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
+          mkdir -p "${RUNNER_TEMP}/jest-results"
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=600000 --output-style=stream \
+            '--testFile=transaction-pooler\.integration' --json "--outputFile=${RUNNER_TEMP}/jest-results/pooler.json"
+          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=r.testResults.flatMap(x=>x.assertionResults);for(const a of t)console.log(`${a.status} ${a.title}`);if(r.numPassedTests<5||r.numFailedTests||r.numPendingTests){console.log("::error::the PgBouncer suite did not run every test and pass");process.exit(1)}' "${RUNNER_TEMP}/jest-results/pooler.json"
+      - name: Fail-first - without the per-transaction RESET ROLE the poisoned-backend case must FAIL
+        env:
+          CREWFLOW_TEST_PGBOUNCER_FAILFIRST: without-reset-role
+        run: |
+          set -uo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          eval "$test_env"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
+          status=0
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=600000 --output-style=stream \
+            '--testFile=transaction-pooler\.integration' --json "--outputFile=${RUNNER_TEMP}/jest-results/pooler-failfirst.json" || status=$?
+          if [ "$status" = 0 ]; then echo "::error::fail-first: the suite PASSED without RESET ROLE (it must fail)"; exit 1; fi
+          node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const t=r.testResults.flatMap(x=>x.assertionResults);for(const a of t)console.log(`${a.status} ${a.title}`);const poisoned=t.find(a=>/poisoned backend/.test(a.title));if(!poisoned||poisoned.status!=="failed"){console.log("::error::fail-first: the poisoned-backend case did not fail");process.exit(1)}console.log("fail-first OK: without RESET ROLE the poisoned-backend case fails")' "${RUNNER_TEMP}/jest-results/pooler-failfirst.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: jest-results-transaction-pooler
+          path: ${{ runner.temp }}/jest-results/
+          if-no-files-found: ignore
+      - name: Stop PgBouncer and PostgreSQL
+        if: always()
+        run: |
+          kill "$(cat "${RUNNER_TEMP}/pgbouncer/pgbouncer.pid" 2>/dev/null)" 2>/dev/null || true
+          docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
   # One always-reporting status for branch protection. A skipped matrix job never reports its expanded names
   # ("test (1)", ...), so a PR the change filter skips could never satisfy those required checks. This job always runs:
   # it fails if a required job failed or was cancelled, and accepts "skipped" only when `changed` succeeded and its

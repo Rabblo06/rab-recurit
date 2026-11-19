@@ -141,7 +141,7 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
   const driftConfig = pgClientConfig(pg, { endpoint, purpose: 'drift', sessionAffinity: true, statementTimeoutMs: 60_000 });
   // Security review L-3: the provisioning lock is a SESSION advisory lock held across BEGIN/COMMIT pairs, so the connection
   // must be session-stable: the live two-connection probe, before the first connection and cycle.
-  await probePgSessionAffinity(pgClientConfig(pg, { endpoint, purpose: 'probe', sessionAffinity: true, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }), {
+  await probePgSessionAffinity(pgClientConfig(pg, { endpoint, purpose: 'probe', sessionAffinity: true, sessionSettings: false, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }), {
     label: 'the provisioner session-lock connection',
   });
   // W6-E2E-05: survives a database restart / failover / idle kill (bounded exponential backoff); the first connection

@@ -11,6 +11,9 @@ import {
   pgTypeOrmConnectionOptions,
 } from '../create-pg-pool';
 import { PgConfigError } from '../pg-url-policy';
+import { createPgClient } from '../create-pg-pool';
+import { TransactionScopedClient } from '../transaction-scoped-client';
+import { isTransactionScopedPool } from '../transaction-scoped-client';
 import { TEST_CA_A } from './fixtures/pg-test-ca';
 
 // Phase B (B2): what pg ACTUALLY uses. Every assertion goes through pg's own ConnectionParameters (the object a pg Client
@@ -130,11 +133,60 @@ describe('create-pg-pool: explicit target, TLS and session settings as pg sees t
     expect(none).not.toHaveProperty('query_timeout');
   });
 
-  it('a session-lock connection on a transaction-pooler shape is refused (CLI storage lock), a runtime one is not', () => {
+  it('no host name is matched any more: a pooler-looking URL is not refused for a session lock (the live probe decides)', () => {
     const r = resolvePgEnvironment({ PG_DATABASE_URL: `postgres://u:${SECRET}@ep-a-1-pooler.eu-west-2.aws.neon.tech/neondb` }, { processRole: 'cli' });
-    expect(() => pgClientConfig(r, { endpoint: 'lock', purpose: 'storage-lock' })).toThrow(PgConfigError);
-    expect(() => pgClientConfig(r, { endpoint: 'lock', purpose: 'storage-lock' })).toThrow(/session advisory lock needs a direct/);
-    expect(() => pgClientConfig(r, { purpose: 'runtime' })).not.toThrow();
+    expect(() => pgClientConfig(r, { endpoint: 'lock', purpose: 'storage-lock' })).not.toThrow();
+  });
+
+  describe('PG_DATABASE_SESSION_URL: the transaction-pooled runtime endpoint', () => {
+    const POOLER = `postgres://crewflow_owner:${SECRET}@pgbouncer.internal:6432/rab`;
+    const SESSION = `postgres://crewflow_owner:${SECRET}@db.internal:5432/rab`;
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: POOLER, PG_DATABASE_SESSION_URL: SESSION }, { processRole: 'api' });
+
+    it('the runtime pool (pg Pool and TypeORM) gets the transaction-scoped client and NO startup -c settings; the settings travel per transaction', () => {
+      const pool = pgPoolConfig(r, { endpoint: 'runtime', purpose: 'runtime' });
+      expect(pool.host).toBe('pgbouncer.internal');
+      expect(pool.Client).toBe(TransactionScopedClient);
+      expect(pool).not.toHaveProperty('options');
+      expect(pool.crewflowTransactionScope).toEqual({ statementTimeoutMs: 30_000, idleInTransactionTimeoutMs: 60_000, readOnly: false, dispatchNotify: false });
+      const orm = pgTypeOrmConnectionOptions(r, { endpoint: 'runtime', purpose: 'runtime' });
+      expect(orm.host).toBe('pgbouncer.internal');
+      expect((orm.extra as Record<string, unknown>).Client).toBe(TransactionScopedClient);
+      expect(orm.extra).not.toHaveProperty('options');
+      const readOnly = pgPoolConfig(r, { endpoint: 'runtime', purpose: 'probe', readOnly: true });
+      expect(readOnly.crewflowTransactionScope?.readOnly).toBe(true);
+      const created = createPgPool(r, { endpoint: 'runtime', purpose: 'runtime' });
+      expect(isTransactionScopedPool(created)).toBe(true);
+      void created.end();
+    });
+
+    it('createPgClient builds a TransactionScopedClient; pgClientConfig and pgConnectionString refuse the endpoint (a plain Client would skip the preamble)', () => {
+      expect(createPgClient(r, { endpoint: 'runtime', purpose: 'probe' })).toBeInstanceOf(TransactionScopedClient);
+      expect(() => pgClientConfig(r, { endpoint: 'runtime', purpose: 'probe' })).toThrow(/transaction-pooled runtime connection/);
+      expect(() => pgConnectionString(r, { endpoint: 'runtime', purpose: 'probe' })).toThrow(/transaction-pooled runtime connection/);
+    });
+
+    it('a session-affine request on the runtime endpoint is refused; primary and lock are the session URL with the usual startup settings', () => {
+      expect(() => createPgClient(r, { endpoint: 'runtime', purpose: 'lock', sessionAffinity: true })).toThrow(/needs the direct connection \(PG_DATABASE_SESSION_URL\)/);
+      for (const endpoint of ['primary', 'lock'] as const) {
+        const c = new ConnectionParameters(pgClientConfig(r, { endpoint, purpose: 'probe' }));
+        expect(c.host).toBe('db.internal');
+        expect(c.options).toBe('-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000');
+        expect(createPgClient(r, { endpoint, purpose: 'probe' })).not.toBeInstanceOf(TransactionScopedClient);
+      }
+    });
+
+    it('sessionSettings: false (the session probe) sends no startup settings', () => {
+      const c = pgClientConfig(r, { endpoint: 'lock', purpose: 'probe', sessionSettings: false });
+      expect(c).not.toHaveProperty('options');
+    });
+
+    it('without PG_DATABASE_SESSION_URL the runtime endpoint is the plain primary (no transaction scope)', () => {
+      const plain = resolvePgEnvironment({ PG_DATABASE_URL: LOCAL }, { processRole: 'api' });
+      const pool = pgPoolConfig(plain, { endpoint: 'runtime', purpose: 'runtime' });
+      expect(pool).not.toHaveProperty('Client');
+      expect(pool.options).toBe('-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000');
+    });
   });
 
   it('the elevated endpoint is refused when it is not configured (always in production)', () => {

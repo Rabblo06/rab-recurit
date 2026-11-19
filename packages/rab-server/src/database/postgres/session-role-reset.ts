@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { DataSource } from 'typeorm';
 
 import { recordSqlQuery } from '../../engine/observability/request-context';
+import { isTransactionScopedPool } from './transaction-scoped-client';
 
 /**
  * Pool safety for the owner login (M0 §6.4 control 3; G-09 "pool poisoning", owner-accepted residual otherwise).
@@ -40,6 +41,9 @@ const installed = new WeakSet<object>();
 
 export function installSessionRoleResetOnAcquire(pool: Pool, log: (line: string) => void = (l) => console.warn(l)): void { // eslint-disable-line no-console
   if (installed.has(pool)) return;
+  // A transaction-scoped pool (behind a transaction pooler) must NOT get a checkout reset: it would be its own statement, which
+  // the pooler may run on another backend. Its client resets the role inside every transaction (transaction-scoped-client.ts).
+  if (isTransactionScopedPool(pool)) return;
   installed.add(pool);
   pool.on('acquire', (client: PoolClient) => {
     // ST-05: this statement bypasses TypeORM's logger, which is where every other statement is counted. Count it here so
