@@ -20,9 +20,14 @@ describe('PlatformAdminBootstrapService (shared by bootstrap-admin and the API b
   let tenant: { bindCoreIdentityGucs: jest.Mock };
   let service: PlatformAdminBootstrapService;
 
+  let existing: { status: string; verified: boolean; manager_tier: boolean } | undefined;
+  let adminActivation: { status: string; live_invite: boolean } | undefined;
+
   function answer(row: Record<string, unknown> | undefined, allowed: boolean | null = true): void {
     manager.query.mockImplementation(async (sql: string) => {
       queries.push(sql);
+      if (sql.includes('FOR UPDATE OF u')) return existing ? [existing] : [];
+      if (sql.includes('core.account_invite i')) return adminActivation ? [adminActivation] : [];
       if (sql.includes('has_function_privilege')) return [{ who: 'crewflow_owner', allowed }];
       if (sql.includes('core.bootstrap_first_platform_admin')) return row ? [row] : [];
       // revokeSessionsForPrivilegedGrant (GRANTED_EXISTING): the target's organisation, the previous binding, two UPDATEs.
@@ -35,6 +40,8 @@ describe('PlatformAdminBootstrapService (shared by bootstrap-admin and the API b
 
   beforeEach(() => {
     queries = [];
+    existing = { status: 'active', verified: true, manager_tier: true };
+    adminActivation = undefined;
     manager = { query: jest.fn(), findOne: jest.fn().mockResolvedValue({ id: 'profile' }), insert: jest.fn(), findOneByOrFail: jest.fn() } as never;
     audit = { record: jest.fn() };
     lifecycle = { sendAccountInvite: jest.fn().mockResolvedValue({ queued: true, sendNumber: 1, expiresAt: new Date('2026-11-20T00:00:00Z') }) };
@@ -117,5 +124,58 @@ describe('PlatformAdminBootstrapService (shared by bootstrap-admin and the API b
     answer({ outcome: 'SOMETHING_NEW', user_id: 'u1', organisation_id: 'o1', created_user: true, created_organisation: false });
     await expect(service.run(input, { trigger: 'api_boot', selfHealExistingAdmin: false })).rejects.toMatchObject({ reason: 'UNEXPECTED_OUTCOME' });
     expect(lifecycle.sendAccountInvite).not.toHaveBeenCalled();
+  });
+
+  describe('API boot policy (security review of #264)', () => {
+    const boot = { trigger: 'api_boot' as const, selfHealExistingAdmin: false, requireProvenExistingAccount: true, inspectExistingAdminActivation: true };
+    const granted = { outcome: 'GRANTED_EXISTING', user_id: 'u1', organisation_id: 'o1', created_user: false, created_organisation: false };
+
+    it('F2: an ACTIVE, email-verified manager account is granted', async () => {
+      answer(granted);
+      expect(await service.run(input, boot)).toMatchObject({ outcome: 'GRANTED_EXISTING' });
+      expect(audit.record).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['an INVITED account (email never proven)', { status: 'invited', verified: false, manager_tier: true }],
+      ['an active account whose email was never verified', { status: 'active', verified: false, manager_tier: true }],
+      ['a suspended account', { status: 'suspended', verified: true, manager_tier: true }],
+      ['an account the transaction cannot see', undefined],
+    ])('F2 DENIAL: %s -> REFUSED_EXISTING_ACCOUNT_UNVERIFIED, rolled back, no role, no email, no audit', async (_label, row) => {
+      existing = row;
+      answer(granted);
+      expect(await service.run(input, boot)).toEqual({ outcome: 'REFUSED_EXISTING_ACCOUNT_UNVERIFIED' });
+      expect(manager.insert).not.toHaveBeenCalled();
+      expect(lifecycle.sendAccountInvite).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('F3 DENIAL: a staff-only account (no manager profile) -> REFUSED_EXISTING_ACCOUNT_NOT_MANAGER, rolled back', async () => {
+      existing = { status: 'active', verified: true, manager_tier: false };
+      answer(granted);
+      expect(await service.run(input, boot)).toEqual({ outcome: 'REFUSED_EXISTING_ACCOUNT_NOT_MANAGER' });
+      expect(manager.insert).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('the CLI (no boot policy) keeps granting as before', async () => {
+      existing = { status: 'invited', verified: false, manager_tier: false };
+      answer(granted);
+      expect(await service.run(input, { trigger: 'command', selfHealExistingAdmin: true })).toMatchObject({ outcome: 'GRANTED_EXISTING' });
+    });
+
+    it.each([
+      [{ status: 'invited', live_invite: false }, 'expired'],
+      [{ status: 'invite_expired', live_invite: false }, 'expired'],
+      [{ status: 'invited', live_invite: true }, 'pending'],
+      [{ status: 'active', live_invite: false }, 'done'],
+    ] as const)('F5: an existing admin %p reports activation %s (read only)', async (row, activation) => {
+      adminActivation = row;
+      answer({ outcome: 'ALREADY_BOOTSTRAPPED', user_id: 'u1', organisation_id: 'o1', created_user: false, created_organisation: false });
+      expect(await service.run(input, boot)).toEqual({ outcome: 'ALREADY_BOOTSTRAPPED', userId: 'u1', organisationId: 'o1', activation });
+      expect(manager.insert).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+      expect(lifecycle.sendAccountInvite).not.toHaveBeenCalled();
+    });
   });
 });

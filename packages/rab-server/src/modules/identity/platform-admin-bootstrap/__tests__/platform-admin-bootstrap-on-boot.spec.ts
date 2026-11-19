@@ -31,7 +31,7 @@ describe('PlatformAdminBootstrapOnBoot (first platform admin at API boot)', () =
 
   beforeEach(() => {
     run = jest.fn();
-    mfaEnforced = false;
+    mfaEnforced = true; // the boot path refuses without it (F1); the refusal has its own test
     logs = [];
     for (const level of ['log', 'warn', 'error'] as const) {
       jest.spyOn(Logger.prototype, level).mockImplementation((...args: unknown[]) => {
@@ -56,6 +56,20 @@ describe('PlatformAdminBootstrapOnBoot (first platform admin at API boot)', () =
     expect(JSON.stringify(logs)).not.toContain('Correct-Horse-Battery-42!');
   });
 
+  it('DENIAL (security review of #264, F1): AUTH_MFA_ENFORCE_PLATFORM_ADMIN not true -> refused before the bootstrap runs: no transaction, no write, no email', async () => {
+    for (const value of [false, undefined]) {
+      mfaEnforced = value as boolean;
+      logs = [];
+      expect(await provider().runOnce({ BOOTSTRAP_ADMIN_EMAIL: EMAIL })).toBe('REFUSED_MFA_NOT_ENFORCED');
+      expect(logs).toEqual([{ level: 'error', message: PLATFORM_ADMIN_BOOT_LOG.mfaNotEnforced }]);
+    }
+    // bootstrap.run is the only thing that opens a transaction, writes or queues the activation email: never called.
+    expect(run).not.toHaveBeenCalled();
+    expect(PLATFORM_ADMIN_BOOT_LOG.mfaNotEnforced).toBe(
+      'BOOTSTRAP_ADMIN_EMAIL is set but AUTH_MFA_ENFORCE_PLATFORM_ADMIN is not true: refusing to create a platform admin without enforced MFA. Set AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true and redeploy. Nothing was done and no email was sent.',
+    );
+  });
+
   it('the input has no password field at all, whatever the environment holds', () => {
     const input = readPlatformAdminBootstrapInput({ BOOTSTRAP_ADMIN_EMAIL: EMAIL, BOOTSTRAP_ADMIN_PASSWORD: 'x', BOOTSTRAP_ADMIN_ORG_SLUG: ' Platform ' });
     expect(input).toEqual({ email: 'first.admin@example.test', firstName: 'Admin', lastName: '', orgSlug: 'platform', orgName: null });
@@ -70,19 +84,15 @@ describe('PlatformAdminBootstrapOnBoot (first platform admin at API boot)', () =
     expect(run).toHaveBeenCalledTimes(1);
     expect(run).toHaveBeenCalledWith(
       { email: 'first.admin@example.test', firstName: 'Ada', lastName: 'Lovelace', orgSlug: 'acme', orgName: 'Acme' },
-      { trigger: 'api_boot', selfHealExistingAdmin: false },
+      { trigger: 'api_boot', selfHealExistingAdmin: false, requireProvenExistingAccount: true, inspectExistingAdminActivation: true },
     );
-    expect(logs).toEqual([
-      { level: 'log', message: PLATFORM_ADMIN_BOOT_LOG.created(expiresAt) },
-      { level: 'warn', message: PLATFORM_ADMIN_BOOT_LOG.mfaNotEnforced },
-    ]);
+    expect(logs).toEqual([{ level: 'log', message: PLATFORM_ADMIN_BOOT_LOG.created(expiresAt) }]);
     // Fixed text: never the email address or an id.
     expect(JSON.stringify(logs).toLowerCase()).not.toContain('first.admin@example.test');
     expect(JSON.stringify(logs)).not.toMatch(/\bu1\b|\bo1\b/);
   });
 
-  it('MFA: no warning when AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true (enrolment is then required at first sign-in)', async () => {
-    mfaEnforced = true;
+  it('GRANTED_EXISTING (an active, verified manager account): the accurate fixed line', async () => {
     run.mockResolvedValue({ outcome: 'GRANTED_EXISTING', userId: 'u1', organisationId: 'o1', createdOrganisation: false });
     expect(await provider().runOnce({ BOOTSTRAP_ADMIN_EMAIL: EMAIL })).toBe('GRANTED_EXISTING');
     expect(logs).toEqual([{ level: 'log', message: PLATFORM_ADMIN_BOOT_LOG.grantedExisting }]);
@@ -101,12 +111,26 @@ describe('PlatformAdminBootstrapOnBoot (first platform admin at API boot)', () =
 
   it.each([
     ['CLOSED', 'warn', PLATFORM_ADMIN_BOOT_LOG.closed],
+    ['REFUSED_EXISTING_ACCOUNT_UNVERIFIED', 'error', PLATFORM_ADMIN_BOOT_LOG.existingUnverified],
+    ['REFUSED_EXISTING_ACCOUNT_NOT_MANAGER', 'error', PLATFORM_ADMIN_BOOT_LOG.existingNotManager],
     ['REFUSED_AMBIGUOUS_EMAIL', 'error', PLATFORM_ADMIN_BOOT_LOG.ambiguousEmail],
     ['REFUSED_AMBIGUOUS_ORGANISATION', 'error', PLATFORM_ADMIN_BOOT_LOG.ambiguousOrganisation],
   ] as const)('%s: nothing done, one fixed line, boot continues', async (outcome, level, message) => {
     run.mockResolvedValue({ outcome } as PlatformAdminBootstrapResult);
     expect(await provider().runOnce({ BOOTSTRAP_ADMIN_EMAIL: EMAIL })).toBe(outcome);
     expect(logs).toEqual([{ level, message }]);
+  });
+
+  it('F5: the existing admin never activated and its link expired -> a distinct warning, nothing re-sent', async () => {
+    run.mockResolvedValue({ outcome: 'ALREADY_BOOTSTRAPPED', userId: 'u1', organisationId: 'o1', activation: 'expired' });
+    expect(await provider().runOnce({ BOOTSTRAP_ADMIN_EMAIL: EMAIL })).toBe('ALREADY_BOOTSTRAPPED');
+    expect(logs).toEqual([{ level: 'warn', message: PLATFORM_ADMIN_BOOT_LOG.activationExpired }]);
+    for (const activation of ['done', 'pending'] as const) {
+      logs = [];
+      run.mockResolvedValue({ outcome: 'ALREADY_BOOTSTRAPPED', userId: 'u1', organisationId: 'o1', activation });
+      await provider().runOnce({ BOOTSTRAP_ADMIN_EMAIL: EMAIL });
+      expect(logs).toEqual([{ level: 'log', message: PLATFORM_ADMIN_BOOT_LOG.alreadyExists }]);
+    }
   });
 
   it('FAIL CLOSED: any failure is logged with a fixed message and the boot continues (never throws, never retries)', async () => {

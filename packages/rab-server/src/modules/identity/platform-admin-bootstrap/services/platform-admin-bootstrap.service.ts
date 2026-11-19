@@ -66,12 +66,22 @@ export type PlatformAdminBootstrapEvent =
   | { kind: 'operational-role-granted'; userId: string; organisationId: string };
 
 export type PlatformAdminBootstrapResult =
-  /** An active platform admin already exists. Nothing was created; no email was queued. */
-  | { outcome: 'ALREADY_BOOTSTRAPPED'; userId: string; organisationId: string }
+  /**
+   * An active platform admin already exists. Nothing was created; no email was queued. `activation` is reported only with
+   * `inspectExistingAdminActivation`: 'expired' = the admin is still invited and holds no unexpired, unused invite.
+   */
+  | { outcome: 'ALREADY_BOOTSTRAPPED'; userId: string; organisationId: string; activation?: 'done' | 'pending' | 'expired' }
   /** Platform admins have existed and none is active: the one-time bootstrap is spent. Nothing was changed. */
   | { outcome: 'CLOSED' }
   | { outcome: 'REFUSED_AMBIGUOUS_EMAIL' }
   | { outcome: 'REFUSED_AMBIGUOUS_ORGANISATION' }
+  /**
+   * `requireProvenExistingAccount` only: the email matches one existing account that is not ACTIVE with a verified email
+   * (e.g. a pending invitation whose address was never proven). Rolled back: nothing was written, no email queued.
+   */
+  | { outcome: 'REFUSED_EXISTING_ACCOUNT_UNVERIFIED' }
+  /** `requireProvenExistingAccount` only: the matching account has no manager-tier profile (e.g. staff only). Rolled back. */
+  | { outcome: 'REFUSED_EXISTING_ACCOUNT_NOT_MANAGER' }
   /** An existing account was granted (no invite: it can already sign in); its existing sessions were ended. */
   | { outcome: 'GRANTED_EXISTING'; userId: string; organisationId: string; createdOrganisation: boolean }
   /** A new INVITED account (no password) was created and ONE activation email was queued to the input email. */
@@ -101,6 +111,14 @@ export interface PlatformAdminBootstrapOptions {
    * The CLI does this (unchanged behaviour); the API boot does NOT — once an admin exists the boot path writes nothing.
    */
   selfHealExistingAdmin: boolean;
+  /**
+   * GRANTED_EXISTING (security review of #264, F2/F3): grant an existing account only when it is ACTIVE, its email was
+   * verified (`email_verified_at` set at activation) and it has a manager-tier profile; otherwise roll the whole
+   * transaction back and report a REFUSED_EXISTING_ACCOUNT_* outcome. The API boot sets it; the CLI does not (unchanged).
+   */
+  requireProvenExistingAccount?: boolean;
+  /** ALREADY_BOOTSTRAPPED: also report whether the existing admin's activation is done, pending or expired (read only). */
+  inspectExistingAdminActivation?: boolean;
   onEvent?: (event: PlatformAdminBootstrapEvent) => void;
 }
 
@@ -138,6 +156,19 @@ export class PlatformAdminBootstrapService {
   async run(input: PlatformAdminBootstrapInput, options: PlatformAdminBootstrapOptions): Promise<PlatformAdminBootstrapResult> {
     const emit = options.onEvent ?? (() => undefined);
 
+    try {
+      return await this.runTransaction(input, options, emit);
+    } catch (error) {
+      if (error instanceof ExistingAccountRefusal) return { outcome: error.outcome };
+      throw error;
+    }
+  }
+
+  private async runTransaction(
+    input: PlatformAdminBootstrapInput,
+    options: PlatformAdminBootstrapOptions,
+    emit: (event: PlatformAdminBootstrapEvent) => void,
+  ): Promise<PlatformAdminBootstrapResult> {
     return this.dataSource.transaction(async (manager): Promise<PlatformAdminBootstrapResult> => {
       await this.assertBootstrapAuthority(manager);
 
@@ -160,6 +191,11 @@ export class PlatformAdminBootstrapService {
             // experience + Admin Panel" — an admin that already exists still needs this checked. Idempotent.
             await this.bindContext(manager, result.organisation_id!, result.user_id!);
             await this.ensureOperationalIdentity(manager, result.organisation_id!, result.user_id!, emit);
+          }
+          if (options.inspectExistingAdminActivation) {
+            await this.bindContext(manager, result.organisation_id!, result.user_id!);
+            const activation = await this.existingAdminActivation(manager, result.user_id!);
+            return { outcome: 'ALREADY_BOOTSTRAPPED', userId: result.user_id!, organisationId: result.organisation_id!, activation };
           }
           return { outcome: 'ALREADY_BOOTSTRAPPED', userId: result.user_id!, organisationId: result.organisation_id! };
         }
@@ -185,6 +221,12 @@ export class PlatformAdminBootstrapService {
       // the same helper every tenant-context entry point uses, on THIS transaction (the advisory lock above must cover
       // these writes, so no second transaction is opened).
       await this.bindContext(manager, organisationId, userId);
+
+      // F2/F3 (API boot): never hand platform-wide authority to an account whose email ownership was never proven, or to a
+      // staff-only account. Thrown to ROLL BACK this transaction (the function's platform_admin row included); run() turns
+      // it into the outcome. Checked here, in the same transaction and under the function's advisory lock, on the row the
+      // function itself resolved (locked FOR UPDATE), so nothing can change it between the check and the grant.
+      if (!isNewUser && options.requireProvenExistingAccount) await this.assertProvenExistingAccount(manager, userId);
 
       await this.ensureOperationalIdentity(manager, organisationId, userId, emit);
 
@@ -254,6 +296,34 @@ export class PlatformAdminBootstrapService {
     }
   }
 
+  private async assertProvenExistingAccount(manager: EntityManager, userId: string): Promise<void> {
+    const [row] = await manager.query<Array<{ status: string; verified: boolean; manager_tier: boolean }>>(
+      `SELECT u.status, u.email_verified_at IS NOT NULL AS verified,
+              EXISTS (SELECT 1 FROM core.manager_profile mp WHERE mp.user_id = u.id) AS manager_tier
+         FROM core."user" u
+        WHERE u.id = $1 AND u.deleted_at IS NULL
+        FOR UPDATE OF u`,
+      [userId],
+    );
+    // Fail closed: an account this transaction cannot see is treated as unproven.
+    if (!row || row.status !== 'active' || row.verified !== true) throw new ExistingAccountRefusal('REFUSED_EXISTING_ACCOUNT_UNVERIFIED');
+    if (row.manager_tier !== true) throw new ExistingAccountRefusal('REFUSED_EXISTING_ACCOUNT_NOT_MANAGER');
+  }
+
+  /** Read only: is the existing admin still waiting for activation, and does it still hold a usable (unexpired) invite? */
+  private async existingAdminActivation(manager: EntityManager, userId: string): Promise<'done' | 'pending' | 'expired'> {
+    const [row] = await manager.query<Array<{ status: string; live_invite: boolean }>>(
+      `SELECT u.status,
+              EXISTS (SELECT 1 FROM core.account_invite i
+                       WHERE i.user_id = u.id AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now()) AS live_invite
+         FROM core."user" u
+        WHERE u.id = $1`,
+      [userId],
+    );
+    if (!row || (row.status !== 'invited' && row.status !== 'invite_expired')) return 'done';
+    return row.live_invite ? 'pending' : 'expired';
+  }
+
   private async bindContext(manager: EntityManager, organisationId: string, userId: string): Promise<void> {
     await this.tenantContext.bindCoreIdentityGucs(manager, { organisationId, workspaceId: null, userId, role: '' });
   }
@@ -296,5 +366,13 @@ export class PlatformAdminBootstrapService {
     await manager.insert(OrganisationMember, { organisationId, userId });
     await manager.insert(ManagerProfile, { organisationId, userId, type: ManagerType.CEO });
     emit({ kind: 'operational-role-granted', userId, organisationId });
+  }
+}
+
+/** Thrown inside the transaction to roll it back; never escapes PlatformAdminBootstrapService.run. */
+class ExistingAccountRefusal extends Error {
+  constructor(readonly outcome: 'REFUSED_EXISTING_ACCOUNT_UNVERIFIED' | 'REFUSED_EXISTING_ACCOUNT_NOT_MANAGER') {
+    super(outcome);
+    this.name = 'ExistingAccountRefusal';
   }
 }
