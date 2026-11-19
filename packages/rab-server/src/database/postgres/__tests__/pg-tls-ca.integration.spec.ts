@@ -335,7 +335,8 @@ describe('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed cer
     const env = { NODE_ENV: 'test', PG_DATABASE_URL: urlFor('localhost', selfSignedFront.port, 'sslmode=require'), PG_SSL_ALLOW_SELF_SIGNED: 'true' };
     const r = await gate6On(env, true);
     expect(r.ssl).toBe(false);
-    expect(r.refusal).toMatch(/not using TLS/);
+    // Review L-1: an unverified client config is refused up front (the message names the missing verification).
+    expect(r.refusal).toMatch(/does not verify the server certificate and host name/);
   });
 
   it('DENIAL: both CA variables set refuses before any connection is attempted', () => {
