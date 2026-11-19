@@ -9648,6 +9648,103 @@ Reversal:   drop the client-side branch of assertTlsGate (database-boot-gate-rul
   owner-login-boot-refusals.integration.spec (direct and role ownership, a reachable CREATEROLE role, the added predefined and
   provider roles, each planted in a rolled-back transaction).
 
+## db-setup, provider-neutral: the password form and a pooled admin URL decided by capability (branch feat/twenty-neon-setup, owner decisions 2026-11-19; SQL listed in the PR)
+
+Trigger: the published 0.6.0 db-setup, against a managed PostgreSQL that refuses pre-hashed role passwords, looped "crewflow_owner
+was being created by another start" three times and exited 70. The server refused the SCRAM verifier at COMMIT with SQLSTATE
+XX000, and XX000 was in the race set. Owner rules: no provider-specific code (no host matching, no provider flag), decide by
+capability at run time, the same code everywhere; and (option 1, "Create login, you set password") Crewflow never sends a
+plain-text password.
+
+- **Who can call this?** Only the one-shot db-setup / db-harden services. They alone hold `PG_ADMIN_URL` and
+  `PG_ADMIN_DIRECT_URL`. rab-api / rab-worker refuse both by name (`never-in-runtime-env.ts`, `api-prestart.sh`,
+  `worker-start.sh`) and pin them to "" in both compose files; the placement lint allows exactly that pin.
+- **Whose data?** The crewflow_owner credential (the schema owner of every tenant) and the admin login.
+- **A server that refuses pre-hashed passwords (option 1).** The verifier is always sent first. A refusal of the password FORM
+  switches to the passwordless path. A refusal of the form is 22023 / 28P01 / 0A000 / XX000 (not "tuple concurrently
+  updated") from the CREATE / ALTER ROLE step (fixed DO-block HINT `crewflow-stage=role`) or from the COMMIT of a
+  transaction that set a password. Never 42501, never the DO block's own shape check, never a grant-only transaction.
+  The passwordless path runs under the same advisory lock and the same refusals:
+  - a missing crewflow_owner is created WITHOUT a password and NOLOGIN (`CREATE ROLE crewflow_owner NOLOGIN ...` with no
+    PASSWORD), marked `crewflow:awaiting-password:<unix expiry>` (security re-review R1: a pg_hba trust / peer / cert / ldap
+    rule could otherwise let anyone in as a passwordless CREATEROLE login). The mark expires after 24 h (server clock, like the
+    CREATEROLE mark; independent review L1). No secret leaves db-setup. Q2, both DO blocks and the re-checks accept a NOLOGIN
+    crewflow_owner ONLY with an unexpired mark; a NOLOGIN crewflow_owner with an expired mark is refused (64) with no ALTER
+    ROLE (an admin may have disabled it on purpose), and any other NOLOGIN crewflow_owner stays refused;
+  - an existing role's password is never written;
+  - the grant is added;
+  - exit 64 with fixed steps. The operator runs, once, as the admin login, all the printed lines together in one go
+    (a fresh session, one transaction; psql if the SQL editor runs lines separately): `BEGIN;`, then
+    `SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);` with the placeholder replaced by that
+    value, then a DO block that reads the value from that setting (never from its own text), runs
+    `ALTER ROLE crewflow_owner LOGIN PASSWORD %L` through format() and removes the mark, re-raising any inner error with its
+    SQLSTATE only, then `COMMIT;` (re-review N1). An empty setting (lines run separately) is refused with
+    "run all lines together in one go, inside one transaction". Option 2's CREATE ROLE uses the same shape. Re-check F2-F4:
+    the block starts with `ROLLBACK;` (ends a failed attempt; outside a transaction it only warns), the set_config line
+    returns only `value_set` (no value in a result grid), the SQL is printed between fixed BEGIN SQL / END SQL markers and the
+    instruction says to strip any log prefix, and, on failure, to ROLLBACK, use a NEW value and update the setting.
+  The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
+  with no password write, so never a loop.
+  If the server refuses the passwordless login role too, nothing is created and the reviewed CREATE ROLE + GRANT is printed
+  with a placeholder (option 2).
+- **Residual: the operator's statement** (independent review M1, re-review N1). The value is only in the set_config line.
+  The DO block that uses it holds no value, so a failing ALTER ROLE (a password-check hook, a typo) is quoted in the server
+  log (log_min_error_statement) without it, and pg_stat_statements stores the SELECT normalised (constants replaced) and the
+  DO block without a value. Proven on the pinned PostgreSQL 16 (harness N1): a refused first value and the real value, run
+  statement by statement, appear in no server log line and in no top-level pg_stat_statements row. What remains: the server
+  log at `log_statement = all`, `log_min_duration_statement` or `auto_explain` (they quote the statement text); any error when the editor sends ALL lines as ONE message (the whole message is quoted,
+  set_config line included); pg_stat_statements with `track = all`, which records the ALTER / CREATE ROLE run inside the DO
+  block WITH the value (seen live: one nested row; the default `track = top` does not record it); `pg_stat_activity` while
+  it runs; the provider's own logs, audit and SQL-editor history. The
+  printed steps say so, and: if pg_stat_statements is installed, `SELECT pg_stat_statements_reset();` where permitted,
+  otherwise treat the value as visible to anyone who can read query statistics. The earlier advice to run `SET log_statement = 'none'` first is removed (a non-superuser cannot set it on
+  most providers, and it never covered pg_stat_statements or pg_stat_activity). A provider-generated password is NOT accepted
+  instead (owner decision). That is the provider's tool, outside Crewflow; the same as `own-database-app-login.sql`'s manual
+  path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
+  by db-setup, G1/G2/L1 log guards) is REMOVED.
+- **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
+  login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
+  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Re-review N2: that wrong-password
+  login runs on EVERY run that logs in, right after the successful real login (and once more after COMMIT after a creation,
+  a password change, or any run whose pre-lock login did not work, e.g. 42501 before the CONNECT grant: re-check F1), so a failure counter that a successful login resets never exceeds 1. **Residual:** a lockout that
+  counts total failed logins over a time window can still be reached by many deploys in that window (one failed login each).
+- **The app password's characters** (re-review a). In modes a and b (db-setup creates or sets it) the decoded password,
+  built or inside an explicit PG_DATABASE_URL, must be `^[A-Za-z0-9_-]{32,}$`, refused (64) before connecting; it is what
+  the operator types into the printed SQL, so no quote, `$$` or backslash can break or reshape it.
+- **Role squatting** (independent review L2). Q2 counts the members OF crewflow_owner other than this admin's own ADMIN-only
+  grant (admin_option, no inherit, no set: createrole_self_grant is emptied in the same transaction). Any such member is
+  refused (64) before any probe or write, and again under the advisory lock (Q4 facts), because whoever holds that membership
+  could reset or use the app login. Fix: `REVOKE crewflow_owner FROM <that role>`, or drop crewflow_owner; the member may be
+  the admin's own self-grant with SET or INHERIT (createrole_self_grant), removed with `REVOKE crewflow_owner FROM <admin>`.
+  Owner SQL review 1.17: every printed hint to give the admin rights on crewflow_owner reads exactly
+  `GRANT crewflow_owner TO <admin> WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;` (a plain WITH ADMIN OPTION defaults INHERIT
+  and SET to true on PG16, and this check would refuse the admin). Harness H1 runs the hint as printed, then db-setup: 0.
+  createrole_self_grant applies to CREATE ROLE only, so it plays no part in this GRANT. Owner SQL review 1.12: a password
+  change by db-setup is logged as one fixed line (`passwordSet`), never the value.
+  Re-review N1/N2: only a 28P01 / 28000 refusal of the wrong-password login counts as "password required" (any other
+  failure exits 70, never a pass), and a LOGIN crewflow_owner never keeps the awaiting-password mark (removed under the lock
+  in the CREATEROLE step), so a later NOLOGIN can never count as "awaiting its password".
+- **Verifier and lock waits (re-review F1 remainder).** Before the verifier DO block sets a password, the transaction's
+  lock_timeout is set below deadlock_timeout, so a blocked ALTER ROLE fails (55P03, caught) before `log_lock_waits` could
+  quote the EXECUTEd text with the verifier.
+- **Tampering / a hostile server.** A server that falsely refuses the verifier gains nothing: no password is sent.
+- **A pooled admin URL.** Refused by behaviour, before any read or write, in db-setup AND db-harden: the startup options
+  db-setup sends are refused (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails. Never by its
+  address in db-setup's code or the compose.env lint. On this base, owner-credential / pg-url-policy still match documented
+  pooler host shapes; #258 removes that. `PG_ADMIN_DIRECT_URL` must name the same login and database as `PG_ADMIN_URL`.
+- **Races.** The genuine concurrent-update race is still retried (PostgreSQL's fixed text, compared, never printed); every
+  retry and exhaustion line names the SQLSTATE and the stage. Both DO blocks catch `query_canceled` too.
+- **Failure halfway.** Every write runs in one transaction under the advisory lock; a refusal at COMMIT rolls everything
+  back.
+- **Mode c and a crewflow_owner that owns the database** (lead audit item 6): NOT changed. The reviewed N1 rule keeps mode c
+  the supported path for a transition-shaped database; owner decision.
+- **Shared password ("You set one shared password").** compose builds `PG_DATABASE_URL` from `PG_DATABASE_APP_PASSWORD` and
+  `PG_DATABASE_HOST` / `_PORT` / `_NAME` for db-setup, rab-api and rab-worker alike; an explicit `PG_DATABASE_URL` is the
+  documented alternative, and the compose.env lint refuses both together. db-setup refuses an app URL that names another
+  host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
+  parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
+  independent review I4; nothing after the database name but `?sslmode=verify-full`, re-review N3).
+
 ---
 
 ## First platform administrator at API boot from `BOOTSTRAP_ADMIN_EMAIL` (2026-11-19)

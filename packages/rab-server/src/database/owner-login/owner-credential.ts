@@ -194,7 +194,7 @@ export const DB_SETUP_INPUT_MESSAGES = Object.freeze({
   targetMismatch: `${ADMIN_URL_LABEL} and ${URL_LABEL} name different databases (host, port or database differ). Both must name the same database: db-setup creates crewflow_owner there, and rab-api / rab-worker connect there. Refusing.`,
   weakPassword: `The crewflow_owner password inside ${URL_LABEL} is too weak to become the schema owner's password: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters (openssl rand -hex 32). Nothing was created or changed. Refusing.`,
   // sql-injection-reviewed: an error MESSAGE (printed, never executed); the interpolations are this module's label constants.
-  weakPasswordProduction: `The crewflow_owner password inside ${URL_LABEL} is too weak for production: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters. As your admin set a strong one (openssl rand -hex 32; ALTER ROLE crewflow_owner PASSWORD ...) and put it in ${URL_LABEL}, or set ${ADMIN_URL_LABEL} so db-setup sets it. Refusing.`,
+  weakPasswordProduction: `The crewflow_owner password inside ${URL_LABEL} is too weak for production: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters. As your admin, set a strong one (openssl rand -hex 32) with the SQL db-setup prints below (never a top-level ALTER ROLE ... PASSWORD, which a server log can quote) and put it in ${URL_LABEL}, or set ${ADMIN_URL_LABEL} so db-setup sets it. Refusing.`,
 });
 
 /** Production, fail closed: NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says production (trimmed, any case). Same rule as runtime-db-config.ts. */

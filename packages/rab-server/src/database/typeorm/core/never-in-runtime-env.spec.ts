@@ -46,6 +46,7 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
       'DB_TARGET',
       'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
       'PG_ADMIN_URL',
+      'PG_ADMIN_DIRECT_URL',
       'CREWFLOW_OPS_RUN',
       'PG_OPS_APP_DATABASE_URL',
       'CREWFLOW_OPS_ACTOR_SOURCE',
@@ -183,7 +184,8 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     const url = 'postgresql://postgres:S3cret-ADMIN-do-not-print@db:5432/crewflow?sslmode=verify-full';
     const workerSource = fs.readFileSync(path.join(DOCKER, 'worker-start.sh'), 'utf8');
     const workerLoop = /^for name in ([^;]+); do/m.exec(workerSource)?.[1]?.trim().split(/\s+/) ?? [];
-    for (const name of ['PG_ADMIN_URL', 'PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+    // Security review F2 of PR #259: PG_ADMIN_DIRECT_URL (the direct address of the admin login) under the same rule.
+    for (const name of ['PG_ADMIN_URL', 'PG_ADMIN_DIRECT_URL', 'PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
       for (const processName of ['api', 'worker', 'provisioner'] as const) {
         expect(forbiddenRuntimeEnvNames(processName)).toContain(name);
         const refusal = runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', [name]: url }, processName);

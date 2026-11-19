@@ -640,11 +640,27 @@ for (const [label, env, entry, pattern] of [
   ['a bundled crewflow_owner password with a character outside A-Z a-z 0-9 _ -', { ...BUNDLED, PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}.x@db:5432/crewflow?sslmode=verify-full` }, 'db-setup.sh', /PG_DATABASE_APP_PASSWORD must be 32\+ characters/],
   ['CREWFLOW_BUNDLED_DB=0 (mode c) with a PG_DATABASE_URL still on host db', { ...MODE_C, PG_DATABASE_URL: RUNTIME_URL }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) but PG_DATABASE_URL still names the bundled host db/],
   ['CREWFLOW_BUNDLED_DB=0 (mode b) with a PG_DATABASE_URL still on host db', { ...MODE_B, PG_DATABASE_URL: RUNTIME_URL }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) but PG_DATABASE_URL still names the bundled host db/],
+  // Owner decision 2026-11-19 / security review F6 of #259: the URL compose built from PG_DATABASE_APP_PASSWORD and
+  // PG_DATABASE_HOST (set) is checked at run time; PG_ADMIN_DIRECT_URL and PG_DATABASE_SESSION_URL login rules.
+  ['a built URL with a short password', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: 'postgresql://crewflow_owner:short0123@db-direct.example:25060/d?sslmode=verify-full' }, 'db-setup.sh', /the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST/],
+  ['a built URL whose host carries a brace', { ...MODE_B, PG_DATABASE_HOST: 'db{x}', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db{x}:25060/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port is not digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25x/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port has more than 5 digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:250600/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port smuggles its own query (PG_DATABASE_PORT=5432/x?sslmode=disable&y=)', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '5432/x?sslmode=disable&y=', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:5432/x?sslmode=disable&y=/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['PG_ADMIN_DIRECT_URL without PG_ADMIN_URL', { ...MODE_C, PG_ADMIN_DIRECT_URL: EXT_ADMIN }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL/],
+  ['a PG_ADMIN_DIRECT_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_DIRECT_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL logs in as crewflow_owner/],
+  ['a PG_DATABASE_SESSION_URL that is not crewflow_owner', { ...MODE_B, PG_DATABASE_SESSION_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_SESSION_URL does not log in as crewflow_owner/],
 ]) {
   r = run(`setup-refuse-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry });
   check(`14g db-setup.sh refuses ${label} (64) before the child runs; nothing is printed of the value`, r.code === 64 && pattern.test(r.out) && !boot(r.out) &&
     !r.out.includes('y'.repeat(64)) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
 }
+// Re-review N3 of #259: a well-formed built URL (exactly /<name>?sslmode=verify-full after the port) still passes.
+r = run('setup-built-ok', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
+check('14g2 db-setup.sh accepts a well-formed built URL (the child runs)', r.code === 0 && !/is malformed/.test(r.out) && !!boot(r.out), r.out);
+// #257 + #259 combined (OpenShip): PG_ADMIN_URL with sslmode=require and the built crewflow_owner URL reach the child.
+r = run('setup-admin-require', { ...MODE_B, PG_ADMIN_URL: EXT_ADMIN.replace('verify-full', 'require'), PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
+check('14g3 db-setup.sh accepts PG_ADMIN_URL with sslmode=require (the child runs)', r.code === 0 && !!boot(r.out), r.out);
 for (const [label, env, want] of [
   ['mode b, admin on host db, CA unset -> the bundled CA', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL }, DB_CA],
   ['mode b, admin on host db, CA set -> kept', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL, PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],

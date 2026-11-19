@@ -58,7 +58,7 @@ fi
 # one-shot db-setup service (never-in-runtime-env.ts; the in-process guard refuses it as well), and so do its retired name
 # and db-setup's bundled-db superuser URL. The compose files pin PG_ADMIN_URL to "" here (owner decision L-2): empty is
 # allowed, any value refused.
-for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
+for name in PG_ADMIN_URL PG_ADMIN_DIRECT_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the worker service: it is a database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The Worker connects only as crewflow_owner. Value not shown."; fi
 done
@@ -90,7 +90,7 @@ if [ "${NODE_ENV:-}" != test ] && [ -n "${CREWFLOW_TEST_SEARCH_PATH_TRAP:-}" ]; 
 fi
 
 if [ -z "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode=verify-full).'
+  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode require, verify-ca or verify-full (all verified fully)).'
 fi
 case "$PG_DATABASE_URL" in
   *://crewflow_owner:@*)
