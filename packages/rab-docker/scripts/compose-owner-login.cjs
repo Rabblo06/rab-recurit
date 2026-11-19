@@ -32,9 +32,11 @@
  *     target volume read-only. compose.env's PG_ADMIN_URL may be any login but crewflow_owner or a former separated one, its
  *     PG_DATABASE_URL only crewflow_owner (any other login: "renamed to PG_ADMIN_URL"), never both; verify-full, a direct
  *     host, with a password; PG_DATABASE_PASSWORD required exactly while the bundled db runs (dbSettingsProblems). db-setup has
- *     exactly its shape (same image, entrypoint ./db-setup.sh, restart "no", no port, no profile, the H1-H6 hardening,
- *     depends_on a healthy db only, the CA read-only and the target volume writable) and rab-api waits for it
- *     (service_completed_successfully). No service carries any other database URL — no migrator, provisioner,
+ *     exactly its shape (same image, started through the wait-for-db wrapper (db-setup-wait.cjs: the block of
+ *     rab/db-setup.sh, then exec ./db-setup.sh; owner instruction 2026-11-18, Twenty's Helm wait-for-db), restart "no",
+ *     no port, no profile, the H1-H6 hardening, NO depends_on (with CREWFLOW_BUNDLED_DB=0 there is no db container),
+ *     CREWFLOW_DB_WAIT_SECONDS committed as ${CREWFLOW_DB_WAIT_SECONDS:-300}, the CA read-only and the target volume
+ *     writable) and rab-api waits for it (service_completed_successfully) and never for db. No service carries any other database URL — no migrator, provisioner,
  *     worker, ops, replica, posture, drift or test URL, no legacy DATABASE_URL* name, no libpq PG* variable, no postgres://
  *     value under another key; no CREWFLOW_DB_MODE (there is no mode switch); nothing from a separated-mode env file
  *     (.env.migrate, the retired .env.ops, per-service staging files) reaches any service;
@@ -74,7 +76,7 @@
  *     a health check, its two named volumes, POSTGRES_PASSWORD exactly ${PG_DATABASE_PASSWORD:-} (T-2; the entrypoint refuses
  *     an empty one before it touches the volume: required only while it runs) and no
  *     POSTGRES_PASSWORD_FILE / trust / database URL, TLS on with the certificate it makes itself (verify-full kept), the
- *     superuser never named crewflow_owner; rab-api waits for it healthy; rab-api and rab-worker mount only its CA volume,
+ *     superuser never named crewflow_owner; nothing depends on it (db-setup waits for it itself); rab-api and rab-worker mount only its CA volume,
  *     read-only; PG_DATABASE_PASSWORD reaches no container (only db's POSTGRES_PASSWORD and db-setup's bundled URL hold it).
  *     Exactly one db replica (deploy.replicas, never `scale`); 0 only in the -no-db combinations, i.e. compose.env's
  *     CREWFLOW_BUNDLED_DB=0 with PG_ADMIN_URL or PG_DATABASE_URL set (Twenty's Helm db.enabled=false; the env-file lint
@@ -88,6 +90,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { pgCaPemProblem } = require('./pg-ca-pem.cjs');
+const { dbSetupStartProblems, waitSecondsProblem, WAIT_SECONDS_KEY, WAIT_SECONDS_DEFAULT } = require('./db-setup-wait.cjs');
 
 const DOCKER_DIR = path.resolve(__dirname, '..');
 const FILES = Object.freeze({
@@ -535,7 +538,9 @@ function adminUrlPlacementProblems(rel, text) {
     if (!inSetup && /\bPG_ADMIN_URL\b/.test(line) && !(top === 'services' && PIN_SERVICES.includes(service) && PIN.test(line))) {
       problems.push(`${rel}:${i + 1}: ${ADMIN_URL_KEY} in ${where} (only the one-shot db-setup service may receive it; rab-api / rab-worker only pin it to "")`);
     }
-    if (line.includes('${PG_ADMIN_URL')) {
+    // `$$` is Compose's escape for a literal `$` (db-setup's wait-for-db wrapper reads the variable in its own shell): only
+    // an unescaped `${PG_ADMIN_URL...}` is an interpolation.
+    if (line.split('$$').join('').includes('${PG_ADMIN_URL')) {
       if (!inSetup) problems.push(`${rel}:${i + 1}: \${PG_ADMIN_URL...} interpolated in ${where} (db-setup only)`);
       interpolations += 1;
     }
@@ -823,7 +828,12 @@ function bundledDbProblems(services, model, p, { replicas: wantReplicas = 1, exp
   for (const target of Object.keys(DB_VOLUMES)) if (!(db.volumes ?? []).some((v) => v.type === 'volume' && v.target === target)) p(`${DB_SERVICE}: named volume ${DB_VOLUMES[target]} at ${target} is missing`);
   const hc = (db.healthcheck?.test ?? []).map(String).join(' ');
   if (!/pg_isready/.test(hc) || !/-h localhost/.test(hc)) p(`${DB_SERVICE}: health check is not pg_isready over TCP (the first-start init server is socket-only)`);
-  if (services['rab-api'] && services['rab-api'].depends_on?.[DB_SERVICE]?.condition !== 'service_healthy') p(`rab-api: does not wait for a healthy ${DB_SERVICE}`);
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): nothing depends on db (dbSetupStartProblems refuses
+  // rab-api -> db; db-setup waits for the database itself).
+  for (const [name, svc] of Object.entries(services)) {
+    const deps = svc?.depends_on ?? {};
+    if ((Array.isArray(deps) ? deps : Object.keys(deps)).includes(DB_SERVICE)) p(`${name}: depends on ${DB_SERVICE} (with CREWFLOW_BUNDLED_DB=0 it has no container; db-setup waits for the database itself)`);
+  }
   for (const name of ['rab-api', 'rab-worker']) {
     if (!services[name]) continue;
     if (!Object.keys(services[name].networks ?? {}).includes('crewflow-db')) p(`${name}: is not on the crewflow-db network`);
@@ -852,7 +862,9 @@ function dbSetupProblems(services, p, want) {
   hardeningProblems(DB_SETUP_SERVICE, s, p, { longRunning: false });
   if (Array.isArray(s.profiles) && s.profiles.length) p(`${DB_SETUP_SERVICE}: has profiles (it would not run with the stack, and rab-api would wait for it in vain)`);
   if (s.image !== api.image) p(`${DB_SETUP_SERVICE}: image differs from rab-api (O2: one image; the same bootstrap child)`);
-  if (JSON.stringify(s.entrypoint ?? null) !== JSON.stringify(['./db-setup.sh'])) p(`${DB_SETUP_SERVICE}: entrypoint is not exactly ./db-setup.sh`);
+  // Owner instruction 2026-11-18: the wait-for-db wrapper (the block of rab/db-setup.sh, then exec ./db-setup.sh), no
+  // depends_on, CREWFLOW_DB_WAIT_SECONDS as committed (rendered from sentinel env files that do not set it: the default).
+  for (const msg of dbSetupStartProblems(services, { requireWait: true, renderedWait: WAIT_SECONDS_DEFAULT })) p(msg);
   if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${DB_SETUP_SERVICE}: has a command (db-setup.sh takes none)`);
   if (s.init === true) p(`${DB_SETUP_SERVICE}: init: true (no compose init: the script runs as PID 1 and exits)`);
   if (s.restart !== 'no') p(`${DB_SETUP_SERVICE}: restart is "${s.restart ?? ''}", expected "no" (a one-shot: it exits after the setup)`);
@@ -864,8 +876,6 @@ function dbSetupProblems(services, p, want) {
   const vols = s.volumes ?? [];
   if (!vols.some((v) => v.type === 'volume' && v.source === DB_CA_VOLUME && v.target === DB_CA_TARGET && v.read_only === true)) p(`${DB_SETUP_SERVICE}: does not mount the bundled db's CA read-only at ${DB_CA_TARGET}`);
   if (!vols.some((v) => v.type === 'volume' && v.source === DB_TARGET_VOLUME && v.target === DB_TARGET_DIR && v.read_only !== true)) p(`${DB_SETUP_SERVICE}: does not mount the target volume writable at ${DB_TARGET_DIR}`);
-  const deps = s.depends_on ?? {};
-  if (JSON.stringify(Object.keys(deps)) !== JSON.stringify([DB_SERVICE]) || deps[DB_SERVICE]?.condition !== 'service_healthy') p(`${DB_SETUP_SERVICE}: depends_on must be exactly a healthy ${DB_SERVICE}`);
   const env = s.environment ?? {};
   const expected = want && typeof want === 'object' ? want : {};
   for (const key of DB_SETUP_DB_KEYS) {
@@ -1174,6 +1184,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (why) problems.push(`${key}: ${why}`);
     if (kind !== 'compose' && key === ADMIN_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only, and rab-api / rab-worker refuse it (an env file here would hand the admin URL to them)`);
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
+    if (kind !== 'compose' && key === WAIT_SECONDS_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup's committed \${${WAIT_SECONDS_KEY}:-300} would silently override a value here`);
+    if (kind === 'compose' && key === WAIT_SECONDS_KEY && waitSecondsProblem(value)) problems.push(waitSecondsProblem(value));
     if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only (its committed \${PG_DATABASE_URL:-...} would override a value here), and rab-api / rab-worker refuse it`);
     if (kind === 'database' && !why && key !== URL_KEY && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
     if (kind === 'runtime' && DATABASE_ENV_ONLY.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
@@ -1264,7 +1276,9 @@ function lintComposeText(rel, text) {
   // PR #125 option 2: ${PG_DATABASE_URL...} is interpolated in exactly one place, db-setup's environment (never on rab-api /
   // rab-worker, which pin the literal empty string). A second interpolation would hand the one database setting to another
   // service.
-  const urlInterpolations = text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_DATABASE_URL')).length;
+  // `$$` is Compose's escape for a literal `$` (db-setup's wait-for-db wrapper reads the variable in its own shell): only
+  // an unescaped `${PG_DATABASE_URL...}` is an interpolation.
+  const urlInterpolations = text.split('\n').filter((l) => !/^\s*#/.test(l) && l.split('$$').join('').includes('${PG_DATABASE_URL')).length;
   if (urlInterpolations > 1) problems.push(`${rel}: interpolates \${PG_DATABASE_URL...} ${urlInterpolations} times (option 2: only db-setup's one line)`);
   // Owner decision 2026-11-17: no compose `:?` on PG_DATABASE_PASSWORD (it would demand it with your own database too);
   // db, db-setup and the lints require it exactly while the bundled db runs.

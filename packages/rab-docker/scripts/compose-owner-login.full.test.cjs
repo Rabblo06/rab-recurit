@@ -127,7 +127,17 @@ test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip },
       [(s) => { s[SETUP].restart = 'unless-stopped'; }, /db-setup: restart is "unless-stopped", expected "no"/],
       [(s) => { s[SETUP].profiles = ['setup']; }, /db-setup: has profiles/],
       [(s) => { s[SETUP].ports = [{ target: 5432, published: '5432', host_ip: '127.0.0.1' }]; }, /db-setup: publishes a port/],
-      [(s) => { s[SETUP].entrypoint = ['./api-prestart.sh']; }, /db-setup: entrypoint is not exactly \.\/db-setup\.sh/],
+      [(s) => { s[SETUP].entrypoint = ['./api-prestart.sh']; }, /db-setup: entrypoint is neither exactly \.\/db-setup\.sh nor exactly the wait-for-db wrapper/],
+      // Owner instruction 2026-11-18: the wait-for-db wrapper is required here (the plain start would need depends_on: db).
+      [(s) => { s[SETUP].entrypoint = ['./db-setup.sh']; }, /db-setup: must start through the wait-for-db wrapper/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace('exec ./db-setup.sh', 'exec ./api-prestart.sh')); }, /db-setup: entrypoint is neither/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace(/
+crewflow_wait_for_db
+/, '
+')); }, /db-setup: entrypoint is neither/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace('"57P03"', '"57P04"')); }, /db-setup: entrypoint is neither/],
+      [(s) => { delete s[SETUP].environment.CREWFLOW_DB_WAIT_SECONDS; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is missing/],
+      [(s) => { s[SETUP].environment.CREWFLOW_DB_WAIT_SECONDS = '0'; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed/],
       [(s) => { s[SETUP].command = ['sh']; }, /db-setup: has a command/],
       [(s) => { s[SETUP].init = true; }, /db-setup: init: true/],
       [(s) => { s[SETUP].image = s[SETUP].image.replace(/sha256:0/, 'sha256:1'); }, /db-setup: image differs from rab-api/],
@@ -137,9 +147,9 @@ test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip },
       [(s) => { s[SETUP].security_opt = []; }, /db-setup: security_opt no-new-privileges:true is missing/],
       [(s) => { delete s[SETUP].pids_limit; }, /db-setup: pids_limit is missing/],
       [(s) => { delete s[SETUP].mem_limit; }, /db-setup: mem_limit is missing/],
-      [(s) => { delete s[SETUP].depends_on; }, /db-setup: depends_on must be exactly a healthy db/],
-      [(s) => { s[SETUP].depends_on.db.condition = 'service_started'; }, /db-setup: depends_on must be exactly a healthy db/],
-      [(s) => { s[SETUP].depends_on['rab-redis'] = { condition: 'service_healthy' }; }, /db-setup: depends_on must be exactly a healthy db/],
+      [(s) => { s[SETUP].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(db\)/],
+      [(s) => { s[SETUP].depends_on = { db: { condition: 'service_started', required: true } }; }, /db-setup: has depends_on \(db\)/],
+      [(s) => { s[SETUP].depends_on = { 'rab-redis': { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(rab-redis\)/],
       [(s) => { s[SETUP].volumes = s[SETUP].volumes.filter((v) => v.source !== gate.DB_TARGET_VOLUME); }, /db-setup: does not mount the target volume writable/],
       [(s) => { for (const v of s[SETUP].volumes) if (v.source === gate.DB_TARGET_VOLUME) v.read_only = true; }, /db-setup: the target volume must be writable here/],
       [(s) => { delete s['rab-api'].depends_on[SETUP]; }, /rab-api: does not wait for db-setup/],
@@ -408,23 +418,24 @@ test('staging: own project name and storage prefix', { skip }, () => {
   assertRefused(problemsAfter('staging', (s) => { s['rab-api'].environment.STORAGE_KEY_PREFIX = 'production'; }), /STORAGE_KEY_PREFIX is not staging/);
 });
 
-test('bundled database under the full contract: every combination has db; rab-api waits for it healthy', { skip }, () => {
+test('bundled database under the full contract: every combination has db; nothing depends on it', { skip }, () => {
   for (const c of [REL, EXT, 'staging']) {
     assertRefused(problemsAfter(c, (s) => { delete s.db; }), /services are .*expected/);
-    assertRefused(problemsAfter(c, (s) => { s['rab-api'].depends_on.db.condition = 'service_started'; }), /rab-api: does not wait for a healthy db/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-api'].depends_on.db = { condition: 'service_healthy', required: true }; }), /rab-api: depends on db/);
     assertRefused(problemsAfter(c, (s) => { s['rab-postgres'] = structuredClone(s.db); }), /services are .*expected/);
   }
 });
 
 // Twenty's Helm db.enabled: CREWFLOW_BUNDLED_DB (compose.env) is db's replica count, 1 by default, 0 only with your own
-// database. The dependency edges stay committed (Compose skips the wait on a 0-replica service).
-test('bundled db switch: one replica by default; 0 only with CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL; the edges stay', { skip }, () => {
+// database. No service depends on db (owner instruction 2026-11-18: OpenShip does not skip a 0-replica dependency, it
+// skips the dependent); db-setup waits for the database itself, rab-api waits for db-setup.
+test('bundled db switch: one replica by default; 0 only with CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL; no edge to db', { skip }, () => {
   for (const c of [DEF, EXT, PT, 'staging']) assert.equal(fresh(c).services.db.deploy.replicas, 1, c);
   for (const c of ['external-no-db', 'pass-through-no-db']) {
     const m = fresh(c);
     assert.equal(m.services.db.deploy.replicas, 0, c);
-    assert.equal(m.services[SETUP].depends_on.db.condition, 'service_healthy', c);
-    assert.equal(m.services['rab-api'].depends_on.db.condition, 'service_healthy', c);
+    assert.equal(m.services[SETUP].depends_on, undefined, c);
+    assert.deepEqual(Object.keys(m.services['rab-api'].depends_on).sort(), [SETUP, 'rab-redis'], c);
     assert.equal(m.services['rab-api'].depends_on[SETUP].condition, 'service_completed_successfully', c);
     const key = c === 'external-no-db' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL';
     assert.equal(m.services[SETUP].environment[key], c === 'external-no-db' ? gate.SENTINEL_ADMIN_URL : gate.SENTINEL_URL, c);

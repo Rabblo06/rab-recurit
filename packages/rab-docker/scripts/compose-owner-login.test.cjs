@@ -615,7 +615,7 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { s.db.volumes.push({ type: 'bind', source: '/x/01-crewflow-owner.sql', target: '/docker-entrypoint-initdb.d/01.sql', read_only: true }); }), /mounts an init script/);
 });
 
-test('DENIAL bundled db: internal network only, its own volumes, rab-api waits for it, the app mounts only its CA read-only', { skip }, () => {
+test('DENIAL bundled db: internal network only, its own volumes, nothing depends on it, the app mounts only its CA read-only', { skip }, () => {
   assertRefused(problemsAfter((s) => { s.db.networks.default = null; }), /internal crewflow-db network only/);
   assertRefused(problemsAfter((s, m) => { m.networks['crewflow-db'].internal = false; }), /crewflow-db is not internal/);
   assertRefused(problemsAfter((s) => { s.db.volumes = s.db.volumes.filter((v) => v.target !== '/var/lib/postgresql'); }), /crewflow-db-data at \/var\/lib\/postgresql is missing/);
@@ -623,7 +623,11 @@ test('DENIAL bundled db: internal network only, its own volumes, rab-api waits f
   assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/tmp').source = 'other'; }), /db: unexpected named volume/);
   // The pre-fix layout (data on /var/lib/postgresql/data: root-owned on postgres:18, so the db cannot start there).
   assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/lib/postgresql').target = '/var/lib/postgresql/data'; }), /db: unexpected named volume at \/var\/lib\/postgresql\/data/);
-  assertRefused(problemsAfter((s) => { delete s['rab-api'].depends_on.db; }), /rab-api: does not wait for a healthy db/);
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): nothing depends on db (with CREWFLOW_BUNDLED_DB=0 it has no
+  // container, and OpenShip then skipped the dependent instead of starting it); db-setup waits for the database itself.
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {
+    assertRefused(problemsAfter((s) => { s[svc].depends_on = { ...(s[svc].depends_on ?? {}), db: { condition: 'service_healthy', required: true } }; }), new RegExp(`${svc}: depends on db`));
+  }
   for (const svc of ['rab-api', 'rab-worker']) {
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
     assertRefused(problemsAfter((s) => { s[svc].volumes.find((v) => v.source === 'crewflow-db-ca').read_only = false; }), new RegExp(`${svc}: (the bundled db's CA volume must be mounted read-only|does not mount)`));
@@ -802,10 +806,11 @@ test('ADMIN_URL_PLACEMENT (owner requirement 2026-11-17): every committed compos
     assert.ok(files.some((f) => f.endsWith(path.join('rab-docker', rel))), rel);
   }
   for (const file of files) assert.deepEqual(gate.adminUrlPlacementProblems(file, fs.readFileSync(file, 'utf8')), [], file);
-  // The deploy files do interpolate it, on db-setup, exactly once.
+  // The deploy files do interpolate it, on db-setup, exactly once (`$$` is Compose's literal `$`: db-setup's wait-for-db
+  // wrapper reads the variable in its own shell, which is not an interpolation).
   for (const rel of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
     const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
-    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_ADMIN_URL')).length, 1, rel);
+    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.split('$$').join('').includes('${PG_ADMIN_URL')).length, 1, rel);
   }
 });
 
@@ -813,6 +818,9 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   const setup = 'services:\n  db-setup:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n';
   const pinned = `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: ""\n  rab-worker:\n    environment:\n      PG_ADMIN_URL: ''\n`;
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', setup), []);
+  // An escaped `$${PG_ADMIN_URL}` (a shell reference inside db-setup) is not an interpolation; an unescaped second one is.
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', `${setup}    entrypoint: ["/bin/sh", "-c", "echo ` + '$${PG_ADMIN_URL:-}"]\n'), []);
+  assert.match(gate.adminUrlPlacementProblems('x.yml', `${setup}    entrypoint: ["/bin/sh", "-c", "echo ` + '$$${PG_ADMIN_URL:-}"]\n').join('\n'), /interpolates \$\{PG_ADMIN_URL\.\.\.\} 2 times/);
   // Owner decision L-2: the exact empty pin on rab-api / rab-worker is the one allowed occurrence outside db-setup.
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', pinned), []);
   // ... and on the dev / QA stacks' server / worker (follow-up of the review: the same pin there).
