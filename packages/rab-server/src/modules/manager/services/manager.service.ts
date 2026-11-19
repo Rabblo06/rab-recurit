@@ -38,6 +38,7 @@ import { ManagerProfile } from '../entities/manager-profile.entity';
 import { ManagerVenue } from '../entities/manager-venue.entity';
 import { EmailChangeRequestResult, EmailChangeService } from '../../identity/services/email-change.service';
 import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
+import { assertPlatformAdminTargetAllowed } from '../../../engine/core-modules/platform-admin/platform-admin-target-guard';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
 const MANAGER_SORT_COLUMNS: Record<string, string> = {
@@ -894,6 +895,9 @@ export class ManagerService {
     const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
     if (!profile?.user) throw new NotFoundException('Manager not found.');
     await lockLiveUser(manager, profile.userId, 'Manager not found.');
+    // Security review of #264, F2: a pending platform admin's invitation is never resent, re-pointed or cancelled from the
+    // tenant side (404, before the CEO rule's 403 can confirm the account). A platform-admin actor keeps the Admin Panel path.
+    await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Manager not found.');
     await this.assertCeoMutationAllowed(manager, ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1192,6 +1196,7 @@ export class ManagerService {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Manager not found.'); // #264 F2
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
