@@ -1,0 +1,21 @@
+{
+  "check": "static",
+  "data": {
+    "floors": {
+      "ALPINE_BRANCH": "v3.24",
+      "MIN_LIBEXPAT_VERSION": "2.10.0-r0",
+      "MIN_NODE_VERSION": "24.22.3"
+    },
+    "npm_floors": []
+  },
+  "fails": [],
+  "holds": [],
+  "infos": [
+    "packages/rab-docker/rab/Dockerfile: 6 stage(s); every external base image pinned by digest",
+    "floors: node>=24.22.3 libexpat>=2.10.0-r0 alpine=v3.24 npm=none",
+    "0 valid owner risk decision(s) in the register",
+    "0 scanner-blind advisory watch-list entries"
+  ],
+  "mode": "release",
+  "status": "PASS"
+}
