@@ -25,9 +25,12 @@ import { Client, ClientConfig } from 'pg';
  *                                                         the per-session startup settings, now per transaction;
  *       SET LOCAL search_path TO DEFAULT                  drops a session-level search_path left on the backend;
  *       DO: current_user = session_user, else RAISE 42501 (fail closed: the transaction is aborted, so the caller's
- *           statement fails and nothing runs); then every `rab.*` setting present on the backend (the RLS GUCs) is set to
- *           '' transaction-locally, so a session-level `set_config('rab.organisation_id', ..., false)` left by an earlier
- *           client never reaches this transaction. The tenant binding (TenantContextService) then sets its own values.
+ *           statement fails and nothing runs); then every RLS GUC (RLS_GUC_NAMES: each `rab.*` name a policy or definer
+ *           reads; a spec scans the source so a new one cannot be missed) is set to '' transaction-locally, so a session-level
+ *           `set_config('rab.organisation_id', ..., false)` left by an earlier client never reaches this transaction. The
+ *           list is explicit because PostgreSQL does NOT list placeholder (custom, never-defined) settings in pg_settings:
+ *           the first version iterated pg_settings and the PgBouncer test caught the poisoned rab.organisation_id leaking
+ *           through. The tenant binding (TenantContextService) then sets its own values.
  *   - a pooler pins one backend for the whole transaction, so the preamble and the caller's statements share it.
  *
  * REFUSED (fail closed, an Error before anything is sent): a transaction-control statement combined with others in one
@@ -55,6 +58,26 @@ export const TRANSACTION_SCOPE_CONFIG_KEY = 'crewflowTransactionScope';
 
 export type TransactionScopedClientConfig = ClientConfig & { [TRANSACTION_SCOPE_CONFIG_KEY]?: TransactionScopeSettings };
 
+/**
+ * Every `rab.*` setting an RLS policy, a definer function or the tenant binding reads. The preamble clears each one
+ * transaction-locally. transaction-scoped-client.spec.ts scans the server source for `rab.<name>` and fails when one is
+ * missing here. Constants only (they are interpolated into the preamble).
+ */
+export const RLS_GUC_NAMES = Object.freeze([
+  'rab.organisation_id',
+  'rab.workspace_id',
+  'rab.user_id',
+  'rab.role',
+  'rab.actor_type',
+  'rab.team_shift_id',
+  'rab.team_staff_id',
+  'rab.admin_scope',
+  'rab.upgrade_scope',
+  'rab.ai_retention',
+  'rab.ai_synthetic_marker',
+  'rab.ai_usage_retention',
+] as const);
+
 /** SQLSTATE of the preamble's role assertion (insufficient_privilege): the transaction is aborted, nothing else runs. */
 export const TRANSACTION_SCOPE_ROLE_SQLSTATE = '42501';
 export const TRANSACTION_SCOPE_ROLE_MESSAGE = 'crewflow pool safety: the session still acts as another role after RESET ROLE; refusing the transaction';
@@ -66,6 +89,7 @@ function integerMs(name: string, value: number): number {
 
 /** The preamble (exported for the exact-text test). Integers and constants only: nothing request-derived ever reaches it. */
 export function transactionScopePreambleSql(settings: TransactionScopeSettings): string {
+  for (const name of RLS_GUC_NAMES) if (!/^rab\.[a-z_]+$/.test(name)) throw new Error('RLS_GUC_NAMES holds a name that is not rab.<lowercase>');
   const statement = integerMs('statementTimeoutMs', settings.statementTimeoutMs);
   const idle = integerMs('idleInTransactionTimeoutMs', settings.idleInTransactionTimeoutMs);
   return [
@@ -77,7 +101,7 @@ export function transactionScopePreambleSql(settings: TransactionScopeSettings):
     `DO $crewflow_scope$ DECLARE s text; BEGIN ` +
       `IF current_user OPERATOR(pg_catalog.<>) session_user THEN ` +
       `RAISE EXCEPTION USING ERRCODE = '${TRANSACTION_SCOPE_ROLE_SQLSTATE}', MESSAGE = '${TRANSACTION_SCOPE_ROLE_MESSAGE}'; END IF; ` +
-      `FOR s IN SELECT name FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.~~) 'rab.%' LOOP ` +
+      `FOREACH s IN ARRAY ARRAY[${RLS_GUC_NAMES.map((n) => `'${n}'`).join(', ')}]::text[] LOOP ` +
       `PERFORM pg_catalog.set_config(s, '', true); END LOOP; END $crewflow_scope$`,
   ].join('; ');
 }

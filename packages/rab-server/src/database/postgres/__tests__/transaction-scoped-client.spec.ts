@@ -1,8 +1,11 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { Client } from 'pg';
 
 import {
   classifyStatement,
   isTransactionScopedPool,
+  RLS_GUC_NAMES,
   TransactionScopedClient,
   TransactionScopedClientError,
   transactionScopePreambleSql,
@@ -144,7 +147,9 @@ describe('transaction-scoped client: the preamble and the classifier', () => {
   it('the preamble: RESET ROLE, the per-transaction settings, search_path, the role assertion and the rab.* neutralisation, constants only', () => {
     expect(PREAMBLE.startsWith('RESET ROLE; SET LOCAL statement_timeout = 30000; SET LOCAL idle_in_transaction_session_timeout = 60000; SET LOCAL search_path TO DEFAULT; DO $crewflow_scope$')).toBe(true);
     expect(PREAMBLE).toContain("IF current_user OPERATOR(pg_catalog.<>) session_user THEN RAISE EXCEPTION USING ERRCODE = '42501'");
-    expect(PREAMBLE).toContain("FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.~~) 'rab.%'");
+    // Placeholder settings are not in pg_settings, so the RLS GUCs are cleared from an explicit list (the PgBouncer test).
+    expect(PREAMBLE).toContain(`FOREACH s IN ARRAY ARRAY['rab.organisation_id', 'rab.workspace_id', 'rab.user_id', 'rab.role'`);
+    expect(PREAMBLE).not.toContain('pg_settings');
     expect(PREAMBLE).toContain("PERFORM pg_catalog.set_config(s, '', true)");
     expect(transactionScopePreambleSql({ ...SETTINGS, readOnly: true })).toContain('SET LOCAL transaction_read_only = on; SET LOCAL search_path TO DEFAULT');
     expect(transactionScopePreambleSql({ statementTimeoutMs: 0, idleInTransactionTimeoutMs: 0, readOnly: false })).toContain('SET LOCAL statement_timeout = 0;');
@@ -182,5 +187,27 @@ describe('transaction-scoped client: the preamble and the classifier', () => {
     expect(isTransactionScopedPool({ options: { Client } })).toBe(false);
     expect(isTransactionScopedPool({ options: {} })).toBe(false);
     expect(isTransactionScopedPool(undefined)).toBe(false);
+  });
+});
+
+describe('transaction-scoped client: the RLS GUC list is complete', () => {
+  it('every rab.<name> setting the server source reads or sets is cleared by the preamble', () => {
+    const root = path.resolve(__dirname, '../../..');
+    const found = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === 'node_modules' || entry.name === '__tests__') continue;
+          walk(full);
+        } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.spec.ts')) {
+          const text = fs.readFileSync(full, 'utf8');
+          for (const m of text.matchAll(/(?:current_setting|set_config)\(\s*'(rab\.[a-z_]+)'/g)) found.add(m[1]!);
+        }
+      }
+    };
+    walk(root);
+    expect(found.size).toBeGreaterThan(5);
+    expect([...found].filter((n) => !(RLS_GUC_NAMES as readonly string[]).includes(n)).sort()).toEqual([]);
   });
 });

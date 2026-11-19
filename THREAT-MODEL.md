@@ -9586,7 +9586,10 @@ Reversal:   a secret store mounted as a file per process (Docker secrets / Kuber
   inside a transaction whose FIRST statement is one fixed preamble (constants and integers only):
   `RESET ROLE; SET LOCAL statement_timeout = <ms>; SET LOCAL idle_in_transaction_session_timeout = <ms>; [SET LOCAL
   transaction_read_only = on;] SET LOCAL search_path TO DEFAULT; DO $crewflow_scope$ ... current_user <> session_user -> RAISE
-  42501; every rab.* setting present on the backend -> set_config(name, '', true) ... $crewflow_scope$`. A caller transaction
+  42501; each RLS GUC of the explicit list RLS_GUC_NAMES (12 rab.* names; a spec scans the source for new ones) ->
+  set_config(name, '', true) ... $crewflow_scope$`. Explicit, because PostgreSQL does not list placeholder settings in
+  pg_settings: the first version iterated pg_settings, and the PgBouncer test (locally and in CI) caught a poisoned
+  session rab.organisation_id leaking into a bare runtime statement. A caller transaction
   gets it right before its first real statement (after `SET TRANSACTION ...`); a statement outside a transaction is sent as
   `BEGIN; preamble; statement; COMMIT` and its result is handed out after COMMIT. So the session startup settings become
   per-transaction settings (A1: per transaction, not role defaults: no SQL, nothing leaks into migrations or ops sessions, any
