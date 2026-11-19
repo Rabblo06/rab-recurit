@@ -9,8 +9,10 @@ import { BOOT_FACTS_SQL } from './database-boot-gate-rules';
 import { buildPgSsl, isVerifyFullSsl } from '../postgres/pg-tls';
 import {
   DANGEROUS_PREDEFINED_ROLES,
+  DATABASE_OWNERSHIP_COLUMNS_SQL,
   OWNER_LOGIN_FACTS_SQL,
   OWNER_LOGIN_REACHABILITY_SQL,
+  OWNER_LOGIN_REACHABLE_ROLES,
   ownerLoginDatabaseOwnershipProblems,
   ownerLoginRolePostureProblems,
   ownerLoginInventoryProblems,
@@ -56,6 +58,26 @@ describe('owner-login posture: rule 2 (reachability, MEMBER semantics)', () => {
   it.each(['neon_superuser', 'rds_superuser', 'cloudsqlsuperuser', 'azure_pg_admin', 'supabase_admin'])('refuses the provider admin role %s', (role) => {
     expect(PROVIDER_ADMIN_ROLES).toContain(role);
     expect(ownerLoginReachabilityProblems(extra({ role })).join()).toMatch(/provider administrator role/);
+  });
+  // Security review L-2 (PR #257): closed world. Any reached role outside the layout is refused by name.
+  it('the reachable set is exactly the owner-login layout', () => {
+    expect([...OWNER_LOGIN_REACHABLE_ROLES].sort()).toEqual(['crewflow', 'crewflow_app', 'rab_app', 'rab_owner', 'rab_secure_owner']);
+  });
+  it.each(['vendor_admin', 'crewflow_worker', 'some_monitoring_role'])('refuses an unnamed, attribute-free reached role %s, naming it and what to revoke', (role) => {
+    const out = ownerLoginReachabilityProblems(extra({ role })).join('; ');
+    expect(out).toMatch(new RegExp(`role "${role}" is reachable from crewflow_owner \\(crewflow_owner>y>x\\); only rab_owner, rab_app, rab_secure_owner, crewflow, crewflow_app may be`));
+    expect(out).toMatch(new RegExp(`REVOKE "${role}" FROM`));
+  });
+  it('pg_database_owner (implicit, the database owner) is allowed only when database ownership is not refused', () => {
+    expect(ownerLoginReachabilityProblems(extra({ role: 'pg_database_owner', path: '(implicit)' }))).toEqual([]);
+    expect(ownerLoginReachabilityProblems(extra({ role: 'pg_database_owner', path: '(implicit)' }), { refuseDatabaseOwnership: true }).join()).toMatch(/role "pg_database_owner" is reachable/);
+  });
+  it('review I-3: a walk result without the login row is refused, never read as "reaches nothing"', () => {
+    expect(ownerLoginReachabilityProblems([]).join()).toMatch(/returned no row for the login itself/);
+    expect(ownerLoginReachabilityProblems(reach.filter((r) => !r.is_login)).join()).toMatch(/returned no row for the login itself/);
+  });
+  it.each(['pg_signal_autovacuum_worker', 'pg_monitor', 'pg_read_all_stats', 'pg_read_all_settings', 'pg_stat_scan_tables'])('names the added predefined role %s', (role) => {
+    expect(ownerLoginReachabilityProblems(extra({ role })).join()).toMatch(new RegExp(`predefined role "${role}"`));
   });
   it("the login's OWN CREATEROLE is not judged by the walk (its mark rule is assertCreateRoleGate)", () => {
     expect(ownerLoginReachabilityProblems(reach.map((r) => (r.is_login ? { ...r, createrole: true } : r)))).toEqual([]);
@@ -206,9 +228,11 @@ describe('owner-login posture: database ownership (owner decision 2026-11-19)', 
   });
   it('both fact queries read ownership with MEMBER semantics, and pg_database_owner', () => {
     for (const sql of [OWNER_LOGIN_FACTS_SQL, BOOT_FACTS_SQL]) {
-      expect(sql).toMatch(/d\.datdba = s\.oid/);
+      expect(sql).toMatch(/d\.datdba OPERATOR\(pg_catalog\.=\) s\.oid/);
+      // Review L-3: every comparison in the new columns names pg_catalog's operator.
+      expect(DATABASE_OWNERSHIP_COLUMNS_SQL).not.toMatch(/[^(.]= /);
       expect(sql).toMatch(/pg_has_role\(session_user, d\.datdba, 'MEMBER'\)/);
-      expect(sql).toMatch(/o\.rolname = 'pg_database_owner'/);
+      expect(sql).toMatch(/o\.rolname OPERATOR\(pg_catalog\.=\) 'pg_database_owner'/);
     }
   });
 });

@@ -68,9 +68,22 @@ export function startSecurityPostureMonitoring(input: {
     session: async () => {
       const runner = input.dataSource.createQueryRunner();
       await runner.connect();
+      // Security review L-3 (PR #257): the check reads catalogs only, inside ONE transaction whose search_path is pinned with
+      // SET LOCAL (a pooled application connection cannot take a startup option), so a planted ALTER ROLE / ALTER DATABASE
+      // search_path cannot shadow what it calls. Rolled back on release: nothing reaches the pool.
+      try {
+        await runner.startTransaction();
+        await runner.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog,pg_temp', true)`);
+      } catch (error) {
+        await runner.release().catch(() => undefined);
+        throw error;
+      }
       return {
         query: (sql: string, params?: unknown[]) => runner.query(sql, params) as Promise<Array<Record<string, unknown>>>,
-        release: () => runner.release(),
+        release: async () => {
+          await runner.rollbackTransaction().catch(() => undefined);
+          await runner.release();
+        },
       };
     },
   });

@@ -65,6 +65,13 @@ export interface PgConnectionRequest {
    * It does not change the application_name.
    */
   readOnly?: boolean;
+  /**
+   * Security review L-3 (PR #257): `-c search_path=pg_catalog,pg_temp` as a STARTUP option, for sessions that only read the
+   * catalogs to judge the database (the boot gates). A startup option takes precedence over a planted
+   * `ALTER ROLE ... SET search_path` / `ALTER DATABASE ... SET search_path`, so an object planted in another schema can never
+   * shadow what those queries call. Their SQL is fully schema-qualified anyway.
+   */
+  pinnedSearchPath?: boolean;
 }
 
 export interface PgPoolRequest extends PgConnectionRequest {
@@ -109,6 +116,9 @@ function applicationNameFor(resolved: ResolvedPgEnvironment, endpoint: PgEndpoin
   return parts.join('-').slice(0, 63);
 }
 
+/** The search_path a `pinnedSearchPath` session starts with (catalog first, the session's temp schema last, nothing else). */
+export const PG_PINNED_SEARCH_PATH = 'pg_catalog,pg_temp';
+
 /** libpq-style startup options. Exported for its unit test. */
 export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequest, dispatchNotify = false): string {
   const statement = assertTimeout('statementTimeoutMs', request.statementTimeoutMs ?? PG_RUNTIME_STATEMENT_TIMEOUT_MS);
@@ -121,6 +131,7 @@ export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequ
   if (readOnly) parts.push('-c default_transaction_read_only=on');
   // Phase D (E-1): see ResolvedPgEnvironment.dispatchNotify. Writable sessions only; absent (not 'off') otherwise.
   if (dispatchNotify && !readOnly) parts.push('-c crewflow.dispatch_notify=on');
+  if (request.pinnedSearchPath === true) parts.push(`-c search_path=${PG_PINNED_SEARCH_PATH}`);
   return parts.join(' ');
 }
 

@@ -22,6 +22,14 @@ export const DANGEROUS_PREDEFINED_ROLES: readonly string[] = Object.freeze([
   'pg_maintain',
   'pg_checkpoint',
   'pg_use_reserved_connections',
+  // Security review L-2 (PR #257): backend signalling to autovacuum workers (PG18), and the monitoring roles that read other
+  // sessions' queries, every setting and the statistics views. The reachability rule is closed-world anyway; naming them
+  // gives a clearer message.
+  'pg_signal_autovacuum_worker',
+  'pg_monitor',
+  'pg_read_all_stats',
+  'pg_read_all_settings',
+  'pg_stat_scan_tables',
 ]);
 
 /**

@@ -1,5 +1,7 @@
 import { Client } from 'pg';
 
+import { createPgClient } from '../postgres/create-pg-pool';
+import { resolvePgEnvironment } from '../postgres/pg-config';
 import { integrationTestDatabase } from '../typeorm/core/integration-test-database-gate';
 import { assertDatabaseOwnershipGate, BOOT_FACTS_SQL, DatabaseBootGateError, parseBootFacts } from './database-boot-gate-rules';
 import { OWNER_LOGIN_FACTS_SQL, ownerLoginRolePostureProblems } from './owner-login-posture';
@@ -81,6 +83,43 @@ suite('owner-login boot refusals (real PostgreSQL, as crewflow_owner)', () => {
         expect(message).toMatch(/ALTER DATABASE <database> OWNER TO <admin>/);
       },
     );
+  });
+
+  it('the healthy test database passes the PRODUCTION role posture (closed-world reachability, ownership on) as crewflow_owner', async () => {
+    expect(await ownerLoginRolePostureProblems(asOwner, { refuseDatabaseOwnership: true })).toEqual([]);
+  });
+
+  // Security review L-2 (PR #257): closed world; an attribute-free role nobody named is refused, by name.
+  it('DENIAL: vendor_admin granted to crewflow (INHERIT FALSE, SET FALSE) is refused, naming the role and the path', async () => {
+    await planted(['CREATE ROLE vendor_admin NOLOGIN', 'GRANT vendor_admin TO crewflow WITH INHERIT FALSE, SET FALSE'], async () => {
+      const out = (await ownerLoginRolePostureProblems(asOwner)).join('; ');
+      expect(out).toMatch(/role "vendor_admin" is reachable from crewflow_owner \(crewflow_owner>crewflow>vendor_admin\); only rab_owner, rab_app, rab_secure_owner, crewflow, crewflow_app may be/);
+      expect(out).toMatch(/REVOKE "vendor_admin" FROM/);
+    });
+  });
+
+  // Security review L-3 (PR #257): the boot-gate session's search_path is a STARTUP option, which a planted role setting
+  // cannot override. The plant is committed (a role setting applies only to new sessions) and reset in finally.
+  it('L-3: with ALTER ROLE crewflow_owner SET search_path = x, pg_catalog planted, the pinned session keeps pg_catalog,pg_temp and the posture passes', async () => {
+    const resolved = resolvePgEnvironment({ NODE_ENV: 'test', PG_DATABASE_URL: String(process.env.TEST_DATABASE_URL) }, { processRole: 'api' });
+    await admin.query(`ALTER ROLE crewflow_owner IN DATABASE ${quoted()} SET search_path = x, pg_catalog`);
+    try {
+      const plain = createPgClient(resolved, { purpose: 'boot-gates' });
+      const pinned = createPgClient(resolved, { purpose: 'boot-gates', pinnedSearchPath: true });
+      await plain.connect();
+      await pinned.connect();
+      try {
+        expect(String((await plain.query('SHOW search_path')).rows[0].search_path).replace(/ /g, '')).toBe('x,pg_catalog');
+        expect(String((await pinned.query('SHOW search_path')).rows[0].search_path).replace(/ /g, '')).toBe('pg_catalog,pg_temp');
+        expect(await ownerLoginRolePostureProblems(async (sql, params) => (await pinned.query(sql, params as unknown[] | undefined)).rows)).toEqual([]);
+        expect(parseBootFacts((await pinned.query(BOOT_FACTS_SQL)).rows[0]).who).toBe('crewflow_owner');
+      } finally {
+        await plain.end();
+        await pinned.end();
+      }
+    } finally {
+      await admin.query(`ALTER ROLE crewflow_owner IN DATABASE ${quoted()} RESET search_path`);
+    }
   });
 
   it('DENIAL: a reachable CREATEROLE role is refused by the reachability walk (ADMIN-only edge included)', async () => {

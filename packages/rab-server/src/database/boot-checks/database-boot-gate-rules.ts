@@ -562,23 +562,51 @@ export interface ClientTlsState {
 
 /**
  * Gate 6 (owner instruction 2026-11-19: "trust our side of the connection ... No proxy-specific exceptions"). In production
- * the gate's connection must be encrypted. Satisfied when EITHER this session's own client socket is TLS that Node verified
- * (`authorized`: certificate chain AND host name) under a config that demanded it (`verifyFullConfigured`), whatever
- * pg_stat_ssl says (a provider's TLS-terminating proxy makes the backend report ssl=false) — OR the backend itself reports
- * ssl=true. Anything else refuses. Provider-neutral: no host, provider name or flag plays any part. Returns the warnings
- * (one line when pg_stat_ssl disagreed with the verified client side). Pure.
+ * the gate's connection must be VERIFIED TLS: its own `ssl` config demanded verification (`verifyFullConfigured`:
+ * rejectUnauthorized + host-name check) AND its client socket is TLS that Node verified (`authorized`: chain AND host name).
+ * Then pg_stat_ssl is not consulted for the decision (a provider's TLS-terminating proxy makes the backend report ssl=false;
+ * one warning line says so). Security review L-1 (PR #257): pg_stat_ssl.ssl=true alone no longer passes, because a session
+ * that did not verify the server (rejectUnauthorized false) can be encrypted to an impostor; an unknown client state refuses
+ * too. Node's global NODE_TLS_REJECT_UNAUTHORIZED=0 (which disables verification for every TLS socket of the process) is
+ * refused in production first (review I-4). Provider-neutral: no host, provider name or flag plays any part. Returns the
+ * warnings. Pure apart from reading `env`.
  */
-export function assertTlsGate(facts: BootGateFacts, production: boolean, context: { clientTls?: ClientTlsState | null } = {}): string[] {
+export function assertTlsGate(
+  facts: BootGateFacts,
+  production: boolean,
+  context: { clientTls?: ClientTlsState | null; env?: Record<string, string | undefined> } = {},
+): string[] {
   if (!production) return [];
+  const nodeTls = context.env?.NODE_TLS_REJECT_UNAUTHORIZED;
+  if (nodeTls !== undefined && nodeTls.trim() === '0') {
+    throw new DatabaseBootGateError(
+      'tls',
+      'NODE_TLS_REJECT_UNAUTHORIZED=0 is set: it switches off certificate verification for every TLS connection of this process. Production refuses it; remove it.',
+    );
+  }
   const tls = context.clientTls;
-  const verifiedClientTls = !!tls && tls.encrypted === true && tls.authorized === true && tls.verifyFullConfigured === true;
-  if (verifiedClientTls) {
+  if (!tls || tls.verifyFullConfigured !== true) {
+    throw new DatabaseBootGateError(
+      'tls',
+      'the production database connection does not verify the server certificate and host name (its TLS configuration is not verify-full). Use sslmode=require, verify-ca or verify-full without PG_SSL_ALLOW_SELF_SIGNED.',
+    );
+  }
+  if (tls.encrypted === true && tls.authorized === true) {
     return facts.ssl === true
       ? []
       : ['the database backend reports no TLS (pg_stat_ssl, e.g. behind a TLS-terminating proxy); this connection is verified TLS on the client side (certificate chain and host name), which is what gate 6 trusts.'];
   }
-  if (facts.ssl === true) return [];
-  throw new DatabaseBootGateError('tls', 'the production database connection is not using TLS (pg_stat_ssl). Configure verified TLS for the database URL.');
+  throw new DatabaseBootGateError('tls', 'the production database connection is not using verified TLS. Configure verified TLS for the database URL.');
+}
+
+/**
+ * The server-side TLS rule alone (pg_stat_ssl.ssl must be true in production), for a check that has no client socket to read:
+ * the replica validation (runtime/replica/replica-validation.ts), unchanged from before gate 6 became client-side.
+ */
+export function assertServerTlsGate(facts: BootGateFacts, production: boolean): void {
+  if (production && facts.ssl !== true) {
+    throw new DatabaseBootGateError('tls', 'the production database connection is not using TLS (pg_stat_ssl). Configure verified TLS for the database URL.');
+  }
 }
 
 export interface EvaluateBootGatesInput {
@@ -596,8 +624,14 @@ export interface EvaluateBootGatesInput {
    * is accepted only at the host it was bound at (owner decision A: a restore / clone / fork elsewhere is refused).
    */
   connectionHost: string;
-  /** The gate session's client-side TLS state (gate 6); null or absent = unknown (then pg_stat_ssl must say TLS). */
+  /** The gate session's client-side TLS state (gate 6); null or absent = unknown, which production refuses. */
   clientTls?: ClientTlsState | null;
+  /**
+   * Review L-1: the connection factory's own production classification (pg-config.ts isPgProductionEnvironment) for the
+   * gate's connection. Gate 6 is production when EITHER this or the process classification says so, so the two can never
+   * disagree in the weaker direction (e.g. RAB_RUNTIME_ENV=' production' with a stray space).
+   */
+  connectionProduction?: boolean;
 }
 
 export interface BootGateReport {
@@ -667,7 +701,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const disabled = (await query(RLS_DISABLED_TENANT_TABLES_SQL)).map((r) => String(r.relname));
   assertForceRlsGate(forceRows, disabled);
 
-  const tlsWarnings = assertTlsGate(facts, production, { clientTls: input.clientTls });
+  const tlsWarnings = assertTlsGate(facts, production || input.connectionProduction === true, { clientTls: input.clientTls, env });
 
   let compatibilityWarnings: readonly string[] = [];
   try {

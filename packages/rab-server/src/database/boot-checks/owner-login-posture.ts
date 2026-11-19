@@ -134,14 +134,14 @@ const LAYOUT_AND_LOGIN = [OWNER_LOGIN_ROLE, ...LAYOUT_SCHEMA_ROLES];
  * the database. Three read-only columns, NULL-free (COALESCE false only where the row legitimately cannot exist).
  * Shared by rule 1 (OWNER_LOGIN_FACTS_SQL, the posture monitor too) and the boot gate (BOOT_FACTS_SQL).
  */
-export const DATABASE_OWNERSHIP_COLUMNS_SQL = `(SELECT d.datdba = s.oid FROM pg_catalog.pg_database d, pg_catalog.pg_roles s
-         WHERE d.datname = pg_catalog.current_database() AND s.rolname = session_user) AS owns_database,
+export const DATABASE_OWNERSHIP_COLUMNS_SQL = `(SELECT d.datdba OPERATOR(pg_catalog.=) s.oid FROM pg_catalog.pg_database d, pg_catalog.pg_roles s
+         WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database() AND s.rolname OPERATOR(pg_catalog.=) session_user) AS owns_database,
        (SELECT pg_catalog.pg_has_role(session_user, d.datdba, 'MEMBER') FROM pg_catalog.pg_database d
-         WHERE d.datname = pg_catalog.current_database()) AS member_of_database_owner,
+         WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()) AS member_of_database_owner,
        COALESCE((SELECT pg_catalog.pg_has_role(session_user, o.oid, 'MEMBER') FROM pg_catalog.pg_roles o
-                  WHERE o.rolname = 'pg_database_owner'), false) AS database_owner_role,
+                  WHERE o.rolname OPERATOR(pg_catalog.=) 'pg_database_owner'), false) AS database_owner_role,
        (SELECT pg_catalog.pg_get_userbyid(d.datdba)::text FROM pg_catalog.pg_database d
-         WHERE d.datname = pg_catalog.current_database()) AS database_owner`;
+         WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()) AS database_owner`;
 
 /**
  * Pure: the problems the ownership columns describe. Fail closed: a column that is not exactly false (NULL, missing) counts
@@ -253,13 +253,30 @@ export function ownerLoginProblems(row: Row | undefined, options: OwnerLoginPost
   return p;
 }
 
-/** Rule 2 (pure). The login's own row is judged by rule 1, every other reached role here. */
-export function ownerLoginReachabilityProblems(rows: Row[]): string[] {
+/**
+ * Security review L-2 (PR #257): the roles the owner login may reach, CLOSED WORLD. Anything else reached (any edge, any
+ * depth) is refused by name, whatever its attributes: a deny-list cannot know every provider's administrator role.
+ * pg_database_owner is reached implicitly by the database owner's members; it is allowed only when database ownership is
+ * not refused (outside production: dev and test databases are owned by rab_owner, postgres-init/01-roles.sql).
+ */
+export const OWNER_LOGIN_REACHABLE_ROLES: readonly string[] = Object.freeze(['rab_owner', 'rab_app', 'rab_secure_owner', 'crewflow', 'crewflow_app']);
+
+/**
+ * Rule 2 (pure). The login's own row is judged by rule 1, every other reached role here. Fail closed (review I-3): the walk
+ * starts AT the login, so a result without the login's own row is refused, never read as "reaches nothing".
+ */
+export function ownerLoginReachabilityProblems(rows: Row[], options: OwnerLoginPostureOptions = {}): string[] {
   const p: string[] = [];
+  if (!rows.some((r) => yes(r.is_login))) p.push(`the role walk from ${OWNER_LOGIN_ROLE} returned no row for the login itself; the reachable roles could not be read`);
   for (const r of rows) {
     if (yes(r.is_login)) continue;
     const name = String(r.role);
     const via = `reachable from ${OWNER_LOGIN_ROLE} (${String(r.path)})`;
+    const expected = OWNER_LOGIN_REACHABLE_ROLES.includes(name) || (name === 'pg_database_owner' && !options.refuseDatabaseOwnership);
+    const named = DANGEROUS_PREDEFINED_ROLES.includes(name) || PROVIDER_ADMIN_ROLES.includes(name);
+    if (!expected && !named) {
+      p.push(`role "${name}" is ${via}; only ${OWNER_LOGIN_REACHABLE_ROLES.join(', ')} may be. Revoke it (REVOKE "${name}" FROM <the member on the path>, as its administrator)`);
+    }
     const attrs = [
       yes(r.super) && 'SUPERUSER',
       yes(r.bypassrls) && 'BYPASSRLS',
@@ -329,7 +346,7 @@ export async function ownerLoginRolePostureProblems(query: PostureQuery, options
   const [login] = await query(OWNER_LOGIN_FACTS_SQL);
   return [
     ...ownerLoginProblems(login, options),
-    ...ownerLoginReachabilityProblems(await query(OWNER_LOGIN_REACHABILITY_SQL)),
+    ...ownerLoginReachabilityProblems(await query(OWNER_LOGIN_REACHABILITY_SQL), options),
     ...ownerLoginInventoryProblems(await query(OWNER_LOGIN_MEMBERSHIPS_SQL), await query(LAYOUT_SCHEMA_ROLES_SQL), await query(OWNER_LOGIN_FOREIGN_LOGINS_SQL)),
   ];
 }

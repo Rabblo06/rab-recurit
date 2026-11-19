@@ -146,7 +146,7 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
       gateDataSourceSeq += 1;
       const dataSource = createPgDataSource(
         pg,
-        { endpoint, purpose: 'boot-gates', max: 1 },
+        { endpoint, purpose: 'boot-gates', max: 1, pinnedSearchPath: true },
         {
           name: `db-boot-gates-${processName}-${gateDataSourceSeq}`,
           entities: [],
@@ -170,6 +170,8 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
           cliCommand: options.cliCommand,
           connectionHost: endpointTarget.target.host,
           clientTls: clientTlsOf(session, endpointTarget.ssl),
+          // Review L-1: the TLS gate is production when EITHER classifier says so (the process's, or the connection factory's).
+          connectionProduction: pg.production,
           query,
           checkPendingMigrations: async ({ production }) => {
             return checkSchemaCompatibility(query, {
