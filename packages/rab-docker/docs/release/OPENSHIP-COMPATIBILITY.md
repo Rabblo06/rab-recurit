@@ -21,6 +21,14 @@ never drop a security setting silently. Nothing was deployed, imported or connec
 > by default for 170 s, so it fails with its own line inside that 180 s window.
 > The rows below about `depends_on` describe v0.9.8.
 
+> **Neon and TLS on OpenShip (2026-11-19)<!-- VERIFY -->.** Neon in three steps: paste Neon's `neondb_owner` connection string as it
+> is (pooler host and `sslmode=require` included) into `PG_ADMIN_URL` on db-setup and db-harden, set `CREWFLOW_BUNDLED_DB=0`,
+> switch the `db` service off in OpenShip (it ignores `deploy.replicas`), and deploy. `db-setup` switches to Neon's direct host
+> itself. Enter `PG_DATABASE_URL` (the `crewflow_owner` URL at Neon's **direct** host) on db-setup, db-harden, rab-api and
+> rab-worker. Accepted `sslmode` values: `require`, `verify-ca`, `verify-full` (plus `channel_binding=require`), each with the
+> full certificate and host-name check, as node-postgres does; `disable`, `prefer`, `allow` and `no-verify` are refused.
+> Details: `OWNER-LOGIN-DEPLOYMENT.md` section 2.
+
 ## 1. What was checked, and the gap
 
 | Item | Value |
@@ -83,7 +91,8 @@ result holds at v0.9.8 and HEAD for every row.
 | `name` (top level) | — | Not used; OpenShip names its own projects | — | — |
 | `init` | — (not used since DB-SETUP: rab-worker's `worker-start.sh` execs tini itself; the gates refuse `init: true`) | — | — | — |
 | top-level `networks` with `internal: true` | db, rab-api, rab-worker (`crewflow-db`) — DB-SETUP | NOT VERIFIED on OpenShip | — | If dropped, db sits on the project's default network: still unpublished, but reachable by every service of the project. |
-| nested interpolation: the bundled `crewflow_owner` URL built from `PG_DATABASE_APP_PASSWORD` as the default of `PG_DATABASE_URL` | db-setup, rab-api, rab-worker — since 2026-11-18 | NOT VERIFIED on OpenShip's interpolator | — | **Enter `PG_DATABASE_URL` explicitly on all three services on OpenShip**; do not rely on the default. If the interpolator mishandled it, the services would get a wrong URL and fail to log in. `PG_ADMIN_URL` goes on db-setup only. |
+| nested interpolation: the bundled `crewflow_owner` URL built from `PG_DATABASE_APP_PASSWORD` as the default of `PG_DATABASE_URL` | db-setup, db-harden, rab-api, rab-worker — since 2026-11-18 | NOT VERIFIED on OpenShip's interpolator | — | **Enter `PG_DATABASE_URL` explicitly on all four services on OpenShip**; do not rely on the default. If the interpolator mishandled it, the services would get a wrong URL and fail to log in. `PG_ADMIN_URL` goes on db-setup and db-harden only. |
+| One-shot `db-harden` (`restart: "no"`, no `depends_on`, nothing depends on it) — since 2026-11-18 | db-harden | NOT VERIFIED on OpenShip | — | If OpenShip never runs it, `crewflow_owner` keeps CREATEROLE until the next `db-setup` run removes it; after the mark's 24 hours rab-api and rab-worker refuse to start, so redeploy within that time. |
 | `user` on db (`999:999`) | db — DB-SETUP | DROPPED (warning), as for every service | `compose-parser.ts:708` | db then starts as root: its entrypoint chowns its TLS directory and the image's docker-entrypoint.sh drops to `postgres`. NOT measured on OpenShip. |
 
 **Summary.** At v0.9.8 and HEAD, OpenShip drops **seven of the H6 runtime security keys** (`user`, `read_only`, `tmpfs`,
