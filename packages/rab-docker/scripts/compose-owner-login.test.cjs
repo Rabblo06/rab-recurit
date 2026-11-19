@@ -237,6 +237,31 @@ test('DENIAL bundled db switch: 0 without your own database, any value but 0 or 
   }
 });
 
+// Security review L1: the committed default wait ends inside OpenShip's 180 s window for rab-api -> db-setup
+// (service_completed_successfully on a service without a health check), so db-setup exits 70 with its own line first.
+test('db-setup wait: the default bound is below 180 s and the same in db-setup.sh, both compose wrappers and both environments', () => {
+  const wait = require('./db-setup-wait.cjs');
+  assert.ok(Number(wait.WAIT_SECONDS_DEFAULT) < wait.OPENSHIP_DEPENDENCY_WINDOW_SECONDS && wait.OPENSHIP_DEPENDENCY_WINDOW_SECONDS === 180, wait.WAIT_SECONDS_DEFAULT);
+  assert.equal(wait.WAIT_SECONDS_EXPR, `\${CREWFLOW_DB_WAIT_SECONDS:-${wait.WAIT_SECONDS_DEFAULT}}`);
+  for (const rel of ['rab/db-setup.sh', 'docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const defaults = [...text.matchAll(/CREWFLOW_DB_WAIT_SECONDS:-(\d+)\}/g)].map((m) => m[1]);
+    assert.ok(defaults.length >= 2, `${rel}: ${defaults.length} defaults`);
+    assert.deepEqual([...new Set(defaults)], [wait.WAIT_SECONDS_DEFAULT], rel);
+  }
+});
+
+// Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-setup's wait bound, a compose.env value only, 0-900 seconds.
+test('DENIAL db-setup wait: CREWFLOW_DB_WAIT_SECONDS is 0-900 whole seconds in compose.env, never in database.env / runtime.env', () => {
+  for (const v of ['0', '10', '170', '900', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_DB_WAIT_SECONDS=${v}`), [], v);
+  for (const v of ['901', '1000', '-1', '30s', '1e3', '0300', 'x']) {
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_DB_WAIT_SECONDS=${v}`), /^CREWFLOW_DB_WAIT_SECONDS: must be a whole number of seconds from 0 to 900/);
+  }
+  for (const kind of ['database', 'runtime']) {
+    assertRefused(lintEnvText(kind, 'CREWFLOW_DB_WAIT_SECONDS=170'), /^CREWFLOW_DB_WAIT_SECONDS: set it in compose\.env/);
+  }
+});
+
 test('DENIAL L1: a CREWFLOW_TEST_* seam is refused in every env file and as a container variable', () => {
   for (const name of ['CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS', 'CREWFLOW_TEST_OWNER_SETUP_ABORT', 'CREWFLOW_TEST_ANYTHING']) {
     assert.match(forbiddenReason(name), /a test seam/);
@@ -688,7 +713,7 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { s.db.volumes.push({ type: 'bind', source: '/x/01-crewflow-owner.sql', target: '/docker-entrypoint-initdb.d/01.sql', read_only: true }); }), /mounts an init script/);
 });
 
-test('DENIAL bundled db: internal network only, its own volumes, rab-api waits for it, the app mounts only its CA read-only', { skip }, () => {
+test('DENIAL bundled db: internal network only, its own volumes, nothing depends on it, the app mounts only its CA read-only', { skip }, () => {
   assertRefused(problemsAfter((s) => { s.db.networks.default = null; }), /internal crewflow-db network only/);
   assertRefused(problemsAfter((s, m) => { m.networks['crewflow-db'].internal = false; }), /crewflow-db is not internal/);
   assertRefused(problemsAfter((s) => { s.db.volumes = s.db.volumes.filter((v) => v.target !== '/var/lib/postgresql'); }), /crewflow-db-data at \/var\/lib\/postgresql is missing/);
@@ -696,7 +721,11 @@ test('DENIAL bundled db: internal network only, its own volumes, rab-api waits f
   assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/tmp').source = 'other'; }), /db: unexpected named volume/);
   // The pre-fix layout (data on /var/lib/postgresql/data: root-owned on postgres:18, so the db cannot start there).
   assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/lib/postgresql').target = '/var/lib/postgresql/data'; }), /db: unexpected named volume at \/var\/lib\/postgresql\/data/);
-  assertRefused(problemsAfter((s) => { delete s['rab-api'].depends_on.db; }), /rab-api: does not wait for a healthy db/);
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): nothing depends on db (with CREWFLOW_BUNDLED_DB=0 it has no
+  // container, and OpenShip then skipped the dependent instead of starting it); db-setup waits for the database itself.
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {
+    assertRefused(problemsAfter((s) => { s[svc].depends_on = { ...(s[svc].depends_on ?? {}), db: { condition: 'service_healthy', required: true } }; }), new RegExp(`${svc}: depends on db`));
+  }
   for (const svc of ['rab-api', 'rab-worker']) {
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
     assertRefused(problemsAfter((s) => { s[svc].volumes.find((v) => v.source === 'crewflow-db-ca').read_only = false; }), new RegExp(`${svc}: (the bundled db's CA volume must be mounted read-only|does not mount)`));
@@ -875,10 +904,11 @@ test('ADMIN_URL_PLACEMENT (owner requirement 2026-11-17): every committed compos
     assert.ok(files.some((f) => f.endsWith(path.join('rab-docker', rel))), rel);
   }
   for (const file of files) assert.deepEqual(gate.adminUrlPlacementProblems(file, fs.readFileSync(file, 'utf8')), [], file);
-  // The deploy files do interpolate it, once on db-setup and once on db-harden (owner decision 2026-11-18, M1).
+  // The deploy files do interpolate it, once on db-setup and once on db-harden (owner decision 2026-11-18, M1). `$$` is
+  // Compose's literal `$`: db-setup's wait-for-db wrapper reads the variable in its own shell, which is not an interpolation.
   for (const rel of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
     const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
-    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_ADMIN_URL')).length, 2, rel);
+    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.split('$$').join('').includes('${PG_ADMIN_URL')).length, 2, rel);
   }
 });
 
@@ -886,6 +916,9 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   const setup = 'services:\n  db-setup:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n';
   const pinned = `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: ""\n  rab-worker:\n    environment:\n      PG_ADMIN_URL: ''\n`;
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', setup), []);
+  // An escaped `$${PG_ADMIN_URL}` (a shell reference inside db-setup) is not an interpolation; an unescaped second one is.
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', `${setup}    entrypoint: ["/bin/sh", "-c", "echo ` + '$${PG_ADMIN_URL:-}"]\n'), []);
+  assert.match(gate.adminUrlPlacementProblems('x.yml', `${setup}    entrypoint: ["/bin/sh", "-c", "echo ` + '$$${PG_ADMIN_URL:-}"]\n').join('\n'), /interpolates \$\{PG_ADMIN_URL\.\.\.\} 2 times/);
   // Owner decision L-2: the exact empty pin on rab-api / rab-worker is the one allowed occurrence outside db-setup.
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', pinned), []);
   // ... and on the dev / QA stacks' server / worker (follow-up of the review: the same pin there).
@@ -1013,8 +1046,8 @@ function hardenModel() {
   const services = {
     'rab-api': { image, depends_on: { 'db-setup': { condition: 'service_completed_successfully' } } },
     'rab-worker': { image, depends_on: { 'rab-api': { condition: 'service_healthy' } } },
-    'db-setup': { ...oneShot(['./db-setup.sh'], {}), depends_on: { db: { condition: 'service_healthy' } }, stop_grace_period: '40s' },
-    'db-harden': oneShot(['./db-setup.sh', 'harden'], { [gate.HARDEN_TIMEOUT_KEY]: '1200' }),
+    'db-setup': { ...oneShot(['./db-setup.sh'], { CREWFLOW_DB_WAIT_SECONDS: '170' }), depends_on: { db: { condition: 'service_healthy' } }, stop_grace_period: '40s' },
+    'db-harden': oneShot(['./db-setup.sh', 'harden'], { [gate.HARDEN_TIMEOUT_KEY]: '1200', CREWFLOW_DB_WAIT_SECONDS: '170' }),
   };
   return { services, want };
 }
@@ -1046,6 +1079,10 @@ test('DENIAL dbHardenProblems: missing, any depends_on, a service depending on i
     [(s) => { delete s['db-harden'].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL; }, /db-harden: CREWFLOW_BUNDLED_DB_ADMIN_URL is missing/],
     [(s) => { delete s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY]; }, /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is missing/],
     [(s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = '30'; }, /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is "30"/],
+    // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-harden's database wait, bounded by db-setup's value.
+    [(s) => { delete s['db-harden'].environment.CREWFLOW_DB_WAIT_SECONDS; }, /db-harden: CREWFLOW_DB_WAIT_SECONDS is missing/],
+    [(s) => { s['db-harden'].environment.CREWFLOW_DB_WAIT_SECONDS = '900'; }, /db-harden: CREWFLOW_DB_WAIT_SECONDS is not db-setup's committed value/],
+    [(s) => { s['db-harden'].environment.CREWFLOW_DB_WAIT_SECONDS = '901'; s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '901'; }, /db-harden: CREWFLOW_DB_WAIT_SECONDS is not db-setup's committed value/],
     [(s) => { s['db-harden'].restart = 'on-failure'; }, /db-harden: restart is "on-failure", expected "no"/],
     [(s) => { s['db-harden'].profiles = ['harden']; }, /db-harden: has profiles/],
     [(s) => { s['db-harden'].env_file = [{ path: '/secrets/runtime.env' }]; }, /db-harden: reads runtime\.env/],

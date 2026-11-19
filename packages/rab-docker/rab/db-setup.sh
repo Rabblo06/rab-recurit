@@ -36,7 +36,10 @@
 # PG_ADMIN_URL reaches no other service: rab-api and rab-worker refuse it (api-prestart.sh, worker-start.sh, the in-process
 # guard). This script writes NO file (no target file, no password file, no volume) and takes no file lock: every write of
 # the child runs in a transaction under a PostgreSQL advisory lock, which serialises concurrent runs against one database.
-# Exit 0 = done; 64 = refusal; anything else = failure (rab-api is not started: depends_on service_completed_successfully).
+# Before the child, it waits (bounded, CREWFLOW_DB_WAIT_SECONDS, default 170 s) until the database accepts connections
+# (BEGIN crewflow wait-for-db below; neither db-setup nor db-harden has depends_on: db).
+# Exit 0 = done; 64 = refusal; anything else = failure (70 among them: the database did not accept connections in time)
+# (rab-api is not started: depends_on service_completed_successfully).
 # Prints fixed lines only (the child's): never a URL, a password, a host or a database name. Never traces the shell.
 set -eu
 
@@ -177,6 +180,154 @@ if [ "$HARDEN" = 1 ] && [ "$MODE" = owner ]; then
   echo 'db-harden: no admin login (mode c): nothing to harden'
   exit 0
 fi
+# BEGIN crewflow wait-for-db
+# Twenty's Helm wait-for-db init container, re-implemented (not copied): db-setup and db-harden have no `depends_on: db`,
+# because with CREWFLOW_BUNDLED_DB=0 the bundled db has no container and a platform that does not skip a 0-replica dependency
+# (OpenShip: 'Dependency "db" has no container for service_healthy') then never starts them. Instead they wait for the
+# database they will use: PG_ADMIN_URL's host when it is set (mode b: PG_ADMIN_URL + PG_DATABASE_URL, the same database;
+# inside db-setup.sh also mode a, where PG_ADMIN_URL is the bundled superuser URL by then), else the bundled db (host db,
+# mode a, from CREWFLOW_BUNDLED_DB_ADMIN_URL: the compose wrapper runs before db-setup.sh picks the mode), else
+# PG_DATABASE_URL's host (mode c). The probe is pg_isready's check, in node (the image has no pg_isready): a TCP connect and a
+# protocol-3.0 startup message with a FIXED placeholder login (crewflow_wait_for_db), no TLS and no password; an
+# authentication request or any error other than 57P03 (starting up / shutting down) means the server accepts connections.
+# It never authenticates, never runs a query and reads nothing but the URL's host and port; the bootstrap child then makes
+# the real verify-full connection. Bounded by CREWFLOW_DB_WAIT_SECONDS (unset or empty = 170; 0 = do not wait; at most 900)
+# on the monotonic clock; a progress line whenever the result changes and every 10 s; on timeout ONE fixed line and exit 70
+# (a failure, like the bootstrap child's own "did not accept a connection" 70; 64 stays for settings the operator must
+# change, such as an invalid CREWFLOW_DB_WAIT_SECONDS). The default 170 s stays inside OpenShip's 180 s window for a
+# service_completed_successfully dependency without a health check (security review L1), so on a dead database db-setup
+# fails with its own line first. Prints no URL, host, login, password or database name (the lines say "db-setup" also in
+# db-harden). Not waited for (the refusal or the child's check comes at once): a bad CREWFLOW_BUNDLED_DB, an empty
+# PG_DATABASE_URL or an empty crewflow_owner password in it, the bundled db without its password, an unparseable URL. In the
+# compose wrapper ONLY those come before the wait: db-setup.sh's own preamble refusals (arguments, a password variable or
+# APP_SECRET present, a login that is not crewflow_owner) run after it (review L2). Safe to run twice: the same block runs
+# in the db-setup wrapper of docker-compose.production.yml / docker-compose.image.yml (the published image's db-setup.sh
+# has no wait) and again here (run-prestart-shell-tests.cjs and compose-owner-login.cjs require the copies to be identical).
+crewflow_wait_for_db() {
+  case "${CREWFLOW_BUNDLED_DB:-1}" in 0 | 1) ;; *) return 0 ;; esac
+  case "${PG_DATABASE_URL:-}" in '' | *://crewflow_owner:@*) return 0 ;; esac
+  if [ -n "${PG_ADMIN_URL:-}" ]; then
+    crewflow_wait_url="$PG_ADMIN_URL"
+  elif [ "${CREWFLOW_BUNDLED_DB:-1}" = 1 ]; then
+    crewflow_wait_url="${CREWFLOW_BUNDLED_DB_ADMIN_URL:-}"
+    case "$crewflow_wait_url" in '' | postgresql://postgres:@*) crewflow_wait_url=''; return 0 ;; esac
+  else
+    crewflow_wait_url="$PG_DATABASE_URL"
+  fi
+  case "${CREWFLOW_DB_WAIT_SECONDS:-170}" in
+    *[!0-9]* | ????*) crewflow_wait_limit=invalid ;;
+    *) crewflow_wait_limit="${CREWFLOW_DB_WAIT_SECONDS:-170}" ;;
+  esac
+  if [ "$crewflow_wait_limit" = invalid ] || [ "$crewflow_wait_limit" -gt 900 ]; then
+    echo 'db-setup: REFUSED - CREWFLOW_DB_WAIT_SECONDS must be a whole number of seconds from 0 to 900 (unset = 170; 0 = do not wait). Value not shown.' >&2
+    exit 64
+  fi
+  if [ "$crewflow_wait_limit" -eq 0 ]; then crewflow_wait_url=''; return 0; fi
+  crewflow_wait_status=0
+  CREWFLOW_DB_WAIT_URL="$crewflow_wait_url" CREWFLOW_DB_WAIT_LIMIT="$crewflow_wait_limit" node -e '
+"use strict";
+const net = require("net");
+const limit = Number(process.env.CREWFLOW_DB_WAIT_LIMIT);
+let host = "";
+let port = 5432;
+try {
+  const u = new URL(process.env.CREWFLOW_DB_WAIT_URL || "");
+  host = decodeURIComponent(u.hostname);
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (u.port) port = Number(u.port);
+  if (u.searchParams.has("host") || u.searchParams.has("port")) host = "";
+} catch (e) {
+  host = "";
+}
+delete process.env.CREWFLOW_DB_WAIT_URL;
+if (!host || host.startsWith("/") || !(Number.isInteger(port) && port > 0 && port < 65536)) {
+  console.log("db-setup: not waiting for the database: its address could not be read from the URL (the setup step checks the URL next)");
+  process.exit(0);
+}
+const which = host === "db" ? "the bundled database (db)" : "your database";
+const started = process.hrtime.bigint();
+const elapsed = () => Number((process.hrtime.bigint() - started) / 1000000n) / 1000;
+const startup = (() => {
+  const params = Buffer.from("user\x00crewflow_wait_for_db\x00database\x00crewflow_wait_for_db\x00application_name\x00crewflow-db-setup-wait\x00\x00", "latin1");
+  const head = Buffer.alloc(8);
+  head.writeInt32BE(8 + params.length, 0);
+  head.writeInt32BE(196608, 4);
+  return Buffer.concat([head, params]);
+})();
+const probe = (timeoutMs) => new Promise((resolve) => {
+  let done = false;
+  let buf = Buffer.alloc(0);
+  const s = net.connect({ host: host, port: port });
+  const finish = (result) => {
+    if (done) return;
+    done = true;
+    s.destroy();
+    resolve(result);
+  };
+  s.setTimeout(timeoutMs, () => finish("no answer in time"));
+  s.on("error", (e) => {
+    const code = String((e && e.code) || "unknown");
+    if (code === "ECONNREFUSED") finish("connection refused");
+    else if (code === "ENOTFOUND" || code === "EAI_AGAIN") finish("host name not found yet");
+    else finish("network error " + code.replace(/[^A-Z0-9_]/g, ""));
+  });
+  s.on("close", () => finish("connection closed before an answer"));
+  s.on("connect", () => s.write(startup));
+  s.on("data", (d) => {
+    buf = Buffer.concat([buf, d]);
+    if (buf[0] === 0x52) return finish("ready");
+    if (buf[0] !== 0x45) return finish("an answer that is not PostgreSQL");
+    if (buf.length < 5) return;
+    const len = buf.readInt32BE(1);
+    if (len < 4 || len > 65536) return finish("ready");
+    if (buf.length < 1 + len) return;
+    const fields = buf.subarray(5, 1 + len).toString("latin1").split("\x00");
+    const sqlstate = (fields.find((f) => f[0] === "C") || "").slice(1);
+    finish(sqlstate === "57P03" ? "the server is starting up or shutting down (57P03)" : "ready");
+  });
+});
+(async () => {
+  let last = "";
+  let nextReport = 0;
+  for (;;) {
+    const left = limit - elapsed();
+    const result = await probe(Math.max(1000, Math.min(5000, Math.floor(left * 1000))));
+    const t = elapsed();
+    if (result === "ready") {
+      console.log("db-setup: " + which + " accepts connections (waited " + Math.round(t) + "s)");
+      process.exit(0);
+    }
+    if (result !== last || t >= nextReport) {
+      console.log("db-setup: waiting for " + which + " to accept connections (" + Math.round(t) + "s of " + limit + "s): " + result);
+      last = result;
+      nextReport = t + 10;
+    }
+    if (t >= limit) {
+      console.error("db-setup: REFUSED - the database did not accept connections within " + limit + "s (CREWFLOW_DB_WAIT_SECONDS). Nothing was changed. Check that it is running and reachable from this container, then start again.");
+      process.exit(70);
+    }
+    await new Promise((r) => setTimeout(r, Math.min(2000, Math.ceil((limit - t) * 1000))));
+  }
+})().catch(() => {
+  console.error("db-setup: REFUSED - the wait for the database stopped unexpectedly. Nothing was changed.");
+  process.exit(70);
+});
+' &
+  crewflow_wait_pid=$!
+  trap 'kill -TERM "$crewflow_wait_pid" 2>/dev/null; exit 143' TERM INT
+  wait "$crewflow_wait_pid" || crewflow_wait_status=$?
+  trap - TERM INT
+  unset crewflow_wait_url crewflow_wait_limit crewflow_wait_pid
+  case "$crewflow_wait_status" in
+    0) ;;
+    70) exit 70 ;;
+    *) echo "db-setup: REFUSED - the wait for the database stopped unexpectedly (exit $crewflow_wait_status). Nothing was changed." >&2; exit 70 ;;
+  esac
+}
+# END crewflow wait-for-db
+# After the refusals above (an invalid setting is refused at once, never waited for), before the bootstrap child: wait,
+# bounded, until the database accepts connections (db-harden in mode c has returned above: it never connects).
+crewflow_wait_for_db
 echo "$PREFIX: mode $MODE (bundled = the bundled db's superuser; admin = your PG_ADMIN_URL; owner = read-only checks of your crewflow_owner)"
 
 # BEGIN crewflow bundled-db CA

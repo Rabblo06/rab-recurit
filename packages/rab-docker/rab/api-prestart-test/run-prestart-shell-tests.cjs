@@ -109,11 +109,24 @@ process.exit(code);
 
 // Owner decision 2026-11-18: no setup volume is mounted anywhere (there is none any more); `cmd` runs a shell line instead
 // of a script.
-function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [], cmd = null } = {}) {
+function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [], cmd = null, execSetup = false } = {}) {
+  // db-setup.sh waits for the database before the child (section 15); the harness has no database (--network none), so
+  // every other db-setup case runs with CREWFLOW_DB_WAIT_SECONDS=0 (do not wait) unless it sets the variable itself.
+  if ((entry.startsWith('db-setup.sh') || (cmd && cmd.includes('db-setup'))) && !Object.prototype.hasOwnProperty.call(env, 'CREWFLOW_DB_WAIT_SECONDS')) {
+    env = { ...env, CREWFLOW_DB_WAIT_SECONDS: '0' };
+  }
   const ctlDir = path.join(work, `ctl-${name}`);
   fs.mkdirSync(ctlDir);
   for (const [k, v] of Object.entries(ctl)) fs.writeFileSync(path.join(ctlDir, k), String(v));
-  const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`, '-v', `${WORKER_START}:/app/worker-start.sh:ro`, '-v', `${DB_SETUP}:/app/db-setup.sh:ro`];
+  // execSetup: db-setup.sh mounted with its image mode (0555 in rab/Dockerfile), so the compose wrapper's `exec ./db-setup.sh`
+  // runs it exactly as in the image (the repository file is 0644).
+  let setupFile = DB_SETUP;
+  if (execSetup) {
+    setupFile = path.join(work, `db-setup-${name}.sh`);
+    fs.copyFileSync(DB_SETUP, setupFile);
+    fs.chmodSync(setupFile, 0o555);
+  }
+  const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`, '-v', `${WORKER_START}:/app/worker-start.sh:ro`, '-v', `${setupFile}:/app/db-setup.sh:ro`];
   if (withPrestart) args.push('-v', `${PRESTART}:/app/api-prestart.sh:ro`);
   for (const [stubName, target] of Object.entries(STUBS)) args.push('-v', `${path.join(stubs, `${stubName}.js`)}:${target}:ro`);
   args.push('-v', `${path.join(stubs, 'twentymigrate.js')}:${MIGRATE_CHILD}:ro`);
@@ -681,6 +694,113 @@ for (const [label, env, want] of [
   }
   r = run('harden-test-timeout', { ...MODE_B, NODE_ENV: 'test', CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '5' }, { entry: 'db-setup.sh harden' });
   check('17f under NODE_ENV=test a short harden timeout (5 s) is accepted', r.code === 0 && field(boot(r.out), 'argv') === '--harden', r.out);
+}
+
+// 15. db-setup and db-harden wait for the database themselves (owner instruction 2026-11-18, Twenty's Helm wait-for-db): no
+// depends_on: db in docker-compose.production.yml / docker-compose.image.yml. The block (BEGIN/END crewflow wait-for-db) runs
+// inside db-setup.sh (db-setup and `db-setup.sh harden`) and, identical, in the db-setup compose wrapper that execs
+// ./db-setup.sh (the published 0.6.0 image has no wait). Target: PG_ADMIN_URL's host when it is set (mode b: both URLs set),
+// else the bundled db (mode a), else PG_DATABASE_URL's host (mode c). A fake PostgreSQL in the same container (127.0.0.1,
+// --network none) answers the startup message: 57P03 while "starting up", then an authentication request ('R'), or the hba
+// error 28000 (both mean "accepts connections").
+{
+  const waitApi = require('../../scripts/db-setup-wait.cjs');
+  const FAKE_PG = `
+const net = require('net');
+const [mode, slowSeconds, port] = [process.argv[2], Number(process.argv[3] || 0), Number(process.argv[4] || 5432)];
+const t0 = Date.now();
+const err = (s, code) => { const b = Buffer.from('SFATAL\\0C' + code + '\\0Mfake\\0\\0', 'latin1'); const h = Buffer.alloc(5); h.write('E'); h.writeInt32BE(4 + b.length, 1); s.end(Buffer.concat([h, b])); };
+net.createServer((s) => {
+  s.on('error', () => {});
+  s.once('data', (d) => {
+    // The probe sends exactly a protocol-3.0 startup message with the fixed placeholder login, no password.
+    const ok = d.readInt32BE(4) === 196608 && d.toString('latin1').includes('user\\0crewflow_wait_for_db\\0');
+    if (!ok) return s.destroy();
+    if (Date.now() - t0 < slowSeconds * 1000) return err(s, '57P03');
+    if (mode === 'hba') return err(s, '28000');
+    const r = Buffer.alloc(9); r.write('R'); r.writeInt32BE(8, 1); r.writeInt32BE(10, 5); s.end(r);
+  });
+}).listen(port, '127.0.0.1');
+`;
+  // The compose wrapper's script, exactly as docker-compose.production.yml commits it (`$$` undone), from the raw text.
+  const wrapperOf = (rel) => {
+    const text = fs.readFileSync(path.resolve(__dirname, '..', '..', rel), 'utf8');
+    const m = /\n {6}- \|\n( {8}set -eu\n {8}# BEGIN crewflow wait-for-db\n[\s\S]*? {8}exec \.\/db-setup\.sh\n)/.exec(text);
+    return m ? m[1].split('\n').map((l) => l.replace(/^ {8}/, '')).join('\n').split('$$').join('$') : null;
+  };
+  const WRAP = wrapperOf('docker-compose.production.yml');
+  check('15a the wait block is identical in db-setup.sh and in the db-setup wrapper of docker-compose.production.yml and docker-compose.image.yml (exactly: set -eu, the block, the call, exec ./db-setup.sh)',
+    WRAP !== null && WRAP === waitApi.waitWrapperScript() && wrapperOf('docker-compose.image.yml') === WRAP, 'the wait blocks differ');
+  // Mode b, both URLs set: the admin URL is on the fake server; the crewflow_owner URL names an unreachable host, so only a
+  // wait on PG_ADMIN_URL's host can succeed.
+  const ADMIN_LOCAL = 'postgres://postgres:ADMINSENTINEL1@127.0.0.1:55432/crewflow?sslmode=verify-full';
+  const LOCAL = { ...MODE_B, PG_ADMIN_URL: ADMIN_LOCAL };
+  const OWNER_LOCAL = `postgresql://crewflow_owner:${OWNER_PW}@127.0.0.1:55432/crewflow?sslmode=verify-full`;
+  const ctlFor = (extra = {}) => ({ 'fakepg.cjs': FAKE_PG, 'wrapper.sh': WRAP ?? 'exit 99', ...extra });
+  const noSecret = (out) => !out.includes('ADMINSENTINEL') && !out.includes(OWNER_PW) && !out.includes('pw-external') && !out.includes('127.0.0.1') &&
+    !out.includes('55432') && !out.includes('db-direct') && !out.includes('postgres://') && !out.includes('postgresql://');
+  const before = (out, a, b) => out.indexOf(a) >= 0 && out.indexOf(b) > out.indexOf(a);
+  const tookOf = (out) => Number((/took=(\d+)/.exec(out) || [])[1]);
+
+  // In-image (db-setup.sh), mode b: a slow database (57P03 for 3 s) -> progress lines, then "accepts", THEN the child; exit 0.
+  r = run('wait-slow', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs ok 3 55432 & sleep 0.5; sh /app/db-setup.sh; echo "exit=$?"' });
+  check("15b db-setup.sh, mode b (both URLs): PG_ADMIN_URL's host still starting up (57P03) is waited for with progress lines, then the child runs; exit 0; nothing of either URL is printed",
+    /exit=0/.test(r.out) && /db-setup: waiting for your database to accept connections \(\d+s of 30s\): the server is starting up or shutting down \(57P03\)/.test(r.out) &&
+    before(r.out, 'your database accepts connections', 'STUB bootstrap') && field(boot(r.out), 'aurl') === hash(ADMIN_LOCAL) && noSecret(r.out), r.out);
+  // Unreachable -> the ONE fixed line, exit 70, no child.
+  r = run('wait-timeout', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '4' }, { cmd: 'start=$(date +%s); sh /app/db-setup.sh; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+  const took = tookOf(r.out);
+  check('15c db-setup.sh: an unreachable database -> after the bound (4 s) ONE fixed line and exit 70; the child never runs; nothing is printed of the URL',
+    /exit=70/.test(r.out) && took >= 4 && took <= 9 && (r.out.match(/db-setup: REFUSED - the database did not accept connections within 4s \(CREWFLOW_DB_WAIT_SECONDS\)/g) || []).length === 1 &&
+    /connection refused/.test(r.out) && !boot(r.out) && noSecret(r.out), `${took}\n${r.out}`);
+  // The hba refusal (28000: e.g. the bundled db's hostssl-only pg_hba.conf for the probe's plain TCP) means "up".
+  r = run('wait-hba', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '20' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs hba 0 55432 & sleep 0.5; sh /app/db-setup.sh; echo "exit=$?"' });
+  check('15d db-setup.sh: an error answer other than 57P03 (28000, the TLS-only pg_hba.conf) counts as "accepts connections"; the child runs', /exit=0/.test(r.out) && before(r.out, 'accepts connections', 'STUB bootstrap'), r.out);
+  // The bound: whole seconds 0-900; anything else refused (64) before anything connects; 0 = do not wait.
+  for (const v of ['abc', '901', '1000', '-1', '30s', '0300']) {
+    r = run(`wait-bad-${v.replace(/[^a-z0-9]/gi, 'x')}`, { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: v }, { entry: 'db-setup.sh' });
+    check(`15e CREWFLOW_DB_WAIT_SECONDS=${v} -> refused (64) before anything connects; the value is not printed`, r.code === 64 && /CREWFLOW_DB_WAIT_SECONDS must be a whole number of seconds from 0 to 900/.test(r.out) && !boot(r.out) && !r.out.includes(`=${v}`), r.out);
+  }
+  r = run('wait-zero', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '0' }, { entry: 'db-setup.sh' });
+  check('15f CREWFLOW_DB_WAIT_SECONDS=0 -> no wait (no probe line); the child runs at once', r.code === 0 && !/waiting for|accepts connections/.test(r.out) && Boolean(boot(r.out)), r.out);
+  // Mode c (PG_DATABASE_URL only): its own host is waited for.
+  r = run('wait-mode-c', { ...MODE_C, PG_DATABASE_URL: OWNER_LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs ok 2 55432 & sleep 0.5; sh /app/db-setup.sh; echo "exit=$?"' });
+  check("15f2 db-setup.sh, mode c: PG_DATABASE_URL's host is waited for, then the read-only child runs; exit 0",
+    /exit=0/.test(r.out) && /\(57P03\)/.test(r.out) && before(r.out, 'your database accepts connections', 'STUB bootstrap') && noSecret(r.out), r.out);
+
+  // db-harden (`db-setup.sh harden`, no compose wrapper): the same in-script wait, on PG_ADMIN_URL's host, before the child.
+  r = run('wait-harden', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs ok 3 55432 & sleep 0.5; sh /app/db-setup.sh harden; echo "exit=$?"' });
+  check("15f3 db-harden, mode b: waits for PG_ADMIN_URL's host (57P03, then accepts), then the child runs with --harden; exit 0",
+    /exit=0/.test(r.out) && /\(57P03\)/.test(r.out) && before(r.out, 'your database accepts connections', 'STUB bootstrap') && field(boot(r.out), 'argv') === '--harden' && noSecret(r.out), r.out);
+  r = run('wait-harden-mode-c', { ...MODE_C, CREWFLOW_DB_WAIT_SECONDS: '' }, { cmd: 'start=$(date +%s); sh /app/db-setup.sh harden; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+  check('15f4 db-harden, mode c: nothing to harden, so it never waits (unreachable database, default bound): exit 0 at once, no probe line',
+    /exit=0/.test(r.out) && tookOf(r.out) <= 3 && !/waiting for/.test(r.out) && !boot(r.out), r.out);
+
+  // The compose wrapper (the published image's path): the same block, then `exec ./db-setup.sh` (which waits again: instant).
+  r = run('wrap-slow', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), execSetup: true, cmd: 'node /ctl/fakepg.cjs ok 3 55432 & sleep 0.5; sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$?"' });
+  check("15g compose wrapper, mode b (both URLs): waits for PG_ADMIN_URL's host, then execs ./db-setup.sh (whose own wait passes at once: safe to run twice), the child runs; exit 0",
+    /exit=0/.test(r.out) && /\(57P03\)/.test(r.out) && (r.out.match(/your database accepts connections/g) || []).length === 2 && before(r.out, 'accepts connections', 'STUB bootstrap') && noSecret(r.out), r.out);
+  r = run('wrap-timeout', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '3' }, { ctl: ctlFor(), execSetup: true, cmd: 'sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$?"' });
+  check('15h compose wrapper: an unreachable database -> the fixed line, exit 70; db-setup.sh never runs (no mode line, no child)',
+    /exit=70/.test(r.out) && /did not accept connections within 3s/.test(r.out) && !/db-setup: mode /.test(r.out) && !boot(r.out) && noSecret(r.out), r.out);
+  // Mode (a) through the wrapper: the bundled db's host `db` (here 127.0.0.1 via --add-host), from CREWFLOW_BUNDLED_DB_ADMIN_URL.
+  r = run('wrap-bundled', { ...BUNDLED, CREWFLOW_DB_WAIT_SECONDS: '30' },
+    { ctl: ctlFor(), execSetup: true, dockerArgs: ['--add-host', 'db:127.0.0.1'], cmd: 'node /ctl/fakepg.cjs ok 2 5432 & sleep 0.5; sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$?"' });
+  check('15i compose wrapper, mode (a): waits for the bundled database (host db), then db-setup.sh runs the child with the bundled URL; exit 0',
+    /exit=0/.test(r.out) && /the bundled database \(db\) accepts connections/.test(r.out) && field(boot(r.out), 'aurl') === hash(ADMIN_URL) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
+  // Settings db-setup.sh refuses are never waited for (default bound, nothing listening): the refusal comes at once.
+  for (const [label, env, pattern] of [
+    ['the bundled db without PG_DATABASE_PASSWORD', { ...BUNDLED, CREWFLOW_BUNDLED_DB_ADMIN_URL: BUNDLED_ADMIN_EMPTY, CREWFLOW_DB_WAIT_SECONDS: '' }, /PG_DATABASE_PASSWORD is required for the bundled database/],
+    ['an empty PG_DATABASE_URL', { ...LOCAL, PG_DATABASE_URL: '', CREWFLOW_DB_WAIT_SECONDS: '' }, /PG_DATABASE_URL is empty: it is always required/],
+    ['an empty crewflow_owner password (PG_DATABASE_APP_PASSWORD unset)', { ...BUNDLED, PG_DATABASE_URL: 'postgresql://crewflow_owner:@db:5432/crewflow?sslmode=verify-full', CREWFLOW_DB_WAIT_SECONDS: '' }, /the crewflow_owner password in PG_DATABASE_URL is empty/],
+    ['a CREWFLOW_BUNDLED_DB other than 0 or 1', { ...LOCAL, CREWFLOW_BUNDLED_DB: 'yes', CREWFLOW_DB_WAIT_SECONDS: '' }, /CREWFLOW_BUNDLED_DB must be exactly 0/],
+  ]) {
+    r = run(`wrap-refuse-${label.replace(/[^a-z0-9]+/gi, '-')}`, env, { ctl: ctlFor(), execSetup: true, cmd: 'start=$(date +%s); sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+    check(`15j compose wrapper: ${label} is not waited for; db-setup.sh refuses it at once (64)`, /exit=64/.test(r.out) && tookOf(r.out) <= 3 && pattern.test(r.out) && !/waiting for/.test(r.out) && !boot(r.out), r.out);
+  }
+  // A stop during the wait ends it at once (TERM forwarded; exit 143), never the 40 s grace period.
+  r = run('wrap-term', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '60' }, { ctl: ctlFor(), execSetup: true, cmd: 'start=$(date +%s); sh -c "$(cat /ctl/wrapper.sh)" db-setup & pid=$!; sleep 3; kill -TERM $pid; wait $pid; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+  check('15k compose wrapper: TERM during the wait stops it at once (exit 143), the child never runs', /exit=143/.test(r.out) && tookOf(r.out) <= 6 && !boot(r.out), r.out);
 }
 
 // The bundled-db CA block is literally the same code in all three scripts.

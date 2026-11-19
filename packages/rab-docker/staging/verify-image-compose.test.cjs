@@ -104,6 +104,13 @@ const weakenings = [
   ['a second postgres:// value on the API', (v) => { v.services['rab-api'].labels = { x: 'postgresql://crewflow_owner:x@db:5432/crewflow' }; }, /rab-api: holds a postgres:\/\/ value outside PG_DATABASE_URL/],
   ['migration approval on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_APPROVED = 'pending-1-x'; }, /rab-worker: sets CREWFLOW_MIGRATION_APPROVED/],
   ['API reads .env.migrate', (_v, f) => { f.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }, /rab-api: names \.env\.migrate/],
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-setup waits for the database itself; nothing depends on db.
+  ['db-setup depends on db again', (v) => { v.services['db-setup'].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(db\)/],
+  ['db-setup and production both depend on db again', (v, _f, p) => { for (const m of [v, p]) m.services['db-setup'].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(db\)/],
+  ['rab-api depends on db again', (v) => { v.services['rab-api'].depends_on.db = { condition: 'service_healthy', required: true }; }, /rab-api: depends on db/],
+  ['db-setup started directly, without the wait', (v) => { v.services['db-setup'].entrypoint = ['./db-setup.sh']; }, /db-setup: must start through the wait-for-db wrapper/],
+  ['the wait block edited in the compose wrapper', (v) => { v.services['db-setup'].entrypoint = v.services['db-setup'].entrypoint.map((x) => String(x).replace('"57P03"', '"57P04"')); }, /db-setup: entrypoint is neither exactly \.\/db-setup\.sh nor exactly the wait-for-db wrapper/],
+  ['the wait bound changed in one file', (v) => { v.services['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '30'; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed|db-setup\.environment\.CREWFLOW_DB_WAIT_SECONDS differs/],
   ['the API waits for a rab-migrate again', (v) => { v.services['rab-api'].depends_on['rab-migrate'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on rab-migrate|rab-api\.depends_on differs/],
   ['API no longer migrates on start (O3 C1)', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'false'; }, /rab-api: CREWFLOW_MIGRATE_ON_START is not "true"/],
   ['a bogus approval mode', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'off'; }, /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token/],
@@ -695,11 +702,13 @@ const H_IMG = `adhin007/adolphus@sha256:${'a'.repeat(64)}`;
 const H_OWNER = 'postgresql://crewflow_owner:not-a-secret@db:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
 const H_BUNDLED = 'postgresql://postgres:not-a-secret@db:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
 const H_TIMEOUT = 'CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS';
+const H_WAIT = require('../scripts/db-setup-wait.cjs');
 const hDbEnv = () => ({ PG_ADMIN_URL: '', PG_DATABASE_URL: H_OWNER, CREWFLOW_BUNDLED_DB: '1', CREWFLOW_BUNDLED_DB_ADMIN_URL: H_BUNDLED, NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' });
 /** A hand-built model of the four services the rules look at (no rendering): the committed shape. */
 const hardenModel = () => ({
-  'db-setup': { image: H_IMG, entrypoint: ['./db-setup.sh'], restart: 'no', user: '1000:1000', read_only: true, depends_on: { db: { condition: 'service_healthy' } }, environment: hDbEnv() },
-  'db-harden': { image: H_IMG, entrypoint: ['./db-setup.sh', 'harden'], restart: 'no', user: '1000:1000', read_only: true, environment: { ...hDbEnv(), [H_TIMEOUT]: '1200' } },
+  // db-setup: the wait-for-db wrapper with no depends_on (owner instruction 2026-11-18); db-harden: db-setup.sh's own wait.
+  'db-setup': { image: H_IMG, entrypoint: ['/bin/sh', '-c', H_WAIT.waitWrapperScript().split('$').join('$$'), 'db-setup'], restart: 'no', user: '1000:1000', read_only: true, environment: { ...hDbEnv(), CREWFLOW_DB_WAIT_SECONDS: '170' } },
+  'db-harden': { image: H_IMG, entrypoint: ['./db-setup.sh', 'harden'], restart: 'no', user: '1000:1000', read_only: true, environment: { ...hDbEnv(), [H_TIMEOUT]: '1200', CREWFLOW_DB_WAIT_SECONDS: '170' } },
   'rab-api': { image: H_IMG, entrypoint: ['./api-prestart.sh'], depends_on: { 'db-setup': { condition: 'service_completed_successfully' } }, environment: { PG_ADMIN_URL: '', PG_DATABASE_URL: H_OWNER } },
   'rab-worker': { image: H_IMG, entrypoint: ['./worker-start.sh'], environment: { PG_ADMIN_URL: '', PG_DATABASE_URL: H_OWNER } },
 });

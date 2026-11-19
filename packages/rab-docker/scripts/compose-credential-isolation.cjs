@@ -40,8 +40,9 @@
  * (appPasswordChecks, pure).
  *
  * The files with a bundled `db` (production, dev, QA) are checked for the database-setup contract (dbSetupContractChecks,
- * pure; owner decision 2026-11-18, Twenty's way): a one-shot db-setup (entrypoint ./db-setup.sh, restart "no", no port, the
- * CA read-only, after a healthy db, no APP_SECRET) with PG_DATABASE_URL = a crewflow_owner URL (sslmode=verify-full); the
+ * pure; owner decision 2026-11-18, Twenty's way): a one-shot db-setup (entrypoint ./db-setup.sh after a healthy db, or in
+ * production the wait-for-db wrapper with no depends_on (db-setup-wait.cjs, owner instruction 2026-11-18), restart "no", no
+ * port, the CA read-only, no APP_SECRET) with PG_DATABASE_URL = a crewflow_owner URL (sslmode=verify-full); the
  * API and the Worker on ./api-prestart.sh / ./worker-start.sh (no compose init) with EXACTLY db-setup's PG_DATABASE_URL, no
  * other database URL in any variable, PG_ADMIN_URL pinned to "" and the CA read-only; the API waits for db-setup to
  * complete. No file carries a credential any more: the retired crewflow-db-target volume (db-setup's target + password
@@ -68,6 +69,7 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { dbSetupEntrypointForm, dbSetupStartProblems, WAIT_SECONDS_DEFAULT } = require('./db-setup-wait.cjs');
 
 const REPO = path.resolve(__dirname, '../../..');
 const SENTINEL_PASSWORD = 'SENTINEL-MIGRATOR-PW-0f3a9c'; // gitleaks:allow (synthetic marker the check plants, not a credential)
@@ -302,10 +304,14 @@ function dbSetupContractChecks(rel, services, [apiName, workerName], { requireHa
   out.push([Boolean(setup), `${rel}: has the one-shot db-setup service`]);
   let setupUrl = null;
   if (setup) {
-    out.push([JSON.stringify(setup.entrypoint ?? null) === JSON.stringify(['./db-setup.sh']) && !setup.command, `${rel}: db-setup runs exactly ./db-setup.sh (entrypoint, no command)`]);
+    // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): ./db-setup.sh directly (dev, QA: depends_on a healthy db), or
+    // the wait-for-db wrapper (the block of rab/db-setup.sh, then exec ./db-setup.sh) with NO depends_on (production: with
+    // CREWFLOW_BUNDLED_DB=0 there is no db container to depend on). Never anything else.
+    out.push([dbSetupEntrypointForm(setup.entrypoint) !== null && !setup.command, `${rel}: db-setup runs exactly ./db-setup.sh or exactly the wait-for-db wrapper (entrypoint, no command)`]);
     out.push([String(setup.restart ?? 'no') === 'no', `${rel}: db-setup restart is "no" (one-shot)`]);
     out.push([!(setup.ports ?? []).length, `${rel}: db-setup publishes no port`]);
-    out.push([setup.depends_on?.db?.condition === 'service_healthy', `${rel}: db-setup starts after a healthy db`]);
+    const start = dbSetupStartProblems(services, { requireWait: rel === PRODUCTION_FILE, renderedWait: WAIT_SECONDS_DEFAULT });
+    out.push([start.length === 0, `${rel}: db-setup waits for the database itself (wrapper, no depends_on${rel === PRODUCTION_FILE ? ', required here' : ''}) or starts after a healthy db${start.length ? ` (${start.join('; ')})` : ''}`]);
     out.push([mountAt(setup, DB_CA_DIR)?.read_only === true, `${rel}: db-setup mounts the db CA read-only`]);
     out.push([!Object.prototype.hasOwnProperty.call(setup.environment ?? {}, 'APP_SECRET'), `${rel}: db-setup has no APP_SECRET (never part of a database credential)`]);
     out.push([String(setup.user ?? '') === '1000:1000' && setup.read_only === true, `${rel}: db-setup runs as 1000:1000 with a read-only root`]);
