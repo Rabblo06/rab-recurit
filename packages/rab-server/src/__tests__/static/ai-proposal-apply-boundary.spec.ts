@@ -20,6 +20,8 @@ const WRITE_TOOLS = 'packages/rab-server/src/modules/ai/actions/ai-write-tools.t
 const REVIEWED_APPLY_CALLS: Record<string, string[]> = {
   'packages/rab-server/src/app.module.ts': ['consumer.apply(', 'consumer.apply('],
   'packages/rab-server/src/engine/core-modules/workspace-host/workspace-host.module.ts': ['consumer.apply('],
+  // Nest middleware (the opt-in CREWFLOW_LOG_FIRST_PEER diagnostic), not an AI write tool.
+  'packages/rab-server/src/engine/core-modules/trusted-proxy/trusted-proxy.module.ts': ['consumer.apply('],
   'packages/rab-server/src/command/hws-backfill.command.ts': ['this.backfill.apply('],
   [EXECUTOR]: ['tool.apply('],
 };
