@@ -38,10 +38,12 @@ describe('semantic posture: trigger def= hash and pinned search_path', () => {
     expect(triggers(SEMANTIC_GOLDEN_PG18)).toEqual(triggers(SEMANTIC_GOLDEN_PG16));
   });
 
-  function recorder(): { calls: Array<{ sql: string; params?: unknown[] }>; query: SemanticQuery } {
+  /** Records every statement; `failOn` makes the first statement containing that text throw (a failing read). */
+  function recorder(failOn?: string): { calls: Array<{ sql: string; params?: unknown[] }>; query: SemanticQuery } {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const query: SemanticQuery = async (sql, params) => {
       calls.push({ sql, params });
+      if (failOn && sql.includes(failOn)) throw new Error(`planted failure on ${failOn.slice(0, 40)}`);
       if (sql.includes(`current_setting('search_path')`)) return [{ sp: '"$user", core' }];
       if (sql.includes('server_version_num')) return [{ v: 160016 }];
       return [];
@@ -58,6 +60,34 @@ describe('semantic posture: trigger def= hash and pinned search_path', () => {
     expect(pin).toBeGreaterThan(0);
     expect(sqls.findIndex((s) => s === SEMANTIC_OBJECT_SQL)).toBeGreaterThan(pin);
     expect(sqls[sqls.length - 1]).toBe('ROLLBACK');
+    // Its own transaction ends with ROLLBACK, which discards the pin: the caller's value is never read or restored.
+    expect(sqls.some((s) => s.includes(`current_setting('search_path')`))).toBe(false);
+  });
+
+  it.each([
+    ['the search_path pin', `set_config('search_path', 'pg_catalog, public, pg_temp', true)`],
+    ['the server version', 'server_version_num'],
+    ['the object read', 'trigger|'],
+    ['the role read', 'login-count|'],
+  ])('own transaction: a failure in %s still issues ROLLBACK (no transaction left open)', async (_label, failOn) => {
+    const { calls, query } = recorder(failOn);
+    await expect(readSemanticPosture(query)).rejects.toThrow(/planted failure/);
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls[0]).toBe('BEGIN READ ONLY');
+    expect(sqls[sqls.length - 1]).toBe('ROLLBACK');
+    expect(sqls.filter((s) => s === 'ROLLBACK')).toHaveLength(1);
+  });
+
+  it("caller's transaction: a failure after the pin still restores the caller's search_path; a failing first read restores nothing", async () => {
+    const after = recorder('trigger|');
+    await expect(readSemanticPosture(after.query, { ownTransaction: false })).rejects.toThrow(/planted failure/);
+    const last = after.calls[after.calls.length - 1]!;
+    expect(last.sql).toContain(`set_config('search_path', $1, true)`);
+    expect(last.params).toEqual(['"$user", core']);
+
+    const first = recorder(`current_setting('search_path')`);
+    await expect(readSemanticPosture(first.query, { ownTransaction: false })).rejects.toThrow(/planted failure/);
+    expect(first.calls).toHaveLength(1); // nothing was pinned, so nothing to restore; never a BEGIN or ROLLBACK of its own
   });
 
   it("caller's transaction: pins, then restores the caller's search_path", async () => {

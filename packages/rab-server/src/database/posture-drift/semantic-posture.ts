@@ -169,9 +169,15 @@ export async function readSemanticPosture(query: SemanticQuery, options: { ownTr
   // change a line. The pinned value renders exactly as the goldens were generated (a default session: `public` visible, so
   // extension types such as citext print unqualified; `core` and workspace schemas not visible, so they print qualified);
   // pg_catalog first, pg_temp last, so nothing in public can shadow a catalog function the read calls unqualified.
-  // Transaction-local, and restored in `finally` for a caller that passed its own transaction.
-  const [{ sp }] = (await query(`SELECT pg_catalog.current_setting('search_path') AS sp`)) as Array<{ sp: string }>;
+  // Transaction-local (gone with the ROLLBACK of an own transaction); restored in `finally` for a caller that passed its own
+  // transaction. Every statement after BEGIN runs inside the try, so a failing read can never leave a transaction open on
+  // the boot-gate or monitor session.
+  let restore: string | null = null;
   try {
+    if (!own) {
+      const [{ sp }] = (await query(`SELECT pg_catalog.current_setting('search_path') AS sp`)) as Array<{ sp: string }>;
+      restore = sp;
+    }
     await query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, public, pg_temp', true)`);
     const [{ v }] = (await query(`SELECT pg_catalog.current_setting('server_version_num')::int AS v`)) as Array<{ v: number }>;
     const objects = await query(SEMANTIC_OBJECT_SQL);
@@ -194,7 +200,7 @@ export async function readSemanticPosture(query: SemanticQuery, options: { ownTr
     return { core: coreLines, workspaces, roles, sha256: hash.digest('hex'), serverMajor: Math.floor(Number(v) / 10000) };
   } finally {
     if (own) await query('ROLLBACK').catch(() => undefined);
-    else await query(`SELECT pg_catalog.set_config('search_path', $1, true)`, [sp]).catch(() => undefined);
+    else if (restore !== null) await query(`SELECT pg_catalog.set_config('search_path', $1, true)`, [restore]).catch(() => undefined);
   }
 }
 
