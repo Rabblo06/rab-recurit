@@ -17,7 +17,7 @@ the service refuses to start if it is set (exit 64); **—** = not given.
 | `PG_DATABASE_PASSWORD` | `compose.env` (mode a) | yes (superuser) | built | built | refused | refused | The bundled db's superuser password. Read on the volume's first start only. |
 | `PG_ADMIN_URL` | `compose.env` (mode b) | — | yes | yes | refused | refused | Your database's admin connection string, as your provider shows it. |
 | `PG_ADMIN_DIRECT_URL`<!-- VERIFY --> | `compose.env`, only when `PG_ADMIN_URL` is a pooler | — | yes | yes | refused | refused | The admin login's direct (session) endpoint. |
-| `PG_DATABASE_DIRECT_URL`<!-- VERIFY --> | `compose.env`, only when `PG_DATABASE_URL` is a pooler | — | yes | yes | yes | yes | The `crewflow_owner` login's direct (session) endpoint, for migrations and advisory locks. Not the legacy `DATABASE_DIRECT_URL`, which stays refused. |
+| `PG_DATABASE_SESSION_URL` | only when `PG_DATABASE_URL` is a transaction pooler; the compose wiring is pending<!-- VERIFY --> | — | yes | yes | yes | yes | The direct session connection of the same `crewflow_owner` login and database. Used for locks, boot gates, migrations, the upgrade runner, the CLI, `db-setup` and `db-harden`; only the request pool uses `PG_DATABASE_URL` then. Refused with another login or database, the same target as `PG_DATABASE_URL`, `PG_DATABASE_URL_IS_DIRECT=true`, or the legacy `DATABASE_DIRECT_URL`. |
 | `CREWFLOW_BUNDLED_DB` | `compose.env` | replicas | yes | yes | — | — | `1` (default) = the bundled db; `0` = your own database. OpenShip ignores the replica count: switch `db` off there. |
 | `CREWFLOW_BUNDLED_DB_ADMIN_URL` | built by Compose; never set it | — | built | built | — | — | The bundled superuser URL, built from `PG_DATABASE_PASSWORD`. |
 | `CREWFLOW_DB_WAIT_SECONDS` | `compose.env` | — | yes | yes | — | — | How long to wait for the database to accept connections: 0-900, default 170. |
@@ -41,12 +41,12 @@ the service refuses to start if it is set (exit 64); **—** = not given.
 - The libpq variables (`PGHOST`, `PGUSER`, `PGPASSWORD`, `PGOPTIONS`, ...).
 - `PG_SSL_ALLOW_SELF_SIGNED` (production always verifies the certificate).
 - `PG_DATABASE_REPLICA_URL`, `CREWFLOW_PROVISIONER_DATABASE_URL` and any other second database URL on rab-api or
-  rab-worker.
+  rab-worker; `PG_DATABASE_SESSION_URL` is the one allowed exception.
 
 ## What the URLs must look like
 
-- **`PG_DATABASE_URL`:** login `crewflow_owner`; the database's **direct** host, or a pooler together with
-  `PG_DATABASE_DIRECT_URL`<!-- VERIFY -->; a password of at least 32 characters with at least 10 different characters.
+- **`PG_DATABASE_URL`:** login `crewflow_owner`; a real session (checked at boot by a live probe), or any transaction
+  pooler together with `PG_DATABASE_SESSION_URL` (then `WORKER_DISPATCH_MODE=event` is refused); a password of at least 32 characters with at least 10 different characters.
 - **`sslmode` (required in production):** `require`, `verify-ca` or `verify-full`, optionally with `channel_binding`.
   Crewflow's own verification is what counts: all three verify the full certificate chain and the host name, the way node-postgres treats `require`. `disable`,
   `prefer`, `allow`, `no-verify` and a missing `sslmode` are refused. `channel_binding=require` is accepted, but the

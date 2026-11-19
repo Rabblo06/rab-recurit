@@ -24,8 +24,8 @@ never drop a security setting silently. Nothing was deployed, imported or connec
 > **Your own database and TLS on OpenShip (2026-11-19).** One general flow<!-- VERIFY --> for every provider: paste your database's
 > admin connection string into `PG_ADMIN_URL` on db-setup and db-harden, set `CREWFLOW_BUNDLED_DB=0`, switch the `db` service
 > off in OpenShip (it ignores `deploy.replicas`), and deploy. Enter `PG_DATABASE_URL` (the `crewflow_owner` URL) on db-setup,
-> db-harden, rab-api and rab-worker. If a URL is a pooler, add its direct endpoint (`PG_ADMIN_DIRECT_URL` on db-setup and
-> db-harden, `PG_DATABASE_DIRECT_URL` where `PG_DATABASE_URL` goes). TLS is verified on Crewflow's side (PR #257): every
+> db-harden, rab-api and rab-worker. If `PG_DATABASE_URL` is a transaction pooler, add `PG_DATABASE_SESSION_URL` (the direct
+> session connection, PR #258) where `PG_DATABASE_URL` goes; a pooled admin URL needs `PG_ADMIN_DIRECT_URL`. TLS is verified on Crewflow's side (PR #257): every
 > URL must set `sslmode=require`, `verify-ca` or `verify-full`, all checked as full verification (chain and host name);
 > `disable`, `prefer`, `allow`, `no-verify` and a missing `sslmode` are refused; `channel_binding` is accepted. Provider notes (direct URL, CA): `OWNER-LOGIN-DEPLOYMENT.md` section 2, "Known provider quirks".
 
