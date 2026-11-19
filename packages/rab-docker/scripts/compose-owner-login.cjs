@@ -170,7 +170,7 @@ const RETIRED_ADMIN_URL_KEYS = Object.freeze(['PG_DATABASE_ADMIN_URL']);
 /** db-setup's committed bundled-db superuser URL, built from ${PG_DATABASE_PASSWORD:-}; used only when neither URL is set. */
 const BUNDLED_ADMIN_URL_KEY = 'CREWFLOW_BUNDLED_DB_ADMIN_URL';
 /** db-setup's whole database environment, exactly (names). */
-const DB_SETUP_DB_KEYS = Object.freeze([ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, 'PG_DATABASE_URL', BUNDLED_DB_KEY, BUNDLED_ADMIN_URL_KEY]);
+const DB_SETUP_DB_KEYS = Object.freeze([ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, 'PG_DATABASE_URL', BUNDLED_DB_KEY, BUNDLED_ADMIN_URL_KEY]);
 /** Where the app services mount the bundled db's CA volume (read-only), and the db's own volume targets. */
 const DB_CA_VOLUME = 'crewflow-db-ca';
 const DB_CA_TARGET = '/run/crewflow/db-ca';
@@ -655,6 +655,7 @@ function adminUrlPlacementProblems(rel, text) {
   const perService = new Map(); // ${PG_ADMIN_URL...} interpolations per admin service (at most one each)
   const ANCHOR = /(?:^|[\s:[{,-])&[A-Za-z0-9_.-]+/;
   const PIN = /^\s*PG_ADMIN_URL\s*:\s*(""|'')\s*$/;
+  const DIRECT_PIN = /^\s*PG_ADMIN_DIRECT_URL\s*:\s*(""|'')\s*$/;
   // The services that may carry that pin: production's rab-api / rab-worker and the dev / QA stacks' server / worker.
   const PIN_SERVICES = [...APP_SERVICES, 'server', 'worker'];
   String(text).split(/\r?\n/).forEach((raw, i) => {
@@ -685,7 +686,9 @@ function adminUrlPlacementProblems(rel, text) {
     for (const retired of RETIRED_ADMIN_URL_KEYS) {
       if (new RegExp(`\\b${retired}\\b`).test(line)) problems.push(`${rel}:${i + 1}: ${retired} (renamed to ${ADMIN_URL_KEY})`);
     }
-    if (!inSetup && /\bPG_ADMIN_DIRECT_URL\b/.test(line)) problems.push(`${rel}:${i + 1}: ${ADMIN_DIRECT_URL_KEY} in ${where} (the direct admin address; db-setup and db-harden only)`);
+    if (!inSetup && /\bPG_ADMIN_DIRECT_URL\b/.test(line) && !(top === 'services' && PIN_SERVICES.includes(service) && DIRECT_PIN.test(line))) {
+      problems.push(`${rel}:${i + 1}: ${ADMIN_DIRECT_URL_KEY} in ${where} (the direct admin address; db-setup and db-harden only; rab-api / rab-worker only pin it to "")`);
+    }
     if (!inSetup && /\bCREWFLOW_BUNDLED_DB_ADMIN_URL\b/.test(line)) problems.push(`${rel}:${i + 1}: ${BUNDLED_ADMIN_URL_KEY} in ${where} (the bundled db's superuser URL; db-setup and db-harden only)`);
   });
   for (const [name, count] of perService) {

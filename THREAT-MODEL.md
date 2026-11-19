@@ -9587,6 +9587,17 @@ capability at run time, the same code everywhere.
   travels as a bind parameter into a transaction-local setting and reaches CREATE / ALTER ROLE through `%L`; the DO block
   re-raises without the inner statement (no CONTEXT with the literal). Exactly one plain-text attempt; a second refusal is
   reported as such.
+- **Security review of #259 (F1-F7), applied:**
+  - The plain-text transaction sets `lock_timeout` to half of `deadlock_timeout` (L1), so a blocked ALTER ROLE fails with 55P03 inside the DO block before `log_lock_waits` could report it with the SQL context. G2 requires `log_lock_waits` off or that ordering.
+  - Both DO blocks catch `query_canceled` (57014: statement_timeout or a cancel) as well as OTHERS.
+  - G1 also quiets `log_lock_waits`, `log_error_verbosity` (terse), `debug_print_*`, `auto_explain.log_min_duration`, `pgaudit.log_parameter` and `pg_stat_statements.track` where the admin may.
+  - G2 is no longer a plain denylist: `debug_print_*` must be off, the preload lists must be readable, a loaded or configured extension must be judged safe, and ANY custom-setting prefix outside a reviewed list (auto_explain, pgaudit, pg_stat_statements, plpgsql, crewflow_bootstrap, crewflow, rab) refuses the fallback.
+  - No `set_config` statement echoes its value back (F7).
+  - db-harden runs the session probe too (F5).
+  - db-setup.sh checks the parts of a compose-built URL at run time (F6).
+  - `PG_ADMIN_DIRECT_URL` is refused in every runtime process and pinned to "" on rab-api / rab-worker (F2).
+- **Residual (FATAL during the plain-text DO block).** A FATAL error cannot be caught: `pg_terminate_backend`, an administrator or compute shutdown/suspend, or an out-of-memory kill while the EXECUTEd CREATE/ALTER ROLE runs. The server's report of it may carry the statement's CONTEXT (including the literal) at the server's log verbosity. Exposure is a narrow window (one statement) on a server whose operator could already read the password. It is not mitigated beyond `log_error_verbosity = terse` where the admin may set it.
+- **Residual (provider fit).** On a managed service whose admin cannot SET the logging settings, and which loads its own extensions (custom-setting prefixes outside the reviewed list), G2 refuses the fallback by design. The owner gets the alternatives in the PR.
 - **Tampering / a hostile server.** A server that lies about refusing the verifier gets the plain text over a verified TLS
   connection, i.e. only the server the operator named, whose certificate verified. That server could already read every row
   as the admin; it learns crewflow_owner's password, which it could set itself.

@@ -7,8 +7,9 @@
 #
 # It starts, on a private docker network, with ports published on 127.0.0.1 only, all from the stock postgres:16 image:
 #   fbc-plain     PostgreSQL 16, TLS on (a per-run CA; server certificate for IP 127.0.0.1)
-#   fbc-sim       the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000), and EVERY statement
-#                 logged with its parameters (log_statement=all, log_min_duration_statement=0)
+#   fbc-sim       the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000), EVERY statement logged
+#                 with its parameters (log_statement=all, log_min_duration_statement=0), lock waits logged with their context
+#                 (log_lock_waits=on, deadlock_timeout=200ms), and auto_explain logging every plan verbosely with parameters
 #   fbc-bouncer1  PgBouncer, transaction pooling, defaults (refuses the `options` startup parameter)
 #   fbc-bouncer2  PgBouncer, transaction pooling, ignore_startup_parameters=options, one server connection per pool
 # No image is built (the docker host's root disk stays untouched): the server headers and PgBouncer come from the same pgdg
@@ -72,7 +73,7 @@ start_pg() { # name port extra-args...
     "cp /certs/server.crt /certs/server.key /tmp/ && chown postgres /tmp/server.crt /tmp/server.key && chmod 600 /tmp/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key $*" >/dev/null
 }
 start_pg fbc-plain 55441
-start_pg fbc-sim 55442 -c shared_preload_libraries=refuse_prehashed -c log_statement=all -c log_min_duration_statement=0
+start_pg fbc-sim 55442 -c shared_preload_libraries=refuse_prehashed,auto_explain -c log_statement=all -c log_min_duration_statement=0 \n  -c log_lock_waits=on -c deadlock_timeout=200ms -c auto_explain.log_min_duration=0 -c auto_explain.log_verbose=on -c auto_explain.log_nested_statements=on
 for name in fbc-plain fbc-sim; do
   ready=no
   for _ in $(seq 1 90); do

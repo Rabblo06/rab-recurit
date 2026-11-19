@@ -632,6 +632,14 @@ for (const [label, env, entry, pattern] of [
   ['a bundled crewflow_owner password with a character outside A-Z a-z 0-9 _ -', { ...BUNDLED, PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}.x@db:5432/crewflow?sslmode=verify-full` }, 'db-setup.sh', /PG_DATABASE_APP_PASSWORD must be 32\+ characters/],
   ['CREWFLOW_BUNDLED_DB=0 (mode c) with a PG_DATABASE_URL still on host db', { ...MODE_C, PG_DATABASE_URL: RUNTIME_URL }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) but PG_DATABASE_URL still names the bundled host db/],
   ['CREWFLOW_BUNDLED_DB=0 (mode b) with a PG_DATABASE_URL still on host db', { ...MODE_B, PG_DATABASE_URL: RUNTIME_URL }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) but PG_DATABASE_URL still names the bundled host db/],
+  // Owner decision 2026-11-19 / security review F6 of #259: the URL compose built from PG_DATABASE_APP_PASSWORD and
+  // PG_DATABASE_HOST (set) is checked at run time; PG_ADMIN_DIRECT_URL and PG_DATABASE_SESSION_URL login rules.
+  ['a built URL with a short password', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: 'postgresql://crewflow_owner:short0123@db-direct.example:25060/d?sslmode=verify-full' }, 'db-setup.sh', /the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST/],
+  ['a built URL whose host carries a brace', { ...MODE_B, PG_DATABASE_HOST: 'db{x}', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db{x}:25060/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port is not digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25x/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['PG_ADMIN_DIRECT_URL without PG_ADMIN_URL', { ...MODE_C, PG_ADMIN_DIRECT_URL: EXT_ADMIN }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL/],
+  ['a PG_ADMIN_DIRECT_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_DIRECT_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL logs in as crewflow_owner/],
+  ['a PG_DATABASE_SESSION_URL that is not crewflow_owner', { ...MODE_B, PG_DATABASE_SESSION_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_SESSION_URL does not log in as crewflow_owner/],
 ]) {
   r = run(`setup-refuse-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry });
   check(`14g db-setup.sh refuses ${label} (64) before the child runs; nothing is printed of the value`, r.code === 64 && pattern.test(r.out) && !boot(r.out) &&

@@ -71,6 +71,8 @@ import {
   OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY,
   OWNER_BOOTSTRAP_G1_QUIET_LOGS,
   OWNER_BOOTSTRAP_G2_LOG_SAFE,
+  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
+  G2_KNOWN_SETTING_PREFIXES,
   OWNER_BOOTSTRAP_PLAINTEXT_STATEMENTS,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
@@ -1604,7 +1606,8 @@ describe('the plain-text fallback through bootstrapOwnerWithIo', () => {
     const t = texts();
     // First the verifier, then (after a ROLLBACK) the plain text, guard first.
     expect(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT));
-    expect(t.indexOf(OWNER_BOOTSTRAP_G1_QUIET_LOGS)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_G2_LOG_SAFE));
+    expect(t.indexOf(OWNER_BOOTSTRAP_G1_QUIET_LOGS)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT));
+    expect(t.indexOf(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_G2_LOG_SAFE));
     expect(t.indexOf(OWNER_BOOTSTRAP_G2_LOG_SAFE)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS));
     expect(t.indexOf(OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT));
     expect(t.filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT)).toHaveLength(1);
@@ -1749,5 +1752,82 @@ describe('PR #258: PG_DATABASE_SESSION_URL (the crewflow_owner session address) 
     expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.appSessionUsed);
     for (const forbidden of [ADMIN_PW, OWNER_PW, 'pool.internal.example', 'crewflow_unit']) expect(lines.join('\n')).not.toContain(forbidden);
+  });
+});
+
+
+describe('security review of #259: F1 / F3 / F5 / F7', () => {
+  it('F1: both DO blocks catch query_canceled (57014) as well as OTHERS, so a cancel or statement_timeout never logs the CONTEXT', () => {
+    for (const block of [OWNER_BOOTSTRAP_Q4C_DO, OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT]) {
+      expect(block).toContain('EXCEPTION WHEN OTHERS OR query_canceled THEN');
+      expect(block).not.toMatch(/EXCEPTION WHEN OTHERS THEN/);
+    }
+  });
+
+  it('F1: L1 sets lock_timeout to half of deadlock_timeout (at least 1 ms), transaction-local; G2 requires log_lock_waits off or lock_timeout below deadlock_timeout', () => {
+    expect(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT).toContain("pg_catalog.set_config('lock_timeout', GREATEST(1, s.setting::bigint / 2)::text || 'ms', true)");
+    expect(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT).toContain("WHERE s.name = 'deadlock_timeout'");
+    expect(OWNER_BOOTSTRAP_G2_LOG_SAFE).toContain("(s.lock_waits = 'off' OR (s.lock_to::bigint > 0 AND s.lock_to::bigint < s.deadlock_to::bigint))");
+  });
+
+  it.each([
+    ['log_lock_waits', 'off'],
+    ['log_error_verbosity', 'terse'],
+    ['debug_print_parse', 'off'],
+    ['debug_print_rewritten', 'off'],
+    ['debug_print_plan', 'off'],
+    ['auto_explain.log_min_duration', '-1'],
+    ['pgaudit.log_parameter', 'off'],
+    ['pg_stat_statements.track', 'top'],
+    ['log_statement', 'none'],
+    ['log_parameter_max_length', '0'],
+  ])('F1 / F3: G1 quiets %s (to %s) where the admin may (user context, or the SET privilege)', (name, value) => {
+    expect(OWNER_BOOTSTRAP_G1_QUIET_LOGS).toContain(`('${name}', '${value}')`);
+    expect(OWNER_BOOTSTRAP_G1_QUIET_LOGS).toContain("WHERE s.context = 'user' OR pg_catalog.has_parameter_privilege(v.name, 'SET')");
+    expect(OWNER_BOOTSTRAP_G1_QUIET_LOGS).toContain('JOIN pg_catalog.pg_settings s ON s.name = v.name');
+  });
+
+  it.each([
+    ["debug_print_* off", "s.dbg_parse = 'off' AND s.dbg_rewritten = 'off' AND s.dbg_plan = 'off'"],
+    ['the preload lists readable', 's.libs IS NOT NULL'],
+    ['auto_explain: no plan, or neither verbose nor parameters', "OR s.ae_min_dur = '-1' OR (s.ae_verbose = 'off' AND s.ae_max_len = '0'))"],
+    ['auto_explain judged when loaded OR configured', "NOT (s.libs OPERATOR(pg_catalog.~) '(^|[,/ ])auto_explain($|[, ])' OR s.ae_min_dur IS NOT NULL)"],
+    ['pgaudit logs no parameters', "OR s.pga_param = 'off')"],
+    ['pg_stat_statements records no nested utility text', "OR s.pgss_track <> 'all' OR s.pgss_utility = 'off')"],
+    ['unknown custom-setting prefixes refused', "pg_catalog.split_part(x.name, '.', 1) <> ALL (ARRAY['auto_explain', 'pgaudit', 'pg_stat_statements', 'plpgsql', 'crewflow_bootstrap', 'crewflow', 'rab'])"],
+    ['anything but true is unsafe', 'false) AS safe'],
+  ])('F3: G2 requires %s', (_label, fragment) => {
+    expect(OWNER_BOOTSTRAP_G2_LOG_SAFE).toContain(fragment);
+  });
+
+  it('F3: the reviewed prefix allowlist names no provider and is quote-free', () => {
+    expect([...G2_KNOWN_SETTING_PREFIXES]).toEqual(['auto_explain', 'pgaudit', 'pg_stat_statements', 'plpgsql', 'crewflow_bootstrap', 'crewflow', 'rab']);
+    for (const p of G2_KNOWN_SETTING_PREFIXES) expect(p).toMatch(/^[a-z_]+$/);
+  });
+
+  it('F7: no set_config statement echoes the value it set: each returns booleans only', () => {
+    for (const text of [OWNER_BOOTSTRAP_Q4B_SET_INPUTS, OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS, OWNER_BOOTSTRAP_G1_QUIET_LOGS, OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT]) {
+      expect(text).toMatch(/set_config\([^)]*\)( IS NOT NULL|::text \|\| 'ms', true\) IS NOT NULL)/);
+      expect(text).not.toMatch(/set_config\([^)]*\),\s*$/m);
+    }
+    expect(OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS).toContain("set_config('crewflow_bootstrap.password', $1, true) IS NOT NULL");
+  });
+
+  it('F5: db-harden runs the session probe once before reading or changing anything; a pooler is refused (64) with the direct-address message', async () => {
+    const f = hardenFake({ rounds: [existing], complete: [true] });
+    f.io.sessionProbe = async () => {
+      throw new PgSessionProbeError('PG_ADMIN_URL connection is not session-stable (x). Refusing to start.');
+    };
+    const error = await hardenOwnerWithIo(f.io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.adminNotSessionStable);
+    expect(f.sent).not.toContain(OWNER_BOOTSTRAP_Q2_FACTS);
+    let probes = 0;
+    const g = hardenFake({ rounds: [{ ...existing, oCreateRole: false }] });
+    g.io.sessionProbe = async () => {
+      probes += 1;
+    };
+    await hardenOwnerWithIo(g.io);
+    expect(probes).toBe(1);
   });
 });

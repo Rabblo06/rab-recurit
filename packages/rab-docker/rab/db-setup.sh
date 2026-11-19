@@ -190,6 +190,32 @@ else
   # c. Your own database, crewflow_owner created by hand: read-only checks only.
   MODE=owner
 fi
+# Security review F6 of #259: the crewflow_owner URL compose BUILT from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PORT /
+# NAME (PG_DATABASE_HOST is set; the lint refuses it beside an explicit PG_DATABASE_URL). Its parts are interpolated
+# unencoded, so they are checked here at run time too: the password 32+ characters of A-Z a-z 0-9 _ -, and the host, port and
+# database name free of $ { } @ # / ? and whitespace (the port digits only). Values are never printed.
+if [ -n "${PG_DATABASE_HOST:-}" ]; then
+  built_rest="${PG_DATABASE_URL#*://crewflow_owner:}"
+  built_pw="${built_rest%@*}"
+  built_after="${built_rest##*@}"
+  built_hostport="${built_after%%/*}"
+  built_tail="${built_after#*/}"
+  built_db="${built_tail%%\?*}"
+  built_host="${built_hostport%:*}"
+  built_port="${built_hostport##*:}"
+  built_ok=yes
+  case "$built_pw" in '' | *[!A-Za-z0-9_-]*) built_ok=no ;; esac
+  if [ "${#built_pw}" -lt 32 ]; then built_ok=no; fi
+  for part in "$built_host" "$built_db"; do
+    case "$part" in '' | *[\$\{\}@#/\?\ ]*) built_ok=no ;; esac
+  done
+  case "$built_port" in '' | *[!0-9]*) built_ok=no ;; esac
+  unset built_rest built_pw built_after built_hostport built_tail built_db built_host built_port part
+  if [ "$built_ok" != yes ]; then
+    refuse 'the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME is malformed: the password must be 32+ characters of A-Z a-z 0-9 _ - (openssl rand -hex 32), the host and database name must not contain $ { } @ # / ? or spaces, and the port must be digits. Values not shown.'
+  fi
+  unset built_ok
+fi
 if [ "${CREWFLOW_BUNDLED_DB:-1}" = 0 ] && [ "$(url_host "$PG_DATABASE_URL")" = db ]; then
   refuse 'CREWFLOW_BUNDLED_DB=0 (your own database) but PG_DATABASE_URL still names the bundled host db: set PG_DATABASE_HOST (and PG_DATABASE_NAME / PG_DATABASE_PORT) to your database, copied from PG_ADMIN_URL, with PG_DATABASE_APP_PASSWORD; or put your crewflow_owner URL in PG_DATABASE_URL (direct host, sslmode=verify-full).'
 fi

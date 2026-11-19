@@ -88,6 +88,7 @@ import {
   OWNER_BOOTSTRAP_COMMIT,
   OWNER_BOOTSTRAP_G1_QUIET_LOGS,
   OWNER_BOOTSTRAP_G2_LOG_SAFE,
+  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_BOOTSTRAP_Q0_SESSION,
   OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING,
   OWNER_BOOTSTRAP_Q2_FACTS,
@@ -638,9 +639,10 @@ export function isVerifiedTls(config: Pick<PgDriverConfig, 'ssl'>): boolean {
   return !!ssl && typeof ssl === 'object' && (ssl as { rejectUnauthorized?: unknown }).rejectUnauthorized === true;
 }
 
-/** G1 + G2 (plain-text fallback, in the write transaction): refused (64) unless no server log would record the password. */
+/** G1 + L1 + G2 (plain-text fallback, in the write transaction): refused (64) unless no server log would record the password. */
 async function assertPlaintextLogSafe(session: SqlSession): Promise<void> {
   await session.query(OWNER_BOOTSTRAP_G1_QUIET_LOGS);
+  await session.query(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT);
   const { rows } = await session.query(OWNER_BOOTSTRAP_G2_LOG_SAFE);
   const safe = rows.length === 1 ? rows[0]?.safe : undefined;
   if (safe !== true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.plaintextLogRisk);
@@ -1441,6 +1443,8 @@ export interface HardenIo {
   now(): number;
   timeoutSeconds: number;
   pollIntervalMs?: number;
+  /** Security review F5 of #259: the capability check of the admin connection, once, before any change (as in db-setup). */
+  sessionProbe?(): Promise<void>;
 }
 
 /**
@@ -1458,6 +1462,7 @@ export async function hardenOwnerWithIo(io: HardenIo): Promise<OwnerBootstrapRes
     waitingLogged = line;
   };
   const base: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'none', code: null };
+  let probed = false;
   for (;;) {
     let session: SqlSession | null = null;
     try {
@@ -1470,6 +1475,15 @@ export async function hardenOwnerWithIo(io: HardenIo): Promise<OwnerBootstrapRes
       if (session) {
         await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
         await session.query(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING);
+        if (io.sessionProbe && !probed) {
+          try {
+            await io.sessionProbe();
+          } catch (error) {
+            if (error instanceof PgSessionProbeError) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNotSessionStable);
+            throw error;
+          }
+          probed = true;
+        }
         const f = await readFacts(session);
         if (!f.ownerExists) waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForRole);
         else if (f.oCreateRole !== true && !f.oCreateRolePending) {
@@ -1549,6 +1563,9 @@ export async function runOwnerHarden(env: Record<string, string | undefined>, op
       now: () => Date.now(),
       timeoutSeconds,
       pollIntervalMs: options.pollIntervalMs,
+      sessionProbe: async () => {
+        await probePgSessionAffinity(adminConfig, { label: 'PG_ADMIN_URL connection' });
+      },
     });
     return result;
   } catch (error) {

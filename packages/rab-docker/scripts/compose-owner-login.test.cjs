@@ -1033,6 +1033,7 @@ function hardenModel() {
   const want = {
     PG_ADMIN_URL: '',
     PG_ADMIN_DIRECT_URL: '',
+    PG_DATABASE_HOST: '',
     PG_DATABASE_URL: gate.BUNDLED_APP_URL,
     CREWFLOW_BUNDLED_DB: '1',
     CREWFLOW_BUNDLED_DB_ADMIN_URL: gate.BUNDLED_URL,
@@ -1225,8 +1226,16 @@ test('owner decision 2026-11-19: compose.env holds PG_ADMIN_DIRECT_URL and PG_DA
     assertRefused(lintEnvText(kind, `${base}PG_ADMIN_DIRECT_URL=${direct}`), /^PG_ADMIN_DIRECT_URL: set it in compose\.env/);
     assertRefused(lintEnvText(kind, `${base}PG_DATABASE_HOST=db.internal.example`), /^PG_DATABASE_HOST: set it in compose\.env/);
   }
-  // Never on rab-api / rab-worker, in any form (placement rule: db-setup and db-harden only).
-  assertRefused(lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n'), /PG_ADMIN_DIRECT_URL in service rab-api/);
+  // Security review F2 of #259: rab-api / rab-worker may only PIN it to "" (like PG_ADMIN_URL); any value, or any other
+  // service, is refused.
+  assert.ok(!lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n').some((p) => /PG_ADMIN_DIRECT_URL in/.test(p)));
+  assertRefused(lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}\n'), /PG_ADMIN_DIRECT_URL in service rab-api/);
+  assertRefused(lintComposeText('x.yml', 'services:\n  other:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n'), /PG_ADMIN_DIRECT_URL in service other/);
+  // Both committed files pin it on rab-api and rab-worker.
+  for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.equal((text.match(/^ {6}PG_ADMIN_DIRECT_URL: ""$/gm) ?? []).length >= 2, true, `${file}: PG_ADMIN_DIRECT_URL pinned on rab-api and rab-worker`);
+  }
 });
 
 test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL)', () => {

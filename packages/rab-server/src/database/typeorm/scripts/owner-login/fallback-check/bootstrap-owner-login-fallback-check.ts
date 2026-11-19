@@ -36,6 +36,15 @@ import { join, resolve } from 'node:path';
 import { Client } from 'pg';
 
 import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from '../owner-bootstrap';
+import {
+  OWNER_BOOTSTRAP_G1_QUIET_LOGS,
+  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
+  OWNER_BOOTSTRAP_Q0_SESSION,
+  OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
+  OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY,
+  OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS,
+  OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT,
+} from '../owner-bootstrap-sql';
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..', '..', '..', '..', '..');
 const TSCONFIG_APP = join(REPO_ROOT, 'packages', 'rab-server', 'tsconfig.app.json');
@@ -140,7 +149,8 @@ async function reset(base: URL): Promise<void> {
 }
 
 /** A database owned by a NON-superuser CREATEROLE admin (the shape of a managed provider's admin login). */
-async function fixture(base: URL, tag: string, grantLogSettings: boolean): Promise<Fixture> {
+/** grantLogSettings: the admin may SET the log settings G1 quiets, and AUTO_EXPLAIN too unless `noAutoExplainGrant`. */
+async function fixture(base: URL, tag: string, grantLogSettings: boolean, noAutoExplainGrant = false): Promise<Fixture> {
   await reset(base);
   const db = `fbc_${tag}_${RUN}`;
   const admin = `fbc_admin_${tag}_${RUN}`;
@@ -170,7 +180,11 @@ async function fixture(base: URL, tag: string, grantLogSettings: boolean): Promi
   }
   await sql(base, 'postgres', `CREATE DATABASE ${ident(db)} OWNER ${ident(admin)}`);
   if (grantLogSettings) {
-    await sql(base, 'postgres', `GRANT SET ON PARAMETER log_statement, log_min_duration_statement, log_parameter_max_length TO ${ident(admin)}`);
+    await sql(base, 'postgres', `GRANT SET ON PARAMETER log_statement, log_min_duration_statement, log_parameter_max_length, log_lock_waits, log_error_verbosity TO ${ident(admin)}`);
+    // G2 reads shared_preload_libraries (superuser-only unless pg_read_all_settings): fail closed when it cannot.
+    await sql(base, 'postgres', `GRANT pg_read_all_settings TO ${ident(admin)}`);
+    const ae = await sql(base, 'postgres', `SELECT 1 FROM pg_catalog.pg_settings WHERE name = 'auto_explain.log_min_duration'`);
+    if (ae.length && !noAutoExplainGrant) await sql(base, 'postgres', `GRANT SET ON PARAMETER "auto_explain.log_min_duration" TO ${ident(admin)}`);
   }
   return { db, admin, adminPassword, ownerPassword: strong() };
 }
@@ -230,6 +244,56 @@ async function created(base: URL, f: Fixture, run: ChildRun, what: string): Prom
   const st = await ownerState(base);
   expect(st.exists && st.scram, `${what}: crewflow_owner missing or its password not stored as SCRAM`);
   expect(await canLogin(base, 'crewflow_owner', f.ownerPassword, f.db), `${what}: crewflow_owner cannot log in with its password`);
+}
+
+
+/**
+ * F1 of the security review: the plain-text transaction run DIRECTLY (the statements db-setup sends, in its order) while a
+ * second session holds the crewflow_owner catalog row (BEGIN; ALTER ROLE crewflow_owner ...). The refusing server logs lock
+ * waits (log_lock_waits=on, deadlock_timeout=200ms) with their context stack. `withGuard` false is the CONTROL (no G1/L1):
+ * the literal must then reach the log, proving the scenario is not vacuous; true is db-setup's order: 55P03 (lock_timeout
+ * below deadlock_timeout), caught by the DO block, and the password in no log line. `statementTimeout` instead sets a short
+ * statement_timeout with no lock_timeout: 57014, which the DO block must catch (WHEN OTHERS OR query_canceled).
+ */
+async function lockedPlaintext(f: Fixture, password: string, mode: 'control' | 'guarded' | 'statement-timeout'): Promise<string> {
+  await sql(SIM, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+  await sql(SIM, 'postgres', `GRANT crewflow_owner TO ${ident(f.admin)} WITH ADMIN OPTION`);
+  const su = (db: string) =>
+    new Client({ host: SIM.hostname, port: Number(SIM.port), user: decodeURIComponent(SIM.username), password: decodeURIComponent(SIM.password), database: db, ssl: { ca: CA, rejectUnauthorized: true } });
+  const holder = su('postgres');
+  await holder.connect();
+  const admin = new Client({ host: SIM.hostname, port: Number(SIM.port), user: f.admin, password: f.adminPassword, database: f.db, ssl: { ca: CA, rejectUnauthorized: true } });
+  await admin.connect();
+  let code = 'none';
+  try {
+    await holder.query('BEGIN');
+    await holder.query(`ALTER ROLE crewflow_owner CONNECTION LIMIT 5`);
+    await admin.query(OWNER_BOOTSTRAP_Q0_SESSION);
+    await admin.query('BEGIN');
+    if (mode === 'guarded') {
+      await admin.query(OWNER_BOOTSTRAP_G1_QUIET_LOGS);
+      await admin.query(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT);
+    } else if (mode === 'statement-timeout') {
+      await admin.query(`SET LOCAL statement_timeout = '100ms'`);
+    }
+    await admin.query(OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY);
+    await admin.query(OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS, [password, 'true']);
+    await admin.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
+    // The control waits past deadlock_timeout (the lock-wait report), then the holder lets go.
+    const release = mode === 'control' ? setTimeout(() => void holder.query('ROLLBACK').catch(() => undefined), 1500) : null;
+    try {
+      await admin.query(OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT);
+    } catch (error) {
+      code = String((error as { code?: unknown }).code ?? 'no-code');
+    }
+    if (release) clearTimeout(release);
+    await admin.query('ROLLBACK').catch(() => undefined);
+  } finally {
+    await holder.query('ROLLBACK').catch(() => undefined);
+    await holder.end().catch(() => undefined);
+    await admin.end().catch(() => undefined);
+  }
+  return code;
 }
 
 const scenarios: Array<[string, () => Promise<void>]> = [
@@ -309,6 +373,44 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       expect(!(await ownerState(SIM)).exists, 'S3: crewflow_owner was created');
       assertClean(run);
       expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'S3: the crewflow_owner password appears in the server log');
+    },
+  ],
+  [
+    'S4 refusing server with auto_explain verbose (log_min_duration=0, parameters logged), admin may NOT quiet it: refused 64, never sent',
+    async () => {
+      const f = await fixture(SIM, 's4', true, true);
+      const run = await runChild({
+        PG_ADMIN_URL: urlFor(SIM, f.admin, f.adminPassword, f.db),
+        PG_DATABASE_URL: urlFor(SIM, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_SSL_CA_CERT_PATH: CA_PATH,
+      });
+      expect(run.code === 64 && run.out.includes(OWNER_BOOTSTRAP_MESSAGES.plaintextLogRisk), `S4: exit ${run.code}, expected the log-risk refusal`);
+      expect(!(await ownerState(SIM)).exists, 'S4: crewflow_owner was created');
+      assertClean(run);
+      expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'S4: the crewflow_owner password appears in the server log');
+    },
+  ],
+  [
+    'S5 F1 lock wait: the CONTROL (no G1/L1) leaks the literal via log_lock_waits; db-setup\'s order fails 55P03 and leaks nothing',
+    async () => {
+      const f = await fixture(SIM, 's5', true);
+      const controlPassword = remember(`control${randomBytes(20).toString('hex')}`);
+      await lockedPlaintext(f, controlPassword, 'control');
+      expect(logHits(process.env.FBC_SIM_CONTAINER, [controlPassword]) > 0, 'S5: the control did not reach the log (the scenario would be vacuous)');
+      await reset(SIM);
+      const g = await fixture(SIM, 's5g', false);
+      const code = await lockedPlaintext(g, g.ownerPassword, 'guarded');
+      expect(code === '55P03', `S5: expected 55P03 (lock_timeout) from the DO block, got ${code}`);
+      expect(logHits(process.env.FBC_SIM_CONTAINER, [g.ownerPassword]) === 0, 'S5: the crewflow_owner password appears in the server log');
+    },
+  ],
+  [
+    'S6 F1 statement_timeout during the ALTER ROLE: 57014 caught by the DO block, the password in no log line',
+    async () => {
+      const f = await fixture(SIM, 's6', false);
+      const code = await lockedPlaintext(f, f.ownerPassword, 'statement-timeout');
+      expect(code === '57014', `S6: expected 57014 from the DO block, got ${code}`);
+      expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'S6: the crewflow_owner password appears in the server log');
     },
   ],
   [

@@ -156,8 +156,8 @@ export const OWNER_BOOTSTRAP_Q4A_LOCK = `SELECT pg_catalog.pg_advisory_xact_lock
  * Q4b: inputs as transaction-local custom settings, sent as BIND PARAMETERS ($1, $2), so neither value is in any
  * statement text, pg_stat_activity.query, pg_stat_statements or log_statement output.
  */
-export const OWNER_BOOTSTRAP_Q4B_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.verifier', $1, true),
-       pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true);`;
+export const OWNER_BOOTSTRAP_Q4B_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.verifier', $1, true) IS NOT NULL
+       AND pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true) IS NOT NULL AS done;`;
 
 /**
  * Q4b2 (lead review of PR #226's own-login script, 2026-11-17): `createrole_self_grant` (PostgreSQL 16+, user-settable) makes
@@ -210,7 +210,7 @@ BEGIN
         AND pg_catalog.has_database_privilege('crewflow_owner', v_db, 'TEMPORARY WITH GRANT OPTION')) THEN
       EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', v_db);
     END IF;
-  EXCEPTION WHEN OTHERS THEN
+  EXCEPTION WHEN OTHERS OR query_canceled THEN
     -- Owner decision 2026-11-19: exactly ONE inner message is kept, PostgreSQL's fixed "tuple concurrently updated" (XX000:
     -- a concurrent ALTER ROLE / GRANT on the same catalog row from another database of the cluster), so the genuine race is
     -- told apart from any other XX000; every other error keeps only its SQLSTATE. The HINT names the failing step (fixed text).
@@ -228,10 +228,11 @@ $bootstrap$;`;
  * Q4b (plain-text fallback): the plain-text password and "must be set", as transaction-local custom settings sent as BIND
  * PARAMETERS ($1, $2): never in a statement text, pg_stat_activity.query or pg_stat_statements; custom settings are
  * per-backend (no other session can read them) and `true` drops them at the end of the transaction. A bind parameter IS
- * logged with a logged statement, hence G1 / G2 first.
+ * logged with a logged statement, hence G1 / L1 / G2 first. Security review F7: the result is one boolean, so the password is
+ * never echoed back in a result row (set_config returns the value it set).
  */
-export const OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.password', $1, true),
-       pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true);`;
+export const OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.password', $1, true) IS NOT NULL
+       AND pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true) IS NOT NULL AS done;`;
 
 /**
  * Q4b3 (plain-text fallback, before Q4c): the server hashes a plain-text password with password_encryption, so it is pinned
@@ -241,34 +242,70 @@ export const OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY = `SELECT pg_catalog.set_config('pa
 
 /**
  * G1 (plain-text fallback, in the write transaction, before the password is sent): switch off, for THIS transaction, every
- * server log path that could record a bind parameter, wherever the admin login may (superuser, or GRANT SET ON PARAMETER,
- * PostgreSQL 15+; a managed-service admin usually cannot). Best effort by design: G2 decides. Only parameters that exist on
- * every supported major are named (has_parameter_privilege errors on an unknown name).
+ * server log path that could record a bind parameter, a statement or an error context, wherever the admin login may: a
+ * user-context setting always; any other with superuser or GRANT SET ON PARAMETER (PostgreSQL 15+; a managed-service admin
+ * usually cannot). Only settings that exist are touched (the join with pg_settings; has_parameter_privilege errors on an
+ * unknown name). Best effort by design: G2 decides. One boolean per row, never a value (security review F7). Security review
+ * F1 / F3 added log_lock_waits, log_error_verbosity (terse: no CONTEXT), debug_print_*, auto_explain, pgaudit and
+ * pg_stat_statements.
  */
-export const OWNER_BOOTSTRAP_G1_QUIET_LOGS = `SELECT pg_catalog.set_config(s.name, s.value, true)
+export const OWNER_BOOTSTRAP_G1_QUIET_LOGS = `SELECT pg_catalog.set_config(v.name, v.value, true) IS NOT NULL AS done
   FROM (VALUES ('log_statement', 'none'),
                ('log_min_duration_statement', '-1'),
                ('log_min_duration_sample', '-1'),
                ('log_transaction_sample_rate', '0'),
                ('log_duration', 'off'),
                ('log_parameter_max_length', '0'),
-               ('log_min_error_statement', 'panic')) AS s(name, value)
- WHERE pg_catalog.has_parameter_privilege(s.name, 'SET');`;
+               ('log_min_error_statement', 'panic'),
+               ('log_lock_waits', 'off'),
+               ('log_error_verbosity', 'terse'),
+               ('debug_print_parse', 'off'),
+               ('debug_print_rewritten', 'off'),
+               ('debug_print_plan', 'off'),
+               ('auto_explain.log_min_duration', '-1'),
+               ('pgaudit.log_parameter', 'off'),
+               ('pg_stat_statements.track', 'top')) AS v(name, value)
+  JOIN pg_catalog.pg_settings s ON s.name = v.name
+ WHERE s.context = 'user' OR pg_catalog.has_parameter_privilege(v.name, 'SET');`;
 
 /**
- * G2 (plain-text fallback, right after G1): may the plain-text password be sent? True only when no log or statistics view
- * of this session can record it:
+ * L1 (security review F1 (b), plain-text fallback, after G1, before G2): log_lock_waits reports a backend that waits longer
+ * than deadlock_timeout WITH its context stack, which would quote the EXECUTEd ALTER ROLE ... PASSWORD text. So the
+ * transaction's lock_timeout is set to half of deadlock_timeout (at least 1 ms): a blocked statement fails with 55P03, which
+ * the DO block catches, before log_lock_waits could report it. G2 then requires log_lock_waits off, or lock_timeout below
+ * deadlock_timeout. lock_timeout is user-settable. One boolean, never a value.
+ */
+export const OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT = `SELECT pg_catalog.set_config('lock_timeout', GREATEST(1, s.setting::bigint / 2)::text || 'ms', true) IS NOT NULL AS done
+  FROM pg_catalog.pg_settings s WHERE s.name = 'deadlock_timeout';`;
+
+/**
+ * The custom-setting prefixes G2 knows (security review F3: an unknown extension may log in ways G2 cannot judge, so any
+ * other prefix in pg_settings is "unsafe"): the three logging extensions G2 judges below, plpgsql (its settings never log a
+ * statement's values), and Crewflow's own prefixes (this step's transaction-local inputs, and the application's settings).
+ * Reviewed list; a provider's own extensions are NOT in it, by design (provider-neutral, fail closed). Quote-free constants.
+ */
+export const G2_KNOWN_SETTING_PREFIXES = Object.freeze(['auto_explain', 'pgaudit', 'pg_stat_statements', 'plpgsql', 'crewflow_bootstrap', 'crewflow', 'rab']);
+
+/**
+ * G2 (plain-text fallback, right after G1 and L1): may the plain-text password be sent? True only when no log or statistics
+ * view of this session can record it, and every input to that decision is readable:
  *   - a failing statement's parameters are never logged (log_parameter_max_length_on_error = 0, set by Q0);
  *   - no statement of this session is logged (log_statement is not 'all', log_min_duration_statement = -1, log_duration
  *     off, no sampled statement or transaction), OR parameters are never logged with a logged statement
  *     (log_parameter_max_length = 0);
- *   - auto_explain, when loaded, logs no plan or no parameters;
- *   - pgaudit, when loaded, does not log parameters (it redacts the PASSWORD of CREATE / ALTER ROLE itself);
- *   - pg_stat_statements, when loaded, does not record nested utility statements (track = 'all' with track_utility on would
- *     store the EXECUTEd CREATE ROLE ... PASSWORD text with its literal).
- * A setting that cannot be read is NULL, and anything but true is "unsafe": owner-bootstrap.ts then refuses (64) and the
- * password is never sent. SELECT only; fixed text.
+ *   - debug_print_parse / _rewritten / _plan off (they log a statement's tree at LOG level);
+ *   - log_lock_waits off, or lock_timeout (L1) above 0 and below deadlock_timeout;
+ *   - the preload lists (shared_ / session_ / local_preload_libraries) are readable; then auto_explain, when loaded or
+ *     configured, logs no plan (log_min_duration = -1) or neither verbose plans nor parameters; pgaudit, when loaded or
+ *     configured, does not log parameters (pgaudit redacts the PASSWORD of CREATE / ALTER ROLE itself: pgaudit/pgaudit
+ *     expected/pgaudit.out, "CREATE USER regress_user1 password <REDACTED>"); pg_stat_statements, when loaded or configured,
+ *     does not record nested utility statements (track 'all' with track_utility on would store the EXECUTEd text). An
+ *     extension that is loaded but whose setting cannot be read is "unsafe";
+ *   - no custom setting outside G2_KNOWN_SETTING_PREFIXES exists.
+ * Every comparison with a missing value is NULL, and anything but true is "unsafe": owner-bootstrap.ts then refuses (64) and
+ * the password is never sent. SELECT only; fixed text.
  */
+// sql-injection-reviewed: the only interpolation is G2_KNOWN_SETTING_PREFIXES, quote-free code constants.
 export const OWNER_BOOTSTRAP_G2_LOG_SAFE = `SELECT COALESCE(
          pg_catalog.current_setting('log_parameter_max_length_on_error') = '0'
          AND (   s.max_len = '0'
@@ -277,9 +314,18 @@ export const OWNER_BOOTSTRAP_G2_LOG_SAFE = `SELECT COALESCE(
                   AND s.duration = 'off'
                   AND (s.min_dur_sample = '-1' OR s.sample_rate::float8 = 0)
                   AND s.xact_rate::float8 = 0))
-         AND (s.ae_min_dur IS NULL OR s.ae_min_dur = '-1' OR s.ae_max_len = '0')
-         AND (s.pga_param IS NULL OR s.pga_param = 'off')
-         AND (s.pgss_track IS NULL OR s.pgss_track <> 'all' OR s.pgss_utility = 'off'),
+         AND s.dbg_parse = 'off' AND s.dbg_rewritten = 'off' AND s.dbg_plan = 'off'
+         AND (s.lock_waits = 'off' OR (s.lock_to::bigint > 0 AND s.lock_to::bigint < s.deadlock_to::bigint))
+         AND s.libs IS NOT NULL
+         AND (NOT (s.libs OPERATOR(pg_catalog.~) '(^|[,/ ])auto_explain($|[, ])' OR s.ae_min_dur IS NOT NULL)
+              OR s.ae_min_dur = '-1' OR (s.ae_verbose = 'off' AND s.ae_max_len = '0'))
+         AND (NOT (s.libs OPERATOR(pg_catalog.~) '(^|[,/ ])pgaudit($|[, ])' OR s.pga_param IS NOT NULL)
+              OR s.pga_param = 'off')
+         AND (NOT (s.libs OPERATOR(pg_catalog.~) '(^|[,/ ])pg_stat_statements($|[, ])' OR s.pgss_track IS NOT NULL)
+              OR s.pgss_track <> 'all' OR s.pgss_utility = 'off')
+         AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_settings x
+                          WHERE pg_catalog.strpos(x.name, '.') > 0
+                            AND pg_catalog.split_part(x.name, '.', 1) <> ALL (ARRAY[${G2_KNOWN_SETTING_PREFIXES.map((p) => `'${p}'`).join(', ')}])),
          false) AS safe
   FROM (SELECT pg_catalog.max(setting) FILTER (WHERE name = 'log_parameter_max_length')               AS max_len,
                pg_catalog.max(setting) FILTER (WHERE name = 'log_statement')                          AS stmt,
@@ -288,7 +334,17 @@ export const OWNER_BOOTSTRAP_G2_LOG_SAFE = `SELECT COALESCE(
                pg_catalog.max(setting) FILTER (WHERE name = 'log_min_duration_sample')                AS min_dur_sample,
                pg_catalog.max(setting) FILTER (WHERE name = 'log_statement_sample_rate')              AS sample_rate,
                pg_catalog.max(setting) FILTER (WHERE name = 'log_transaction_sample_rate')            AS xact_rate,
+               pg_catalog.max(setting) FILTER (WHERE name = 'debug_print_parse')                      AS dbg_parse,
+               pg_catalog.max(setting) FILTER (WHERE name = 'debug_print_rewritten')                  AS dbg_rewritten,
+               pg_catalog.max(setting) FILTER (WHERE name = 'debug_print_plan')                       AS dbg_plan,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_lock_waits')                         AS lock_waits,
+               pg_catalog.max(setting) FILTER (WHERE name = 'lock_timeout')                           AS lock_to,
+               pg_catalog.max(setting) FILTER (WHERE name = 'deadlock_timeout')                       AS deadlock_to,
+               pg_catalog.max(setting) FILTER (WHERE name = 'shared_preload_libraries')
+                 || ',' || pg_catalog.max(setting) FILTER (WHERE name = 'session_preload_libraries')
+                 || ',' || pg_catalog.max(setting) FILTER (WHERE name = 'local_preload_libraries')    AS libs,
                pg_catalog.max(setting) FILTER (WHERE name = 'auto_explain.log_min_duration')          AS ae_min_dur,
+               pg_catalog.max(setting) FILTER (WHERE name = 'auto_explain.log_verbose')               AS ae_verbose,
                pg_catalog.max(setting) FILTER (WHERE name = 'auto_explain.log_parameter_max_length')  AS ae_max_len,
                pg_catalog.max(setting) FILTER (WHERE name = 'pgaudit.log_parameter')                  AS pga_param,
                pg_catalog.max(setting) FILTER (WHERE name = 'pg_stat_statements.track')               AS pgss_track,
@@ -342,12 +398,13 @@ BEGIN
         AND pg_catalog.has_database_privilege('crewflow_owner', v_db, 'TEMPORARY WITH GRANT OPTION')) THEN
       EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', v_db);
     END IF;
-  EXCEPTION WHEN OTHERS THEN
+  EXCEPTION WHEN OTHERS OR query_canceled THEN
     GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
     IF SQLSTATE = 'XX000' AND v_msg = 'tuple concurrently updated' THEN
       RAISE EXCEPTION 'tuple concurrently updated' USING ERRCODE = 'XX000', HINT = 'crewflow-stage=' || v_stage;
     END IF;
     -- Re-raise WITHOUT the inner statement: an error's CONTEXT would otherwise quote the EXECUTEd text (the password).
+    -- Security review F1: query_canceled (57014: statement_timeout, a cancel) is caught too (WHEN OTHERS does not catch it).
     RAISE EXCEPTION 'crewflow_owner bootstrap failed (%)', SQLSTATE USING ERRCODE = SQLSTATE, HINT = 'crewflow-stage=' || v_stage;
   END;
 END
@@ -480,6 +537,7 @@ export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
 /** The statements the plain-text fallback adds to the admin session, in order (the spec checks none carries a secret). */
 export const OWNER_BOOTSTRAP_PLAINTEXT_STATEMENTS = [
   OWNER_BOOTSTRAP_G1_QUIET_LOGS,
+  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_BOOTSTRAP_G2_LOG_SAFE,
   OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY,
   OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS,
