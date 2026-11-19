@@ -7,10 +7,14 @@
 # through a build-time bind mount (nothing is copied into an image); a version below a floor FAILS the build, there is no
 # warn-only mode. A build argument of the same name can only RAISE a floor, never lower it.
 #
-# node:24-alpine = Node 24.22.2 on Alpine 3.24.3, pinned by its multi-arch OCI INDEX digest (linux/amd64 + linux/arm64/v8;
-# verified 2026-11-02 with `docker buildx imagetools inspect node:24-alpine` and `node -v` on both platforms). The final
-# stage uses the SAME digest: keep the two FROM lines in step.
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS base
+# node:24-alpine (= 24.22.3-alpine3.24) = Node 24.22.3 on Alpine 3.24.4, pinned by its multi-arch OCI INDEX digest
+# (linux/amd64 + linux/arm64/v8 + linux/s390x). Verified 2026-11-19 from the Docker Hub registry API: the 24-alpine,
+# 24.22.3-alpine and 24.22.3-alpine3.24 tags all resolve to this index, whose amd64 and arm64 configs carry
+# NODE_VERSION=24.22.3 on alpine-minirootfs-3.24.4. Node 24.22.3 fixes the 2026-11 Node 24 security release (Alpine secdb
+# nodejs 24.22.3-r0). The base layer still carries libssl3/libcrypto3 3.5.9-r0; the final stage's `apk upgrade` takes
+# 3.5.9-r1 from v3.24/main (CVE-2026-88822, -88823, -95691, -95692, -107496). All three FROM lines (base, worker-modules,
+# rab) use the SAME digest: keep them in step.
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS base
 ARG MIN_NODE_VERSION
 # The Node that compiles the native modules (argon2) in `deps` is held to the same floor as the runtime.
 RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
@@ -112,7 +116,7 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tm
 # packages) reaches the final stage, on top of the API tree above. The Worker tree is pruned exactly like the API tree first
 # (node-gyp also reaches it through bullmq > msgpackr > msgpackr-extract), or the delta would carry node-gyp's tree back;
 # its roots are both processes this tree serves: @rab/worker and @rab/server.
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS worker-modules
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS worker-modules
 WORKDIR /app
 COPY package.json yarn.lock .yarnrc.yml ./
 COPY .yarn ./.yarn
@@ -150,7 +154,7 @@ RUN --mount=type=bind,from=runtime-modules,source=/app/node_modules,target=/api/
 # Chromium's dependency tree (ffmpeg, libxml2, cups, pulse, …) or its unfixable advisories; it re-checks
 # apk-absent:chromium, a build-time guard refuses every OS package of the former browser stack by name, and the image gate
 # fails on any browser-stack package (policy.json forbidden_apk/_npm).
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS rab
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS rab
 ARG MIN_NODE_VERSION
 ARG MIN_LIBEXPAT_VERSION
 WORKDIR /app

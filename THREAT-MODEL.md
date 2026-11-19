@@ -4829,11 +4829,12 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
 - **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
   Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
   2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
-  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.3, Chromium
   156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
   any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
   v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
-  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  `node:24-alpine` index digest with Node 24.22.3 on Alpine 3.24.4 (amd64 + arm64; floor and digest raised 2026-11-19
+  for the 2026-11-10 Node 24 security release). Residual: a floor is only as current as the last edit
   of that file (H5 release scanning re-checks against Chrome/Node releases).
 - **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
   `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
