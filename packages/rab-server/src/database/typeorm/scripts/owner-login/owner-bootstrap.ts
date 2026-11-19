@@ -247,8 +247,6 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   passwordRecheck: 'The database grant was added, and the crewflow_owner password inside PG_DATABASE_URL still does not log in: reading the facts again to set it.',
   raceExhausted: (stage: WriteStage, sqlstate: string) =>
     `crewflow_owner kept changing while this start tried to set it up (last: SQLSTATE ${sqlstate} ${stageText(stage)}). Giving up (the restart policy retries).`,
-  ownerUrlOwnsDatabase:
-    'The PG_DATABASE_URL login crewflow_owner owns this database (directly or through a role it is a member of). Crewflow needs the database owned by your admin login, never by the app login (own-database-app-login.sql). As the current owner run: ALTER DATABASE <this database> OWNER TO <your admin>; Refusing.',
   unexpected: (code: string) => `Unexpected failure (${code}). Nothing secret is printed; see the database log for the SQLSTATE.`,
   ready: (what: string) => `crewflow_owner is ready (${what}).`,
   // ---- the CREATEROLE step (owner decision 2026-11-18) ----
@@ -1067,9 +1065,10 @@ export function decideOwnerSelf(session: OwnerSessionFacts, f: OwnerFacts): stri
   if (!f.ownerExists) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('crewflow_owner session without a crewflow_owner role'));
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
-  // Lead audit 2026-11-19 (item 6): the admin path refuses an app login that owns the database (H1); mode c now does too.
-  // o_owns_db is pg_has_role(crewflow_owner, datdba, 'MEMBER'), and O1 has just proved session_user is crewflow_owner.
-  if (f.oOwnsDb) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlOwnsDatabase);
+  // Lead audit 2026-11-19 (item 6) asked mode c to refuse a crewflow_owner that owns the database. NOT done: the reviewed
+  // N1 rule (security re-review N1; transition-from-separated.sql, runbook §5) keeps mode c the supported path for exactly
+  // that database shape (owner rab_owner, crewflow_owner an INHERIT member), and the live harness scenario
+  // n1-transition-shaped-database fails with the refusal. Owner decision pending; the admin path keeps refusing it (H1).
   if (f.oCreateRole === false) notes.push(OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened);
   if ((f.oPrivilegedMemberships ?? 0) > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedMembership);
   if (f.oExpired === true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.expired);

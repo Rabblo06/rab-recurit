@@ -1716,13 +1716,13 @@ describe('a pooler in PG_ADMIN_URL, detected by capability', () => {
   });
 });
 
-describe('lead audit 2026-11-19 item 6: mode c refuses a crewflow_owner that owns the database', () => {
-  it('decideOwnerSelf refuses oOwnsDb (64) with its own message', () => {
+describe('lead audit 2026-11-19 item 6 (NOT applied, owner decision): mode c keeps the reviewed N1 rule', () => {
+  it('decideOwnerSelf accepts a crewflow_owner that owns the database through a role (the transition-shaped database)', () => {
     const self = { sessionLogin: 'crewflow_owner', currentLogin: 'crewflow_owner' };
-    expect(() => decideOwnerSelf(self, { ...existing, oOwnsDb: true })).toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerUrlOwnsDatabase);
-    expect(decideOwnerSelf(self, existing)).toEqual([]);
+    expect(decideOwnerSelf(self, { ...existing, oOwnsDb: true })).toEqual([]);
   });
 });
+
 
 describe('PR #258: PG_DATABASE_SESSION_URL (the crewflow_owner session address) in db-setup', () => {
   const pooledApp = `postgres://crewflow_owner:${OWNER_PW}@pool.internal.example:6432/crewflow_unit`;

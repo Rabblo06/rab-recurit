@@ -9597,7 +9597,9 @@ capability at run time, the same code everywhere.
   retry and exhaustion line now names the SQLSTATE and the stage.
 - **Failure halfway.** Every write runs in one transaction under the advisory lock; a refusal at COMMIT rolls everything back,
   the fallback re-reads the facts under the lock.
-- **Mode c** now also refuses a crewflow_owner that owns the database (lead audit item 6).
+- **Mode c and a crewflow_owner that owns the database** (lead audit item 6): NOT changed. The reviewed N1 rule keeps mode c
+  the supported path for a transition-shaped database (owner rab_owner, crewflow_owner an INHERIT member); refusing it broke
+  the live harness scenario n1-transition-shaped-database. Owner decision.
 
 ```
 SECURITY TRADE-OFF
