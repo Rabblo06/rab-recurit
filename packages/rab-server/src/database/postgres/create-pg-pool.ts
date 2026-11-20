@@ -65,6 +65,14 @@ export interface PgConnectionRequest {
    * It does not change the application_name.
    */
   readOnly?: boolean;
+  /**
+   * Security review L-3 (PR #257): `-c search_path=pg_catalog,pg_temp` as a STARTUP option (it takes precedence over a planted
+   * `ALTER ROLE ... SET search_path` / `ALTER DATABASE ... SET search_path`). NOT used by the boot gates or the posture monitor
+   * yet: their semantic-posture rendering (format_type / regprocedure) is search_path-dependent, so a pinned session renders
+   * `public.citext` where the golden says `citext` and the gate refuses. Follow-up (THREAT-MODEL, L-3): a search_path-
+   * independent posture rendering, then pin those sessions.
+   */
+  pinnedSearchPath?: boolean;
 }
 
 export interface PgPoolRequest extends PgConnectionRequest {
@@ -79,7 +87,7 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
   if (request.url !== undefined) {
     const label = request.urlLabel ?? 'the database URL';
     const target = parsePgUrl(request.url, label, { allowSessionRole: resolved.allowSessionRole });
-    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label, target.host), deprecated: false };
+    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label, target.host, target.channelBindingMode), deprecated: false };
   }
   const name = request.endpoint ?? 'primary';
   if (name === 'elevated') {
@@ -109,6 +117,9 @@ function applicationNameFor(resolved: ResolvedPgEnvironment, endpoint: PgEndpoin
   return parts.join('-').slice(0, 63);
 }
 
+/** The search_path a `pinnedSearchPath` session starts with (catalog first, the session's temp schema last, nothing else). */
+export const PG_PINNED_SEARCH_PATH = 'pg_catalog,pg_temp';
+
 /** libpq-style startup options. Exported for its unit test. */
 export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequest, dispatchNotify = false): string {
   const statement = assertTimeout('statementTimeoutMs', request.statementTimeoutMs ?? PG_RUNTIME_STATEMENT_TIMEOUT_MS);
@@ -121,6 +132,7 @@ export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequ
   if (readOnly) parts.push('-c default_transaction_read_only=on');
   // Phase D (E-1): see ResolvedPgEnvironment.dispatchNotify. Writable sessions only; absent (not 'off') otherwise.
   if (dispatchNotify && !readOnly) parts.push('-c crewflow.dispatch_notify=on');
+  if (request.pinnedSearchPath === true) parts.push(`-c search_path=${PG_PINNED_SEARCH_PATH}`);
   return parts.join(' ');
 }
 

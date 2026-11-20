@@ -19,18 +19,20 @@
 -- PostgreSQL 16, 17 and 18 only: this script refuses any other major before it creates anything (on 15 and earlier
 -- CREATEROLE can grant predefined roles such as pg_execute_server_program; the migration child refuses those servers too).
 --
--- DB-SETUP (database setup like Twenty): this file is now the FALLBACK for operators who create crewflow_owner by hand
--- (then PG_DATABASE_URL names crewflow_owner and it is passed through). By default the stack does this itself on every
--- start: PG_DATABASE_URL is the database ADMIN URL and the one-shot db-setup service's bootstrap child creates
--- crewflow_owner (or resets its password to the one derived from APP_SECRET) and grants it the database.
+-- DB-SETUP (database setup the Twenty way, owner decision 2026-11-18): this file is the FALLBACK for operators who create
+-- crewflow_owner by hand (mode c: PG_DATABASE_URL names crewflow_owner, no PG_ADMIN_URL; db-setup only checks it). By
+-- default the stack does this itself: the one-shot db-setup service, holding the admin login (PG_ADMIN_URL, or the bundled
+-- db's superuser), creates crewflow_owner with the password inside PG_DATABASE_URL and grants it the database.
 --
 -- Provider extras (M0 §5.1):
 --   Cloud SQL: CREATE EXTENSION IF NOT EXISTS btree_gist, citext, pg_trgm, pgcrypto, unaccent WITH SCHEMA public (as admin).
 --   Azure:     azure.extensions=BTREE_GIST,CITEXT,PG_TRGM,PGCRYPTO,UNACCENT; REVOKE CREATE ON SCHEMA public FROM PUBLIC.
 --   RDS:       keep rds.restrict_password_commands=0.
 --   Supabase:  the extensions must not already exist outside schema public.
--- Optional hardening AFTER the first successful install: ALTER ROLE crewflow_owner NOCREATEROLE;
--- (an upgrade that still has role migrations pending then needs it back; the child says so).
+-- REQUIRED AFTER the first successful install (enforced since owner decision 2026-11-18: db-setup and, in production, the
+-- boot check refuse a CREATEROLE crewflow_owner once the schema is complete):
+--   ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;
+-- (an upgrade that still has role migrations pending then needs it back, with the mark; the child says so).
 \set ON_ERROR_STOP on
 -- PR #227 (security review L2): only the supported PostgreSQL majors, 16-18 (database/postgres/supported-majors.ts; a spec
 -- keeps the two in step). Refused before anything is created: on 15 and earlier CREATEROLE can grant predefined roles such
@@ -58,6 +60,16 @@ SELECT length(:'owner_pw') >= 24 AS crewflow_owner_password_ok \gset
 \endif
 
 CREATE ROLE crewflow_owner LOGIN PASSWORD :'owner_pw' NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
+-- Owner decision 2026-11-18: the CREATEROLE mark (db-setup's OWNER_HARDEN_H3_MARK_PENDING). In production rab-api,
+-- rab-worker and the CLI refuse a CREATEROLE crewflow_owner at boot unless it carries exactly this comment
+-- (database-boot-gate-rules.ts assertCreateRoleGate), valid 24 h by the SERVER clock (owner decision M1: an expired mark is
+-- refused at boot once the schema is complete); only an admin can set, clear or renew it. Remove both after the first start.
+DO $mark$
+BEGIN
+  EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+    'crewflow:createrole-until-schema-current:' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + 86400)::text);
+END
+$mark$;
 -- WITH GRANT OPTION: the bootstrap re-grants CREATE on the database to rab_owner, and later migrations re-grant it to
 -- rab_secure_owner (Phase 0b preflight).
 GRANT CONNECT, CREATE, TEMPORARY ON DATABASE :"DBNAME" TO crewflow_owner WITH GRANT OPTION;

@@ -46,6 +46,7 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
       'DB_TARGET',
       'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
       'PG_ADMIN_URL',
+      'PG_ADMIN_DIRECT_URL',
       'CREWFLOW_OPS_RUN',
       'PG_OPS_APP_DATABASE_URL',
       'CREWFLOW_OPS_ACTOR_SOURCE',
@@ -53,6 +54,27 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
       'CREWFLOW_OPS_CHANGE_REF',
     ]) {
       expect(names).toContain(required);
+    }
+  });
+
+  it('first platform admin at boot (2026-11-19): BOOTSTRAP_ADMIN_PASSWORD is refused in every runtime process by both enforcers; the five inputs rab-api reads are not', () => {
+    for (const processName of ['api', 'worker', 'provisioner'] as const) {
+      expect(forbiddenRuntimeEnvNames(processName)).toContain('BOOTSTRAP_ADMIN_PASSWORD');
+      const refusal = runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', BOOTSTRAP_ADMIN_PASSWORD: 'S3cret-PW-do-not-print' }, processName);
+      expect(refusal?.name).toBe('BOOTSTRAP_ADMIN_PASSWORD');
+      expect(refusal?.why).not.toContain('S3cret-PW-do-not-print');
+      expect(runtimeEnvRefusal({ BOOTSTRAP_ADMIN_PASSWORD: ' ' }, processName)).toBeNull();
+    }
+    expect(prestartNames()).toContain('BOOTSTRAP_ADMIN_PASSWORD');
+    for (const name of ['BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME']) {
+      expect(forbiddenRuntimeEnvNames('api')).not.toContain(name);
+      expect(prestartNames()).not.toContain(name);
+      expect(runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', [name]: 'admin@example.test' }, 'api')).toBeNull();
+    }
+    // The command authority stays refused on the API start.
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS']) {
+      expect(runtimeEnvRefusal({ NODE_ENV: 'production', [name]: 'production' }, 'api')?.name).toBe(name);
+      expect(prestartNames()).toContain(name);
     }
   });
 
@@ -162,7 +184,8 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     const url = 'postgresql://postgres:S3cret-ADMIN-do-not-print@db:5432/crewflow?sslmode=verify-full';
     const workerSource = fs.readFileSync(path.join(DOCKER, 'worker-start.sh'), 'utf8');
     const workerLoop = /^for name in ([^;]+); do/m.exec(workerSource)?.[1]?.trim().split(/\s+/) ?? [];
-    for (const name of ['PG_ADMIN_URL', 'PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+    // Security review F2 of PR #259: PG_ADMIN_DIRECT_URL (the direct address of the admin login) under the same rule.
+    for (const name of ['PG_ADMIN_URL', 'PG_ADMIN_DIRECT_URL', 'PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
       for (const processName of ['api', 'worker', 'provisioner'] as const) {
         expect(forbiddenRuntimeEnvNames(processName)).toContain(name);
         const refusal = runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', [name]: url }, processName);
