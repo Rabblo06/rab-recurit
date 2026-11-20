@@ -14,10 +14,13 @@
 #   db-setup-capability  (NOT a required check yet; owner decision pending on making it one) the live harness of the
 #                      bootstrap child against disposable PostgreSQL 16 containers, one at a time, memory-capped
 #                      (scripts/owner-login/fallback-check/run-fallback-check.sh): the pre-hashed path (P1, P2), a server
-#                      that refuses pre-hashed passwords (a test-only C extension built here: N1 passwordless NOLOGIN role +
-#                      steps, N2 the printed SQL), PgBouncer in transaction mode refused by capability (B1, B2) and
-#                      PG_ADMIN_DIRECT_URL (B3), and a pg_hba that trusts crewflow_owner refused (T1). Secrets are generated
-#                      per run and never printed.
+#                      that refuses pre-hashed passwords (a test-only C extension built here: N1 the plain-text fallback
+#                      over verified TLS in one run, N1b no verified TLS -> the printed step, N2a/N2b plain text refused
+#                      too -> passwordless role + steps / the printed SQL, N3 an existing password changed only with
+#                      CREWFLOW_ROTATE_APP_PASSWORD=1, N4 no value in the server log at log_statement=ddl, including a
+#                      plain set cancelled by lock_timeout), the rotate opt-in on H1, PgBouncer in transaction mode refused
+#                      by capability (B1, B2) and PG_ADMIN_DIRECT_URL (B3), and a pg_hba that trusts crewflow_owner refused
+#                      (T1). Secrets are generated per run and never printed.
 # The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
 # transition) run in ci-twenty-tests.yaml (Agent 5), not here: this workflow never reports a suite it does not run.
 name: CI owner-login deployment
@@ -164,5 +167,5 @@ jobs:
       - uses: ./.github/actions/restore-cache
       - name: Build the workspace libraries (the harness imports them)
         run: npx nx run-many -t build -p rab-shared,rab-emails
-      - name: db-setup capability harness (P1, P2, N1, N2, B1-B3, T1)
+      - name: db-setup capability harness (P1, P2, Q1, H1, B1-B3, N1, N1b, N2a, N2b, N3, N4, T1)
         run: bash packages/rab-server/src/database/typeorm/scripts/owner-login/fallback-check/run-fallback-check.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/fbc"

@@ -16,8 +16,11 @@
 # One PostgreSQL runs at a time. Groups, each from a fresh container:
 #   plain  PostgreSQL 16 with TLS (a per-run CA; server certificate for IP 127.0.0.1): P1, P2, Q1, H1; then PgBouncer (transaction
 #          pooling, defaults) in front of it: B1; then PgBouncer with ignore_startup_parameters=options: B2, B3
-#   sim    the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000, and, when switched on, any
-#          role without a password), EVERY statement logged with its parameters: N1, N2
+#   sim    the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000; switched on by the harness:
+#          also plain-text passwords, any role without a password, or a pre-hashed password inside its statement), logging
+#          as N4 asserts it (log_statement=ddl, log_min_error_statement=error, log_lock_waits=on, deadlock_timeout=100ms,
+#          log_min_duration_statement=-1; the harness sets log_statement=all for one admin role only to RECORD the
+#          provider-logs trade-off): N1, N1b, N2a, N2b, N3, N4 (owner decision 2026-11-20: plain-text fallback)
 #   trust  a pg_hba that TRUSTS crewflow_owner (and only it): T1
 # The extension and PgBouncer are built / unpacked in a throwaway container of the same image (apt; nothing installed on the
 # host). Every container and the network are removed by exact name afterwards; nothing is pruned. Secrets are generated here
@@ -145,12 +148,16 @@ harness FBC_PLAIN_SU_URL="$SU" FBC_BOUNCER2_HOSTPORT="127.0.0.1:$PGBPORT" -- B2 
 stop_pgbouncer
 stop_pg
 
-# sim: N1, N2 (every statement logged with its parameters).
-start_pg -c shared_preload_libraries=refuse_prehashed,pg_stat_statements -c pg_stat_statements.track=all -c log_statement=all -c log_min_duration_statement=0
-harness FBC_SIM_SU_URL="$SU" FBC_SIM_CONTAINER="$PG_NAME" -- N1 N2
+# sim: N1, N1b, N2a, N2b, N3, N4 with the N4 logging settings (N4 (C) raises log_statement for one admin role with ALTER ROLE
+# ... SET, which takes precedence over a command-line setting).
+start_pg -c shared_preload_libraries=refuse_prehashed,pg_stat_statements -c pg_stat_statements.track=all \
+  -c log_statement=ddl -c log_min_error_statement=error -c log_lock_waits=on -c deadlock_timeout=100ms -c log_min_duration_statement=-1
+harness FBC_SIM_SU_URL="$SU" FBC_SIM_CONTAINER="$PG_NAME" -- N1 N2 N3 N4
 refusals="$(docker logs "$PG_NAME" 2>&1 | grep -c 'simulated refusal: role passwords must be supplied in plain text' || true)"
-echo "[fallback-check] simulator refusals of a pre-hashed password in the server log: $refusals"
-if [ "$refusals" -lt 1 ]; then echo '[fallback-check] FAIL | the simulator never refused (vacuous run)'; STATUS=1; fi
+plain_refusals="$(docker logs "$PG_NAME" 2>&1 | grep -c 'simulated refusal: role passwords must not be supplied in plain text' || true)"
+echo "[fallback-check] simulator refusals in the server log: pre-hashed $refusals, plain text $plain_refusals"
+if [ "$refusals" -lt 1 ]; then echo '[fallback-check] FAIL | the simulator never refused a pre-hashed password (vacuous run)'; STATUS=1; fi
+if [ "$plain_refusals" -lt 1 ]; then echo '[fallback-check] FAIL | the simulator never refused a plain-text password (vacuous N2)'; STATUS=1; fi
 if docker logs "$PG_NAME" 2>&1 | grep -qF "$SUPW"; then echo '[fallback-check] FAIL | the superuser password appears in the server log'; STATUS=1; fi
 stop_pg
 
