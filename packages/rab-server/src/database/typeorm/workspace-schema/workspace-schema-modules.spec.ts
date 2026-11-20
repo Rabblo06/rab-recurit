@@ -6,6 +6,7 @@ import { archiveColumnsSql } from './v1/archive-columns';
 import { attendanceMoneyChecksSql } from './v1/attendance-money-checks';
 import { searchVectorsSql } from './v1/search-vectors';
 import { EXPECTED_WORKSPACE_FINGERPRINTS } from './v1/expected-fingerprints';
+import { selectWorkspaceFingerprintMajorForUnitTests } from '../../../__tests__/helpers/workspace-fingerprint-major';
 import { provisionWorkspaceFunctionSql } from './v1/provision-workspace-function';
 import { provisionWorkspaceFunctionV2Sql } from './v1/provision-workspace-function-v2';
 import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
@@ -69,6 +70,9 @@ const FROZEN_CHECKSUMS: ReadonlyArray<readonly [string, string]> = [
   // databases, its fingerprints are regenerated with it).
   ['v1.020-grant-parity-guards', '3d22f9652ac99c699dbca8a13d01ff13a5439aea5214295c7fc9a3d26fe05ebe'],
 ];
+
+// These specs assert the committed PostgreSQL 16 values (a describe body reads one while Jest collects; no default major).
+selectWorkspaceFingerprintMajorForUnitTests(16);
 
 describe('workspace schema modules (B3 single source of truth)', () => {
   it('versions are contiguous 1..N, ids unique and well-formed, and every checksum is frozen', () => {
