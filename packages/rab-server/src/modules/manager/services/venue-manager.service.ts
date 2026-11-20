@@ -126,10 +126,10 @@ export class VenueManagerService {
   }
 
   async resendInvite(ctx: AuthContext, id: string) {
-    // ManagerService.resendInvite has no flag re-check yet (owner decision: platform-admin CEO path), so this route's
-    // user.reset_password is re-checked here.
+    // user.reset_password is checked before the scope lookup here (403 before 404), and ManagerService.resendInvite
+    // re-checks this route's venue_manager.create + user.reset_password in its own transaction (SF-2 layer 2).
     await this.assertOwnWorkspaceVenueManager(ctx, id, PermissionFlag.USER_RESET_PASSWORD);
-    return this.managerService.resendInvite(ctx, id);
+    return this.managerService.resendInvite(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto) {
@@ -138,9 +138,9 @@ export class VenueManagerService {
   }
 
   async cancelInvite(ctx: AuthContext, id: string) {
-    // Same as resendInvite: ManagerService.cancelInvite has no flag re-check yet (owner decision pending).
+    // Same as resendInvite.
     await this.assertOwnWorkspaceVenueManager(ctx, id, PermissionFlag.USER_RESET_PASSWORD);
-    return this.managerService.cancelInvite(ctx, id);
+    return this.managerService.cancelInvite(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async changeEmail(ctx: AuthContext, id: string, dto: ChangeEmailDto) {

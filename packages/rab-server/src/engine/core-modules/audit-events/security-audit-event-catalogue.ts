@@ -121,6 +121,9 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'admin.organisation_searched': c('platform_admin'),
   'admin.test_email_sent': c('platform_admin'),
   'admin.email_replay_reason': c('platform_admin', 'warning'),
+  /** SF-2 platform-admin invite path: a platform admin resent / revoked another organisation's pending CEO invitation. */
+  'platform_admin.invite_resent': c('platform_admin', 'warning'),
+  'platform_admin.invite_cancelled': c('platform_admin', 'warning'),
   /** Written by the SQL function `core.replay_failed_email` (outbox-retention-sql.ts); shipped by its caller. */
   'email.replay_requested': c('platform_admin', 'warning'),
   'ai.organisation_setting_changed': c('platform_admin', 'warning'),
