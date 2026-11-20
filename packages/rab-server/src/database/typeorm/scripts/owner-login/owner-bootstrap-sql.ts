@@ -157,7 +157,9 @@ export const OWNER_URL_SESSION_STARTUP_OPTIONS = '-c search_path=pg_catalog,pg_t
  * Q1: superuser-only settings; a no-op row for a non-superuser admin (same trick as 01-crewflow-owner.sql). Independent
  * security review F1 (part 3) of #266: also the duration, sampling and message-level logging, and, only where the module is
  * loaded (current_setting(..., true) IS NOT NULL), pg_stat_statements.track = top (never the nested role statement) and
- * auto_explain off. Session-level, best effort: never a refusal based on logging settings (owner decision pending).
+ * auto_explain off. log_min_messages is raised to warning only from a looser level (debug5-debug1, info, notice), never
+ * lowered from a stricter one (review F8). Session-level, best effort: never a refusal based on logging settings (owner
+ * decision pending).
  */
 export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_config('log_statement', 'none', false),
        pg_catalog.set_config('log_min_error_statement', 'panic', false),
@@ -165,7 +167,8 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
        pg_catalog.set_config('log_min_duration_statement', '-1', false),
        pg_catalog.set_config('log_min_duration_sample', '-1', false),
        pg_catalog.set_config('log_transaction_sample_rate', '0', false),
-       pg_catalog.set_config('log_min_messages', 'warning', false),
+       CASE WHEN pg_catalog.current_setting('log_min_messages') IN ('debug5', 'debug4', 'debug3', 'debug2', 'debug1', 'info', 'notice')
+            THEN pg_catalog.set_config('log_min_messages', 'warning', false) END,
        CASE WHEN pg_catalog.current_setting('pg_stat_statements.track', true) IS NOT NULL
             THEN pg_catalog.set_config('pg_stat_statements.track', 'top', false) END,
        CASE WHEN pg_catalog.current_setting('auto_explain.log_min_duration', true) IS NOT NULL

@@ -9783,9 +9783,10 @@ re-implemented).
 - **Server logging.** The strict "server logging must be off" expectation is dropped for this fallback only (Q1 still turns
   statement and parameter logging off for a superuser admin; every other path is unchanged). One fixed line says the value
   may be in the provider's own logs and points to the rotation steps.
-- **Residual (owner-accepted).** The value can remain in: the server log at `log_statement = all` or
-  `log_min_duration_statement` >= 0 when the admin is not a superuser (`log_parameter_max_length` is superuser-only), as the
-  logged bind parameter; `pg_stat_statements` with `track = all` (the nested CREATE / ALTER ROLE; the default `top` does not
+- **Residual (owner-accepted).** The value can remain in: the server log, as the logged bind parameter `$1`, when the admin is
+  NOT a superuser (Q1 is then a no-op and `log_parameter_max_length` is superuser-only) and the server runs with any of
+  `log_statement = all`, `log_min_duration_statement >= 0`, `log_min_duration_sample >= 0`, `log_transaction_sample_rate > 0`,
+  `auto_explain` (PostgreSQL 16+ logs query parameters by default) or `pgaudit.log_parameter = on` (review F9); `pg_stat_statements` with `track = all` (the nested CREATE / ALTER ROLE; the default `top` does not
   record it); the provider's own logs; and, behind a TLS-terminating proxy, the provider's internal hop. Not at
   `log_statement = none / ddl / mod`, and not on error (`log_parameter_max_length_on_error = 0`, Q0). Mitigation: rotate
   (OWNER-LOGIN-DEPLOYMENT.md, "Rotate the crewflow_owner password").

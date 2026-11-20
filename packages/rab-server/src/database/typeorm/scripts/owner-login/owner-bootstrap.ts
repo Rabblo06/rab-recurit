@@ -995,7 +995,13 @@ async function writeTransaction(session: SqlSession, io: OwnerBootstrapIo, form:
  */
 async function adminTlsVerified(session: SqlSession, io: OwnerBootstrapIo): Promise<boolean> {
   if (!io.adminTlsVerified || io.adminTlsVerified() !== true) return false;
-  const { rows } = await session.query(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL);
+  // Review F11 of #266: informational only, so a failing read (outside any transaction) never aborts the run: non-TLS.
+  let rows: Row[] = [];
+  try {
+    rows = (await session.query(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL)).rows;
+  } catch {
+    rows = [];
+  }
   if (!(rows.length === 1 && rows[0]?.ssl === true)) io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
   return true;
 }

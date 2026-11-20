@@ -2787,7 +2787,7 @@ describe('independent security review of #266: F1 (part 3), F2, F3, F5', () => {
       "pg_catalog.set_config('log_min_duration_statement', '-1', false)",
       "pg_catalog.set_config('log_min_duration_sample', '-1', false)",
       "pg_catalog.set_config('log_transaction_sample_rate', '0', false)",
-      "pg_catalog.set_config('log_min_messages', 'warning', false)",
+      "CASE WHEN pg_catalog.current_setting('log_min_messages') IN ('debug5', 'debug4', 'debug3', 'debug2', 'debug1', 'info', 'notice')\n            THEN pg_catalog.set_config('log_min_messages', 'warning', false) END",
       "CASE WHEN pg_catalog.current_setting('pg_stat_statements.track', true) IS NOT NULL\n            THEN pg_catalog.set_config('pg_stat_statements.track', 'top', false) END",
       "CASE WHEN pg_catalog.current_setting('auto_explain.log_min_duration', true) IS NOT NULL\n            THEN pg_catalog.set_config('auto_explain.log_min_duration', '-1', false) END",
       'FROM pg_catalog.pg_roles WHERE rolname = current_user AND rolsuper;',
@@ -2795,5 +2795,28 @@ describe('independent security review of #266: F1 (part 3), F2, F3, F5', () => {
       expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).toContain(piece);
     }
     expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).not.toMatch(/RAISE|EXCEPTION/);
+    // Review F8: log_min_messages is never set unconditionally (a stricter error / log / fatal / panic stays as it is).
+    expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING.match(/set_config\('log_min_messages'/g)).toHaveLength(1);
+    expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).not.toMatch(/^\s*pg_catalog\.set_config\('log_min_messages'/m);
+    for (const strict of ['warning', 'error', 'log', 'fatal', 'panic']) expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).not.toContain(`'${strict}', 'debug`);
+  });
+
+  it('F11: a T1 read that FAILS never aborts the run: treated as non-TLS, the proxy line, the plain form still runs', async () => {
+    const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    const realOpen = io.openAdmin.bind(io);
+    io.openAdmin = async () => {
+      const s = await realOpen();
+      return {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL) throw Object.assign(new Error('permission denied for view pg_stat_ssl'), { code: '42501' });
+          return s.query(text, values);
+        },
+        end: () => s.end(),
+      };
+    };
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
+    for (const l of lines) expect(l).not.toContain('permission denied');
   });
 });
