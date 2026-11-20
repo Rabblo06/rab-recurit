@@ -12,6 +12,7 @@ import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/
 import { UserRole } from '../../identity/entities';
 import { MemberRolePolicyService } from '../../identity/services/member-role-policy.service';
 import { deactivateAllPushDevicesForUser } from '../../../engine/core-modules/push/push-device-deactivation';
+import { assertPlatformAdminTargetAllowed } from '../../../engine/core-modules/platform-admin/platform-admin-target-guard';
 
 export type MemberStatus = 'active' | 'pending_setup' | 'suspended' | 'inactive';
 
@@ -141,6 +142,8 @@ export class MembersService {
       [userId, ctx.workspaceId],
     );
     if (!row) throw notFound;
+    // Security review of #264, N1: a platform admin's workspace access is never changed from the tenant side (404, CLAUDE.md).
+    await assertPlatformAdminTargetAllowed(manager, ctx.userId, userId, 'Member not found.');
     const keys = row.role_keys ?? [];
     if (keys.length === 0 || !keys.every((key) => isCustomRoleKey(key))) {
       // Leadership, Staff and Venue Managers are managed elsewhere (Users page / organisation settings).

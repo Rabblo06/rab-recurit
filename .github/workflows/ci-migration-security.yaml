@@ -186,12 +186,14 @@ jobs:
         if: always()
         run: docker rm -f owner-login-postgres > /dev/null 2>&1 || true
 
-  # DB-SETUP (Twenty Helm model): the bootstrap child against a real cluster, on every supported major (15 = refused):
-  # create, restart, lost file (A4), the pending-file settlement (L1), refusals, races, the owner-URL mode, and the server
-  # log scanned for every password / verifier (log_statement=all). One fresh cluster per major: roles are cluster-wide.
+  # DB-SETUP (the Twenty way, owner decision 2026-11-18): the bootstrap child against a real cluster, on every supported
+  # major (15 = refused): create with the PG_DATABASE_URL password, restart, a different password set with the admin,
+  # refusals, races, mode c (read-only), the CREATEROLE lifecycle (marked -> the real migrate chain -> removed; a re-grant
+  # refused by the boot rule), and the server log scanned for every password / verifier (log_statement=all). One fresh
+  # cluster per major: roles are cluster-wide.
   owner-bootstrap:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
