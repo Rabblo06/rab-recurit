@@ -116,6 +116,9 @@ export class UserDeletionService {
       throw new UserDeletionBlockedException('CANNOT_DELETE_SELF', 'You cannot delete your own account.');
     }
     if (await this.platformAdmin.isPlatformAdminTx(manager, { userId: targetUserId })) {
+      // Security review of #264, F2: to a tenant-side actor the platform administrator's account does not exist (404, CLAUDE.md);
+      // only another platform admin learns that it is blocked.
+      if (!(await this.platformAdmin.isPlatformAdminTx(manager, { userId: ctx.userId }))) throw new NotFoundException('User not found.');
       throw new UserDeletionBlockedException('CANNOT_DELETE_PLATFORM_ADMIN', 'This account holds the platform administrator claim and cannot be deleted.');
     }
     const [owns] = await manager.query<Array<{ owns: boolean }>>(`SELECT core.user_owns_manager_workspace($1) AS owns`, [targetUserId]);

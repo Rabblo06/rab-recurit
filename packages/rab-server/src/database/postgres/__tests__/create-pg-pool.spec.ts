@@ -120,6 +120,14 @@ describe('create-pg-pool: explicit target, TLS and session settings as pg sees t
     expect(pgClientConfig(named, { purpose: 'runtime' }).application_name).toBe('ops-shell');
   });
 
+  it('review L-3 (PR #257): pinnedSearchPath adds -c search_path=pg_catalog,pg_temp as a STARTUP option (the boot gates), nothing else does', () => {
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: LOCAL }, { processRole: 'api' });
+    const pinned = new ConnectionParameters(pgClientConfig(r, { purpose: 'boot-gates', pinnedSearchPath: true }));
+    expect(pinned.options).toBe('-c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000 -c search_path=pg_catalog,pg_temp');
+    expect(pgTypeOrmConnectionOptions(r, { purpose: 'boot-gates', max: 1, pinnedSearchPath: true }).extra).toMatchObject({ options: expect.stringMatching(/-c search_path=pg_catalog,pg_temp$/) });
+    expect(new ConnectionParameters(pgClientConfig(r, { purpose: 'runtime' })).options).not.toMatch(/search_path/);
+  });
+
   it('per-call timeouts: lock connections keep 5 s; 0 disables (only where the old code had none)', () => {
     const r = resolvePgEnvironment({ PG_DATABASE_URL: LOCAL }, { processRole: 'cli' });
     const lock = new ConnectionParameters(pgClientConfig(r, { endpoint: 'lock', purpose: 'storage-lock', statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }));

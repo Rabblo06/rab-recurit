@@ -38,6 +38,7 @@ import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cach
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { isJobRoleInScope } from '../../scheduling/utils/job-role-scope';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
+import { assertPlatformAdminTargetAllowed } from '../../../engine/core-modules/platform-admin/platform-admin-target-guard';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
@@ -947,6 +948,7 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Staff member not found.'); // #264 N1
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
@@ -1079,6 +1081,7 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Staff member not found.'); // #264 N1
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -1103,6 +1106,8 @@ export class StaffService {
     const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
     if (!profile?.user) throw new NotFoundException('Staff member not found.');
     await lockLiveUser(manager, profile.userId, 'Staff member not found.');
+    // Security review of #264, F2: never resend / re-point / cancel a platform admin's invitation from the tenant side (404).
+    await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Staff member not found.');
     this.assertOwned(ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1229,6 +1234,7 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Staff member not found.'); // #264 F2
       this.assertOwned(ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);

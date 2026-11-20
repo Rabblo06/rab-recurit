@@ -248,7 +248,7 @@ npx nx run-many -t start -p rab-server rab-front
 npx nx run rab-worker:start
 ```
 
-Create the first platform administrator with the `bootstrap-admin` command (`BOOTSTRAP_ADMIN_EMAIL=<you> npx nx run rab-server:command bootstrap-admin`). It takes no password: it emails an activation link.
+Create the first platform administrator by setting `BOOTSTRAP_ADMIN_EMAIL=<you>` for the API: on start, if no platform admin exists yet, it creates one and emails an activation link to that address (this needs `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true`, so the admin sets up two-factor authentication at first sign-in). The `bootstrap-admin` command does the same (`BOOTSTRAP_ADMIN_EMAIL=<you> npx nx run rab-server:command bootstrap-admin`). Neither takes a password.
 
 For mobile, from `packages/rab-mobile`:
 
