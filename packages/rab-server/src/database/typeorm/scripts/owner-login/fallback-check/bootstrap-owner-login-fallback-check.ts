@@ -21,7 +21,8 @@
  *   P1  plain PG16, verify-full, a non-superuser CREATEROLE admin: the pre-hashed path; created, the login works.
  *   P2  plain PG16, the cluster superuser as the admin over verify-full (the bundled db's mode a): the same.
  *   N1  the refusing server over verified TLS (owner decision 2026-11-20): ONE run, 0. The verifier is refused at COMMIT,
- *       db-setup sets the same password in plain text (plainFallbackUsed + plainFallbackLogsNotice, result plainText);
+ *       TWICE (security review F5 of #266: verifierRefused, verifierRetry, then the plain line, in that order; two
+ *       pre-hashed refusals in the server log), then db-setup sets the same password in plain text (plainFallbackUsed + plainFallbackLogsNotice, result plainText);
  *       crewflow_owner LOGIN, the PG_DATABASE_URL password logs in, a wrong one does not, pg_authid stores SCRAM-SHA-256$.
  *       The password is in no child output line (nor in this cluster's ddl-level server log).
  *       No plainFallbackTlsEndsAtProxy line (TLS ends at the server itself; the proxy case is covered by the unit tests).
@@ -40,8 +41,13 @@
  *   N4  logging leak check: a successful plain set (as N1), then a plain set that FAILS inside its role statement (the
  *       verifier refused at the statement, refuse_at_statement; another session holds the crewflow_owner row, so the
  *       plain ALTER ROLE waits and lock_timeout fires, 55P03, before log_lock_waits at deadlock_timeout could quote it). The
- *       server log and the child output hold neither value. Then, recorded and NOT asserted: what log_statement = all (set
- *       for the admin role) writes: the documented "provider logs" trade-off (plainFallbackLogsNotice).
+ *       server log and the child output hold neither value, and no log_lock_waits line was written (security review F10).
+ *       Then, recorded and NOT asserted: what log_statement = all (set for the admin role) writes: the documented
+ *       "provider logs" trade-off (plainFallbackLogsNotice).
+ *   N5  PostgreSQL 17+ only (skipped with a note on 16): N4 (B) with a DATABASE-level transaction_timeout = 100ms and
+ *       deadlock_timeout = 1s, so lock_timeout (500ms) would come AFTER the transaction timeout's FATAL (which would carry
+ *       the formatted role statement as CONTEXT): db-setup's P0 guard (review F2) turns the session's transaction_timeout
+ *       off before the plain set, so it fails cleanly on lock_timeout (55P03), no FATAL, no value in the server log.
  *   Q1  role squatting (independent review L2): crewflow_owner already exists and another role is a member of it: refused
  *       (64) before anything is written.
  *   H1  the printed admin-grant hint (owner SQL review): a plain WITH ADMIN OPTION is refused as another member; the hint,
@@ -362,6 +368,23 @@ function serverLog(container: string | undefined): string {
   return all;
 }
 
+/**
+ * Security review F5 of #266: `lines` appear in the child output in this ORDER (each after the previous one). On a refusing
+ * server: verifierRefused, verifierRetry, then the plain-text line (used / no verified TLS / refused).
+ */
+function expectInOrder(run: ChildRun, lines: readonly string[], what: string): void {
+  let at = -1;
+  for (const [i, line] of lines.entries()) {
+    const next = run.out.indexOf(line, at + 1);
+    expect(next > at, `${what}: fixed line ${i + 1} of ${lines.length} is missing or out of order`);
+    at = next;
+  }
+}
+
+/** The pre-hashed refusals the simulator logged in `tail` (a slice of the server log). */
+const prehashedRefusals = (tail: string): number =>
+  tail.split('\n').filter((l) => l.includes('simulated refusal: role passwords must be supplied in plain text')).length;
+
 /** Counts lines of a container's log (stdout and stderr) holding a secret; never prints them. */
 function logHits(container: string | undefined, secrets: string[]): number {
   return serverLog(container)
@@ -391,9 +414,63 @@ function simEnv(f: Fixture, ownerPassword: string): Record<string, string> {
   };
 }
 
+/**
+ * N4 (B) / N5: a plain-text set that FAILS inside its role statement. The verifier is refused inside its own statement
+ * (refuse_at_statement, before the catalog row is touched; twice, review F5), so only the plain ALTER ROLE reaches the
+ * crewflow_owner row that another session holds: it waits, and lock_timeout (L1: half of deadlock_timeout) cancels it,
+ * 55P03. Asserts the clean failure, the cancelled statement in the server log (not vacuous), no FATAL, no log_lock_waits
+ * line (review F10) and the role unchanged. Returns the server log written meanwhile.
+ */
+async function plainSetUnderHeldLock(f: Fixture, next: string, what: string): Promise<string> {
+  const container = process.env.FBC_SIM_CONTAINER;
+  const before = serverLog(container).length;
+  const blocker = new Client({
+    host: clusters.SIM.hostname,
+    port: Number(clusters.SIM.port),
+    user: decodeURIComponent(clusters.SIM.username),
+    password: decodeURIComponent(clusters.SIM.password),
+    database: 'postgres',
+    ssl: { ca: CA, rejectUnauthorized: true },
+  });
+  await blocker.connect();
+  let failed: ChildRun | null = null;
+  try {
+    await setSim('refuse_at_statement', true);
+    await blocker.query('BEGIN');
+    // A no-op change that still writes (and so locks) the crewflow_owner row until ROLLBACK.
+    await blocker.query('ALTER ROLE crewflow_owner CONNECTION LIMIT -1');
+    failed = await runChild({ ...simEnv(f, next), CREWFLOW_ROTATE_APP_PASSWORD: '1' });
+  } finally {
+    await blocker.query('ROLLBACK').catch(() => undefined);
+    await blocker.end().catch(() => undefined);
+    await setSim('refuse_at_statement', false);
+  }
+  if (!failed) throw new Failed(`${what}: the child did not run`);
+  expect(failed.code !== 0, `${what}: exit ${failed.code}, expected a failure`);
+  expectInOrder(failed, [OWNER_BOOTSTRAP_MESSAGES.verifierRefused('statement', 'XX000'), OWNER_BOOTSTRAP_MESSAGES.verifierRetry], what);
+  expect(!failed.out.includes(OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('statement', 'XX000')), `${what}: reported a plain-text set`);
+  expect(!failed.out.includes(OWNER_BOOTSTRAP_MESSAGES.plainFallbackDeadlockTimeout), `${what}: the plain set was not attempted (deadlock_timeout guard)`);
+  expect(failed.out.includes('55P03'), `${what}: the failure is not the lock timeout (${failed.result?.code ?? 'no code'})`);
+  assertClean(failed);
+  const tail = serverLog(container).slice(before);
+  expect(tail.includes('crewflow_owner bootstrap failed (55P03)'), `${what}: the server log does not show the cancelled plain set`);
+  // Refused inside the DO block, the simulator's message is caught and re-raised by SQLSTATE: two such lines (review F5).
+  const statementRefusals = tail.split('\n').filter((l) => l.includes('crewflow_owner bootstrap failed (XX000)')).length;
+  expect(statementRefusals === 2, `${what}: ${statementRefusals} pre-hashed refusal(s) in the server log, expected 2`);
+  // The wrong-password probe logs its own FATAL (28P01); a session ended under the plain set (transaction timeout,
+  // connection check) must not.
+  expect(!/FATAL:\s+terminating connection/.test(tail), `${what}: a session was terminated (FATAL) while the plain set ran`);
+  const lockWaitLines = tail.split('\n').filter((l) => l.includes('still waiting for')).length;
+  expect(lockWaitLines === 0, `${what}: ${lockWaitLines} log_lock_waits line(s) while the plain set waited`);
+  expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), `${what}: the original password no longer logs in`);
+  expect(!(await canLogin(clusters.SIM, 'crewflow_owner', next, f.db)), `${what}: the failed value logs in`);
+  expect(logHits(container, [f.ownerPassword, next]) === 0, `${what}: a crewflow_owner password appears in the server log`);
+  return tail;
+}
+
 const scenarios: Array<[string, () => Promise<void>]> = [
   [
-    'P1 plain PG16, verify-full, non-superuser admin: pre-hashed path, no fallback',
+    'P1 plain PostgreSQL, verify-full, non-superuser admin: pre-hashed path, no fallback',
     async () => {
       const f = await fixture(clusters.PLAIN, 'p1');
       const run = await runChild({
@@ -407,7 +484,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'P2 plain PG16, the cluster superuser as admin over verify-full (the bundled db shape): pre-hashed path',
+    'P2 plain PostgreSQL, the cluster superuser as admin over verify-full (the bundled db shape): pre-hashed path',
     async () => {
       const f = await fixture(clusters.PLAIN, 'p2');
       const run = await runChild({
@@ -425,17 +502,28 @@ const scenarios: Array<[string, () => Promise<void>]> = [
     async () => {
       await simDefaults();
       const f = await fixture(clusters.SIM, 'n1');
+      const before = serverLog(process.env.FBC_SIM_CONTAINER).length;
       const run = await runChild(simEnv(f, f.ownerPassword));
       await created(clusters.SIM, f, run, 'N1');
       expect(run.result?.plainText === true, 'N1: the result does not say the plain-text fallback set the password');
+      expectInOrder(
+        run,
+        [
+          OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+          OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+          OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+          OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+        ],
+        'N1',
+      );
+      const refusals = prehashedRefusals(serverLog(process.env.FBC_SIM_CONTAINER).slice(before));
+      expect(refusals === 2, `N1: ${refusals} pre-hashed refusal(s) in the server log, expected 2 (the verifier tried twice)`);
       for (const line of [
-        OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
-        OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
-        OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+        OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls,
+        OWNER_BOOTSTRAP_MESSAGES.plainFallbackDeadlockTimeout,
+        OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+        OWNER_SQL_BEGIN_MARKER,
       ]) {
-        expect(run.out.includes(line), 'N1: a fixed line is missing');
-      }
-      for (const line of [OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls, OWNER_BOOTSTRAP_MESSAGES.setPasswordStep, OWNER_SQL_BEGIN_MARKER]) {
         expect(!run.out.includes(line), 'N1: a last-resort line was printed');
       }
       // TLS ends at the database itself here (pg_stat_ssl true): the proxy line is for a TLS-ending proxy only.
@@ -462,18 +550,21 @@ const scenarios: Array<[string, () => Promise<void>]> = [
           ...extra,
         });
         expect(run.code === 64 && run.result?.outcome === 'awaiting-password' && run.result?.created === true, `N1b (${what}): exit ${run.code}, outcome ${run.result?.outcome ?? 'none'}`);
-        for (const line of [
-          OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
-          OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls,
-          OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
-          OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
-          OWNER_SQL_BEGIN_MARKER,
-          ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')),
-          OWNER_SQL_END_MARKER,
-          OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
-        ]) {
-          expect(run.out.includes(line), `N1b (${what}): a fixed line is missing`);
-        }
+        expectInOrder(
+          run,
+          [
+            OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+            OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls,
+            OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
+            OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+            OWNER_SQL_BEGIN_MARKER,
+            ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')),
+            OWNER_SQL_END_MARKER,
+            OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
+          ],
+          `N1b (${what})`,
+        );
         expect(!run.out.includes(OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice), `N1b (${what}): the plain-text notice was printed`);
         expect(run.result?.plainText !== true, `N1b (${what}): the result claims a plain-text set`);
         expect((await ownerPasswordState(clusters.SIM)) === 'none', `N1b (${what}): crewflow_owner is missing or has a password`);
@@ -493,19 +584,22 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       try {
         const run1 = await runChild(env);
         expect(run1.code === 64 && run1.result?.outcome === 'awaiting-password' && run1.result?.created === true, `N2a run 1: exit ${run1.code}, outcome ${run1.result?.outcome ?? 'none'}`);
-        for (const line of [
-          OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
-          OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('commit', 'XX000'),
-          OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
-          OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
-          OWNER_SQL_BEGIN_MARKER,
-          ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')),
-          OWNER_SQL_END_MARKER,
-          OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
-          OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
-        ]) {
-          expect(run1.out.includes(line), 'N2a run 1: a fixed line is missing');
-        }
+        expectInOrder(
+          run1,
+          [
+            OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+            OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
+            OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+            OWNER_SQL_BEGIN_MARKER,
+            ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')),
+            OWNER_SQL_END_MARKER,
+            OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
+            OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
+          ],
+          'N2a run 1',
+        );
         expect(!run1.out.includes(OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000')), 'N2a run 1: reported a plain-text set');
         expect(!/another start/.test(run1.out), 'N2a run 1: the refusal was reported as a race');
         expect((await ownerPasswordState(clusters.SIM)) === 'none', 'N2a run 1: crewflow_owner is missing or has a password');
@@ -513,7 +607,16 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         assertClean(run1);
         const run2 = await runChild(env);
         expect(run2.code === 64 && run2.result?.outcome === 'awaiting-password' && run2.result?.created === false, `N2a run 2: exit ${run2.code}, outcome ${run2.result?.outcome ?? 'none'}`);
-        expect(run2.out.includes(OWNER_BOOTSTRAP_MESSAGES.passwordlessKept), 'N2a run 2: the "left unchanged" line is missing');
+        expectInOrder(
+          run2,
+          [
+            OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+            OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.passwordlessKept,
+          ],
+          'N2a run 2',
+        );
         expect((await ownerPasswordState(clusters.SIM)) === 'none', 'N2a run 2: the password was written');
         expect((await ownerCanLoginAttr(clusters.SIM)) === false, 'N2a run 2: crewflow_owner became LOGIN without a password');
         assertClean(run2);
@@ -565,19 +668,22 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         const run1 = await runChild(env);
         await setSim('refuse_plain', false);
         expect(run1.code === 64 && run1.result?.outcome === 'awaiting-manual-role', `N2b run 1: exit ${run1.code}, outcome ${run1.result?.outcome ?? 'none'}`);
-        for (const line of [
-          OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
-          OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('commit', 'XX000'),
-          OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused('commit', 'XX000'),
-          OWNER_BOOTSTRAP_MESSAGES.manualRoleStep,
-          OWNER_SQL_BEGIN_MARKER,
-          ...OWNER_MANUAL_ROLE_SQL.flatMap((st) => st.split('\n')),
-          OWNER_SQL_END_MARKER,
-          OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
-          OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole,
-        ]) {
-          expect(run1.out.includes(line), 'N2b run 1: a fixed line is missing');
-        }
+        expectInOrder(
+          run1,
+          [
+            OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+            OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused('commit', 'XX000'),
+            OWNER_BOOTSTRAP_MESSAGES.manualRoleStep,
+            OWNER_SQL_BEGIN_MARKER,
+            ...OWNER_MANUAL_ROLE_SQL.flatMap((st) => st.split('\n')),
+            OWNER_SQL_END_MARKER,
+            OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
+            OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole,
+          ],
+          'N2b run 1',
+        );
         expect((await ownerPasswordState(clusters.SIM)) === 'missing', 'N2b run 1: crewflow_owner was created');
         assertClean(run1);
         expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N2b: the crewflow_owner password appears in the server log');
@@ -622,14 +728,17 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         run3.code === 0 && run3.result?.outcome === 'updated' && run3.result?.passwordSet === true && run3.result?.plainText === true,
         `N3 ROTATE=1: exit ${run3.code}, outcome ${run3.result?.outcome ?? 'none'} plainText ${String(run3.result?.plainText)}`,
       );
-      for (const line of [
-        OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
-        OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
-        OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
-        OWNER_BOOTSTRAP_MESSAGES.rotateDone,
-      ]) {
-        expect(run3.out.includes(line), 'N3 ROTATE=1: a fixed line is missing');
-      }
+      expectInOrder(
+        run3,
+        [
+          OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+          OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+          OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+          OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+          OWNER_BOOTSTRAP_MESSAGES.rotateDone,
+        ],
+        'N3 ROTATE=1',
+      );
       expect(await canLogin(clusters.SIM, 'crewflow_owner', other, f.db), 'N3 ROTATE=1: the new password does not log in');
       expect(!(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db)), 'N3 ROTATE=1: the old password still logs in');
       expect((await ownerPasswordState(clusters.SIM)) === 'scram', 'N3 ROTATE=1: the password is not stored as SCRAM');
@@ -651,48 +760,18 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       const f = await fixture(clusters.SIM, 'n4');
       const ok = await runChild(simEnv(f, f.ownerPassword));
       await created(clusters.SIM, f, ok, 'N4 (A)');
-      expect(ok.result?.plainText === true && ok.out.includes(OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000')), 'N4 (A): the plain-text fallback did not run');
+      expect(ok.result?.plainText === true, 'N4 (A): the plain-text fallback did not run');
+      expectInOrder(
+        ok,
+        [OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'), OWNER_BOOTSTRAP_MESSAGES.verifierRetry, OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000')],
+        'N4 (A)',
+      );
       assertClean(ok);
       // (B) a failure INSIDE the plain set. The verifier is refused inside its own statement (refuse_at_statement, before the
       // catalog row is touched), so only the plain ALTER ROLE reaches the row that another session holds: it waits, and
       // lock_timeout (L1: half of deadlock_timeout) cancels it, 55P03.
       const next = strong();
-      const before = serverLog(container).length;
-      const blocker = new Client({
-        host: clusters.SIM.hostname,
-        port: Number(clusters.SIM.port),
-        user: decodeURIComponent(clusters.SIM.username),
-        password: decodeURIComponent(clusters.SIM.password),
-        database: 'postgres',
-        ssl: { ca: CA, rejectUnauthorized: true },
-      });
-      await blocker.connect();
-      let failed: ChildRun | null = null;
-      try {
-        await setSim('refuse_at_statement', true);
-        await blocker.query('BEGIN');
-        // A no-op change that still writes (and so locks) the crewflow_owner row until ROLLBACK.
-        await blocker.query('ALTER ROLE crewflow_owner CONNECTION LIMIT -1');
-        failed = await runChild({ ...simEnv(f, next), CREWFLOW_ROTATE_APP_PASSWORD: '1' });
-      } finally {
-        await blocker.query('ROLLBACK').catch(() => undefined);
-        await blocker.end().catch(() => undefined);
-        await setSim('refuse_at_statement', false);
-      }
-      if (!failed) throw new Failed('N4 (B): the child did not run');
-      expect(failed.code !== 0, `N4 (B): exit ${failed.code}, expected a failure`);
-      expect(failed.out.includes(OWNER_BOOTSTRAP_MESSAGES.verifierRefused('statement', 'XX000')), 'N4 (B): the verifier was not refused at its statement');
-      expect(!failed.out.includes(OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('statement', 'XX000')), 'N4 (B): reported a plain-text set');
-      expect(failed.out.includes('55P03'), `N4 (B): the failure is not the lock timeout (${failed.result?.code ?? 'no code'})`);
-      assertClean(failed);
-      // Not vacuous: the server logged the plain set's cancelled statement.
-      const tail = serverLog(container).slice(before);
-      expect(tail.includes('crewflow_owner bootstrap failed (55P03)'), 'N4 (B): the server log does not show the cancelled plain set');
-      const lockWaitLines = tail.split('\n').filter((l) => l.includes('still waiting for')).length;
-      console.log(`[fallback-check] note | N4 (B): log_lock_waits lines while the plain set waited: ${lockWaitLines} (lock_timeout is below deadlock_timeout)`);
-      expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N4 (B): the original password no longer logs in');
-      expect(!(await canLogin(clusters.SIM, 'crewflow_owner', next, f.db)), 'N4 (B): the failed value logs in');
-      expect(logHits(container, [f.ownerPassword, next]) === 0, 'N4: a crewflow_owner password appears in the server log');
+      await plainSetUnderHeldLock(f, next, 'N4 (B)');
       // (C) recorded, NOT asserted: log_statement = all for the admin role (as a provider may log), then one plain set.
       const g = await fixture(clusters.SIM, 'n4c');
       await sql(clusters.SIM, 'postgres', `ALTER ROLE ${ident(g.admin)} SET log_statement = 'all'`);
@@ -706,6 +785,26 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       console.log(
         `[fallback-check] note | N4 (C), not asserted: with log_statement = all for the admin, ${hits.length} server log line(s) hold the plain value (first: ${shape}). The documented "provider logs" trade-off; db-setup prints plainFallbackLogsNotice.`,
       );
+    },
+  ],
+  [
+    'N5 PG17+: database-level transaction_timeout below lock_timeout: the plain set still fails cleanly (55P03), no FATAL, no value logged',
+    async () => {
+      const v = await sql(clusters.SIM, 'postgres', `SELECT pg_catalog.current_setting('server_version_num')::int AS v`);
+      if (Number(v[0]?.v) < 170000) {
+        console.log('[fallback-check] note | N5 skipped: transaction_timeout exists on PostgreSQL 17+ only');
+        return;
+      }
+      await simDefaults();
+      const f = await fixture(clusters.SIM, 'n5');
+      const setup = await runChild(simEnv(f, f.ownerPassword));
+      await created(clusters.SIM, f, setup, 'N5 setup');
+      assertClean(setup);
+      // For every new session in this database: a transaction timeout (100ms) that, unguarded, would end the plain set with a
+      // FATAL before lock_timeout (deadlock_timeout 1s / 2 = 500ms) could cancel it.
+      await sql(clusters.SIM, 'postgres', `ALTER DATABASE ${ident(f.db)} SET transaction_timeout = '100ms'`);
+      await sql(clusters.SIM, 'postgres', `ALTER DATABASE ${ident(f.db)} SET deadlock_timeout = '1s'`);
+      await plainSetUnderHeldLock(f, strong(), 'N5');
     },
   ],
   [
@@ -727,7 +826,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'H1 the printed admin-grant hint, run as written (PG16): a plain WITH ADMIN OPTION is refused as another member; the hint works',
+    'H1 the printed admin-grant hint, run as written (PG16+): a plain WITH ADMIN OPTION is refused as another member; the hint works',
     async () => {
       const f = await fixture(clusters.PLAIN, 'h1');
       // crewflow_owner made by the superuser (no membership rows), without a password: the admin has no ADMIN OPTION on it.

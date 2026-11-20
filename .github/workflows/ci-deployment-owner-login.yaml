@@ -12,13 +12,13 @@
 #                      no build, and the Worker starts after a healthy API (restart: true). ci-security.yaml's deployment-config job
 #                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
 #   db-setup-capability  (NOT a required check yet; owner decision pending on making it one) the live harness of the
-#                      bootstrap child against disposable PostgreSQL 16 containers, one at a time, memory-capped
+#                      bootstrap child against disposable PostgreSQL 16, 17 and 18 containers (a matrix), one at a time, memory-capped
 #                      (scripts/owner-login/fallback-check/run-fallback-check.sh): the pre-hashed path (P1, P2), a server
 #                      that refuses pre-hashed passwords (a test-only C extension built here: N1 the plain-text fallback
 #                      over verified TLS in one run, N1b no verified TLS -> the printed step, N2a/N2b plain text refused
 #                      too -> passwordless role + steps / the printed SQL, N3 an existing password changed only with
 #                      CREWFLOW_ROTATE_APP_PASSWORD=1, N4 no value in the server log at log_statement=ddl, including a
-#                      plain set cancelled by lock_timeout), the rotate opt-in on H1, PgBouncer in transaction mode refused
+#                      plain set cancelled by lock_timeout; N5 on 17+: a database-level transaction_timeout), the rotate opt-in on H1, PgBouncer in transaction mode refused
 #                      by capability (B1, B2) and PG_ADMIN_DIRECT_URL (B3), and a pg_hba that trusts crewflow_owner refused
 #                      (T1). Secrets are generated per run and never printed.
 # The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
@@ -156,9 +156,18 @@ jobs:
           node packages/rab-docker/scripts/compose-one-image.cjs
 
   db-setup-capability:
-    name: db-setup by capability (live PostgreSQL 16; not required)
+    name: db-setup by capability (live PostgreSQL ${{ matrix.pg.major }}; not required)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Debian postgres images by index digest, the same pins as upgrade-with-data.yaml (16 = the compose default; 17 =
+        # what Neon runs; N5, the transaction_timeout guard, runs on 17 and 18 only).
+        pg:
+          - { major: 16, image: 'postgres@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f' }
+          - { major: 17, image: 'postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f' }
+          - { major: 18, image: 'postgres@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42' }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -167,5 +176,7 @@ jobs:
       - uses: ./.github/actions/restore-cache
       - name: Build the workspace libraries (the harness imports them)
         run: npx nx run-many -t build -p rab-shared,rab-emails
-      - name: db-setup capability harness (P1, P2, Q1, H1, B1-B3, N1, N1b, N2a, N2b, N3, N4, T1)
+      - name: db-setup capability harness (P1, P2, Q1, H1, B1-B3, N1, N1b, N2a, N2b, N3, N4, N5, T1)
+        env:
+          FBC_PG_IMAGE: ${{ matrix.pg.image }}
         run: bash packages/rab-server/src/database/typeorm/scripts/owner-login/fallback-check/run-fallback-check.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/fbc"

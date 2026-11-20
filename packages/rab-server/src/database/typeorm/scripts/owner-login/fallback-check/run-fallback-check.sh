@@ -6,7 +6,7 @@
 #   run-fallback-check.sh <repo checkout with node_modules> <empty work dir>
 #
 # Settings (environment; defaults in brackets):
-#   FBC_PG_IMAGE     the Debian PostgreSQL 16 image [the repo's pinned bundled-db image, by digest]
+#   FBC_PG_IMAGE     a Debian PostgreSQL 16, 17 or 18 image by digest (CI runs all three) [the repo's pinned bundled-db image, 16]
 #   FBC_PREFIX       container / network name prefix [fbc-]  (the laptop uses crewtest-<agent>-)
 #   FBC_PG_MEM       memory cap of each PostgreSQL / build container [384m]
 #   FBC_PGB_MEM      memory cap of PgBouncer [64m]
@@ -20,7 +20,7 @@
 #          also plain-text passwords, any role without a password, or a pre-hashed password inside its statement), logging
 #          as N4 asserts it (log_statement=ddl, log_min_error_statement=error, log_lock_waits=on, deadlock_timeout=100ms,
 #          log_min_duration_statement=-1; the harness sets log_statement=all for one admin role only to RECORD the
-#          provider-logs trade-off): N1, N1b, N2a, N2b, N3, N4 (owner decision 2026-11-20: plain-text fallback)
+#          provider-logs trade-off): N1, N1b, N2a, N2b, N3, N4, N5 (17+ only) (owner decision 2026-11-20: plain-text fallback)
 #   trust  a pg_hba that TRUSTS crewflow_owner (and only it): T1
 # The extension and PgBouncer are built / unpacked in a throwaway container of the same image (apt; nothing installed on the
 # host). Every container and the network are removed by exact name afterwards; nothing is pruned. Secrets are generated here
@@ -152,7 +152,8 @@ stop_pg
 # ... SET, which takes precedence over a command-line setting).
 start_pg -c shared_preload_libraries=refuse_prehashed,pg_stat_statements -c pg_stat_statements.track=all \
   -c log_statement=ddl -c log_min_error_statement=error -c log_lock_waits=on -c deadlock_timeout=100ms -c log_min_duration_statement=-1
-harness FBC_SIM_SU_URL="$SU" FBC_SIM_CONTAINER="$PG_NAME" -- N1 N2 N3 N4
+echo "[fallback-check] server: $(docker exec "$PG_NAME" postgres --version)"
+harness FBC_SIM_SU_URL="$SU" FBC_SIM_CONTAINER="$PG_NAME" -- N1 N2 N3 N4 N5
 refusals="$(docker logs "$PG_NAME" 2>&1 | grep -c 'simulated refusal: role passwords must be supplied in plain text' || true)"
 plain_refusals="$(docker logs "$PG_NAME" 2>&1 | grep -c 'simulated refusal: role passwords must not be supplied in plain text' || true)"
 echo "[fallback-check] simulator refusals in the server log: pre-hashed $refusals, plain text $plain_refusals"
