@@ -38,6 +38,8 @@ export const ENVIRONMENT_ALLOWLIST: readonly EnvEntry[] = [
   { group: 'App', key: 'ACCOUNTS_URL', kind: 'url' },
   { group: 'App', key: 'CORS_ORIGINS', kind: 'url' },
   { group: 'App', key: 'TRUSTED_PROXY_CIDRS', kind: 'url' },
+  // Shown so an operator sees the one-time TRUSTED_PROXY_CIDRS diagnostic is still on (remove it after use).
+  { group: 'App', key: 'CREWFLOW_LOG_FIRST_PEER', kind: 'value' },
   { group: 'App', key: 'WORKSPACE_BASE_DOMAIN', kind: 'url' },
   { group: 'Secrets', key: 'APP_SECRET', kind: 'secret' },
   { group: 'Secrets', key: 'APP_ENCRYPTION_KEYRING', kind: 'secret' },
