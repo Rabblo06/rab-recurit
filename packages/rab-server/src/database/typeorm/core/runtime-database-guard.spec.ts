@@ -2,7 +2,7 @@ import { ALLOW_PRODUCTION_DB_COMMANDS } from './database-target';
 import { assertRuntimeDatabaseIdentity, RuntimeDbError, resolveRuntimeDatabase } from './runtime-database-guard';
 
 // Fake credentials only. Every refusal asserts this never appears in the message.
-const SECRET = 'S3cret-PW-do-not-print';
+const SECRET = 'S3cret-PW-do-not-print-0123456789-abcdefgh';
 const PROD_POOLED = `postgres://rab_app:${SECRET}@ep-round-rain-aess0njf-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const PROD_DIRECT = `postgres://rab_owner:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const OTHER_NEON = `postgres://rab_owner:${SECRET}@ep-other-endpoint-xyz.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
@@ -82,13 +82,13 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expectRefused('worker', PROD_ENV({ DB_POOL_MAX: '10' }), /refuses the legacy database variable\(s\) DB_POOL_MAX/);
     expectRefused('api', PROD_ENV({ PGPASSWORD: 'x' }), /libpq environment variable\(s\) PGPASSWORD/);
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: undefined, DATABASE_URL: PROD_APP }), /^DATABASE_URL is present in the api process's environment\. It is the retired name/);
-    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
+    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /must set sslmode=require, verify-ca or verify-full in production/);
   });
 
-  it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; the API only warns', () => {
+  it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; since owner decision 2026-11-18 the production API refuses it too (runtime-db-config.ts checkRuntimeLogin)', () => {
     expectRefused('worker', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED }), /transaction-pooler shape/);
     expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow') }), /transaction-pooler shape/);
-    expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') })).classification).toBe('PRODUCTION');
+    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') }), /transaction-pooler shape/);
   });
 
   it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {
