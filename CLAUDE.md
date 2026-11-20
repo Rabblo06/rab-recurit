@@ -5,8 +5,10 @@ and verify the handoff against current code. Continue relevant pending work;
 do not trust stale text over repository evidence. Update that same canonical
 handoff after substantial changes, including important new production modules.
 
-Workforce staffing platform: one NestJS backend, one PostgreSQL database, three
-clients (`rab-front` web console + venue portal, `rab-mobile` staff app). Full
+Workforce staffing platform: one NestJS backend (`rab-server`, with the
+`rab-worker` background process), one PostgreSQL database, three clients
+(`rab-front` web console + venue portal, `rab-mobile` Flutter staff app,
+`rab-iphone` native Swift app). Full
 architecture, ERD, permission matrix, API structure, schema and milestone plan
 live in `rab-workforce-architecture.md` at the repo root — read it before making
 structural changes.
@@ -28,8 +30,14 @@ structural changes.
   decision 2026-11-04, Option A, permanent; THREAT-MODEL.md PT-01). The API,
   the Worker, the CLI and the short-lived migration child all connect as it
   through one `PG_DATABASE_URL`. Its shape is fixed (M0 §5.1): NOSUPERUSER,
-  NOBYPASSRLS, NOREPLICATION, NOCREATEDB, CREATEROLE; it INHERITs
-  `rab_secure_owner` and `crewflow`, so it **owns every table**. The legacy
+  NOBYPASSRLS, NOREPLICATION, NOCREATEDB; it INHERITs
+  `rab_secure_owner` and `crewflow`, so it **owns every table**. CREATEROLE
+  is needed only until the first start has created the schema roles: an
+  admin marks the role with an expiring comment (24 h grace), the one-shot
+  `db-harden` service (or db-setup, or the operator in mode c) removes
+  CREATEROLE and the mark once the schema is complete, and in production the
+  boot gate refuses a CREATEROLE `crewflow_owner` without a valid, unexpired
+  mark (`assertCreateRoleGate`, `owner-login-posture.ts`). The legacy
   roles `rab_owner`, `rab_app`, `rab_secure_owner`, `crewflow`,
   `crewflow_app` and `crewflow_worker` remain as **schema roles** that
   historical migrations and SECURITY DEFINER functions need. None of them is
@@ -51,18 +59,26 @@ structural changes.
     child and boot gate 2. 15 cannot be added (the role model needs 16);
     19+ only once its fingerprints and goldens exist and are reviewed.
   - `PG_ADMIN_URL` is the database admin URL, and only the one-shot
-    `db-setup` reads it. `PG_DATABASE_URL` always means `crewflow_owner`;
-    any other login there is refused, never treated as an admin URL.
-  - rab-api and rab-worker receive no database URL at all. Compose pins
-    `PG_DATABASE_URL` and `PG_ADMIN_URL` to `""` on both, and both
-    entrypoints refuse (exit 64) a non-empty `PG_DATABASE_URL`, `PG_ADMIN_URL`
-    or its old names, and any variable whose value is a `postgres://` URL.
-    They build the `crewflow_owner` URL from db-setup's target and password
-    files (`api-prestart.sh`, `worker-start.sh`, `never-in-runtime-env.ts`).
-  - Production TLS is `sslmode=verify-full` only. A private CA is given as
-    PEM text in `PG_SSL_CA_CERT` or as a file in `PG_SSL_CA_CERT_PATH`, never
-    both. It is validated at boot (`validatePgCaPem`) and never logged; it
-    only picks the trusted root, and the chain and host-name checks stay on.
+    `db-setup` and `db-harden` services read it. `PG_DATABASE_URL` always
+    means `crewflow_owner`; any other login there is refused, never treated
+    as an admin URL.
+  - rab-api and rab-worker read `PG_DATABASE_URL` (the `crewflow_owner` URL)
+    from their environment, like Twenty (owner decision 2026-11-18): the
+    compose files give rab-api, rab-worker and db-setup the same committed
+    expression, so what db-setup created or checked is exactly what they
+    use. Compose pins `PG_ADMIN_URL` (and `PG_ADMIN_DIRECT_URL`) to `""` on
+    both, and both entrypoints refuse (exit 64) a non-empty admin URL, a
+    second database URL, a role password (`PG_DATABASE_PASSWORD`,
+    `PG_DATABASE_APP_PASSWORD`) and an empty `PG_DATABASE_URL` or empty
+    password in it (`api-prestart.sh`, `worker-start.sh`,
+    `never-in-runtime-env.ts`). db-setup writes no file.
+  - Production TLS accepts exactly `sslmode=require`, `verify-ca` or
+    `verify-full`, and all three are enforced as full verification (chain
+    and host name, `PG_PRODUCTION_SSLMODES` in `pg-tls.ts`); any other
+    sslmode, or none, is refused. A private CA is given as PEM text in
+    `PG_SSL_CA_CERT` or as a file in `PG_SSL_CA_CERT_PATH`, never both. It is
+    validated at boot (`validatePgCaPem`) and never logged; it only picks the
+    trusted root, and the chain and host-name checks stay on.
 - **Every tenant-scoped table gets `organisation_id` + an RLS policy
   (`ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + `USING` +
   `WITH CHECK`) in the *same* migration that creates it.** No exceptions, no
@@ -231,8 +247,9 @@ structural changes.
   `CREWFLOW_PREVIOUS_VERSIONS`; any other jump is refused (exit 65,
   `upgrade-version.ts`). A fix that needs an upgrade command or a structure
   change ships as the next minor. Images are published only by
-  `publish-image.yaml` (mode=publish), after the owner approves the
-  `release` environment, and are deployed by digest
+  `publish-image.yaml` (a published GitHub release, or a manual run with
+  mode=publish), after the owner approves the `release` environment, and
+  are deployed by digest
   (`CREWFLOW_IMAGE_TAG=sha256:…`), never by tag.
 - **Production upgrades need no deployment ID or approval token** (owner
   decision 2026-11-05, BC-11, like Twenty). Both stay available as an opt-in
@@ -337,9 +354,10 @@ yarn test    # nx run-many test
   owns its own page(s), drawers/modals, and feature-local styles, and should
   be self-contained: importable on its own, without another feature reaching
   into it.
-  - `rab-front`: `src/features/<domain>/` — currently `auth`, `dashboard`,
-    `users`, `scheduling`, `offers`, `venues`, `payroll`, `audit`,
-    `notifications`, `settings`.
+  - `rab-front`: `src/features/<domain>/` — currently `ai`, `audit`, `auth`,
+    `dashboard`, `errors`, `help`, `notifications`, `offers`, `onboarding`,
+    `payroll`, `scheduling`, `settings`, `users`, `venues`,
+    `workspace-host`.
   - `rab-mobile`: `lib/features/<domain>/` — the same rule, already in place
     before `rab-front` adopted it; match its shape for new mobile domains.
   - `src/shared/` (`rab-front` only) is for code used by **three or more**
