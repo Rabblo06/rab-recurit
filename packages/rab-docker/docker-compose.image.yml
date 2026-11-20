@@ -668,7 +668,13 @@ services:
       BOOTSTRAP_ADMIN_ORG_NAME: ${BOOTSTRAP_ADMIN_ORG_NAME:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
+      # AI (owner decision 2026-11-20: AI wanted in production, Anthropic only; it replaces the former 'false' pin): OFF unless
+      # the operator sets AI_ENABLED=true in compose.env (the ONLY place: exactly true or false, unset = false; the lint refuses
+      # it in database.env / runtime.env, where this line would silently override it). The SAME expression on rab-api and
+      # rab-worker (the Worker refuses every queued turn while it is false); the gates accept exactly ${AI_ENABLED:-false}.
+      # Turned on, AI also needs ANTHROPIC_API_KEY and the budgets in runtime.env, a platform admin switching the
+      # organisation on in Settings -> AI (every organisation starts OFF), and a model the build approves for production.
+      AI_ENABLED: ${AI_ENABLED:-false}
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
@@ -803,7 +809,8 @@ services:
       PG_ADMIN_DIRECT_URL: ""
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
+      # AI: compose.env's AI_ENABLED, default false, the same expression as rab-api (see there).
+      AI_ENABLED: ${AI_ENABLED:-false}
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
