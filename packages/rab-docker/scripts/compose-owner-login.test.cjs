@@ -50,7 +50,7 @@ test('forbidden names: every second database identity, role password, authority 
     'PG_OPS_APP_DATABASE_URL', 'POSTURE_DATABASE_URL', 'DRIFT_DATABASE_URL', 'SOME_OTHER_DATABASE_URL', 'TEST_DATABASE_URL',
     'CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
     'CREWFLOW_MIGRATOR_PASSWORD', 'CREWFLOW_OPS_RUN', 'ALLOW_PRODUCTION_DB_COMMANDS', 'DB_TARGET', 'CREWFLOW_DB_MODE', 'PGPASSWORD',
-    'PGHOST', 'PGCONNECT_TIMEOUT', 'NODE_OPTIONS', 'BOOTSTRAP_ADMIN_EMAIL', 'WORKER_CLAIM_MODE', 'CREWFLOW_PROVISIONER_ENABLED',
+    'PGHOST', 'PGCONNECT_TIMEOUT', 'NODE_OPTIONS', 'BOOTSTRAP_ADMIN_PASSWORD', 'BOOTSTRAP_ADMIN_ROLE', 'WORKER_CLAIM_MODE', 'CREWFLOW_PROVISIONER_ENABLED',
   ]) {
     assert.ok(forbiddenReason(name), `${name} must be forbidden`);
   }
@@ -383,6 +383,42 @@ test('BC-11 opt-in: the deployment identity lives in database.env only; O3: the 
   }
 });
 
+// Owner decision 2026-11-20 (AI wanted in production, Anthropic only): AI_ENABLED is operator-set, default OFF. The compose
+// files commit exactly ${AI_ENABLED:-false}; compose.env alone may set it (exactly true or false); a committed literal, true
+// as much as the former 'false' pin, another default, `:?` or no default is refused.
+test('DENIAL AI switch: committed only as exactly ${AI_ENABLED:-false}; operator-set in compose.env, never database.env / runtime.env', () => {
+  const { AI_ENABLED_EXPR, aiEnabledExpressionProblems } = gate;
+  assert.equal(AI_ENABLED_EXPR, '${AI_ENABLED:-false}');
+  const svc = (line) => `services:\n  rab-api:\n    environment:\n      ${line}\n`;
+  assert.deepEqual(lintComposeText('x.yml', svc('AI_ENABLED: ${AI_ENABLED:-false}')), []);
+  for (const line of [
+    "AI_ENABLED: 'true'", 'AI_ENABLED: "true"', 'AI_ENABLED: true', "AI_ENABLED: 'false'", 'AI_ENABLED: "false"', 'AI_ENABLED: false',
+    'AI_ENABLED: ${AI_ENABLED:-true}', 'AI_ENABLED: ${AI_ENABLED-false}', 'AI_ENABLED: ${AI_ENABLED}', 'AI_ENABLED: ${AI_ENABLED:?set it}',
+    'AI_ENABLED: "${AI_ENABLED:-false}"', 'AI_ENABLED: ${AI_ENABLED:-false} # on', 'AI_ENABLED:', '- AI_ENABLED=${AI_ENABLED:-false}', '- AI_ENABLED=true',
+  ]) assertRefused(lintComposeText('x.yml', svc(line)), /AI_ENABLED must be committed as exactly AI_ENABLED: \$\{AI_ENABLED:-false\}/);
+  // A comment naming it is not a commitment.
+  assert.deepEqual(lintComposeText('x.yml', svc("# AI_ENABLED: 'true' was the old idea")), []);
+  // docker-compose.production.yml must carry it (the shared optional list both services merge).
+  assertRefused(aiEnabledExpressionProblems('docker-compose.production.yml', 'services: {}\n', { required: true }), /AI_ENABLED is missing/);
+  // The committed files: production carries it exactly once (shared by rab-api and rab-worker), image.yml on each service.
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const count = (f) => (read(f).match(/^\s*AI_ENABLED: \$\{AI_ENABLED:-false\}$/gm) ?? []).length;
+  assert.deepEqual(aiEnabledExpressionProblems('docker-compose.production.yml', read('docker-compose.production.yml'), { required: true }), []);
+  assert.equal(count('docker-compose.production.yml'), 1);
+  assert.deepEqual(aiEnabledExpressionProblems('docker-compose.image.yml', read('docker-compose.image.yml'), { required: true }), []);
+  assert.equal(count('docker-compose.image.yml'), 2);
+  // compose.env: exactly true or false (empty = the default, false); anything else is refused (X3.1 strict switch).
+  assert.ok(gate.STRICT_SWITCHES.includes('AI_ENABLED'));
+  for (const v of ['true', 'false', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nAI_ENABLED=${v}`), [], v);
+  for (const v of ['True', 'yes', '1', 'on']) assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nAI_ENABLED=${v}`), /AI_ENABLED: must be exactly true or false/);
+  // database.env / runtime.env: the committed expression would silently override it, so refused, naming compose.env.
+  for (const kind of ['database', 'runtime']) {
+    for (const v of ['true', 'false']) assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : ''}AI_ENABLED=${v}`), /AI_ENABLED: set it in compose\.env/);
+  }
+  // The development-only real-provider switch is never an operator value in production.
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nAI_DEV_ALLOW_REAL_PROVIDERS=true`), /AI_DEV_ALLOW_REAL_PROVIDERS: compose\.env holds only/);
+});
+
 test('BC-07: CREWFLOW_AUDIT_SINK is required in runtime.env, with a production-accepted value only', () => {
   const ok = 'CREWFLOW_AUDIT_SINK=stdout';
   assert.deepEqual(lintEnvText('runtime', ok), []);
@@ -553,12 +589,38 @@ test('Phase D switches: the gate and the image-compose verifier enforce the same
   assert.deepEqual({ ...verifier.NOTIFICATION_DELIVERY }, { ...gate.NOTIFICATION_DELIVERY });
 });
 
-test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
+test('command authority and a bootstrap password are refused in every env file and on every service', () => {
   for (const kind of ['database', 'runtime', 'compose']) {
-    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_PASSWORD', 'BOOTSTRAP_ADMIN_ROLE']) {
       assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: `));
     }
   }
+  assert.match(forbiddenReason('BOOTSTRAP_ADMIN_PASSWORD'), /a bootstrap password/);
+  assert.match(forbiddenReason('BOOTSTRAP_ADMIN_ROLE'), /unknown bootstrap-admin input/);
+  for (const service of ['rab-api', 'rab-worker']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_PASSWORD']) assert.ok(forbiddenReason(name), `${name} on ${service}`);
+  }
+});
+
+test('first platform admin at boot (2026-11-19): the five BOOTSTRAP_ADMIN_* inputs are allowed for rab-api only', () => {
+  assert.deepEqual([...gate.RAB_API_BOOTSTRAP_ADMIN_KEYS], [
+    'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME',
+  ]);
+  for (const name of gate.RAB_API_BOOTSTRAP_ADMIN_KEYS) {
+    assert.equal(forbiddenReason(name), null, name);
+    // On rab-api: allowed. On any other service: refused.
+    assert.equal(gate.bootstrapAdminPlacementProblem(name, { service: 'rab-api' }), null);
+    for (const service of ['rab-worker', 'db-setup', 'db-harden', 'rab-redis']) {
+      assert.match(gate.bootstrapAdminPlacementProblem(name, { service }), /rab-api only/, `${name} on ${service}`);
+    }
+    // compose.env (the interpolation file) may carry it for rab-api's committed expression; database.env and runtime.env
+    // reach rab-worker as well, so they may not.
+    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}
+${name}=admin@example.test`), []);
+    for (const kind of ['database', 'runtime']) assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: rab-api only`));
+  }
+  // Not one of the five: never placement-checked (forbiddenReason decides).
+  assert.equal(gate.bootstrapAdminPlacementProblem('APP_SECRET', { service: 'rab-worker' }), null);
 });
 
 test('compose env: interpolation values only, digests, never a secret, never every interface', () => {
@@ -1256,4 +1318,49 @@ test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABAS
   const requireAdmin = ADMIN_OK.replace('verify-full', 'require');
   assert.deepEqual(r({ bundled: '0', adminUrl: requireAdmin, appPasswordSet: true, dbHost: 'db.internal.example', dbPort: '5432', dbName: 'crewflow' }), []);
   assert.deepEqual(lintEnvText('compose', `CREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${requireAdmin}\nPG_DATABASE_APP_PASSWORD=${'a1'.repeat(20)}\nPG_DATABASE_HOST=db.internal.example\nPG_DATABASE_PORT=5432\nPG_DATABASE_NAME=crewflow`).filter((p) => /sslmode|PG_ADMIN_URL/.test(p)), []);
+});
+
+test('first platform admin at boot (#264 I1): deploy compose files pass BOOTSTRAP_ADMIN_* through on rab-api only, never a value', () => {
+  const lint = gate.bootstrapAdminComposeTextProblems;
+  const pass = (key) => `      ${key}: \${${key}:-}`;
+  const doc = (apiLines, workerLines = []) =>
+    ['services:', '  rab-api:', '    environment:', ...apiLines, '  rab-worker:', '    environment:', '      APP_SECRET: x', ...workerLines, 'volumes: {}'].join('\n');
+  assert.deepEqual(lint('t', doc(gate.RAB_API_BOOTSTRAP_ADMIN_KEYS.map(pass))), []);
+  assert.deepEqual(lint('t', doc([])), []); // absent is fine: a platform may set them as rab-api variables
+  assert.deepEqual(lint('t', doc(['      # BOOTSTRAP_ADMIN_PASSWORD: never'])), []); // comments are ignored
+  assertRefused(lint('t', doc([], [pass('BOOTSTRAP_ADMIN_EMAIL')])), /service rab-worker sets BOOTSTRAP_ADMIN_EMAIL \(rab-api only\)/);
+  assertRefused(lint('t', doc(['      BOOTSTRAP_ADMIN_EMAIL: admin@example.test'])), /must pass BOOTSTRAP_ADMIN_EMAIL through/);
+  assertRefused(lint('t', doc([pass('BOOTSTRAP_ADMIN_PASSWORD')])), /sets BOOTSTRAP_ADMIN_PASSWORD \(a bootstrap password/);
+  assertRefused(lint('t', doc(['      - BOOTSTRAP_ADMIN_ROLE=x'])), /sets BOOTSTRAP_ADMIN_ROLE \(an unknown bootstrap-admin input/);
+  // The committed deploy files themselves.
+  for (const file of [gate.FILES.image, gate.PRODUCTION_FILE]) {
+    assert.deepEqual(lint(path.basename(file), fs.readFileSync(file, 'utf8')), [], file);
+  }
+});
+
+test('owner decision 2026-11-20: CREWFLOW_ROTATE_APP_PASSWORD is a db-setup-only switch (compose.env: 1 or empty; never another service or env file)', () => {
+  assert.equal(gate.ROTATE_KEY, 'CREWFLOW_ROTATE_APP_PASSWORD');
+  assert.equal(gate.ROTATE_EXPR, '${CREWFLOW_ROTATE_APP_PASSWORD:-}');
+  // compose.env: exactly 1 or empty (a switch, not a secret-like name); anything else refused.
+  for (const v of ['1', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_ROTATE_APP_PASSWORD=${v}`), [], v);
+  for (const v of ['0', 'true', 'yes', '2', 'on']) assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_ROTATE_APP_PASSWORD=${v}`), /^CREWFLOW_ROTATE_APP_PASSWORD: must be exactly 1 \(for one deploy\) or empty/);
+  // database.env / runtime.env (both reach rab-api and rab-worker): refused.
+  for (const kind of ['database', 'runtime']) {
+    const base = kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n';
+    assertRefused(lintEnvText(kind, `${base}CREWFLOW_ROTATE_APP_PASSWORD=1`), /^CREWFLOW_ROTATE_APP_PASSWORD: set it in compose\.env .*db-setup only/);
+  }
+  // Raw compose text: db-setup only, exactly the committed expression, once.
+  const ok = 'services:\n  db-setup:\n    environment:\n      CREWFLOW_ROTATE_APP_PASSWORD: ${CREWFLOW_ROTATE_APP_PASSWORD:-}\n';
+  assert.ok(!lintComposeText('x.yml', ok).some((p) => /CREWFLOW_ROTATE_APP_PASSWORD/.test(p)), 'the committed line passes');
+  for (const svc of ['rab-api', 'rab-worker', 'db-harden', 'server', 'worker', 'other']) {
+    assertRefused(lintComposeText('x.yml', ok.replace('db-setup', svc)), new RegExp(`CREWFLOW_ROTATE_APP_PASSWORD in service ${svc}`));
+  }
+  assertRefused(lintComposeText('x.yml', ok.replace('${CREWFLOW_ROTATE_APP_PASSWORD:-}', '"1"')), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  assertRefused(lintComposeText('x.yml', ok.replace('${CREWFLOW_ROTATE_APP_PASSWORD:-}', '${CREWFLOW_ROTATE_APP_PASSWORD:-1}')), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  assertRefused(lintComposeText('x.yml', `${ok}      - CREWFLOW_ROTATE_APP_PASSWORD=1\n`), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  // Both committed deploy files carry it on db-setup exactly once, and nowhere else.
+  for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.equal((text.match(/^ {6}CREWFLOW_ROTATE_APP_PASSWORD: \$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}$/gm) ?? []).length, 1, `${file}: once on db-setup`);
+  }
 });

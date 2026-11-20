@@ -60,6 +60,11 @@
  *     wait for the schema itself (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0), starts after a healthy API and Redis, runs
  *     main.js as 1000:1000 with tmpfs and a jobs-only health check, stop grace >= 45 s; WORKER_SCHEDULER is never
  *     committed (production defaults to bullmq); Redis AOF + noeviction + ACL, never published;
+ *   - the platform AI switch (owner decision 2026-11-20: AI wanted in production, Anthropic only; it replaced the former
+ *     AI_ENABLED: 'false' pin): rab-api AND rab-worker commit exactly ${AI_ENABLED:-false} (AI_ENABLED_EXPR; every
+ *     AI_ENABLED line of a compose file, docker-compose.production.yml's included, and that file must carry it), so with no
+ *     value it renders "false" on both; the operator turns it on with AI_ENABLED=true in compose.env only (exactly true or
+ *     false), never in database.env / runtime.env (the committed line would override it), and never as a committed literal;
  *   - notification delivery (owner decision 2026-11-06): WORKER_FAST_PUBLISH_NOTIFY=true and
  *     WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30 committed, byte-identical, on rab-api AND rab-worker (the API registers the
  *     email scheduler with its own value; notify() runs in both processes), and never re-entered in an env file;
@@ -191,6 +196,16 @@ const HARDEN_TIMEOUT_MIN_S = 60;
 const HARDEN_TIMEOUT_MAX_S = 7200;
 const HARDEN_ENTRYPOINT = Object.freeze(['./db-setup.sh', 'harden']);
 /**
+ * Owner decision 2026-11-20 (like Twenty and ZITADEL): db-setup never changes an existing crewflow_owner password by itself;
+ * the operator opts in for ONE deploy with CREWFLOW_ROTATE_APP_PASSWORD=1 (owner-bootstrap.ts rotateAppPasswordSetting:
+ * exactly 1 or empty, anything else refused). A switch, not a credential (it holds no password, despite its name): a
+ * compose.env value interpolated into db-setup ONLY, committed exactly as ROTATE_EXPR; never rab-api, rab-worker or
+ * db-harden, never database.env / runtime.env.
+ */
+const ROTATE_KEY = 'CREWFLOW_ROTATE_APP_PASSWORD';
+const ROTATE_EXPR = '${CREWFLOW_ROTATE_APP_PASSWORD:-}';
+const ROTATE_VALUES = Object.freeze(['', '1']);
+/**
  * RETIRED (owner decision 2026-11-18): PR #125 option 2's setup volume, which held a credential-free target file and the
  * crewflow_owner password file. No file carries a credential any more: the volume, and any mount at its path, is refused
  * everywhere, so it can never come back unreviewed.
@@ -270,14 +285,37 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   [/^CREWFLOW_MIGRATION_TEST_/, 'a migration test seam (test harnesses only; never in a compose or env file)'],
   [/^(CREWFLOW_OPS_|PG_OPS_)/, 'a retired separated-mode operations variable (rab-ops was removed; never valid)'],
   [/^CREWFLOW_.*BOOTSTRAP_PASSWORD$/, 'a role password (role passwords never belong in app config)'],
-  [/^BOOTSTRAP_ADMIN_/, 'bootstrap-admin input (a one-off operator command, never a runtime variable)'],
+  // First platform administrator at boot (2026-11-19): the five RAB_API_BOOTSTRAP_ADMIN_KEYS are allowed on rab-api only
+  // (bootstrapAdminPlacementProblem); a bootstrap password, or any other BOOTSTRAP_ADMIN_* name, is refused everywhere.
+  [/^BOOTSTRAP_ADMIN_PASSWORD$/, 'a bootstrap password (the first platform administrator is created without one and activates through an emailed, expiring link; nothing reads it)'],
+  [/^BOOTSTRAP_ADMIN_(?!(EMAIL|FIRST_NAME|LAST_NAME|ORG_SLUG|ORG_NAME)$)/, `an unknown bootstrap-admin input (rab-api reads only BOOTSTRAP_ADMIN_EMAIL, _FIRST_NAME, _LAST_NAME, _ORG_SLUG and _ORG_NAME)`],
   [/^AUTH_.*_ISSUER_URL$/, 'a test-only issuer override'],
 ]);
+/**
+ * First platform administrator at boot (owner request 2026-11-19): rab-api creates the first platform admin at start from
+ * these (PlatformAdminBootstrapOnBoot, the bootstrap-admin command's own code path). They belong to rab-api ONLY: never on
+ * another service, and never in database.env / runtime.env (both reach rab-worker too). compose.env, the interpolation
+ * file, may carry them for rab-api's committed `${BOOTSTRAP_ADMIN_*:-}` expressions; a platform (OpenShip) sets them as
+ * rab-api variables. No password variable exists (FORBIDDEN_PATTERNS refuses BOOTSTRAP_ADMIN_PASSWORD).
+ */
+const RAB_API_BOOTSTRAP_ADMIN_KEYS = Object.freeze([
+  'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME',
+]);
+/**
+ * Where a RAB_API_BOOTSTRAP_ADMIN_KEYS name may appear: a compose service (`service`: its name) or an env file (`envKind`).
+ * Returns the problem text, or null when the placement is allowed (rab-api; compose.env) or the key is not one of them.
+ */
+function bootstrapAdminPlacementProblem(key, { service, envKind } = {}) {
+  if (!RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key)) return null;
+  if (service !== undefined) return service === 'rab-api' ? null : `rab-api only (the first-platform-admin bootstrap runs in the API; ${service} never reads it)`;
+  if (envKind === 'compose') return null;
+  return 'rab-api only: set it in compose.env (interpolated into rab-api\'s committed expression) or as the platform\'s rab-api variable; database.env and runtime.env also reach rab-worker';
+}
 const URL_KEY = 'PG_DATABASE_URL';
 /** Keys the compose files commit; an env file must not re-enter them. */
 const COMMITTED_KEYS = Object.freeze([
   'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START', 'DISABLE_DB_MIGRATIONS',
-  'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'CREWFLOW_RUNTIME_ISOLATION', 'AI_ENABLED',
+  'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'CREWFLOW_RUNTIME_ISOLATION',
   'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION',
   'WORKER_SCHEDULER', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
   'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
@@ -484,6 +522,18 @@ const APPROVAL_MODE_KEY = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
 const APPROVAL_MODE_EXPR = '${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}';
 const APPROVAL_MODES = Object.freeze(['none', 'token']);
 /**
+ * Owner decision 2026-11-20 (AI wanted in production, Anthropic only), replacing the former AI_ENABLED: 'false' pin: the
+ * platform AI switch is an INTERPOLATION value, committed on rab-api AND rab-worker as exactly this expression (in
+ * docker-compose.production.yml once, in the shared optional list both services merge), so unset or blank renders false
+ * and the two services always agree (the Worker refuses every queued turn while it is false). compose.env may set it to
+ * exactly true or false (STRICT_SWITCHES); database.env / runtime.env are refused (the committed line would silently
+ * override them). Any other committed form is refused: a literal (true OR false), another default, `:?`, no default.
+ */
+const AI_ENABLED_KEY = 'AI_ENABLED';
+const AI_ENABLED_EXPR = '${AI_ENABLED:-false}';
+/** The value AI_ENABLED renders when compose.env does not set it: off. */
+const AI_ENABLED_DEFAULT = 'false';
+/**
  * BC-07: the external security audit sink, required in production by security-audit-sink.ts (securityAuditSinkConfig).
  * The values are the code's own: CREWFLOW_AUDIT_SINK none | stdout | file, of which production accepts only stdout;
  * CREWFLOW_AUDIT_SINK_FAILURE refuse | log, of which production accepts only refuse (unset = refuse);
@@ -661,6 +711,8 @@ function adminUrlPlacementProblems(rel, text) {
   const ANCHOR = /(?:^|[\s:[{,-])&[A-Za-z0-9_.-]+/;
   const PIN = /^\s*PG_ADMIN_URL\s*:\s*(""|'')\s*$/;
   const DIRECT_PIN = /^\s*PG_ADMIN_DIRECT_URL\s*:\s*(""|'')\s*$/;
+  const ROTATE_LINE = /^\s*CREWFLOW_ROTATE_APP_PASSWORD\s*:\s*\$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}\s*$/;
+  let rotateLines = 0;
   // The services that may carry that pin: production's rab-api / rab-worker and the dev / QA stacks' server / worker.
   const PIN_SERVICES = [...APP_SERVICES, 'server', 'worker'];
   String(text).split(/\r?\n/).forEach((raw, i) => {
@@ -695,7 +747,15 @@ function adminUrlPlacementProblems(rel, text) {
       problems.push(`${rel}:${i + 1}: ${ADMIN_DIRECT_URL_KEY} in ${where} (the direct admin address; db-setup and db-harden only; rab-api / rab-worker only pin it to "")`);
     }
     if (!inSetup && /\bCREWFLOW_BUNDLED_DB_ADMIN_URL\b/.test(line)) problems.push(`${rel}:${i + 1}: ${BUNDLED_ADMIN_URL_KEY} in ${where} (the bundled db's superuser URL; db-setup and db-harden only)`);
+    // Owner decision 2026-11-20: the rotation opt-in reaches db-setup only (never db-harden, rab-api or rab-worker), once,
+    // exactly as committed.
+    if (/\bCREWFLOW_ROTATE_APP_PASSWORD\b/.test(line)) {
+      if (!(top === 'services' && service === DB_SETUP_SERVICE)) problems.push(`${rel}:${i + 1}: ${ROTATE_KEY} in ${where} (the one-deploy password rotation opt-in: db-setup only, never db-harden, rab-api or rab-worker)`);
+      else if (!ROTATE_LINE.test(line)) problems.push(`${rel}:${i + 1}: ${ROTATE_KEY} on db-setup must be exactly ${ROTATE_KEY}: ${ROTATE_EXPR}`);
+      else rotateLines += 1;
+    }
   });
+  if (rotateLines > 1) problems.push(`${rel}: ${ROTATE_KEY} appears ${rotateLines} times on db-setup (once)`);
   for (const [name, count] of perService) {
     if (count > 1) problems.push(`${rel}: interpolates \${PG_ADMIN_URL...} ${count} times in ${name} (one line per admin service)`);
   }
@@ -1017,6 +1077,15 @@ function dbSetupProblems(services, p, want) {
     else if (String(env[key]) !== String(expected[key] ?? '')) p(`${DB_SETUP_SERVICE}: ${key} is not the committed value (compose.env's, or the bundled db's URL; value not shown)`);
   }
   for (const key of RETIRED_ADMIN_URL_KEYS) if (key in env) p(`${DB_SETUP_SERVICE}: has ${key} (renamed to ${ADMIN_URL_KEY})`);
+  // Owner decision 2026-11-20: the rotation opt-in, committed on db-setup (rendered: compose.env's value, '' or 1), and on no
+  // other service.
+  if (!(ROTATE_KEY in env)) p(`${DB_SETUP_SERVICE}: ${ROTATE_KEY} is missing (committed: ${ROTATE_EXPR}; the one-deploy rotation opt-in)`);
+  else if (!ROTATE_VALUES.includes(String(env[ROTATE_KEY] ?? ''))) p(`${DB_SETUP_SERVICE}: ${ROTATE_KEY} must render to exactly 1 or empty (value not shown)`);
+  for (const [name, svc] of Object.entries(services)) {
+    if (name !== DB_SETUP_SERVICE && svc && typeof svc.environment === 'object' && svc.environment !== null && ROTATE_KEY in svc.environment) {
+      p(`${name}: has ${ROTATE_KEY} (db-setup only: the one-deploy password rotation opt-in)`);
+    }
+  }
   if (env.NODE_ENV !== 'production') p(`${DB_SETUP_SERVICE}: NODE_ENV is not production`);
   if (env.RAB_RUNTIME_ENV !== 'production') p(`${DB_SETUP_SERVICE}: RAB_RUNTIME_ENV is not production`);
   // Twenty Helm model: APP_SECRET is never part of a database credential; db-setup does not receive it (db-setup.sh refuses it).
@@ -1193,6 +1262,8 @@ function checkModel(model, combo) {
       const setupKey = ADMIN_SERVICES.includes(name) && DB_SETUP_DB_KEYS.includes(key);
       const why = setupKey ? null : forbiddenReason(key);
       if (why) p(`${name}: environment has ${key} (${why})`);
+      const placement = bootstrapAdminPlacementProblem(key, { service: name });
+      if (placement) p(`${name}: environment has ${key} (${placement})`);
       if (key !== URL_KEY && !setupKey && isPgUrl(value)) p(`${name}: environment ${key} holds a PostgreSQL URL (a second database identity)`);
     }
     if (!ADMIN_SERVICES.includes(name) && ADMIN_URL_KEY in env && !(appServices.includes(name) && env[ADMIN_URL_KEY] === '')) p(`${name}: has ${ADMIN_URL_KEY} (db-setup and db-harden only; rab-api / rab-worker pin it to "")`);
@@ -1254,6 +1325,8 @@ function checkModel(model, combo) {
     // The long-running services refuse to start when a declared isolation control is missing (H6 enforce).
     if (e.CREWFLOW_RUNTIME_ISOLATION !== 'enforce') p(`${name}: CREWFLOW_RUNTIME_ISOLATION is "${e.CREWFLOW_RUNTIME_ISOLATION ?? ''}", expected "enforce"`);
     if (e.RAB_RUNTIME_ENV !== 'production') p(`${name}: RAB_RUNTIME_ENV is not production`);
+    // Owner decision 2026-11-20: the operator's AI switch reaches both services as exactly true or false.
+    if (!SWITCH_VALUES.includes(String(e[AI_ENABLED_KEY] ?? ''))) p(`${name}: ${AI_ENABLED_KEY} is "${e[AI_ENABLED_KEY] ?? ''}", expected exactly true or false (commit ${AI_ENABLED_EXPR}; compose.env sets it)`);
     if (!String(e.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${name}: does not read runtime.env (APP_SECRET missing)`);
     // BC-07: the sink must reach both services, as a production-accepted value.
     if (!AUDIT_SINK_PRODUCTION_MODES.includes(String(e[AUDIT_SINK_KEY] ?? ''))) p(`${name}: ${AUDIT_SINK_KEY} is "${e[AUDIT_SINK_KEY] ?? ''}", expected stdout (BC-07, from runtime.env)`);
@@ -1273,6 +1346,8 @@ function checkModel(model, combo) {
       if (String(e[key] ?? '') !== want) p(`${name}: ${key} is "${e[key] ?? ''}", expected "${want}" (owner decision 2026-11-11, pay-statement sweep, committed on rab-api and rab-worker)`);
     }
   }
+  // Owner decision 2026-11-20: ONE AI switch for both services (the Worker refuses every queued turn while it is false).
+  if (services['rab-api'] && services['rab-worker'] && String(envOf(api)[AI_ENABLED_KEY] ?? '') !== String(envOf(worker)[AI_ENABLED_KEY] ?? '')) p(`${AI_ENABLED_KEY} differs between rab-api and rab-worker (one compose.env value for both)`);
   // The rule is "identical on both"; the per-service pin above implies it, and this names the drift directly.
   for (const key of Object.keys(STATEMENT_DISPATCH)) {
     const a = envOf(services['rab-api'])[key];
@@ -1399,7 +1474,11 @@ function lintEnvText(kind, text, { template = false } = {}) {
     seen.add(key);
     const why = kind === 'compose' && (key === DB_PASSWORD_KEY || key === APP_PASSWORD_KEY) ? null : forbiddenReason(key);
     if (why) problems.push(`${key}: ${why}`);
+    const bootstrapPlacement = bootstrapAdminPlacementProblem(key, { envKind: kind });
+    if (bootstrapPlacement) problems.push(`${key}: ${bootstrapPlacement}`);
     if (kind !== 'compose' && key === HARDEN_TIMEOUT_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-harden's committed ${HARDEN_TIMEOUT_EXPR} would silently override a value here`);
+    if (kind !== 'compose' && key === ROTATE_KEY) problems.push(`${key}: set it in compose.env (the interpolation file), for one deploy: it belongs to db-setup only`);
+    if (kind === 'compose' && key === ROTATE_KEY && !ROTATE_VALUES.includes(value)) problems.push(`${key}: must be exactly 1 (for one deploy) or empty (value not shown)`);
     if (kind !== 'compose' && key === ADMIN_DIRECT_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup and db-harden only`);
     if (kind !== 'compose' && [DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY].includes(key)) problems.push(`${key}: set it in compose.env (the interpolation file): compose builds PG_DATABASE_URL from it`);
     if (kind !== 'compose' && key === ADMIN_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only, and rab-api / rab-worker refuse it (an env file here would hand the admin URL to them)`);
@@ -1429,13 +1508,21 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FILE') problems.push(`${key}: the file sink is development-only (production refuses CREWFLOW_AUDIT_SINK=file)`);
     if (key === APPROVAL_MODE_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): rab-api's committed ${APPROVAL_MODE_EXPR} would silently override a value here`);
     if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
+    // Owner decision 2026-11-20: the AI switch is compose.env's (exactly true or false: the STRICT_SWITCHES check above).
+    if (key === AI_ENABLED_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): the committed ${AI_ENABLED_EXPR} on rab-api and rab-worker would silently override a value here`);
     if (kind === 'compose') {
       // DB-SETUP (T-1 / T-2): the two database values are the only secrets compose.env holds; everything else stays
       // CREWFLOW_* and secret-free.
       const dbKey = COMPOSE_DATABASE_KEYS.includes(key);
-      if (!key.startsWith('CREWFLOW_') && !dbKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')})`);
+      // First platform administrator at boot: rab-api's BOOTSTRAP_ADMIN_* inputs are interpolation values too (no secret).
+      const bootstrapKey = RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key);
+      // The platform AI switch (owner decision 2026-11-20): an interpolation value of rab-api's and rab-worker's committed
+      // ${AI_ENABLED:-false} (no secret).
+      const aiKey = key === AI_ENABLED_KEY;
+      if (!key.startsWith('CREWFLOW_') && !dbKey && !bootstrapKey && !aiKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')}, rab-api's ${RAB_API_BOOTSTRAP_ADMIN_KEYS.join(', ')}, and ${AI_ENABLED_KEY})`);
       // CREWFLOW_SECRETS_DIR names a directory, not a secret.
-      if (key !== 'CREWFLOW_SECRETS_DIR' && !dbKey && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
+      // CREWFLOW_ROTATE_APP_PASSWORD is a switch (1 or empty, checked above), not a password.
+      if (key !== 'CREWFLOW_SECRETS_DIR' && key !== ROTATE_KEY && !dbKey && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
       if (!dbKey && /:\/\/[^/\s]*@/.test(value)) problems.push(`${key}: a URL with credentials in the interpolation file`);
       if (key === DB_PASSWORD_KEY && !(template && isPlaceholder(value)) && !DB_PASSWORD_SHAPE.test(value)) {
         problems.push(`${key}: must be at least 32 URL-safe characters (letters, digits, - . _ ~; e.g. openssl rand -hex 32): it is interpolated into the bundled db's admin URL`);
@@ -1521,6 +1608,80 @@ function databaseExpressionProblems(rel, text) {
   return problems;
 }
 
+/**
+ * First platform administrator at start (security review of #264, I1), on the raw text of a deploy compose file: a
+ * BOOTSTRAP_ADMIN_* key may appear only under the rab-api service, only as one of RAB_API_BOOTSTRAP_ADMIN_KEYS, and only as
+ * the plain pass-through `KEY: ${KEY:-}` (no committed value: the email is the operator's, set once and removed). Comments
+ * are ignored. Absent keys are fine (a platform may also set them as rab-api variables).
+ */
+function bootstrapAdminComposeTextProblems(rel, text) {
+  const problems = [];
+  let inServices = false;
+  let service = null;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/^\S/.test(line)) {
+      inServices = /^services:\s*$/.test(line);
+      service = null;
+      continue;
+    }
+    const top = /^ {2}([A-Za-z0-9_.-]+):\s*$/.exec(line);
+    if (inServices && top) {
+      service = top[1];
+      continue;
+    }
+    if (/^\s*#/.test(line)) continue;
+    const m = /^\s*-?\s*(BOOTSTRAP_ADMIN_[A-Za-z0-9_]*)\s*[:=]\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    const key = m[1];
+    const where = service ? `service ${service}` : 'outside any service';
+    if (!RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key)) {
+      problems.push(`${rel}: ${where} sets ${key} (${forbiddenReason(key) ?? 'not a bootstrap input'})`);
+      continue;
+    }
+    if (service !== 'rab-api') {
+      problems.push(`${rel}: ${where} sets ${key} (rab-api only)`);
+      continue;
+    }
+    const value = m[2].replace(/^(['"])(.*)\1$/, '$2');
+    const passThrough = '${' + key + ':-}';
+    if (value !== passThrough) problems.push(`${rel}: rab-api must pass ${key} through as ${key}: ${passThrough} (no committed value)`);
+  }
+  return problems;
+}
+
+/**
+ * The platform AI switch in raw compose text (owner decision 2026-11-20): every uncommented AI_ENABLED line is exactly
+ * `AI_ENABLED: ${AI_ENABLED:-false}` (AI_ENABLED_EXPR; a list or quoted form, a literal, another default or `:?` is
+ * refused). `required`: the file must carry it (docker-compose.production.yml: once, in the shared optional list).
+ */
+function aiEnabledExpressionProblems(rel, text, { required = false } = {}) {
+  const problems = [];
+  let found = 0;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/^\s*#/.test(line)) continue;
+    const m = /^\s*(-\s*)?(["']?)AI_ENABLED\2\s*[:=]\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    found += 1;
+    if (m[1] || m[2] || !/^\s*AI_ENABLED:/.test(line) || m[3] !== AI_ENABLED_EXPR) problems.push(`${rel}: ${AI_ENABLED_KEY} must be committed as exactly ${AI_ENABLED_KEY}: ${AI_ENABLED_EXPR} (owner decision 2026-11-20: operator-set in compose.env, default off; never a literal)`);
+  }
+  if (required && found === 0) problems.push(`${rel}: ${AI_ENABLED_KEY} is missing (commit ${AI_ENABLED_KEY}: ${AI_ENABLED_EXPR}, so it renders false unless the operator sets it)`);
+  return problems;
+}
+
+/**
+ * Owner decision 2026-11-20, default OFF: problems of a model rendered from the gate's own sentinel compose.env, which sets
+ * no AI_ENABLED, so rab-api and rab-worker must render the default, "false" (a committed literal true, another default, or
+ * a missing key does not). Only for those renders: an operator's compose.env may set true (checkModel accepts it).
+ */
+function aiDefaultOffProblems(model) {
+  const problems = [];
+  for (const name of ['rab-api', 'rab-worker']) {
+    const v = model?.services?.[name]?.environment?.[AI_ENABLED_KEY];
+    if (String(v ?? '') !== AI_ENABLED_DEFAULT) problems.push(`${name}: ${AI_ENABLED_KEY} is "${v ?? ''}" with no ${AI_ENABLED_KEY} in compose.env, expected "${AI_ENABLED_DEFAULT}" (owner decision 2026-11-20: commit ${AI_ENABLED_EXPR}, default off)`);
+  }
+  return problems;
+}
+
 /** Problems in raw compose text that rendering cannot show. */
 function lintComposeText(rel, text) {
   const problems = [];
@@ -1528,6 +1689,7 @@ function lintComposeText(rel, text) {
   if (/^\s*-?\s*CREWFLOW_MIGRATION_APPROVED\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_MIGRATION_APPROVED`);
   if (/^\s*-?\s*CREWFLOW_DB_MODE\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_DB_MODE (there is no mode switch)`);
   problems.push(...databaseExpressionProblems(rel, text));
+  problems.push(...bootstrapAdminComposeTextProblems(rel, text));
   // Owner decision 2026-11-17: no compose `:?` on PG_DATABASE_PASSWORD (it would demand it with your own database too);
   // db, db-setup and the lints require it exactly while the bundled db runs. The same for PG_DATABASE_APP_PASSWORD.
   if (/\$\{PG_DATABASE_PASSWORD:\?/.test(text)) problems.push(`${rel}: \${PG_DATABASE_PASSWORD:?...} demands the bundled db's password with your own database too (use \${PG_DATABASE_PASSWORD:-}; the db entrypoint and db-setup refuse an empty one)`);
@@ -1542,6 +1704,7 @@ function lintComposeText(rel, text) {
   for (const m of text.matchAll(/^\s*-?\s*CREWFLOW_MIGRATION_APPROVAL_MODE\s*[:=]\s*(.*?)\s*$/gm)) {
     if (m[1] !== APPROVAL_MODE_EXPR) problems.push(`${rel}: ${APPROVAL_MODE_KEY} must be exactly ${APPROVAL_MODE_EXPR} (an opt-in of compose.env)`);
   }
+  problems.push(...aiEnabledExpressionProblems(rel, text));
   if (/^\s*privileged\s*:\s*true/m.test(text)) problems.push(`${rel}: privileged: true`);
   return problems;
 }
@@ -1602,7 +1765,7 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
       const withoutPassword = fs.readFileSync(envFor[k], 'utf8').split('\n').filter((l) => !l.startsWith(`${DB_PASSWORD_KEY}=`) && !l.startsWith(`${APP_PASSWORD_KEY}=`)).join('\n');
       fs.writeFileSync(envFor[`${k}-no-db`], `${withoutPassword}${BUNDLED_DB_KEY}=0\n`, { mode: 0o600 });
     }
-    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_|PG_ADMIN_)/i.test(k)));
+    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_|PG_ADMIN_|AI_ENABLED$)/i.test(k)));
     const models = {};
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
@@ -1635,6 +1798,8 @@ function staticProblems() {
   // The database expression and the retired setup volume on docker-compose.production.yml too (its other rules are
   // compose-one-image.cjs's and compose-credential-isolation.cjs's).
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...databaseExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
+  if (fs.existsSync(PRODUCTION_FILE)) problems.push(...bootstrapAdminComposeTextProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
+  if (fs.existsSync(PRODUCTION_FILE)) problems.push(...aiEnabledExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8'), { required: true }));
   // ADMIN_URL_PLACEMENT, every compose file of the repository (dev, QA, test overlays included), not only the deploy files.
   for (const file of composeFilesInRepo()) {
     problems.push(...adminUrlPlacementProblems(path.relative(path.resolve(DOCKER_DIR, '../..'), file).split(path.sep).join('/'), fs.readFileSync(file, 'utf8')));
@@ -1695,7 +1860,7 @@ function main(argv) {
   }
   for (const combo of combos) {
     const label = `${combo.name} (${combo.files.map((f) => path.relative(DOCKER_DIR, FILES[f]).split(path.sep).join('/')).join(' + ')})`;
-    report(label, staticOnly ? checkStaticModel(models[combo.name]) : checkModel(models[combo.name], combo));
+    report(label, staticOnly ? checkStaticModel(models[combo.name]) : [...checkModel(models[combo.name], combo), ...aiDefaultOffProblems(models[combo.name]).map((m) => `${combo.name}: ${m}`)]);
   }
   return failures === 0 ? 0 : 1;
 }
@@ -1706,9 +1871,11 @@ module.exports = {
   ACCEPTED_SSLMODES, sslmodeProblem, ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY, RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_URL_NO_PASSWORD, DB_SETUP_DB_KEYS, dbSettingsProblems,
   APP_PASSWORD_KEY, APP_URL_EXPR, APP_PASSWORD_SHAPE, SENTINEL_APP_PW, BUNDLED_APP_URL, OWNER_PASSWORD_SENTINELS,
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
+  ROTATE_KEY, ROTATE_EXPR, ROTATE_VALUES,
+  AI_ENABLED_KEY, AI_ENABLED_EXPR, AI_ENABLED_DEFAULT, aiEnabledExpressionProblems, aiDefaultOffProblems,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
-  SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
+  SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, RAB_API_BOOTSTRAP_ADMIN_KEYS, bootstrapAdminPlacementProblem, bootstrapAdminComposeTextProblems, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, databaseExpressionProblems, PRODUCTION_FILE, renderModels, staticProblems, main,
 };

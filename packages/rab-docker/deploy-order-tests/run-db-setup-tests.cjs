@@ -105,7 +105,10 @@ const MSG = {
   readyCreated: /crewflow_owner is ready \(created/,
   readyUnchanged: /crewflow_owner is ready \((existing crewflow_owner, checked read-only, )?unchanged/,
   readyReset: /crewflow_owner is ready \(password set/,
-  passwordSet: /did not log in: it is now set with the admin login/,
+  passwordSet: /did not log in, so crewflow_owner now uses it/,
+  // Owner decision 2026-11-20: an existing crewflow_owner's password is changed only with CREWFLOW_ROTATE_APP_PASSWORD=1.
+  passwordMismatch: /PG_DATABASE_URL password doesn't match crewflow_owner/,
+  rotateDone: /remove CREWFLOW_ROTATE_APP_PASSWORD/,
   ownerUrlAuth: /Without PG_ADMIN_URL db-setup never changes the password/,
   createRoleRemoved: /CREATEROLE was removed from crewflow_owner/,
   createRoleMarked: /crewflow_owner keeps CREATEROLE for it and is marked/,
@@ -196,9 +199,11 @@ function project(block, { ownerInit = false, logging = true } = {}) {
 }
 
 /** compose.env for the case (upgrade-lib writeComposeEnv): by default mode (a) with PG_DATABASE_APP_PASSWORD = secrets.owner. */
-function use(p, { digest = NEW, databaseUrl = null, adminUrl = null, appPassword = L.secrets.owner, pgImage = PG_IMAGE } = {}) {
-  L.writeComposeEnv(p, { repository: REPO, digest, pgImage, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl, adminUrl, appPassword });
+function use(p, { digest = NEW, databaseUrl = null, adminUrl = null, appPassword = L.secrets.owner, pgImage = PG_IMAGE, extra = {} } = {}) {
+  L.writeComposeEnv(p, { repository: REPO, digest, pgImage, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl, adminUrl, appPassword, extra });
 }
+/** Owner decision 2026-11-20: the one-deploy opt-in that lets db-setup change an existing crewflow_owner's password. */
+const ROTATE = Object.freeze({ CREWFLOW_ROTATE_APP_PASSWORD: '1' });
 
 function deploy(p, label) {
   const d = p.deploy();
@@ -622,17 +627,21 @@ async function blockBundled() {
     p.psql('ALTER ROLE crewflow_owner NOCREATEROLE');
   }, p);
 
-  await step('A4', 'a', 'mode (a) password mismatch: a NEW PG_DATABASE_APP_PASSWORD -> db-setup SETS it with the superuser; the old one is refused; API and Worker recreated and healthy', async (check, n) => {
+  await step('A4', 'a', 'mode (a) password mismatch: a NEW PG_DATABASE_APP_PASSWORD -> refused (64) without the opt-in; with CREWFLOW_ROTATE_APP_PASSWORD=1 db-setup SETS it with the superuser; the old one is refused; API and Worker recreated and healthy', async (check, n) => {
     const newPw = L.hex(32);
     s['a:new'] = newPw;
     const before = role(p);
     use(p, { appPassword: newPw });
+    const refused = setupOnce(p, 'A4-no-opt-in');
+    check(refused.code === 64 && MSG.passwordMismatch.test(refused.out), `without the opt-in: exit ${refused.code}, "PG_DATABASE_URL password doesn't match crewflow_owner"`);
+    use(p, { appPassword: newPw, extra: ROTATE });
     const d = deploy(p, 'A4-new-password');
     check(d.code === 0, `deploy with the new password: exit ${d.code}`);
     await waitApp(p, { api: 900_000 });
     const sl = setupLog(p);
     evidence('A4-db-setup.log', sl);
-    check(MSG.readyReset.test(lastReady(sl)) && MSG.passwordSet.test(sl), 'db-setup: "password set to the one inside PG_DATABASE_URL"');
+    check(MSG.readyReset.test(lastReady(sl)) && MSG.passwordSet.test(sl) && MSG.rotateDone.test(sl), 'db-setup: "password set to the one inside PG_DATABASE_URL", then "remove CREWFLOW_ROTATE_APP_PASSWORD"');
+    use(p, { appPassword: newPw });
     const after = role(p);
     check(after && before && after.oid === before.oid && after.verifierSha !== before.verifierSha, 'the same role (oid), a new verifier');
     check(p.ownerLoginWorks(newPw) && !p.ownerLoginWorks(s.owner), 'the new password logs in, the old one is refused');
@@ -717,12 +726,13 @@ async function blockAdmin() {
   await step('B3', 'b', 'mode (b) password mismatch: a new password inside PG_DATABASE_URL -> the admin SETS it (other-database check passed); old refused; apps healthy', async (check, n) => {
     const newPw = L.hex(32);
     s['b:new'] = newPw;
-    use(p, { adminUrl, databaseUrl: L.ownerUrl(newPw), appPassword: null });
+    use(p, { adminUrl, databaseUrl: L.ownerUrl(newPw), appPassword: null, extra: ROTATE });
     const d = deploy(p, 'B3-new-password');
     check(d.code === 0, `deploy exit ${d.code}`);
     await waitApp(p, { api: 900_000 });
     check(MSG.readyReset.test(lastReady(setupLog(p))), 'db-setup: password set');
     check(p.ownerLoginWorks(newPw) && !p.ownerLoginWorks(appPw), 'the new password logs in, the old one is refused');
+    use(p, { adminUrl, databaseUrl: L.ownerUrl(newPw), appPassword: null });
   }, p);
 
   await step('B4', 'b', 'refusals of mode (b), each before any write: an admin without ADMIN OPTION + a wrong password; a SUPERUSER / BYPASSRLS crewflow_owner; two URLs naming different databases; a non-crewflow_owner PG_DATABASE_URL; a PG_ADMIN_URL that logs in as crewflow_owner', async (check, n) => {
@@ -732,7 +742,8 @@ async function blockAdmin() {
     const wrong = L.hex(32);
     s['b:wrong'] = wrong;
     const cases = [
-      ['no ADMIN OPTION + a wrong password', { PG_ADMIN_URL: L.dbUrl('dot_admin2', admin2Pw), PG_DATABASE_URL: L.ownerUrl(wrong) }, MSG.noAdminOption],
+      ['a wrong password without the opt-in', { PG_ADMIN_URL: adminUrl, PG_DATABASE_URL: L.ownerUrl(wrong) }, MSG.passwordMismatch],
+      ['no ADMIN OPTION + a wrong password', { PG_ADMIN_URL: L.dbUrl('dot_admin2', admin2Pw), PG_DATABASE_URL: L.ownerUrl(wrong), ...ROTATE }, MSG.noAdminOption],
       ['different databases', { PG_ADMIN_URL: L.dbUrl('dot_admin', adminPw, 'postgres'), PG_DATABASE_URL: L.ownerUrl(cur) }, /name different databases/],
       ['a non-crewflow_owner PG_DATABASE_URL', { PG_ADMIN_URL: adminUrl, PG_DATABASE_URL: L.dbUrl('dot_admin', adminPw) }, /must log in as crewflow_owner/],
       ['a crewflow_owner PG_ADMIN_URL', { PG_ADMIN_URL: L.ownerUrl(cur), PG_DATABASE_URL: L.ownerUrl(cur) }, /PG_ADMIN_URL logs in as crewflow_owner/],

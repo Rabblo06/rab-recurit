@@ -272,9 +272,15 @@ The concurrency times 384 MB must fit the memory budget. Set them together.
 
 | Name | What it does | Default | Services | Secret |
 |---|---|---|---|---|
-| `BOOTSTRAP_ADMIN_EMAIL` and the other optional `BOOTSTRAP_ADMIN_*` settings | Create the first platform admin at boot. PR #264 adds these lines to rab-api in both compose files and owns their refusal rules: see that PR for the exact names and rules. **Needs `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true`** (see above): #264 refuses to bootstrap without it. Until #264 merges, the gates refuse every `BOOTSTRAP_ADMIN_*` name on rab-api, so use the one-off `bootstrap-admin` command. | unset | api | no |
+| `BOOTSTRAP_ADMIN_EMAIL` and the other optional `BOOTSTRAP_ADMIN_*` settings | Create the first platform admin at boot. PR #264 (merged) passes `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_FIRST_NAME`, `BOOTSTRAP_ADMIN_LAST_NAME`, `BOOTSTRAP_ADMIN_ORG_SLUG` and `BOOTSTRAP_ADMIN_ORG_NAME` through to rab-api ONLY, as `${KEY:-}` lines in both compose files, and owns their refusal rules (any other `BOOTSTRAP_ADMIN_*` name, and `BOOTSTRAP_ADMIN_PASSWORD` always, is refused). **Needs `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true`** (see above): #264 refuses to bootstrap without it. | unset | api | no |
 
-### AI (inert: `AI_ENABLED` is pinned `false`)
+### AI (off unless the operator sets `AI_ENABLED=true`; owner decision 2026-11-20, PR #268)
+
+`AI_ENABLED` is not an optional setting of this list: both compose files commit `AI_ENABLED: ${AI_ENABLED:-false}` on
+rab-api and rab-worker, so it is `false` unless set, and it is set ONLY as a compose.env interpolation value (exactly
+`true` or `false`; the gates refuse it in an env file). Never enter it as a blank service-scoped platform value: the app
+reads blank as its code default, which is ON. Turned on, AI also needs `ANTHROPIC_API_KEY` on both services, a platform
+admin switching the organisation on (Settings -> AI) and a production-approved model. The optional settings:
 
 `ANTHROPIC_API_KEY` (secret), `AI_AGENTS_ENABLED` (false), `AI_MODELS_DEFAULT_DISABLED` / `_FAST` / `_SMART`
 (unset), `AI_DAILY_BUDGET_USD` (2), `AI_USER_DAILY_BUDGET_USD` (1), `AI_ORG_DAILY_TOKEN_BUDGET` (200000),
@@ -282,7 +288,7 @@ The concurrency times 384 MB must fit the memory budget. Set them together.
 `AI_ORG_RATE_PER_MIN` (60), `AI_USER_TURNS_PER_DAY` (100), `AI_ORG_MAX_ACTIVE_TURNS` (2), `AI_TURN_TIMEOUT_SECONDS`
 (90), `AI_TITLE_GENERATION` (true), `AI_RETENTION_DAYS` (90), `AI_RETENTION_MODE` (off),
 `AI_RETENTION_INTERVAL_MINUTES` (60), `AI_STALE_TURN_SWEEP` (false), `AI_STALE_TURN_THRESHOLD_MINUTES` (15) and
-`AI_STALE_TURN_SWEEP_INTERVAL_MINUTES` (5). Services: both. None does anything while AI is off.
+`AI_STALE_TURN_SWEEP_INTERVAL_MINUTES` (5). Services: both. None does anything while `AI_ENABLED` is false.
 
 ### Compose interpolation only (never reach a container)
 

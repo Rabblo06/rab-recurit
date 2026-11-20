@@ -78,7 +78,7 @@ services:
     environment:
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
+      AI_ENABLED: ${AI_ENABLED:-false}
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
@@ -156,7 +156,7 @@ services:
     environment:
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
+      AI_ENABLED: ${AI_ENABLED:-false}
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       # The owner's "feel instant" onboarding pin, read by the in-process provisioner (Agent 2 interface).

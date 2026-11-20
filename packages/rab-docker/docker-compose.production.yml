@@ -43,12 +43,16 @@
 #       + PG_ADMIN_URL (its admin URL pasted as-is; db-setup ONLY) + PG_DATABASE_APP_PASSWORD (`openssl rand -hex 32`) +
 #       PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (the database's DIRECT address, copied from the admin URL):
 #       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
-#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
-#       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
-#       run the printed SQL once, all lines together, then redeploy; Crewflow never sends a plain-text password; the
-#       typed value can stay in server logs, pg_stat_statements (track = all), pg_stat_activity and provider logs).
-#       PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only
-#       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
+#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password, in one run
+#       (owner decision 2026-11-20): pre-hashed first; a server that refuses pre-hashed passwords gets the same password in
+#       plain text, only over a verified-TLS admin connection (it may then be in the provider's own logs). Only when that
+#       is refused too, or the TLS is not verified, the last resort: crewflow_owner WITHOUT a password, NOLOGIN, and
+#       db-setup stops with fixed steps (run the printed SQL once, all lines together, then redeploy).
+#       PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only.
+#       An existing crewflow_owner whose password does not log in is NEVER changed by itself: db-setup exits 64
+#       ("PG_DATABASE_URL password doesn't match crewflow_owner"). To rotate: the new value in PG_DATABASE_URL on every
+#       service, plus CREWFLOW_ROTATE_APP_PASSWORD=1 in compose.env for ONE deploy, then remove it (db-setup only;
+#       OWNER-LOGIN-DEPLOYMENT.md "Rotate the crewflow_owner password"). A pooled PG_ADMIN_URL is refused by what it does; then
 #       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
 #       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.
 #   (c) YOUR OWN database, where you created crewflow_owner yourself: CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL only:
@@ -74,6 +78,7 @@
 #   IMAGE     CREWFLOW_IMAGE_REPOSITORY and CREWFLOW_IMAGE_TAG (interpolation of the image line).
 #   REQUIRED  x-crewflow-required-env, ${KEY:?...} on rab-api and rab-worker: they refuse to boot in production without it,
 #             so the platform must not deploy without it either (OpenShip shows it as "needs value" and refuses the deploy).
+#             The one exception in that list is the AI switch, AI_ENABLED: ${AI_ENABLED:-false} (operator-set, default off).
 #   DATABASE / REDIS  what that service needs to reach PostgreSQL and Redis: the crewflow_owner URL (or its parts), the
 #             optional database CA (PG_SSL_CA_CERT; `${KEY:-}`, empty = unset), and on the one-shots the admin URL, the
 #             bundled-db switch and their waits (CREWFLOW_DB_WAIT_SECONDS / CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: the gates
@@ -103,10 +108,15 @@
 # CREWFLOW_PROVISIONER_DATABASE_URL, CREWFLOW_MIGRATION_DATABASE_URL, PG_DATABASE_REPLICA_*, PG_OPS_APP_DATABASE_URL,
 # CREWFLOW_*_BOOTSTRAP_PASSWORD, CREWFLOW_MIGRATOR_PASSWORD, CREWFLOW_MIGRATION_PHASE, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
 # ALLOW_PRODUCTION_DB_COMMANDS, DB_TARGET, CREWFLOW_DB_MODE, CREWFLOW_PROVISIONER_ENABLED, libpq PG* variables, NODE_OPTIONS,
-# BOOTSTRAP_ADMIN_*, TEST_*, ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
+# BOOTSTRAP_ADMIN_PASSWORD (always refused) and any other BOOTSTRAP_ADMIN_* name than the five below, TEST_*,
+# ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
 # WORKER_INVITE_AUTO_DELETE_ENABLED, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED, CREWFLOW_MIGRATION_APPROVED,
 # CREWFLOW_UPGRADE_INCOMPLETE (retired), WORKER_SCHEDULER=interval; and any override of the keys
 # committed below.
+# FIRST PLATFORM ADMIN AT BOOT (#264): only BOOTSTRAP_ADMIN_EMAIL and the four optional BOOTSTRAP_ADMIN_FIRST_NAME,
+# BOOTSTRAP_ADMIN_LAST_NAME, BOOTSTRAP_ADMIN_ORG_SLUG and BOOTSTRAP_ADMIN_ORG_NAME may be set, on rab-api ONLY (passed
+# through below as `${KEY:-}`, no committed value). There is no bootstrap password: BOOTSTRAP_ADMIN_PASSWORD is always
+# refused; the admin activates through an emailed, expiring link.
 #
 # SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). There is no operations service: the owner CLI commands run
 # as one-off commands of the rab-api image under crewflow_owner (X2.2). O1: the Worker bundle launcher and its separate
@@ -152,6 +162,15 @@ x-crewflow-required-env: &required-env
   S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
   # Security audit sink (BC-07): production accepts only `stdout`, compliant only with an off-host append-only log shipper.
   CREWFLOW_AUDIT_SINK: ${CREWFLOW_AUDIT_SINK:?CREWFLOW_AUDIT_SINK is required (stdout)}
+  # NOT required: the platform AI switch (owner decision 2026-11-20: AI wanted in production, Anthropic only), kept in this
+  # shared list (the only optional setting it carries) so rab-api and rab-worker always merge the same line and agree. OFF
+  # unless the operator sets AI_ENABLED=true in compose.env (exactly true or false; unset or blank = false: every AI route
+  # answers 404 and the Worker refuses every queued turn). The gates accept exactly ${AI_ENABLED:-false}, never a committed
+  # literal, and refuse AI_ENABLED in an env file. Turned on, AI also needs ANTHROPIC_API_KEY on both services (an optional
+  # setting: ENV-REFERENCE.md), a platform admin switching the organisation on in Settings -> AI (every organisation starts
+  # OFF) and a model the build approves for production (catalog.ts). Never enter AI_ENABLED as a blank service-scoped
+  # platform value: the app reads blank as its code default, which is ON (THREAT-MODEL EX-2).
+  AI_ENABLED: ${AI_ENABLED:-false}
 
 services:
 
@@ -360,7 +379,7 @@ services:
   # needs crewflow_owner created (PG_ADMIN_URL) or checked (PG_DATABASE_URL only).
   # ---------------------------------------------------------------------------
   db-setup:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # Twenty's Helm wait-for-db init container (owner instruction 2026-11-18): no `depends_on: db` (with CREWFLOW_BUNDLED_DB=0
     # that dependency has no container, and OpenShip then skips db-setup instead of starting it). This wrapper waits, bounded
     # (CREWFLOW_DB_WAIT_SECONDS, default 170 s), until the database db-setup uses accepts connections (PG_ADMIN_URL's host when
@@ -541,6 +560,11 @@ services:
       # unset or empty = 170 (inside OpenShip's 180 s window for rab-api -> db-setup); 0 = do not wait. Not a database
       # credential; read only by the wait above.
       CREWFLOW_DB_WAIT_SECONDS: ${CREWFLOW_DB_WAIT_SECONDS:-170}
+      # Owner decision 2026-11-20: db-setup never changes an existing crewflow_owner password by itself ("PG_DATABASE_URL
+      # password doesn't match crewflow_owner", exit 64). To rotate it, put the new value in PG_DATABASE_URL on every service and
+      # set CREWFLOW_ROTATE_APP_PASSWORD=1 in compose.env for ONE deploy, then remove it. Exactly 1 or empty (anything else is
+      # refused). THIS SERVICE ONLY: never rab-api, rab-worker or db-harden. Not a credential (a switch).
+      CREWFLOW_ROTATE_APP_PASSWORD: ${CREWFLOW_ROTATE_APP_PASSWORD:-}
       # Your own database's CA as PEM text (one line with \n escapes is fine), the same value on db-setup, db-harden, rab-api
       # and rab-worker. Empty = unset: the bundled db's own CA for host db (the scripts point PG_SSL_CA_CERT_PATH at it),
       # otherwise the system CA store. Not PG_SSL_CA_CERT_PATH: this file mounts no external CA file.
@@ -582,7 +606,7 @@ services:
   # The only other service besides db-setup that receives the admin login (compose-owner-login.cjs enforces the shape).
   # ---------------------------------------------------------------------------
   db-harden:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     entrypoint: ["./db-setup.sh", "harden"]
     environment:
       # db-setup's database settings, exactly (the same modes and refusals): PG_ADMIN_URL (b), the crewflow_owner URL,
@@ -618,7 +642,7 @@ services:
 
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
     # no compose init). It runs the refusals (this service never receives a PG_ADMIN_URL value, pinned ""), the
     # runtime-isolation check, takes PG_DATABASE_URL (the crewflow_owner URL) from the environment, runs the migrate child and
@@ -642,10 +666,14 @@ services:
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
       PG_ADMIN_DIRECT_URL: ""
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
+      BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
+      BOOTSTRAP_ADMIN_ORG_SLUG: ${BOOTSTRAP_ADMIN_ORG_SLUG:-}
+      BOOTSTRAP_ADMIN_ORG_NAME: ${BOOTSTRAP_ADMIN_ORG_NAME:-}
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
@@ -705,7 +733,7 @@ services:
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # worker-start.sh is the ENTRYPOINT (PID 1): the refusals (this service never receives a PG_ADMIN_URL value, pinned
     # ""), PG_DATABASE_URL (the crewflow_owner URL) from the environment, then `exec /sbin/tini -s -- node
     # packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog SIGKILL, ignored by the kernel for PID 1, still
@@ -743,7 +771,6 @@ services:
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       # The owner's "feel instant" onboarding pin, read by the in-process provisioner (Agent 2 interface).

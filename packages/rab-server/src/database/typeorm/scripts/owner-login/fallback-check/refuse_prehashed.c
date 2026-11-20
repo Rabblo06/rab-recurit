@@ -12,6 +12,12 @@
  *   - with refuse_prehashed.refuse_passwordless_role = on (SIGHUP; off by default): ProcessUtility_hook remembers a
  *     CREATE ROLE / CREATE USER WITHOUT a PASSWORD option, LOGIN or NOLOGIN (a provider that refuses passwordless roles
  *     altogether: db-setup's option-2 path);
+ *   - with refuse_prehashed.refuse_plain = on (SIGHUP; off by default): a plain-text password of 12+ characters is
+ *     remembered too and refused at COMMIT the same way (a server that refuses BOTH forms: db-setup's plain-text fallback,
+ *     owner decision 2026-11-20, is refused and the last resort runs);
+ *   - with refuse_prehashed.refuse_at_statement = on (SIGHUP; off by default): a PRE-HASHED password is refused AT ONCE,
+ *     inside the CREATE / ALTER ROLE statement (ERROR XX000, before the catalog row is written), instead of at COMMIT.
+ *     It lets the harness hold a lock on the role row that ONLY the later plain-text statement waits on (N4);
  *   - XACT_EVENT_PRE_COMMIT: if any of those was seen, ERROR (XX000) with a fixed message; the transaction aborts;
  *   - every other transaction end clears the flags.
  * It never stores, logs or forwards a password. What it does NOT simulate: any network call, any provider-side storage of
@@ -36,7 +42,10 @@ void _PG_init(void);
 static check_password_hook_type prev_check_password_hook = NULL;
 static ProcessUtility_hook_type prev_process_utility = NULL;
 static bool refuse_passwordless_role = false;
+static bool refuse_plain = false;
+static bool refuse_at_statement = false;
 static bool prehashed_seen = false;
+static bool plain_seen = false;
 static bool passwordless_seen = false;
 
 static void
@@ -46,9 +55,15 @@ refuse_prehashed_check_password(const char *username, const char *shadow_pass, P
 	if (prev_check_password_hook)
 		prev_check_password_hook(username, shadow_pass, password_type, validuntil_time, validuntil_null);
 	if (password_type != PASSWORD_TYPE_PLAINTEXT)
+	{
+		if (refuse_at_statement)
+			elog(ERROR, "simulated refusal: role passwords must be supplied in plain text");
 		prehashed_seen = true;
+	}
 	else if (strlen(shadow_pass) < 12)
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("simulated refusal: the role password is too weak")));
+	else if (refuse_plain)
+		plain_seen = true;
 }
 
 static void
@@ -84,12 +99,14 @@ refuse_prehashed_xact(XactEvent event, void *arg)
 {
 	if (event == XACT_EVENT_PRE_COMMIT || event == XACT_EVENT_PARALLEL_PRE_COMMIT)
 	{
-		if (prehashed_seen || passwordless_seen)
+		if (prehashed_seen || plain_seen || passwordless_seen)
 		{
 			const char *why = prehashed_seen ? "simulated refusal: role passwords must be supplied in plain text"
+				: plain_seen ? "simulated refusal: role passwords must not be supplied in plain text"
 				: "simulated refusal: a role needs a password";
 
 			prehashed_seen = false;
+			plain_seen = false;
 			passwordless_seen = false;
 			elog(ERROR, "%s", why);
 		}
@@ -98,6 +115,7 @@ refuse_prehashed_xact(XactEvent event, void *arg)
 			 event == XACT_EVENT_PARALLEL_ABORT)
 	{
 		prehashed_seen = false;
+		plain_seen = false;
 		passwordless_seen = false;
 	}
 }
@@ -108,6 +126,12 @@ _PG_init(void)
 	DefineCustomBoolVariable("refuse_prehashed.refuse_passwordless_role",
 							 "Also refuse a role created without a password (test simulator only).",
 							 NULL, &refuse_passwordless_role, false, PGC_SIGHUP, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("refuse_prehashed.refuse_plain",
+							 "Also refuse a plain-text role password, at COMMIT (test simulator only).",
+							 NULL, &refuse_plain, false, PGC_SIGHUP, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("refuse_prehashed.refuse_at_statement",
+							 "Refuse a pre-hashed role password inside the statement instead of at COMMIT (test simulator only).",
+							 NULL, &refuse_at_statement, false, PGC_SIGHUP, 0, NULL, NULL, NULL);
 	prev_check_password_hook = check_password_hook;
 	check_password_hook = refuse_prehashed_check_password;
 	prev_process_utility = ProcessUtility_hook;

@@ -188,12 +188,26 @@ describeIfDb('CF-04 email change cannot take over an account (integration)', () 
     expect(req.cancel_reason).toBe('email_unavailable');
   });
 
-  it('a platform administrator’s email cannot be changed through this path (403 PROTECTED_ACCOUNT)', async () => {
+  // Security review of #264, F2: a tenant actor now gets 404 for a platform admin's account (assertPlatformAdminTargetAllowed in
+  // ManagerService.changeEmail), before EmailChangeService's 403 PROTECTED_ACCOUNT could confirm the account is special. That
+  // 403 stays as the inner layer.
+  it('a platform administrator’s email cannot be changed through this path (404 to a tenant actor; the email is unchanged)', async () => {
     const ceo = await factory.createCeo({ id: organisationId } as never, { permissions: 'production' });
     const ceoToken = await factory.login(ceo);
     const target = await factory.createInternalManager({ id: organisationId } as never, { permissions: 'production', platformAdmin: true, label: 'cf04pa' });
     const res = await http().patch(`/rest/v1/managers/${target.profileId}/email`).set(as(ceoToken)).send({ email: freshEmail('pa'), currentPassword: ceo.password });
+    expect(res.status).toBe(404);
+    expect(res.body.code).not.toBe('PROTECTED_ACCOUNT');
+    expect(await userRow(target.userId)).toMatchObject({ email: target.email });
+  });
+
+  it('...and a platform-admin actor reaches the inner layer: 403 PROTECTED_ACCOUNT, the email is unchanged', async () => {
+    const adminCeo = await factory.createCeo({ id: organisationId } as never, { permissions: 'production', platformAdmin: true });
+    const adminToken = await factory.login(adminCeo);
+    const target = await factory.createInternalManager({ id: organisationId } as never, { permissions: 'production', platformAdmin: true, label: 'cf04pa2' });
+    const res = await http().patch(`/rest/v1/managers/${target.profileId}/email`).set(as(adminToken)).send({ email: freshEmail('pa2'), currentPassword: adminCeo.password });
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PROTECTED_ACCOUNT');
     expect(await userRow(target.userId)).toMatchObject({ email: target.email });
   });
 

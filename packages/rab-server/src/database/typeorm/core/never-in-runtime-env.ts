@@ -80,6 +80,14 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
     name: 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
     why: 'It is honoured only by production database commands. Remove it.',
   },
+  // First platform administrator at boot (2026-11-19): rab-api reads BOOTSTRAP_ADMIN_EMAIL and the optional
+  // BOOTSTRAP_ADMIN_FIRST_NAME / _LAST_NAME / _ORG_SLUG / _ORG_NAME (PlatformAdminBootstrapOnBoot), so those are NOT listed.
+  // There is no bootstrap password: the administrator is created with none and activates through the emailed, expiring
+  // link. A password variable is refused in every runtime process, so one can never sit in a long-lived environment.
+  {
+    name: 'BOOTSTRAP_ADMIN_PASSWORD',
+    why: 'The first platform administrator is created without a password and activates through an emailed, expiring link; no bootstrap password is ever read. Remove it.',
+  },
   { name: 'CREWFLOW_OPS_RUN', why: RETIRED_OPS },
   { name: 'PG_OPS_APP_DATABASE_URL', why: RETIRED_OPS },
   { name: 'CREWFLOW_OPS_ACTOR_SOURCE', why: RETIRED_OPS },

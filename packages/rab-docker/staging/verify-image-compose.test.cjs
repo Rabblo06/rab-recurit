@@ -114,6 +114,10 @@ const weakenings = [
   ['the API waits for a rab-migrate again', (v) => { v.services['rab-api'].depends_on['rab-migrate'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on rab-migrate|rab-api\.depends_on differs/],
   ['API no longer migrates on start (O3 C1)', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'false'; }, /rab-api: CREWFLOW_MIGRATE_ON_START is not "true"/],
   ['a bogus approval mode', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'off'; }, /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token/],
+  // Owner decision 2026-11-20: AI is operator-set, default OFF (both files commit ${AI_ENABLED:-false}).
+  ['AI pinned on in the variant', (v) => { v.services['rab-api'].environment.AI_ENABLED = 'true'; }, /rab-api: AI_ENABLED is not "false" when compose\.env does not set it/],
+  ['AI pinned on in both files', (v, _f, p) => { for (const m of [v, p]) m.services['rab-worker'].environment.AI_ENABLED = 'true'; }, /rab-worker: AI_ENABLED is not "false" when compose\.env does not set it/],
+  ['AI_ENABLED removed from the Worker', (v) => { delete v.services['rab-worker'].environment.AI_ENABLED; }, /rab-worker: AI_ENABLED is not "false"|rab-worker\.environment\.AI_ENABLED differs/],
   ['API stops registering the schedulers (O3 C2)', (v) => { v.services['rab-api'].environment.DISABLE_CRON_JOBS_REGISTRATION = 'true'; }, /rab-api: must migrate and register/],
   ['the Worker migrates (O3 C1)', (v) => { delete v.services['rab-worker'].environment.DISABLE_DB_MIGRATIONS; }, /rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION/],
   ['the Worker registers schedulers (O3 C2)', (v) => { v.services['rab-worker'].environment.DISABLE_CRON_JOBS_REGISTRATION = 'false'; }, /rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION/],
@@ -328,6 +332,8 @@ test('environment mode refuses migration/ops authority, foreign logins and unfil
   assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: ['PG_DATABASE_URL'] } }), /rab-worker: REDIS_URL is missing/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }), /rab-api: names \.env\.migrate/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_PHASE = 'B'; }), /rab-worker: sets CREWFLOW_MIGRATION_PHASE/);
+  // Owner decision 2026-11-20: AI_ENABLED in an env file would be silently overridden by the committed expression.
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: [...worker.names, 'AI_ENABLED'] } }), /rab-worker: AI_ENABLED is set in an env file \(set it in compose\.env/);
   // rab-ops removal (PR 2): every retired ops name in an env file, and .env.ops itself, stay refused.
   for (const k of RETIRED_OPS_NAMES) {
     assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, k] }, 'rab-worker': worker }), new RegExp(`rab-api: sets ${k} in the deployed model`));
@@ -345,6 +351,11 @@ const otherWeakenings = [
   ['rab-redis without a memory limit', (v) => { delete v.services['rab-redis'].mem_limit; }, /rab-redis: no memory limit/],
   ['a strict switch overridden with a typo in the deployed model (X3.1)', (v) => { v.services['rab-api'].environment.AUTH_MFA_ENFORCE_PLATFORM_ADMIN = 'yes'; }, /rab-api: AUTH_MFA_ENFORCE_PLATFORM_ADMIN must be exactly true or false.* in the deployed model/],
   ['a bogus approval mode in the deployed model', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'off'; }, /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model/],
+  // Owner decision 2026-11-20: the operator's AI switch, exactly true or false and the same on both services.
+  ['AI switched on for the API only', (v) => { v.services['rab-api'].environment.AI_ENABLED = 'true'; }, /AI_ENABLED differs between rab-api and rab-worker in the deployed model/],
+  ['AI switched on for the Worker only', (v) => { v.services['rab-worker'].environment.AI_ENABLED = 'true'; }, /AI_ENABLED differs between rab-api and rab-worker in the deployed model/],
+  ['a bogus AI switch on both', (v) => { for (const n of ['rab-api', 'rab-worker']) v.services[n].environment.AI_ENABLED = 'yes'; }, /rab-api: AI_ENABLED is not exactly true or false in the deployed model/],
+  ['AI_ENABLED removed by an override', (v) => { for (const n of ['rab-api', 'rab-worker']) delete v.services[n].environment.AI_ENABLED; }, /rab-worker: AI_ENABLED is not exactly true or false in the deployed model/],
   ['an override turns fast publish off on the Worker', (v) => { v.services['rab-worker'].environment.WORKER_FAST_PUBLISH_NOTIFY = 'false'; }, /rab-worker: WORKER_FAST_PUBLISH_NOTIFY is not "true" in the deployed model/],
   ['an override sets the API email sweep back to 2 s', (v) => { v.services['rab-api'].environment.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS = '2'; }, /rab-api: WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override turns the timer triggers off on the Worker', (v) => { v.services['rab-worker'].environment.WORKER_TIMER_TRIGGERS = 'off'; }, /rab-worker: WORKER_TIMER_TRIGGERS is not "on" in the deployed model/],
@@ -364,6 +375,13 @@ const otherWeakenings = [
 for (const [name, mutate, pattern] of otherWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
+
+test('environment mode accepts the operator AI switch (compose.env, owner decision 2026-11-20): true or false on both services', { skip }, () => {
+  for (const value of ['true', 'false']) {
+    const problems = deployed((v) => { for (const n of ['rab-api', 'rab-worker']) v.services[n].environment.AI_ENABLED = value; });
+    assert.ok(!problems.some((p) => /AI_ENABLED/.test(p)), `${value}: ${problems.join(' | ')}`);
+  }
+});
 
 test('environment mode accepts the operator token opt-in (compose.env), and none', { skip }, () => {
   for (const mode of ['none', 'token']) {

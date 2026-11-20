@@ -376,6 +376,33 @@ test('approval mode (BC-11/C4): unset in compose.env renders none; token renders
   assertRefused(gate.lintEnvText('runtime', 'CREWFLOW_MIGRATION_APPROVAL_MODE=token'), /set it in compose\.env/);
 });
 
+test('AI switch (owner decision 2026-11-20): unset in compose.env renders false on both; true renders true on both; a literal pin is refused', { skip }, () => {
+  // unset -> false: the sentinel compose.env does not set it (and the child environment drops any AI_ENABLED of this machine).
+  for (const c of COMBOS) {
+    for (const svc of APP) assert.equal(fresh(c.name).services[svc].environment.AI_ENABLED, 'false', `${c.name} ${svc}`);
+    assert.deepEqual(gate.aiDefaultOffProblems(fresh(c.name)), [], c.name);
+  }
+  // true -> true on rab-api AND rab-worker (one variable), and the model passes every check.
+  const on = renderModels(COMBOS, ['AI_ENABLED=true']);
+  for (const c of COMBOS) {
+    for (const svc of APP) assert.equal(on[c.name].services[svc].environment.AI_ENABLED, 'true', `${c.name} ${svc}`);
+    assert.deepEqual(checkModel(on[c.name], c), [], c.name);
+  }
+  // A blank compose.env value still renders the default, false (`:-`), never the code default.
+  const blank = renderModels([combo(DEF)], ['AI_ENABLED='])[DEF];
+  for (const svc of APP) assert.equal(blank.services[svc].environment.AI_ENABLED, 'false', svc);
+  // A committed 'true' (or no AI_ENABLED at all) renders something other than the default with no compose.env value.
+  for (const svc of APP) {
+    const pinned = fresh(DEF);
+    pinned.services[svc].environment.AI_ENABLED = 'true';
+    assertRefused(gate.aiDefaultOffProblems(pinned), new RegExp(`${svc}: AI_ENABLED is "true" with no AI_ENABLED in compose\\.env, expected "false"`));
+    // ... and only one service switched on is a drift checkModel refuses in any render.
+    assertRefused(checkModel(pinned, combo(DEF)), /AI_ENABLED differs between rab-api and rab-worker/);
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.AI_ENABLED; }), new RegExp(`${svc}: AI_ENABLED is "", expected exactly true or false`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.AI_ENABLED = 'yes'; }), new RegExp(`${svc}: AI_ENABLED is "yes", expected exactly true or false`));
+  }
+});
+
 test('BC-07: the audit sink reaches rab-api and rab-worker from runtime.env as stdout; missing or invalid is refused', { skip }, () => {
   for (const svc of APP) {
     assert.equal(fresh(DEF).services[svc].environment.CREWFLOW_AUDIT_SINK, 'stdout', svc);
@@ -753,5 +780,24 @@ test('DENIAL security review L3: volumes_from, secrets/configs under /run/crewfl
       assertRefused(problemsAfter(c.name, mutate), pattern);
       assert.ok(label);
     }
+  }
+});
+
+// Owner decision 2026-11-20: the one-deploy password rotation opt-in, rendered.
+test('CREWFLOW_ROTATE_APP_PASSWORD renders on db-setup only (empty by default); missing there, a value other than 1 / empty, or on another service is refused', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    assert.equal(m.services['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD, '', `${c.name}: db-setup renders it empty`);
+    for (const [name, svc] of Object.entries(m.services)) {
+      if (name !== 'db-setup') assert.ok(!('CREWFLOW_ROTATE_APP_PASSWORD' in (svc.environment ?? {})), `${c.name}: ${name} has it`);
+    }
+    const cases = [
+      [(s) => { delete s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD; }, /db-setup: CREWFLOW_ROTATE_APP_PASSWORD is missing/],
+      [(s) => { s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD = 'yes'; }, /db-setup: CREWFLOW_ROTATE_APP_PASSWORD must render to exactly 1 or empty/],
+      ...['rab-api', 'rab-worker', 'db-harden'].map((svc) => [(s) => { s[svc].environment.CREWFLOW_ROTATE_APP_PASSWORD = ''; }, new RegExp(`${svc}: has CREWFLOW_ROTATE_APP_PASSWORD`)]),
+    ];
+    for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c.name, mutate), pattern);
+    // 1 (the operator's one-deploy opt-in) passes.
+    assert.ok(!problemsAfter(c.name, (s) => { s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD = '1'; }).some((p) => /ROTATE/.test(p)), `${c.name}: 1 passes`);
   }
 });
