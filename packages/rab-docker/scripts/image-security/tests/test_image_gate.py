@@ -669,10 +669,15 @@ if __name__ == '__main__':
 
 
 class CredentialMountDir(unittest.TestCase):
-    """DB-SETUP (Twenty Helm model): the crewflow_owner password file never ships in the image."""
+    """Credential mount points must be empty in the image. Owner decision 2026-11-18 (Twenty's way): db-setup's volume is
+    retired (rab-api and rab-worker read PG_DATABASE_URL from their environment), so the policy names none; the rule stays
+    for any future one."""
 
-    def test_policy_names_the_db_setup_mount_point(self):
-        self.assertIn('/run/crewflow/db-target', g.role_policy('image')['credential_mount_dirs'])
+    def test_policy_names_no_credential_mount_point_since_the_setup_volume_is_retired(self):
+        dirs = g.role_policy('image')['credential_mount_dirs']
+        self.assertIsInstance(dirs, list)
+        self.assertNotIn('/run/crewflow/db-target', dirs)
+        self.assertEqual(dirs, [])
 
     def test_a_file_under_the_mount_point_fails_and_the_empty_directory_passes(self):
         dirs = ['/run/crewflow/db-target']

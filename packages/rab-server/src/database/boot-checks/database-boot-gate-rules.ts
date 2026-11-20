@@ -8,7 +8,14 @@ import { assertDeploymentIdentity, DeploymentIdentityError, Query } from '../dep
 import { dispatchNotifyFor } from '../postgres/pg-config';
 import { PgConfigError } from '../postgres/pg-url-policy';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, SupportedPostgresMajor, unsupportedPostgresMessage } from '../postgres/supported-majors';
-import { OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
+import {
+  createRoleMarkColumnsSql,
+  DATABASE_OWNERSHIP_COLUMNS_SQL,
+  OWNER_LOGIN_ROLE,
+  ownerLoginDatabaseOwnershipProblems,
+  ownerLoginObjectPostureProblems,
+  ownerLoginRolePostureProblems,
+} from './owner-login-posture';
 import { SchemaCompatibilityError } from './schema-compatibility';
 
 export type BootProcess = 'api' | 'worker' | 'cli' | 'provisioner';
@@ -80,6 +87,12 @@ export interface BootGateFacts {
   loginPrivileged: boolean;
   /** The LOGIN role has REPLICATION or CREATEDB (owner-login shape: neither). */
   loginReplicationOrCreatedb: boolean;
+  /** The LOGIN role has CREATEROLE (owner decision 2026-11-18: refused in production unless db-setup marked it pending). */
+  loginCreateRole: boolean;
+  /** The LOGIN role carries a valid CREATEROLE mark (owner-login-posture.ts: an admin's "until the schema is current"). */
+  loginCreateRolePending: boolean;
+  /** That mark's expiry has passed, by the server clock (owner decision M1: the 24 h grace period). */
+  loginCreateRoleMarkExpired: boolean;
   /** Comma-separated owner roles the current role is a member of (other than itself), or null. */
   ownerRoles: string | null;
   serverVersionNum: number;
@@ -87,6 +100,16 @@ export interface BootGateFacts {
   extensions: string[];
   /** null when pg_stat_ssl has no row for this backend. */
   ssl: boolean | null;
+  /**
+   * Owner decision 2026-11-19: the LOGIN owns the current database directly, is a member of its owner role, or is a member
+   * of pg_database_owner (owner-login-posture.ts DATABASE_OWNERSHIP_COLUMNS_SQL). Fail closed: anything but an explicit
+   * false from the query reads as true.
+   */
+  ownsDatabase: boolean;
+  memberOfDatabaseOwner: boolean;
+  databaseOwnerRole: boolean;
+  /** The current database's owner role name (for the refusal message), or null. */
+  databaseOwner: string | null;
   /**
    * Phase D: the login (or the role it acts as) is crewflow_worker or a member of it (any membership). False when the
    * crewflow_worker role does not exist. A non-Worker process with this set could reach the dispatch-claim grants.
@@ -102,6 +125,7 @@ export interface BootGateFacts {
  * for crewflow_worker too: its expected crewflow_app membership (INHERIT TRUE, SET FALSE) is not an owner role, and any
  * path from it to crewflow / rab_owner / rab_secure_owner — whatever the grant options — is refused.
  */
+// sql-injection-reviewed: the only interpolation is createRoleMarkColumnsSql over a fixed column expression and quote-free code constants.
 export const BOOT_FACTS_SQL = `
 SELECT current_user::text AS who,
        session_user::text AS login,
@@ -109,6 +133,8 @@ SELECT current_user::text AS who,
        r.rolbypassrls AS bypassrls,
        (SELECT s.rolsuper OR s.rolbypassrls FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_privileged,
        (SELECT s.rolreplication OR s.rolcreatedb FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_repl_createdb,
+       (SELECT s.rolcreaterole FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_createrole,
+       ${createRoleMarkColumnsSql("(SELECT pg_catalog.shobj_description(s.oid, 'pg_authid') FROM pg_catalog.pg_roles s WHERE s.rolname = session_user)", 'login_createrole_pending', 'login_createrole_mark_expired')},
        (SELECT pg_catalog.string_agg(o.rolname::text, ',' ORDER BY o.rolname)
           FROM pg_catalog.pg_roles o
          WHERE o.rolname IN ('crewflow', 'rab_owner', 'rab_secure_owner') AND o.rolname <> current_user
@@ -118,7 +144,8 @@ SELECT current_user::text AS who,
        pg_catalog.current_setting('server_version_num')::int AS server_version_num,
        pg_catalog.current_database()::text AS database,
        (SELECT pg_catalog.string_agg(e.extname::text, ',' ORDER BY e.extname) FROM pg_catalog.pg_extension e) AS extensions,
-       (SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()) AS ssl
+       (SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()) AS ssl,
+       ${DATABASE_OWNERSHIP_COLUMNS_SQL}
   FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
 
 export const FORCE_RLS_SQL = `
@@ -168,13 +195,42 @@ export function parseBootFacts(row: Record<string, unknown> | undefined): BootGa
     bypassrls: row.bypassrls === true,
     loginPrivileged: row.login_privileged === true,
     loginReplicationOrCreatedb: row.login_repl_createdb === true,
+    loginCreateRole: row.login_createrole === true,
+    loginCreateRolePending: row.login_createrole_pending === true,
+    loginCreateRoleMarkExpired: row.login_createrole_mark_expired === true,
     ownerRoles: row.owner_roles ? String(row.owner_roles) : null,
     serverVersionNum: Number(row.server_version_num),
     database: String(row.database),
     extensions: row.extensions ? String(row.extensions).split(',') : [],
     ssl: row.ssl === null || row.ssl === undefined ? null : row.ssl === true,
     workerMember: row.worker_member === true,
+    ownsDatabase: row.owns_database !== false,
+    memberOfDatabaseOwner: row.member_of_database_owner !== false,
+    databaseOwnerRole: row.database_owner_role !== false,
+    databaseOwner: row.database_owner === null || row.database_owner === undefined ? null : String(row.database_owner),
   };
+}
+
+/**
+ * Gate 1, database ownership (owner decision 2026-11-19, "refuse to start if the login ... owns the database"): in
+ * PRODUCTION the login must not own the current database: directly, through any role it is a member of, or as a member of
+ * pg_database_owner. Outside production development and test databases are owned by rab_owner (postgres-init/01-roles.sql),
+ * which the owner login is a member of, so nothing is said there. Pure.
+ */
+export function assertDatabaseOwnershipGate(
+  facts: Pick<BootGateFacts, 'who' | 'ownsDatabase' | 'memberOfDatabaseOwner' | 'databaseOwnerRole' | 'databaseOwner'>,
+  production: boolean,
+  label: string,
+): void {
+  if (!production) return;
+  const problems = ownerLoginDatabaseOwnershipProblems({
+    login: facts.who,
+    owns_database: facts.ownsDatabase,
+    member_of_database_owner: facts.memberOfDatabaseOwner,
+    database_owner_role: facts.databaseOwnerRole,
+    database_owner: facts.databaseOwner,
+  });
+  if (problems.length) throw new DatabaseBootGateError('role', `the ${label} login owns the database it serves: ${problems.join('; ')}.`);
 }
 
 /**
@@ -215,12 +271,53 @@ export function assertRoleGate(facts: BootGateFacts, expected: readonly BootRole
 }
 
 /**
+ * Gate 1, CREATEROLE (owner decisions 2026-11-18: "keep the protection as a boot check ... CREATEROLE (after the NOCREATEROLE
+ * step)", and M1 "auto-close plus a grace period"). crewflow_owner is created CREATEROLE because the FIRST start's migrate
+ * child creates the schema roles. An admin marks it `crewflow:createrole-until-schema-current:<unix expiry>` (db-setup in modes
+ * a and b, the SQL files in mode c; now + 24 h by the server clock); db-harden (modes a and b) removes CREATEROLE and the mark
+ * as soon as the ledger holds every migration of the image, in the same deploy. In PRODUCTION:
+ *   CREATEROLE, no valid mark      -> REFUSED (never meant to keep it, or re-granted after the NOCREATEROLE step);
+ *   CREATEROLE, mark expired       -> REFUSED (mode c: the operator did not run the NOCREATEROLE step within the grace period;
+ *                                     modes a and b: db-harden did not run or timed out), naming the two statements;
+ *   CREATEROLE, mark not expired   -> allowed with a WARNING (the first start, before db-harden or the operator closes it);
+ *   NOCREATEROLE                   -> nothing to say.
+ * The Worker gets the same rule, NOT a stricter one: it starts once the API is healthy, while db-harden may still be in its
+ * transaction (a strict Worker would crash-loop for those seconds), and in mode c there is no db-harden at all, so a strict
+ * Worker would refuse for the whole grace period. The expiry bounds the window for both processes.
+ * Outside production nothing is reported (test and development databases keep a CREATEROLE crewflow_owner). Returns the
+ * warnings. Pure.
+ */
+export function assertCreateRoleGate(
+  facts: Pick<BootGateFacts, 'who' | 'loginCreateRole' | 'loginCreateRolePending' | 'loginCreateRoleMarkExpired'>,
+  production: boolean,
+  label: string,
+): string[] {
+  if (!production || !facts.loginCreateRole) return [];
+  if (!facts.loginCreateRolePending) {
+    throw new DatabaseBootGateError(
+      'role',
+      `the ${label} login "${facts.who}" has CREATEROLE after the schema bootstrap, and no admin marked it as waiting for it. Remove it as your admin: ALTER ROLE ${facts.who} NOCREATEROLE; COMMENT ON ROLE ${facts.who} IS NULL; (with an admin login, db-harden / db-setup do it: docker compose up -d). A release that needs it back says so in its notes.`,
+    );
+  }
+  if (facts.loginCreateRoleMarkExpired) {
+    throw new DatabaseBootGateError(
+      'role',
+      `the ${label} login "${facts.who}" still has CREATEROLE and its grace period (the admin's mark) has expired. The schema bootstrap is complete: as your admin run ALTER ROLE ${facts.who} NOCREATEROLE; COMMENT ON ROLE ${facts.who} IS NULL; then start again (with an admin login, db-harden / db-setup do it: docker compose up -d).`,
+    );
+  }
+  return [
+    `the login "${facts.who}" still has CREATEROLE, marked by an admin for the schema bootstrap; db-harden removes it once the schema is complete (mode c: run ALTER ROLE ${facts.who} NOCREATEROLE; COMMENT ON ROLE ${facts.who} IS NULL; before the mark expires, or the next start is refused).`,
+  ];
+}
+
+/**
  * Gate 1 (asynchronous part, after gate 2 — it reads PG16 pg_auth_members columns): nothing dangerous is reachable from
- * the owner login (MEMBER semantics: INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) and
+ * the owner login (MEMBER semantics: INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles,
+ * roles with SUPERUSER / BYPASSRLS / CREATEDB / CREATEROLE / REPLICATION), in production it does not own the database, and
  * the role layout is exactly the reviewed owner-login inventory (owner-login-posture.ts).
  */
-export async function assertOwnerLoginRoleGate(query: Query, label: string): Promise<void> {
-  const problems = await ownerLoginRolePostureProblems(query);
+export async function assertOwnerLoginRoleGate(query: Query, label: string, production = false): Promise<void> {
+  const problems = await ownerLoginRolePostureProblems(query, { refuseDatabaseOwnership: production });
   if (problems.length) {
     throw new DatabaseBootGateError('role', `the ${label} role posture is not the reviewed owner-login layout: ${problems.join('; ')}. Do not serve; investigate the roles.`);
   }
@@ -450,8 +547,63 @@ export function assertForceRlsGate(rows: Array<Record<string, unknown>>, disable
   }
 }
 
-/** Gate 6. */
-export function assertTlsGate(facts: BootGateFacts, production: boolean): void {
+/** What the gate's own pg client socket reports after the handshake (database-boot-gates.ts reads it). */
+export interface ClientTlsState {
+  /** The socket is a TLSSocket (the client negotiated TLS). */
+  encrypted: boolean;
+  /** Node verified the certificate chain and the host name (rejectUnauthorized + checkServerIdentity passed). */
+  authorized: boolean;
+  /**
+   * The connection's own `ssl` config demanded verification: `rejectUnauthorized: true` and no host-name check switched off
+   * (pg-tls.ts verify-full: Node's default check, or the IP-bound one). Without it `authorized` alone is not trusted.
+   */
+  verifyFullConfigured: boolean;
+}
+
+/**
+ * Gate 6 (owner instruction 2026-11-19: "trust our side of the connection ... No proxy-specific exceptions"). In production
+ * the gate's connection must be VERIFIED TLS: its own `ssl` config demanded verification (`verifyFullConfigured`:
+ * rejectUnauthorized + host-name check) AND its client socket is TLS that Node verified (`authorized`: chain AND host name).
+ * Then pg_stat_ssl is not consulted for the decision (a provider's TLS-terminating proxy makes the backend report ssl=false;
+ * one warning line says so). Security review L-1 (PR #257): pg_stat_ssl.ssl=true alone no longer passes, because a session
+ * that did not verify the server (rejectUnauthorized false) can be encrypted to an impostor; an unknown client state refuses
+ * too. Node's global NODE_TLS_REJECT_UNAUTHORIZED=0 (which disables verification for every TLS socket of the process) is
+ * refused in production first (review I-4). Provider-neutral: no host, provider name or flag plays any part. Returns the
+ * warnings. Pure apart from reading `env`.
+ */
+export function assertTlsGate(
+  facts: BootGateFacts,
+  production: boolean,
+  context: { clientTls?: ClientTlsState | null; env?: Record<string, string | undefined> } = {},
+): string[] {
+  if (!production) return [];
+  const nodeTls = context.env?.NODE_TLS_REJECT_UNAUTHORIZED;
+  if (nodeTls !== undefined && nodeTls.trim() === '0') {
+    throw new DatabaseBootGateError(
+      'tls',
+      'NODE_TLS_REJECT_UNAUTHORIZED=0 is set: it switches off certificate verification for every TLS connection of this process. Production refuses it; remove it.',
+    );
+  }
+  const tls = context.clientTls;
+  if (!tls || tls.verifyFullConfigured !== true) {
+    throw new DatabaseBootGateError(
+      'tls',
+      'the production database connection does not verify the server certificate and host name (its TLS configuration is not verify-full). Use sslmode=require, verify-ca or verify-full without PG_SSL_ALLOW_SELF_SIGNED.',
+    );
+  }
+  if (tls.encrypted === true && tls.authorized === true) {
+    return facts.ssl === true
+      ? []
+      : ['the database backend reports no TLS (pg_stat_ssl, e.g. behind a TLS-terminating proxy); this connection is verified TLS on the client side (certificate chain and host name), which is what gate 6 trusts.'];
+  }
+  throw new DatabaseBootGateError('tls', 'the production database connection is not using verified TLS. Configure verified TLS for the database URL.');
+}
+
+/**
+ * The server-side TLS rule alone (pg_stat_ssl.ssl must be true in production), for a check that has no client socket to read:
+ * the replica validation (runtime/replica/replica-validation.ts), unchanged from before gate 6 became client-side.
+ */
+export function assertServerTlsGate(facts: BootGateFacts, production: boolean): void {
   if (production && facts.ssl !== true) {
     throw new DatabaseBootGateError('tls', 'the production database connection is not using TLS (pg_stat_ssl). Configure verified TLS for the database URL.');
   }
@@ -472,6 +624,14 @@ export interface EvaluateBootGatesInput {
    * is accepted only at the host it was bound at (owner decision A: a restore / clone / fork elsewhere is refused).
    */
   connectionHost: string;
+  /** The gate session's client-side TLS state (gate 6); null or absent = unknown, which production refuses. */
+  clientTls?: ClientTlsState | null;
+  /**
+   * Review L-1: the connection factory's own production classification (pg-config.ts isPgProductionEnvironment) for the
+   * gate's connection. Gate 6 is production when EITHER this or the process classification says so, so the two can never
+   * disagree in the weaker direction (e.g. RAB_RUNTIME_ENV=' production' with a stray space).
+   */
+  connectionProduction?: boolean;
 }
 
 export interface BootGateReport {
@@ -509,9 +669,11 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const [factsRow] = await query(BOOT_FACTS_SQL);
   const facts = parseBootFacts(factsRow);
   assertRoleGate(facts, expectedRolesFor(processName, input.cliCommand, claimMode), label);
+  const createRoleWarnings = assertCreateRoleGate(facts, production, label);
+  assertDatabaseOwnershipGate(facts, production, label);
   assertVersionGate(facts);
   // After the version gate: the walk and the inventory read PG16-only pg_auth_members columns (D10: < 16 is refused).
-  await assertOwnerLoginRoleGate(query, label);
+  await assertOwnerLoginRoleGate(query, label, production);
   // Gate 1c (Phase D wave 3): no stored crewflow.dispatch_notify; the session value matches the process's mode.
   const dispatchNotify = assertDispatchNotifyGate(await query(DISPATCH_NOTIFY_STORED_SQL), (await query(DISPATCH_NOTIFY_SESSION_SQL))[0], {
     expectOn: expectDispatchNotify,
@@ -539,7 +701,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const disabled = (await query(RLS_DISABLED_TENANT_TABLES_SQL)).map((r) => String(r.relname));
   assertForceRlsGate(forceRows, disabled);
 
-  assertTlsGate(facts, production);
+  const tlsWarnings = assertTlsGate(facts, production || input.connectionProduction === true, { clientTls: input.clientTls, env });
 
   let compatibilityWarnings: readonly string[] = [];
   try {
@@ -569,7 +731,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
     identity: identity.summary,
     tls: facts.ssl,
     forceRlsTables: FORCE_RLS_SPOT_CHECK_TABLES.length,
-    warnings: [...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
+    warnings: [...createRoleWarnings, ...tlsWarnings, ...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
   };
 }
 
