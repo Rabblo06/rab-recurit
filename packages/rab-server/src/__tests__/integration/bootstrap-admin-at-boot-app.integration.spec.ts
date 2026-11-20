@@ -179,12 +179,14 @@ describeIfDb('first platform admin at API boot, through the HTTP app (integratio
     const workspaceOwner = managers[0]!;
     const ceo = await factory.createCeo(organisation, { permissions: 'production' });
     // Same permission set as the workspace owner: both share the organisation's canonical "manager" role (factory rule).
-    const target = await factory.createInternalManager(organisation, { permissions: 'all', platformAdmin: true, label: 'bootn1pa' });
+    const target = await factory.createInternalManager(organisation, { permissions: 'all', platformAdmin: true, label: 'bootn1pa', workspace: false });
     grantedUserIds.push(target.userId);
     await owner.query(
-      `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source) VALUES ($1, $2, $3, 'active', 'write_path') ON CONFLICT DO NOTHING`,
+      `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source) VALUES ($1, $2, $3, 'active', 'write_path')`,
       [organisation.id, target.userId, workspaceOwner.workspaceId],
     );
+    // Setup check: the target really is an active member of the owner's workspace, so a 404 below is the guard, not a miss.
+    expect(await owner.query(`SELECT status FROM core.workspace_membership WHERE user_id = $1 AND workspace_id = $2`, [target.userId, workspaceOwner.workspaceId])).toEqual([{ status: 'active' }]);
     const [before] = await owner.query(`SELECT first_name, password_hash, security_version FROM core."user" WHERE id = $1`, [target.userId]);
     const ceoToken = await accessToken(ceo);
     const ownerToken = await accessToken(workspaceOwner);
