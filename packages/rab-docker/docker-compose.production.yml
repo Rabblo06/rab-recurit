@@ -732,6 +732,11 @@ services:
       # unset or empty = 170 (inside OpenShip's 180 s window for rab-api -> db-setup); 0 = do not wait. Not a database
       # credential; read only by the wait above.
       CREWFLOW_DB_WAIT_SECONDS: ${CREWFLOW_DB_WAIT_SECONDS:-170}
+      # Owner decision 2026-11-20: db-setup never changes an existing crewflow_owner password by itself ("PG_DATABASE_URL
+      # password doesn't match crewflow_owner", exit 64). To rotate it, put the new value in PG_DATABASE_URL on every service and
+      # set CREWFLOW_ROTATE_APP_PASSWORD=1 in compose.env for ONE deploy, then remove it. Exactly 1 or empty (anything else is
+      # refused). THIS SERVICE ONLY: never rab-api, rab-worker or db-harden. Not a credential (a switch).
+      CREWFLOW_ROTATE_APP_PASSWORD: ${CREWFLOW_ROTATE_APP_PASSWORD:-}
       # The TLS trust setting of rab-api / rab-worker (the shared optional list above): an external database's CA file.
       # Not PG_DATABASE_URL_IS_DIRECT: the bootstrap child refuses a transaction-pooler URL whatever that flag says.
       PG_SSL_CA_CERT_PATH:

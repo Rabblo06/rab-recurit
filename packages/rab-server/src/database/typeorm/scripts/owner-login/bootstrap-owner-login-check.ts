@@ -449,14 +449,24 @@ async function assertRestartUnchanged(ctx: Ctx, db: string, adminUrl: string, be
   expect((await dbFacts(ctx.admin, db)).acl === before.acl, `${label}: database ACL changed`);
 }
 
-/** A different password in PG_DATABASE_URL, with the admin: set to it (same role), the old one no longer logs in. */
+/**
+ * A different password in PG_DATABASE_URL, with the admin (owner decision 2026-11-20, like Twenty and ZITADEL): refused (64)
+ * with the exact mismatch line and the role untouched; with CREWFLOW_ROTATE_APP_PASSWORD=1 it is set (same role), the old
+ * one no longer logs in, and the remove-it line is printed.
+ */
 async function assertPasswordSet(ctx: Ctx, db: string, adminUrl: string, before: { state: OwnerState; password: string }, label: string): Promise<string> {
   const next = remember(secret());
-  const run = await runChild({ admin: adminUrl, app: ownerUrl(ctx, next, db) });
+  const refused = await runChild({ admin: adminUrl, app: ownerUrl(ctx, next, db) });
+  assertCleanOutput(refused);
+  expectResult(refused, 64, 'refused', `${label} (no opt-in)`);
+  expectLine(refused, OWNER_BOOTSTRAP_MESSAGES.passwordMismatch, `${label} (no opt-in)`);
+  expect((await ownerState(ctx.admin)).passwordHash === before.state.passwordHash, `${label} (no opt-in): the password was changed`);
+  const run = await runChild({ admin: adminUrl, app: ownerUrl(ctx, next, db), extra: { CREWFLOW_ROTATE_APP_PASSWORD: '1' } });
   assertCleanOutput(run);
   expectResult(run, 0, 'updated', label);
   expect(run.result?.passwordSet === true && run.result.created === false, `${label}: wrong flags`);
   expectLine(run, OWNER_BOOTSTRAP_MESSAGES.passwordSet, label);
+  expectLine(run, OWNER_BOOTSTRAP_MESSAGES.rotateDone, label);
   const after = await ownerState(ctx.admin);
   expect(after.oid === before.state.oid && after.attrs === before.state.attrs, `${label}: the role was recreated or its attributes changed`);
   expect(after.passwordHash !== before.state.passwordHash && after.passwordIsScram, `${label}: rolpassword not replaced by a SCRAM verifier`);
@@ -468,14 +478,14 @@ async function assertPasswordSet(ctx: Ctx, db: string, adminUrl: string, before:
 const SCENARIOS: Scenario[] = [
   {
     id: 'superuser-fresh-restart-password-set',
-    covers: 'mode a/b with a superuser admin: fresh (env password, SCRAM, 01 attributes, grant, CREATEROLE marked), restart unchanged, a different env password -> set with the admin',
+    covers: 'mode a/b with a superuser admin: fresh (env password, SCRAM, 01 attributes, grant, CREATEROLE marked), restart unchanged, a different env password -> refused (64, the mismatch line), then set with the admin under CREWFLOW_ROTATE_APP_PASSWORD=1',
     async run(ctx) {
       const db = await createDb(ctx, 'su');
       const url = suUrl(ctx, db);
       const fresh = await assertFreshCreated(ctx, db, url, 'fresh');
       await assertRestartUnchanged(ctx, db, url, fresh, 'restart');
       await assertPasswordSet(ctx, db, url, fresh, 'password mismatch');
-      return ['created with the env password and marked; restart byte-identical; mismatch -> password set, old one refused'];
+      return ['created with the env password and marked; restart byte-identical; mismatch -> 64 without the opt-in, password set with it, old one refused'];
     },
   },
   {
@@ -517,7 +527,13 @@ const SCENARIOS: Scenario[] = [
       const dbA = await createDb(ctx, 'l4a');
       const a = await assertFreshCreated(ctx, dbA, suUrl(ctx, dbA), 'A fresh');
       const dbB = await createDb(ctx, 'l4b');
-      const run = await runChild({ admin: suUrl(ctx, dbB), app: ownerUrl(ctx, remember(secret()), dbB) });
+      const otherPw = remember(secret());
+      const plain = await runChild({ admin: suUrl(ctx, dbB), app: ownerUrl(ctx, otherPw, dbB) });
+      assertCleanOutput(plain);
+      expectResult(plain, 64, 'refused', 'B (no opt-in)');
+      expectLine(plain, OWNER_BOOTSTRAP_MESSAGES.passwordMismatch, 'B (no opt-in)');
+      // Owner decision 2026-11-20: the rotation opt-in never lifts Q2b.
+      const run = await runChild({ admin: suUrl(ctx, dbB), app: ownerUrl(ctx, otherPw, dbB), extra: { CREWFLOW_ROTATE_APP_PASSWORD: '1' } });
       assertCleanOutput(run);
       expectResult(run, 64, 'refused', 'B');
       expectLine(run, OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase, 'B');
@@ -575,7 +591,12 @@ const SCENARIOS: Scenario[] = [
       await presetOwner(ctx, db, '', own);
       const before = await ownerState(ctx.admin);
       const url = urlFor(ctx.admin, adm.name, adm.password, db);
-      const mismatch = await runChild({ admin: url, app: ownerUrl(ctx, remember(secret()), db) });
+      const otherPw = remember(secret());
+      const noOptIn = await runChild({ admin: url, app: ownerUrl(ctx, otherPw, db) });
+      assertCleanOutput(noOptIn);
+      expectResult(noOptIn, 64, 'refused', 'mismatch (no opt-in)');
+      expectLine(noOptIn, OWNER_BOOTSTRAP_MESSAGES.passwordMismatch, 'mismatch (no opt-in)');
+      const mismatch = await runChild({ admin: url, app: ownerUrl(ctx, otherPw, db), extra: { CREWFLOW_ROTATE_APP_PASSWORD: '1' } });
       assertCleanOutput(mismatch);
       expectResult(mismatch, 64, 'refused', 'mismatch');
       expectLine(mismatch, OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption, 'mismatch');
@@ -588,7 +609,7 @@ const SCENARIOS: Scenario[] = [
       const ok = await runChild({ admin: url, app: ownerUrl(ctx, own, db) });
       assertCleanOutput(ok);
       expectResult(ok, 0, 'unchanged', 'NOCREATEROLE', 'none');
-      return ['mismatch -> 64 adminNoAdminOption; mark needed -> 64 createRoleNoRights; role byte-identical; NOCREATEROLE -> 0'];
+      return ['mismatch -> 64 (no opt-in: the mismatch line; with it: adminNoAdminOption); mark needed -> 64 createRoleNoRights; role byte-identical; NOCREATEROLE -> 0'];
     },
   },
   {
