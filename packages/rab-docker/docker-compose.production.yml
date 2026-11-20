@@ -28,24 +28,44 @@
 # This file mirrors docker-compose.image.yml's runtime contract (same image variable, services, commands, isolation keys,
 # environment keys) with per-service environment instead of env_file. Where the two differ, docker-compose.image.yml wins.
 #
-# DATABASE SETTINGS, LIKE TWENTY (DB-SETUP, owner decisions D1 a / D3 / D4 / D5; PG_ADMIN_URL, owner decision 2026-11-17:
-# the admin login lives ONLY in the setup step, like Twenty's Helm db-superuser secret; PG_DATABASE_URL ALWAYS means the app
-# login, crewflow_owner). Three modes:
-#   (a) BUNDLED db (default): CREWFLOW_BUNDLED_DB unset or 1, and PG_DATABASE_PASSWORD (`openssl rand -hex 32`); db-setup
-#       uses the bundled `db` service's superuser, sslmode=verify-full (db makes its own CA; the app mounts it read-only), and
-#       creates crewflow_owner. PG_DATABASE_PASSWORD is required only here (checked at start by db, db-setup and the lints).
-#   (b) YOUR OWN database, with an admin login: CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL (DIRECT host, sslmode=verify-full):
-#       db-setup creates crewflow_owner. No PG_DATABASE_PASSWORD.
-#   (c) YOUR OWN database, where you created crewflow_owner yourself: CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL = the
-#       crewflow_owner URL (D5, DB-SETUP-PLAN §7.1), NO PG_ADMIN_URL: db-setup only checks it (read-only) and exits; no
-#       provisioning. A PG_DATABASE_URL whose login is not crewflow_owner is REFUSED (never reinterpreted as an admin URL).
-# PR #125 option 2, kept in every mode: PG_ADMIN_URL and PG_DATABASE_URL are interpolated ONLY into the one-shot `db-setup`
-# service, which runs the bootstrap child (the ONLY connection with them), writes a credential-free target file to the
-# crewflow-db-target volume and exits. rab-api and rab-worker never receive a PG_ADMIN_URL value (pinned "", they refuse any other) nor an operator's
-# PG_DATABASE_URL (pinned ""): they build the crewflow_owner URL from that file and the crewflow_owner password file (a
-# random password db-setup stores and reuses, Twenty Helm model; APP_SECRET is never part of it; accepted risk TM-DB-1: the
-# URL is in db-setup's service definition, T-1). No manual SQL step. There is no migrator, provisioner, worker, ops or replica
-# URL and no .env.migrate.
+# DATABASE SETTINGS, LIKE TWENTY (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): rab-api and
+# rab-worker read PG_DATABASE_URL, ALWAYS the crewflow_owner URL (direct host, sslmode require / verify-ca / verify-full), straight from their
+# environment, exactly as Twenty's server and worker read the app user's PG_DATABASE_URL (twentyhq/twenty@eedb0a73
+# helm/twenty/templates/deployment-server.yaml:148-155, deployment-worker.yaml:81-88). Only the one-shot db-setup holds an
+# admin login. Three modes:
+#   (a) BUNDLED db (default): CREWFLOW_BUNDLED_DB unset or 1, PG_DATABASE_PASSWORD (the db superuser) and
+#       PG_DATABASE_APP_PASSWORD (the crewflow_owner password), each `openssl rand -hex 32`. PG_DATABASE_URL is left unset:
+#       compose builds postgresql://crewflow_owner:<PG_DATABASE_APP_PASSWORD>@db:5432/crewflow?sslmode=verify-full for
+#       db-setup, rab-api and rab-worker alike, and db-setup creates crewflow_owner with that password, as the bundled db's
+#       superuser (Twenty's compose: the password is an env value, `openssl rand -hex 32`). db makes its own CA; the app
+#       mounts it read-only.
+#   (b) YOUR OWN database, with an admin login (owner decision 2026-11-19, "You set one shared password"): CREWFLOW_BUNDLED_DB=0
+#       + PG_ADMIN_URL (its admin URL pasted as-is; db-setup ONLY) + PG_DATABASE_APP_PASSWORD (`openssl rand -hex 32`) +
+#       PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (the database's DIRECT address, copied from the admin URL):
+#       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
+#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password, in one run
+#       (owner decision 2026-11-20): pre-hashed first; a server that refuses pre-hashed passwords gets the same password in
+#       plain text, only over a verified-TLS admin connection (it may then be in the provider's own logs). Only when that
+#       is refused too, or the TLS is not verified, the last resort: crewflow_owner WITHOUT a password, NOLOGIN, and
+#       db-setup stops with fixed steps (run the printed SQL once, all lines together, then redeploy).
+#       PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only.
+#       An existing crewflow_owner whose password does not log in is NEVER changed by itself: db-setup exits 64
+#       ("PG_DATABASE_URL password doesn't match crewflow_owner"). To rotate: the new value in PG_DATABASE_URL on every
+#       service, plus CREWFLOW_ROTATE_APP_PASSWORD=1 in compose.env for ONE deploy, then remove it (db-setup only;
+#       OWNER-LOGIN-DEPLOYMENT.md "Rotate the crewflow_owner password"). A pooled PG_ADMIN_URL is refused by what it does; then
+#       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
+#       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.
+#   (c) YOUR OWN database, where you created crewflow_owner yourself: CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL only:
+#       db-setup only checks it (read-only).
+# A PG_DATABASE_URL whose login is not crewflow_owner, or a PG_ADMIN_URL that logs in as crewflow_owner, is REFUSED.
+# PG_ADMIN_URL and PG_ADMIN_DIRECT_URL are interpolated ONLY into db-setup / db-harden; rab-api and rab-worker pin both to ""
+# and refuse any value (L-2; security review F2 of #259).
+# CREATEROLE: crewflow_owner is created CREATEROLE for the first start's schema bootstrap; in modes a and b db-setup removes
+# it (as the admin) at its first run after the schema is complete, i.e. the next `docker compose up -d`, and the API / Worker
+# refuse it at boot unless db-setup marked it as waiting for that bootstrap.
+# No file carries a credential any more: no target file, no password file, no crewflow-db-target volume (TM-DB-1 trade-off:
+# the crewflow_owner password is a platform environment value, THREAT-MODEL.md). There is no migrator, provisioner, worker,
+# ops or replica URL and no .env.migrate.
 #
 # LIFECYCLE (O3, owner decisions C1-C5, like Twenty): no release step, no rab-migrate. The API migrates on start
 # (CREWFLOW_MIGRATE_ON_START=true, approval mode none), registers the job schedulers, then serves. The Worker never
@@ -73,16 +93,22 @@
 #             inert OPENAI/GOOGLE/MISTRAL/XAI_API_KEY, and CREWFLOW_APP_VERSION (an internal provisioning label).
 # rab-api and rab-worker take the SAME values (one login, one connection budget, the API registers the job schedulers with
 # its own intervals and the consume-only Worker never compares them). REDIS_URL is pinned to the bundled rab-redis.
-# PG_ADMIN_URL and PG_DATABASE_URL are db-setup's interpolation values only (see DATABASE SETTINGS above); the retired
+# PG_ADMIN_URL is db-setup's interpolation value only; PG_DATABASE_URL (or, for the bundled db, PG_DATABASE_APP_PASSWORD)
+# reaches db-setup, rab-api and rab-worker as the same crewflow_owner URL (see DATABASE SETTINGS above); the retired
 # PG_DATABASE_ADMIN_URL is refused (renamed to PG_ADMIN_URL).
 # MUST NOT BE ENTERED ANYWHERE: DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX, PG_WORKER_DATABASE_URL,
 # CREWFLOW_PROVISIONER_DATABASE_URL, CREWFLOW_MIGRATION_DATABASE_URL, PG_DATABASE_REPLICA_*, PG_OPS_APP_DATABASE_URL,
 # CREWFLOW_*_BOOTSTRAP_PASSWORD, CREWFLOW_MIGRATOR_PASSWORD, CREWFLOW_MIGRATION_PHASE, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
 # ALLOW_PRODUCTION_DB_COMMANDS, DB_TARGET, CREWFLOW_DB_MODE, CREWFLOW_PROVISIONER_ENABLED, libpq PG* variables, NODE_OPTIONS,
-# BOOTSTRAP_ADMIN_*, TEST_*, ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
+# BOOTSTRAP_ADMIN_PASSWORD (always refused) and any other BOOTSTRAP_ADMIN_* name than the five below, TEST_*,
+# ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
 # WORKER_INVITE_AUTO_DELETE_ENABLED, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED, CREWFLOW_MIGRATION_APPROVED,
 # CREWFLOW_UPGRADE_INCOMPLETE (retired), WORKER_SCHEDULER=interval; and any override of the keys
 # committed below.
+# FIRST PLATFORM ADMIN AT BOOT (#264): only BOOTSTRAP_ADMIN_EMAIL and the four optional BOOTSTRAP_ADMIN_FIRST_NAME,
+# BOOTSTRAP_ADMIN_LAST_NAME, BOOTSTRAP_ADMIN_ORG_SLUG and BOOTSTRAP_ADMIN_ORG_NAME may be set, on rab-api ONLY (passed
+# through below as `${KEY:-}`, no committed value). There is no bootstrap password: BOOTSTRAP_ADMIN_PASSWORD is always
+# refused; the admin activates through an emailed, expiring link.
 #
 # SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). There is no operations service: the owner CLI commands run
 # as one-off commands of the rab-api image under crewflow_owner (X2.2). O1: the Worker bundle launcher and its separate
@@ -102,12 +128,13 @@ x-logging: &logging
 # ACCOUNTS_URL, CORS_ORIGINS, TRUSTED_PROXY_CIDRS and EMAIL_DRIVER are development values production refuses.
 # ---------------------------------------------------------------------------------------------------------------------------
 x-crewflow-required-env: &required-env
-  # PR #125 option 2: NEVER a database URL on rab-api / rab-worker. PINNED EMPTY (a literal, never interpolated; do not
-  # enter a value here: the entrypoints refuse any non-empty value, exit 64). They build the crewflow_owner URL from
-  # db-setup's target file and crewflow_owner password file. The database settings (PG_ADMIN_URL; PG_DATABASE_URL = an
-  # existing crewflow_owner URL; or neither = the bundled db built from PG_DATABASE_PASSWORD, `openssl rand -hex 32`) are
-  # interpolation values that reach only the db-setup service below. On rab-api / rab-worker PG_ADMIN_URL is pinned "" (L-2).
-  PG_DATABASE_URL: ""
+  # The crewflow_owner URL (owner decision 2026-11-18, Twenty's way), the SAME expression on db-setup, rab-api and
+  # rab-worker: your crewflow_owner URL (modes b and c: direct host, sslmode=verify-full), or, unset, the bundled db's
+  # crewflow_owner URL built from PG_DATABASE_APP_PASSWORD (mode a; `openssl rand -hex 32`). Required in effect: an empty
+  # URL or an empty password refuses to start (exit 64). On rab-api / rab-worker PG_ADMIN_URL is pinned "" (L-2).
+  # Nested interpolation (OpenShip: NOT VERIFIED, docs/release/OPENSHIP-COMPATIBILITY.md): if a platform mishandles the
+  # default, enter PG_DATABASE_URL explicitly; a wrong value fails closed (refused, or no login).
+  PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
   # Root secret, 32+ random bytes. Changing it later breaks every session and stored encrypted secret.
   APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
   # https:// and not localhost (refused otherwise).
@@ -296,7 +323,17 @@ x-crewflow-optional-env: &optional-env
   # -- Runtime isolation report: warn (default) logs each missing control. `enforce` REFUSES to start when a platform drops
   # the H6 keys, which OpenShip does: never set enforce on OpenShip. --
   CREWFLOW_RUNTIME_ISOLATION: ${CREWFLOW_RUNTIME_ISOLATION:-warn}
-  # -- AI: INERT while AI_ENABLED is pinned 'false' below (every AI route answers 404, the Worker refuses every turn) --
+  # -- AI (owner decision 2026-11-20: AI wanted in production, Anthropic only; it replaces the former 'false' pin). OFF unless
+  # the operator sets AI_ENABLED=true (exactly true or false; unset or blank = false, so every AI route answers 404 and the
+  # Worker refuses every queued turn). ONE variable in this shared list, so rab-api and rab-worker always agree; the gates
+  # accept exactly ${AI_ENABLED:-false} and never a committed literal. Turned on, AI also needs ANTHROPIC_API_KEY (below) and a
+  # platform admin switching the organisation on in Settings -> AI (every organisation starts OFF), and a model the build
+  # approves for production (catalog.ts; until one is, AI answers "not configured"). Spend stops at the budgets below:
+  # AI_DAILY_BUDGET_USD per organisation per UTC day, AI_USER_DAILY_BUDGET_USD per user (effective min of the two) and
+  # AI_ORG_DAILY_TOKEN_BUDGET tokens per organisation per day. AI_DEV_ALLOW_REAL_PROVIDERS stays unlisted (boot refuses it
+  # outside development). Never enter AI_ENABLED as a blank service-scoped platform value: the app reads blank as its code
+  # default, which is ON (THREAT-MODEL EX-2). --
+  AI_ENABLED: ${AI_ENABLED:-false}
   ANTHROPIC_API_KEY:
   AI_AGENTS_ENABLED: ${AI_AGENTS_ENABLED:-false}
   AI_MODELS_DEFAULT_DISABLED:
@@ -338,9 +375,8 @@ services:
   # the cluster's own, unused, file). Even a process inside this container needs the password (`docker compose exec -e PGPASSWORD db psql -U postgres -d crewflow`, PGPASSWORD = PG_DATABASE_PASSWORD).
   # pg_isready (the health check) does not authenticate. The image reads the superuser password ONLY when the data volume is
   # empty (first start): changing PG_DATABASE_PASSWORD later does not change it (ALTER ROLE postgres PASSWORD ... first).
-  # YOUR OWN DATABASE (like Twenty's Helm db.enabled=false): CREWFLOW_BUNDLED_DB=0 and either PG_ADMIN_URL (its admin URL:
-  # db-setup creates crewflow_owner) or PG_DATABASE_URL (a crewflow_owner you created yourself: checked read-only); direct
-  # host, sslmode=verify-full. This service then gets 0 replicas and never starts, and PG_DATABASE_PASSWORD is NOT needed
+  # YOUR OWN DATABASE (like Twenty's Helm db.enabled=false): CREWFLOW_BUNDLED_DB=0, PG_DATABASE_URL (the crewflow_owner
+  # URL) and, to have db-setup create crewflow_owner, PG_ADMIN_URL (its admin URL); direct host, sslmode=verify-full. This service then gets 0 replicas and never starts, and PG_DATABASE_PASSWORD is NOT needed
   # (owner decision 2026-11-17: no dummy password): it is required only while this db runs, which its entrypoint, db-setup
   # and the env-file lint / --environment preflight check (a compose `:?` cannot depend on CREWFLOW_BUNDLED_DB).
   # Image: postgres:16 (Debian, 16.16), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name a Debian
@@ -466,10 +502,13 @@ services:
       retries: 30
       start_period: 60s
     # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
-    # database in PG_ADMIN_URL or PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency
-    # that has 0 replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup refuses
-    # (exit 64: neither URL set) and rab-api never starts. The compose.env lint and the --environment preflight accept only
-    # 0 or 1, and 0 only with exactly one of PG_ADMIN_URL / PG_DATABASE_URL whose host is not `db`.
+    # database in PG_DATABASE_URL (+ PG_ADMIN_URL): no db container is created. In docker-compose.production.yml and
+    # docker-compose.image.yml nothing depends on db (owner instruction 2026-11-18, Twenty's Helm wait-for-db): db-setup waits
+    # for the database itself (OpenShip skips a dependent of a service without a container). OpenShip ignores
+    # deploy.replicas: there, switch the db service off in OpenShip itself. 0 without your own database fails closed: db-setup
+    # refuses (exit 64: PG_DATABASE_URL still names the bundled host db) and rab-api never starts. The compose.env lint and the
+    # --environment preflight accept only 0 or 1, and 0 only with a PG_DATABASE_URL (and any PG_ADMIN_URL) whose host is
+    # not `db`.
     # Development and QA never set it (they have no external database).
     deploy:
       replicas: ${CREWFLOW_BUNDLED_DB:-1}
@@ -510,43 +549,208 @@ services:
     logging: *logging
 
   # ---------------------------------------------------------------------------
-  # db-setup — the ONE-SHOT database setup, the Twenty Helm way (OWNER-DB-FINAL.md Part A). Twenty: the
-  # `ensure-database-exists` init container alone holds the superuser secret (twentyhq/twenty@eedb0a73
-  # packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:81-130). The SAME image as rab-api and rab-worker;
-  # its entrypoint db-setup.sh runs only the bootstrap child, then exits. It is the ONLY service that receives PG_ADMIN_URL,
-  # and the only one that receives a database URL from the operator, in one of three modes (owner decision 2026-11-17):
-  # (a) the bundled db's superuser (default), (b) PG_ADMIN_URL, your own database's ADMIN URL (crewflow_owner is created if
-  # missing, with a RANDOM password kept in /run/crewflow/db-target/owner-password and reused on every start; Twenty:
-  # secret-db-url.yaml:3-8), or (c) PG_DATABASE_URL, an existing crewflow_owner URL (read-only checks; its password is
-  # copied into that file; the database is never written to; no provisioning). Plus the TLS CA; NOT APP_SECRET (never part
-  # of a database credential; db-setup.sh refuses it). In every mode it writes the credential-free target file
-  # /run/crewflow/db-target/target.json. rab-api and rab-worker never receive a PG_ADMIN_URL value (pinned "") nor an operator's
-  # PG_DATABASE_URL: they mount the volume read-only and build the crewflow_owner URL from the two files. It runs again on every `docker compose up` (it
-  # removes the old target first, never the password file), then rab-api starts (depends_on:
-  # service_completed_successfully). No port, no health check (it exits), never restarted.
-  # Running it again is safe: it only creates what is missing (role, grants, password file) and exits 0 when all exists.
+  # db-setup — the ONE-SHOT database setup, the Twenty way (owner decision 2026-11-18). Twenty: the
+  # `ensure-database-exists` init container alone holds the superuser secret and creates the app user with the app user's own
+  # password (twentyhq/twenty@eedb0a73 packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:82-128). The SAME
+  # image as rab-api and rab-worker; its entrypoint db-setup.sh runs only the bootstrap child, then exits. It is the ONLY
+  # service that receives an admin login: (a) the bundled db's superuser (default), or (b) PG_ADMIN_URL, your own
+  # database's admin URL; with it, crewflow_owner is created with the password inside PG_DATABASE_URL (the same URL rab-api
+  # and rab-worker receive), its password is set to that one when it does not log in, and CREATEROLE is removed once the
+  # schema is complete. (c) Without an admin, it only checks crewflow_owner, read-only. NOT APP_SECRET (db-setup.sh refuses
+  # it). It writes no file. It runs again on every `docker compose up` (idempotent: it changes only what differs), then
+  # rab-api starts (depends_on: service_completed_successfully). No port, no health check (it exits), never restarted.
+  # NO depends_on (owner instruction 2026-11-18, Twenty's Helm wait-for-db): it first waits, bounded, for the database it
+  # uses (the wrapper below: PG_ADMIN_URL's host when it is set, else the bundled db, else PG_DATABASE_URL's host).
   # It also runs with CREWFLOW_BUNDLED_DB=0 (unlike Twenty's `if db.enabled` init containers): your own database still
-  # needs crewflow_owner created (PG_ADMIN_URL) or checked (PG_DATABASE_URL), and db-setup's files are the only way the
-  # crewflow_owner credential reaches rab-api and rab-worker without a database URL in their environment.
+  # needs crewflow_owner created (PG_ADMIN_URL) or checked (PG_DATABASE_URL only).
   # ---------------------------------------------------------------------------
   db-setup:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
-    entrypoint: ["./db-setup.sh"]
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
+    # Twenty's Helm wait-for-db init container (owner instruction 2026-11-18): no `depends_on: db` (with CREWFLOW_BUNDLED_DB=0
+    # that dependency has no container, and OpenShip then skips db-setup instead of starting it). This wrapper waits, bounded
+    # (CREWFLOW_DB_WAIT_SECONDS, default 170 s), until the database db-setup uses accepts connections (PG_ADMIN_URL's host when
+    # it is set, else the bundled db, else PG_DATABASE_URL's host), then execs ./db-setup.sh unchanged. It is here, not only in the image, because
+    # the pinned release (0.6.0) has a db-setup.sh without the wait; later images run the identical block again inside
+    # db-setup.sh (instant once the database is up). The block between the BEGIN/END lines must stay byte-identical to
+    # rab/db-setup.sh (compose-owner-login.cjs, run-prestart-shell-tests.cjs); `$$` is Compose's escape for `$`.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        # BEGIN crewflow wait-for-db
+        # Twenty's Helm wait-for-db init container, re-implemented (not copied): db-setup and db-harden have no `depends_on: db`,
+        # because with CREWFLOW_BUNDLED_DB=0 the bundled db has no container and a platform that does not skip a 0-replica dependency
+        # (OpenShip: 'Dependency "db" has no container for service_healthy') then never starts them. Instead they wait for the
+        # database they will use: PG_ADMIN_URL's host when it is set (mode b: PG_ADMIN_URL + PG_DATABASE_URL, the same database;
+        # inside db-setup.sh also mode a, where PG_ADMIN_URL is the bundled superuser URL by then), else the bundled db (host db,
+        # mode a, from CREWFLOW_BUNDLED_DB_ADMIN_URL: the compose wrapper runs before db-setup.sh picks the mode), else
+        # PG_DATABASE_URL's host (mode c). The probe is pg_isready's check, in node (the image has no pg_isready): a TCP connect and a
+        # protocol-3.0 startup message with a FIXED placeholder login (crewflow_wait_for_db), no TLS and no password; an
+        # authentication request or any error other than 57P03 (starting up / shutting down) means the server accepts connections.
+        # It never authenticates, never runs a query and reads nothing but the URL's host and port; the bootstrap child then makes
+        # the real verify-full connection. Bounded by CREWFLOW_DB_WAIT_SECONDS (unset or empty = 170; 0 = do not wait; at most 900)
+        # on the monotonic clock; a progress line whenever the result changes and every 10 s; on timeout ONE fixed line and exit 70
+        # (a failure, like the bootstrap child's own "did not accept a connection" 70; 64 stays for settings the operator must
+        # change, such as an invalid CREWFLOW_DB_WAIT_SECONDS). The default 170 s stays inside OpenShip's 180 s window for a
+        # service_completed_successfully dependency without a health check (security review L1), so on a dead database db-setup
+        # fails with its own line first. Prints no URL, host, login, password or database name (the lines say "db-setup" also in
+        # db-harden). Not waited for (the refusal or the child's check comes at once): a bad CREWFLOW_BUNDLED_DB, an empty
+        # PG_DATABASE_URL or an empty crewflow_owner password in it, the bundled db without its password, an unparseable URL. In the
+        # compose wrapper ONLY those come before the wait: db-setup.sh's own preamble refusals (arguments, a password variable or
+        # APP_SECRET present, a login that is not crewflow_owner) run after it (review L2). Safe to run twice: the same block runs
+        # in the db-setup wrapper of docker-compose.production.yml / docker-compose.image.yml (the published image's db-setup.sh
+        # has no wait) and again here (run-prestart-shell-tests.cjs and compose-owner-login.cjs require the copies to be identical).
+        crewflow_wait_for_db() {
+          case "$${CREWFLOW_BUNDLED_DB:-1}" in 0 | 1) ;; *) return 0 ;; esac
+          case "$${PG_DATABASE_URL:-}" in '' | *://crewflow_owner:@*) return 0 ;; esac
+          if [ -n "$${PG_ADMIN_URL:-}" ]; then
+            crewflow_wait_url="$$PG_ADMIN_URL"
+          elif [ "$${CREWFLOW_BUNDLED_DB:-1}" = 1 ]; then
+            crewflow_wait_url="$${CREWFLOW_BUNDLED_DB_ADMIN_URL:-}"
+            case "$$crewflow_wait_url" in '' | postgresql://postgres:@*) crewflow_wait_url=''; return 0 ;; esac
+          else
+            crewflow_wait_url="$$PG_DATABASE_URL"
+          fi
+          case "$${CREWFLOW_DB_WAIT_SECONDS:-170}" in
+            *[!0-9]* | ????*) crewflow_wait_limit=invalid ;;
+            *) crewflow_wait_limit="$${CREWFLOW_DB_WAIT_SECONDS:-170}" ;;
+          esac
+          if [ "$$crewflow_wait_limit" = invalid ] || [ "$$crewflow_wait_limit" -gt 900 ]; then
+            echo 'db-setup: REFUSED - CREWFLOW_DB_WAIT_SECONDS must be a whole number of seconds from 0 to 900 (unset = 170; 0 = do not wait). Value not shown.' >&2
+            exit 64
+          fi
+          if [ "$$crewflow_wait_limit" -eq 0 ]; then crewflow_wait_url=''; return 0; fi
+          crewflow_wait_status=0
+          CREWFLOW_DB_WAIT_URL="$$crewflow_wait_url" CREWFLOW_DB_WAIT_LIMIT="$$crewflow_wait_limit" node -e '
+        "use strict";
+        const net = require("net");
+        const limit = Number(process.env.CREWFLOW_DB_WAIT_LIMIT);
+        let host = "";
+        let port = 5432;
+        try {
+          const u = new URL(process.env.CREWFLOW_DB_WAIT_URL || "");
+          host = decodeURIComponent(u.hostname);
+          if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+          if (u.port) port = Number(u.port);
+          if (u.searchParams.has("host") || u.searchParams.has("port")) host = "";
+        } catch (e) {
+          host = "";
+        }
+        delete process.env.CREWFLOW_DB_WAIT_URL;
+        if (!host || host.startsWith("/") || !(Number.isInteger(port) && port > 0 && port < 65536)) {
+          console.log("db-setup: not waiting for the database: its address could not be read from the URL (the setup step checks the URL next)");
+          process.exit(0);
+        }
+        const which = host === "db" ? "the bundled database (db)" : "your database";
+        const started = process.hrtime.bigint();
+        const elapsed = () => Number((process.hrtime.bigint() - started) / 1000000n) / 1000;
+        const startup = (() => {
+          const params = Buffer.from("user\x00crewflow_wait_for_db\x00database\x00crewflow_wait_for_db\x00application_name\x00crewflow-db-setup-wait\x00\x00", "latin1");
+          const head = Buffer.alloc(8);
+          head.writeInt32BE(8 + params.length, 0);
+          head.writeInt32BE(196608, 4);
+          return Buffer.concat([head, params]);
+        })();
+        const probe = (timeoutMs) => new Promise((resolve) => {
+          let done = false;
+          let buf = Buffer.alloc(0);
+          const s = net.connect({ host: host, port: port });
+          const finish = (result) => {
+            if (done) return;
+            done = true;
+            s.destroy();
+            resolve(result);
+          };
+          s.setTimeout(timeoutMs, () => finish("no answer in time"));
+          s.on("error", (e) => {
+            const code = String((e && e.code) || "unknown");
+            if (code === "ECONNREFUSED") finish("connection refused");
+            else if (code === "ENOTFOUND" || code === "EAI_AGAIN") finish("host name not found yet");
+            else finish("network error " + code.replace(/[^A-Z0-9_]/g, ""));
+          });
+          s.on("close", () => finish("connection closed before an answer"));
+          s.on("connect", () => s.write(startup));
+          s.on("data", (d) => {
+            buf = Buffer.concat([buf, d]);
+            if (buf[0] === 0x52) return finish("ready");
+            if (buf[0] !== 0x45) return finish("an answer that is not PostgreSQL");
+            if (buf.length < 5) return;
+            const len = buf.readInt32BE(1);
+            if (len < 4 || len > 65536) return finish("ready");
+            if (buf.length < 1 + len) return;
+            const fields = buf.subarray(5, 1 + len).toString("latin1").split("\x00");
+            const sqlstate = (fields.find((f) => f[0] === "C") || "").slice(1);
+            finish(sqlstate === "57P03" ? "the server is starting up or shutting down (57P03)" : "ready");
+          });
+        });
+        (async () => {
+          let last = "";
+          let nextReport = 0;
+          for (;;) {
+            const left = limit - elapsed();
+            const result = await probe(Math.max(1000, Math.min(5000, Math.floor(left * 1000))));
+            const t = elapsed();
+            if (result === "ready") {
+              console.log("db-setup: " + which + " accepts connections (waited " + Math.round(t) + "s)");
+              process.exit(0);
+            }
+            if (result !== last || t >= nextReport) {
+              console.log("db-setup: waiting for " + which + " to accept connections (" + Math.round(t) + "s of " + limit + "s): " + result);
+              last = result;
+              nextReport = t + 10;
+            }
+            if (t >= limit) {
+              console.error("db-setup: REFUSED - the database did not accept connections within " + limit + "s (CREWFLOW_DB_WAIT_SECONDS). Nothing was changed. Check that it is running and reachable from this container, then start again.");
+              process.exit(70);
+            }
+            await new Promise((r) => setTimeout(r, Math.min(2000, Math.ceil((limit - t) * 1000))));
+          }
+        })().catch(() => {
+          console.error("db-setup: REFUSED - the wait for the database stopped unexpectedly. Nothing was changed.");
+          process.exit(70);
+        });
+        ' &
+          crewflow_wait_pid=$$!
+          trap 'kill -TERM "$$crewflow_wait_pid" 2>/dev/null; exit 143' TERM INT
+          wait "$$crewflow_wait_pid" || crewflow_wait_status=$$?
+          trap - TERM INT
+          unset crewflow_wait_url crewflow_wait_limit crewflow_wait_pid
+          case "$$crewflow_wait_status" in
+            0) ;;
+            70) exit 70 ;;
+            *) echo "db-setup: REFUSED - the wait for the database stopped unexpectedly (exit $$crewflow_wait_status). Nothing was changed." >&2; exit 70 ;;
+          esac
+        }
+        # END crewflow wait-for-db
+        crewflow_wait_for_db
+        exec ./db-setup.sh
+      - db-setup
     environment:
-      # The database settings (compose.env), THIS SERVICE ONLY (owner decision 2026-11-17, Twenty's Helm model: the admin
-      # login lives only in the setup step). db-setup.sh picks the mode; the bootstrap child refuses both URLs at once,
-      # neither, a non-crewflow_owner PG_DATABASE_URL and a crewflow_owner PG_ADMIN_URL:
-      #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode=verify-full; CREWFLOW_BUNDLED_DB=0): db-setup
-      #       creates crewflow_owner. rab-api and rab-worker NEVER receive it (they refuse it; compose-owner-login.cjs).
+      # The database settings (compose.env). db-setup.sh picks the mode; the bootstrap child refuses a non-crewflow_owner
+      # PG_DATABASE_URL, a crewflow_owner PG_ADMIN_URL, and two URLs that name different databases:
+      #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode=verify-full; CREWFLOW_BUNDLED_DB=0), THIS
+      #       SERVICE ONLY: db-setup creates crewflow_owner with it. rab-api and rab-worker NEVER receive it (pinned "").
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
-      #   (c) PG_DATABASE_URL: ALWAYS the app login, a crewflow_owner you created yourself (CREWFLOW_BUNDLED_DB=0, no
-      #       PG_ADMIN_URL): checked read-only, never written to. Any other login here is refused (never an admin URL).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-}
-      #   (a) neither (the default): the bundled db's superuser, built here from PG_DATABASE_PASSWORD. Used only when both
-      #       URLs above are empty; db-setup.sh refuses CREWFLOW_BUNDLED_DB=0 without a URL, and an empty password (no
-      #       `:?` here: PG_DATABASE_PASSWORD is not required with your own database).
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_HOST: ${PG_DATABASE_HOST:-}
+      #   ALWAYS: the crewflow_owner URL, the very expression rab-api and rab-worker receive (x-crewflow-required-env): your
+      #   crewflow_owner URL (b, c), or the bundled db's built from PG_DATABASE_APP_PASSWORD (a).
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
+      #   (a) no PG_ADMIN_URL and CREWFLOW_BUNDLED_DB 1 (the default): the admin is the bundled db's superuser, built here from
+      #       PG_DATABASE_PASSWORD; db-setup.sh refuses an empty password (no `:?` here: PG_DATABASE_PASSWORD is not required
+      #       with your own database). (c) CREWFLOW_BUNDLED_DB=0 and no PG_ADMIN_URL: read-only checks.
       CREWFLOW_BUNDLED_DB: ${CREWFLOW_BUNDLED_DB:-1}
       CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full
+      # How long db-setup waits for the database to accept connections before it gives up (exit 70): whole seconds, 0-900;
+      # unset or empty = 170 (inside OpenShip's 180 s window for rab-api -> db-setup); 0 = do not wait. Not a database
+      # credential; read only by the wait above.
+      CREWFLOW_DB_WAIT_SECONDS: ${CREWFLOW_DB_WAIT_SECONDS:-170}
+      # Owner decision 2026-11-20: db-setup never changes an existing crewflow_owner password by itself ("PG_DATABASE_URL
+      # password doesn't match crewflow_owner", exit 64). To rotate it, put the new value in PG_DATABASE_URL on every service and
+      # set CREWFLOW_ROTATE_APP_PASSWORD=1 in compose.env for ONE deploy, then remove it. Exactly 1 or empty (anything else is
+      # refused). THIS SERVICE ONLY: never rab-api, rab-worker or db-harden. Not a credential (a switch).
+      CREWFLOW_ROTATE_APP_PASSWORD: ${CREWFLOW_ROTATE_APP_PASSWORD:-}
       # The TLS trust setting of rab-api / rab-worker (the shared optional list above): an external database's CA file.
       # Not PG_DATABASE_URL_IS_DIRECT: the bootstrap child refuses a transaction-pooler URL whatever that flag says.
       PG_SSL_CA_CERT_PATH:
@@ -555,12 +759,9 @@ services:
       RAB_RUNTIME_ENV: production
     networks: [default, crewflow-db]
     volumes:
+      # The bundled db's own CA (read-only; db-setup.sh sets PG_SSL_CA_CERT_PATH for host db).
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-      # The target file (written here; read-only in rab-api and rab-worker).
-      - crewflow-db-target:/run/crewflow/db-target
-    depends_on:
-      db:
-        condition: service_healthy
+
     restart: "no"
     logging: *logging
     user: "1000:1000"
@@ -572,15 +773,68 @@ services:
     cpus: 1
     stop_grace_period: 40s
 
+  # ---------------------------------------------------------------------------
+  # db-harden — the ONE-SHOT CREATEROLE hardening (owner decision 2026-11-18, security review of PR #246, M1: "auto-close
+  # plus a grace period"). crewflow_owner is created CREATEROLE because the first start's migrate child creates the schema
+  # roles. This service closes that window in the SAME deploy: the same image and code path as db-setup (db-setup.sh
+  # harden -> the bootstrap child's CREATEROLE step), the same database settings. It polls READ-ONLY (a crewflow_owner
+  # session reads the migration ledger) until the ledger holds every migration of this image, bounded by
+  # CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS (default 1200, 60-7200), then, as the admin, under the advisory lock and after the
+  # other-database check, removes CREATEROLE and the mark (ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE
+  # crewflow_owner IS NULL) and exits 0. Already hardened: no-op, exit 0. Timeout: a clear error, a non-zero exit,
+  # nothing changed (the next `docker compose up -d` retries; db-setup also removes it once the schema is complete).
+  # Mode c (no PG_ADMIN_URL, CREWFLOW_BUNDLED_DB=0): nothing to do, exit 0 (the operator removes CREATEROLE by hand within
+  # the mark's grace period). NO depends_on at all, and NOTHING depends on it: it never blocks rab-api or rab-worker, and
+  # it does not rely on depends_on conditions (OpenShip drops them): it waits for the database and the ledger by itself.
+  # The database wait is db-setup.sh's own `crewflow wait-for-db` block (the same target selection as db-setup's wrapper:
+  # PG_ADMIN_URL's host when it is set, else the bundled db; bound CREWFLOW_DB_WAIT_SECONDS), so no compose wrapper here:
+  # `harden` exists only in images whose db-setup.sh already has that block (the published 0.6.0 image has neither).
+  # The only other service besides db-setup that receives the admin login (compose-owner-login.cjs enforces the shape).
+  # ---------------------------------------------------------------------------
+  db-harden:
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
+    entrypoint: ["./db-setup.sh", "harden"]
+    environment:
+      # db-setup's database settings, exactly (the same modes and refusals): PG_ADMIN_URL (b), the crewflow_owner URL,
+      # the bundled db switch and its superuser URL (a). rab-api and rab-worker NEVER receive the admin login.
+      PG_ADMIN_URL: ${PG_ADMIN_URL:-}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_HOST: ${PG_DATABASE_HOST:-}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
+      CREWFLOW_BUNDLED_DB: ${CREWFLOW_BUNDLED_DB:-1}
+      CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full
+      PG_SSL_CA_CERT_PATH:
+      PG_SSL_CA_CERT:
+      # How long it waits (read-only polls) for the ledger to hold every migration of this image: 60-7200 s.
+      CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: ${CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS:-1200}
+      # How long it first waits for the database to accept connections (db-setup.sh's wait block; the same value as db-setup).
+      CREWFLOW_DB_WAIT_SECONDS: ${CREWFLOW_DB_WAIT_SECONDS:-170}
+      NODE_ENV: production
+      RAB_RUNTIME_ENV: production
+    networks: [default, crewflow-db]
+    volumes:
+      # The bundled db's own CA (read-only; db-setup.sh sets PG_SSL_CA_CERT_PATH for host db).
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
+    restart: "no"
+    logging: *logging
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    stop_grace_period: 30s
+
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
-    # no compose init). It runs the refusals, the runtime-isolation check, builds the crewflow_owner URL from db-setup's
-    # target file (option 2: this service never receives a PG_ADMIN_URL value, pinned "", or an operator's PG_DATABASE_URL), waits (bounded, 120 s) for a working login, runs
-    # the migrate child and the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`.
+    # no compose init). It runs the refusals (this service never receives a PG_ADMIN_URL value, pinned ""), the
+    # runtime-isolation check, takes PG_DATABASE_URL (the crewflow_owner URL) from the environment, runs the migrate child and
+    # the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`.
     # Owner CLI one-offs: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`
-    # (the script builds the same crewflow_owner URL and runs the command with it, nothing else).
+    # (the same refusals and the same PG_DATABASE_URL, then the command, nothing else).
     entrypoint: ["./api-prestart.sh"]
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
@@ -588,8 +842,6 @@ services:
     volumes:
       # The bundled db's own CA (read-only; api-prestart.sh sets PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt for host db).
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-      # db-setup's target file (read-only): the crewflow_owner URL is built from it.
-      - crewflow-db-target:/run/crewflow/db-target:ro
     environment:
       # REQUIRED and OPTIONAL: the shared lists above (identical on rab-worker).
       <<: [*required-env, *optional-env]
@@ -597,6 +849,12 @@ services:
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      PG_ADMIN_DIRECT_URL: ""
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
+      BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
+      BOOTSTRAP_ADMIN_ORG_SLUG: ${BOOTSTRAP_ADMIN_ORG_SLUG:-}
+      BOOTSTRAP_ADMIN_ORG_NAME: ${BOOTSTRAP_ADMIN_ORG_NAME:-}
       # OPTIONAL, rab-api only. Pool ceiling (code default 10; the Worker's 12 is pinned on rab-worker).
       PG_POOL_MAX_CONNECTIONS:
       # Seconds api-prestart.sh waits before exiting after a start-up failure (0-300).
@@ -604,7 +862,6 @@ services:
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
@@ -635,12 +892,10 @@ services:
     depends_on:
       rab-redis:
         condition: service_healthy
-      # The bundled db (with CREWFLOW_BUNDLED_DB=0 it has 0 replicas and Compose skips this wait).
-      db:
-        condition: service_healthy
-      # Option A: db-setup (the only service with PG_ADMIN_URL) has created or checked crewflow_owner and written the target file.
-      # A platform that drops this condition (OpenShip: NOT VERIFIED) still cannot start the API early: api-prestart.sh
-      # waits, bounded (120 s), for the target file and a working crewflow_owner login, and never takes an admin path.
+      # db-setup (the only service with an admin login) has created or checked crewflow_owner. No dependency on db (owner
+      # instruction 2026-11-18, Twenty's Helm wait-for-db): db-setup waits for the database itself. A platform that drops this
+      # condition (OpenShip: NOT VERIFIED) starts the API early: its migrate child then fails to log in (or finds the role
+      # missing), exits non-zero, and the restart policy retries; it never takes an admin path.
       db-setup:
         condition: service_completed_successfully
     healthcheck:
@@ -666,9 +921,9 @@ services:
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
-    # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it builds the crewflow_owner URL from db-setup's target
-    # file (option 2: this service never receives a PG_ADMIN_URL value, pinned "", or an operator's PG_DATABASE_URL), then `exec /sbin/tini -s -- node
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
+    # worker-start.sh is the ENTRYPOINT (PID 1): the refusals (this service never receives a PG_ADMIN_URL value, pinned
+    # ""), PG_DATABASE_URL (the crewflow_owner URL) from the environment, then `exec /sbin/tini -s -- node
     # packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog SIGKILL, ignored by the kernel for PID 1, still
     # works). NO compose `init: true` (compose-owner-login.cjs refuses it).
     entrypoint: ["./worker-start.sh"]
@@ -676,7 +931,6 @@ services:
     networks: [default, crewflow-db]
     volumes:
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-      - crewflow-db-target:/run/crewflow/db-target:ro
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
@@ -699,6 +953,7 @@ services:
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      PG_ADMIN_DIRECT_URL: ""
       # OPTIONAL, rab-worker only. Event-loop watchdog: a loop silent this long is a stall (30-900 s).
       CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS: ${CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS:-120}
       # Milliseconds the Worker waits for running jobs on shutdown: a plain integer from 1000 to 34000 (drain + 10 s
@@ -707,7 +962,6 @@ services:
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       # The owner's "feel instant" onboarding pin, read by the in-process provisioner (Agent 2 interface).
@@ -764,5 +1018,3 @@ volumes:
   # rab-worker).
   crewflow-db-data:
   crewflow-db-ca:
-  # db-setup's target file (PR #125 options A and 2): written by db-setup only, mounted read-only by rab-api and rab-worker.
-  crewflow-db-target:

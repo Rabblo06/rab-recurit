@@ -2838,7 +2838,8 @@ Provider-side spend limits remain the owner's backstop (checklist).
 
 ### EX-2: owner-approved deviation from rule 1.1 (`AI_ENABLED` default true, owner 2026-10-25)
 Actor→action→consequence: an operator deploys without setting `AI_ENABLED` → AI is platform-on by default.
-Controls: production compose pins `AI_ENABLED: 'false'` (rab-api, rab-worker); every organisation's AI switch defaults
+Controls: production compose commits `AI_ENABLED: ${AI_ENABLED:-false}` on rab-api and rab-worker (was the literal
+`'false'` pin until the owner decision of 2026-11-20, "AI: operator-set in production" below); every organisation's AI switch defaults
 OFF and only a platform admin with step-up can change it; with no approved, keyed model the AI subsystem is
 unavailable (fail closed, boot unaffected); `AI_ENABLED=false` still blocks every AI route and queued turn.
 Residual risk: a non-production deployment made from this code (e.g. QA) starts with AI platform-on; it still does
@@ -2932,7 +2933,7 @@ platform admins the reasons, names only, and the key status as configured boolea
 | T1–T3, AI-F1 | AI | Open for veto before release |
 | TP-1 … TP-7 | AI Part A | TP-1 = owner decision 4; TP-2 confirmed by the owner 2026-10-25 (deviation from spec 4.3); the rest open for veto |
 | EX-1 (rule 3.7 exception) | AI Part A | Owner-approved 2026-10-25 for dev + synthetic data only; expires at the first of §3.7 recorded / real-data or production use / 2026-12-31 |
-| EX-2 (rule 1.1 deviation) | AI | Owner-approved 2026-10-25: `AI_ENABLED` code default true; production compose pins `AI_ENABLED: 'false'`; org switches stay default OFF; no ready model ⇒ AI unavailable |
+| EX-2 (rule 1.1 deviation) | AI | Owner-approved 2026-10-25: `AI_ENABLED` code default true; production compose commits `${AI_ENABLED:-false}` (operator-set, default off, owner decision 2026-11-20; was the `'false'` pin); org switches stay default OFF; no ready model ⇒ AI unavailable |
 | TP-8 (four inert Twenty key names) | AI Phase 1 real models | Owner-approved 2026-10-25 (D4); inert until an SDK + approval |
 | TP-9 (production legacy key = warning) | AI Phase 1 real models | Open until the owner confirms the production env (D2); release-checklist item |
 | TP-10 (env default lists not tier-checked) | AI Phase 1 real models | Open for veto |
@@ -3503,7 +3504,8 @@ names, shift notes); an insider with a narrower role; an operator editing permis
 - **Prompt caching:** request-level `cacheControl {type: ephemeral}` only when the catalogue fact is `anthropic-auto`
   AND (a real provider in NODE_ENV=development on the EX-1 path — synthetic organisation, non-test database — or an
   in-process test model under NODE_ENV=test). Never production, never a lifetime key (static test). Production compose
-  stays `AI_ENABLED: 'false'`.
+  stays `AI_ENABLED: 'false'` (since 2026-11-20: `${AI_ENABLED:-false}`, operator-set, default off; this caching rule is
+  unchanged).
 - **Residual / open:** the per-user ceiling default (PROVISIONAL); OpenAI `promptCacheKey` is not wired (no catalogue
   entry uses it); the front's text for the two new codes and the Usage tab belong to the front lane.
 
@@ -4829,11 +4831,12 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
 - **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
   Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
   2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
-  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.3, Chromium
   156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
   any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
   v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
-  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  `node:24-alpine` index digest with Node 24.22.3 on Alpine 3.24.4 (amd64 + arm64; floor and digest raised 2026-11-19
+  for the 2026-11-10 Node 24 security release). Residual: a floor is only as current as the last edit
   of that file (H5 release scanning re-checks against Chrome/Node releases).
 - **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
   `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
@@ -7349,7 +7352,7 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
 - **Residual.** As Twenty: the deployment configuration (compose.env, db-setup's definition) must be protected like the
   database itself; who can read it is outside Crewflow.
 
-### TM-DB-2 (new, Helm model) — the crewflow_owner password file on the setup volume
+### TM-DB-2 (SUPERSEDED 2026-11-18 by TM-DB-6: no password file any more) — the crewflow_owner password file on the setup volume
 - **Actor → action → consequence.** Anyone who can read the setup volume (root on the host, `docker run -v` on it, a copy
   of a volume backup) reads the `crewflow_owner` password → the schema owner login (RLS is FORCED, but the owner can alter
   policies).
@@ -9425,3 +9428,635 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## db-setup waits for the database itself; no `depends_on: db` (branch fix/db-setup-waits-for-db, 2026-11-18; no SQL)
+- **What changed.** `docker-compose.production.yml` / `docker-compose.image.yml`: db-setup has no `depends_on`, rab-api no
+  longer depends on `db` (it keeps db-setup `service_completed_successfully` and rab-redis `service_healthy`). OpenShip
+  (v0.9.12+) skipped db-setup when `db` had no container (`CREWFLOW_BUNDLED_DB=0`). db-setup now waits, bounded
+  (`CREWFLOW_DB_WAIT_SECONDS`, default 170, 0-900), for the database it uses: Twenty's Helm wait-for-db init container,
+  re-implemented. The block lives in `rab/db-setup.sh` and, byte-identical, in a compose wrapper (`/bin/sh -c '<block>;
+  exec ./db-setup.sh'`) because the published 0.6.0 image has no wait. Gates: `scripts/db-setup-wait.cjs` (shared by
+  compose-owner-login, compose-credential-isolation, compose-one-image, verify-image-compose).
+- **Credentials.** The probe reads only the host and port of the URL db-setup already holds (bundled URL, PG_ADMIN_URL
+  or PG_DATABASE_URL); it never authenticates, never runs a query, never prints the URL, host, login or password (fixed
+  lines only; tests 15b/15c/15g/15h scan for the sentinel). The URL reaches the probe as an environment variable of its own
+  process (never argv); nothing but its host and port is used. No new service receives a URL.
+- **Security trade-off (convenience over a stricter control; §5.8, for veto).** The probe is pg_isready's check, not a
+  verify-full login: a plain-TCP protocol-3.0 startup message with the fixed placeholder login `crewflow_wait_for_db`, no
+  TLS, no password. Chosen because the image has no `pg_isready`, because it needs no credential and no CA (so it cannot
+  leak or misuse one), and because the real connection follows at once. What an on-path attacker gains: it can make the wait
+  end early (fake "ready") or last until the bound (drop packets); either way the bootstrap child's own verify-full
+  connection decides, exactly as before this change. It learns the placeholder name only. The server logs one
+  `no pg_hba.conf entry ... crewflow_wait_for_db ... no encryption` FATAL (bundled db: hostssl only) or an authentication
+  start per successful probe; nothing is authorised, so the admin-connection audit (run-db-setup-tests.cjs) is unchanged.
+- **Fail closed.** Timeout: one fixed line, exit 70, nothing changed (the child never ran; rab-api is not started).
+  An invalid bound: exit 64 before anything connects. Not waited for: a bad CREWFLOW_BUNDLED_DB, both URLs, neither with
+  CREWFLOW_BUNDLED_DB=0, the bundled db without its password, an unparseable URL. Correction (review L2): in the compose
+  wrapper ONLY those CREWFLOW_BUNDLED_DB / URL-presence checks come before the wait; db-setup.sh's own preamble refusals
+  (arguments, PG_DATABASE_PASSWORD or APP_SECRET present, the run lock) run after it, so with an unreachable database
+  such a setting is reported only after the bound. TERM during the wait exits 143 at once. The wrapper is checked
+  exactly (any edit fails the gates), and as Compose text every `$` must be doubled (review L3: a single `$` would be
+  interpolated by Compose).
+- **Residual (OpenShip).** OpenShip waits at most 180 s (db-setup has no health check) for db-setup to complete before it
+  fails rab-api. The default bound is therefore 170 s (review L1): on a dead database db-setup exits 70 with its own fixed
+  line inside that window, so the operator sees the cause, not only OpenShip's timeout; a slower database means a
+  redeploy (api-prestart.sh's own 120 s wait for db-setup's files is unchanged). A larger CREWFLOW_DB_WAIT_SECONDS gives
+  that up on OpenShip.
+- **Follow-up (review L2, not in this PR).** db-setup removes the previous `target.json` only once its child holds the run
+  lock, i.e. AFTER the wait. While db-setup waits, a platform that does not honour service_completed_successfully could
+  start rab-api, whose api-prestart.sh would read the PREVIOUS run's target and password files. They describe the last
+  good setup (same login, no admin URL), so nothing leaks, but api-prestart.sh should check that the target is fresh
+  (written by the current db-setup run) before it uses it. OpenShip ignores `deploy.replicas`, so `CREWFLOW_BUNDLED_DB=0` there needs the db service switched off in
+  OpenShip; otherwise the bundled db starts without a password, refuses (exit 64) and restarts, while db-setup and the app
+  use your database regardless.
+- **Tests.** run-prestart-shell-tests.cjs section 15 (slow database 57P03 then ready, unreachable timeout, 28000 counts as
+  up, bounds 0-900, 0 = no wait, the compose wrapper path incl. mode a by host db, refusals not waited for, TERM); the four
+  compose gates and their tests; real containers on InstaBox with the published 0.6.0 image (PR body).
+## DB-SETUP the Twenty way: rab-api and rab-worker read PG_DATABASE_URL (crewflow_owner) from the environment (branch feat/twenty-style-db-url, owner instruction 2026-11-18; security review of PR #246: M1 owner decision, M2, L1-L4)
+
+- **Change.** Replaces PR #125 option 2's credential files. rab-api and rab-worker read `PG_DATABASE_URL`, always the
+  `crewflow_owner` URL (direct host, `sslmode=verify-full`), from their environment, as Twenty's server and worker read the
+  app user's URL (`twentyhq/twenty@eedb0a73` `helm/twenty/templates/deployment-server.yaml:148-155`,
+  `deployment-worker.yaml:81-88`). The target file, the password file, the setup-volume flock, the derive step and the
+  `crewflow-db-target` volume are removed from every compose file (`crewflow-db-ca` stays). `PG_ADMIN_URL`, `DATABASE_URL` and
+  the other legacy URLs stay refused on rab-api / rab-worker. Modes: (a) bundled db, `PG_DATABASE_PASSWORD` (superuser) +
+  `PG_DATABASE_APP_PASSWORD` (crewflow_owner), each `openssl rand -hex 32`; (b) your database, `PG_ADMIN_URL` (db-setup and
+  db-harden only) + `PG_DATABASE_URL`, the same database; (c) your database, `PG_DATABASE_URL` only.
+- **db-setup** (modes a and b) creates `crewflow_owner` with the password inside `PG_DATABASE_URL` (SCRAM verifier only).
+  **A password mismatch SILENTLY ROTATES the owner password**: when the role exists and that password does not log in,
+  db-setup SETS it to the one in `PG_DATABASE_URL` (one log line, no prompt), after the safety checks (Q2b: not used by
+  another database of the cluster; ADMIN OPTION + CREATEROLE or superuser). Consequence: a typo in `PG_DATABASE_APP_PASSWORD`
+  or `PG_DATABASE_URL` changes the schema owner's password to the typo (the API then works with it), and any other client that
+  used the old password stops working. Mode c never changes the password (a mismatch is refused, 64). Every write runs in a
+  transaction under the existing advisory lock (`crewboot`), which replaces the flock.
+- **M2 (review): password strength floor.** db-setup refuses (64, before connecting) to create or set a `crewflow_owner`
+  password under 32 characters, with fewer than 10 different characters, or made of one short repeated block; in mode c
+  (check only) the same floor is enforced in production. The bundled db's password is additionally 32+ of `[A-Za-z0-9_-]`
+  (db-setup.sh). A heuristic floor, not an entropy measurement (a 32-character sequence such as `0123456789…` passes).
+- **L2 (review): an old compose.env.** Before 2026-11-18 `PG_DATABASE_URL` could hold the ADMIN URL. db-setup.sh,
+  api-prestart.sh and worker-start.sh now refuse (64, before any node process) a `PG_DATABASE_URL` whose userinfo login is not
+  `crewflow_owner` (a pure shell parse; no connection), and db-setup.sh a `PG_ADMIN_URL` that logs in as `crewflow_owner`.
+  REQUIRED preflight before every deploy: `node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file compose
+  <your compose.env>`; a non-zero exit is a stop.
+- **CREATEROLE (owner decision M1, "auto-close plus a grace period").** crewflow_owner is created CREATEROLE because the
+  first start's migrate child creates the schema roles. An admin marks it `COMMENT ON ROLE crewflow_owner IS
+  'crewflow:createrole-until-schema-current:<unix expiry>'`, the expiry computed by the SERVER as now + 24 h (db-setup; the
+  mode-c SQL files). L4 (live, PG16/17/18): a CREATEROLE crewflow_owner gets 42501 for `COMMENT ON ROLE crewflow_owner IS
+  '<mark>'` and `IS NULL`, cannot GRANT itself ADMIN OPTION, and cannot ALTER its own attributes, so it cannot forge, clear or
+  extend the mark. Modes a and b: the one-shot `db-harden` service (same image and code path, admin login, nothing depends on
+  it, no depends_on) polls read-only until the ledger holds every migration of the image, then removes CREATEROLE and the mark
+  in the SAME deploy (Q2b first; and only while no migrate child holds the migration lock, because the migrate child's
+  disableLegacyLogins after the chain still needs CREATEROLE). Timeout (`CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS`, default 1200,
+  60-7200): a non-zero exit, nothing changed; the next db-setup run removes it. Boot gate (API, Worker, CLI; production): no
+  valid mark -> refused; expired mark -> refused, naming `ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner
+  IS NULL;`; unexpired mark -> warning. The posture monitor treats exactly "crewflow_owner createrole true -> false" as the
+  expected hardening and re-baselines (no drift, no 503, no restart); CREATEROLE coming back, or any other change, is drift.
+  `transition-from-separated.sql` creates crewflow_owner NOCREATEROLE, so a transitioned deployment has nothing to harden.
+- **Boot refusals (exit 64, value never printed).** Entrypoints: empty `PG_DATABASE_URL`, empty password, a non-crewflow_owner
+  login (L2), `PG_DATABASE_APP_PASSWORD` / `PG_DATABASE_PASSWORD` / `PG_ADMIN_URL` / any other postgres URL. In process, before
+  connecting (production): not crewflow_owner, a transaction-pooler host. Boot gates: SUPERUSER, BYPASSRLS, CREATEDB,
+  REPLICATION, CREATEROLE without a valid unexpired mark, plus every existing RLS and owner-login posture check.
+- **Wait-for-db (merged with #254/#255; same trade-off as the section above, nothing new authorised).** db-setup keeps the
+  compose wait wrapper (no `depends_on`, default 170 s); db-harden has no `depends_on` either and uses the identical block
+  inside db-setup.sh (no wrapper: `harden` exists only in images that carry the block). Target selection changed for this
+  branch's modes: PG_ADMIN_URL's host when it is set (mode b is now BOTH URLs set; before, both URLs was a refusal and was not
+  waited for), else the bundled db, else PG_DATABASE_URL's host (mode c). An empty PG_DATABASE_URL or an empty crewflow_owner
+  password is refused at once, never waited for; db-harden in mode c exits before any wait. The section above's follow-up
+  about a stale `target.json` no longer applies: there is no target file.
+
+### TM-DB-6 (new, replaces TM-DB-2) — the crewflow_owner password is a platform environment value
+
+```
+SECURITY TRADE-OFF (TM-DB-6)
+Decision:   the crewflow_owner password is an operator-chosen platform environment value (compose.env /
+            PG_DATABASE_APP_PASSWORD, or inside PG_DATABASE_URL), interpolated into PG_DATABASE_URL of db-setup, db-harden,
+            rab-api and rab-worker, instead of a random 0400 file on a volume only db-setup could write.
+Reason:     owner instruction 2026-11-18 ("Twenty's way"): one setting, no volume, no derive step; the same model as
+            Twenty's compose (an env value, openssl rand -hex 32) and Helm chart (the app URL in the server's env).
+Risk:       the password now sits in each app CONTAINER DEFINITION: `docker inspect` of rab-api / rab-worker,
+            `docker compose config`, the platform UI's variables page and deploy logs that print the rendered definition all
+            show it, to anyone who can read them -> the schema-owner login (RLS is FORCED, but the owner can alter
+            policies). Not new: the running process always held the URL (/proc/<pid>/environ after the old derive step). Also
+            new: the password is OPERATOR-CHOSEN (it was random): M2's floor refuses weak values.
+Mitigation: the password never reaches a container as its own variable (refused by name everywhere); no other database
+            credential may sit beside it (gates + entrypoints); fixed log messages never print a URL or password; the login
+            is NOSUPERUSER / NOBYPASSRLS / NOCREATEDB / NOREPLICATION and NOCREATEROLE after the bootstrap, checked at every
+            boot; rotation = change the value and redeploy (db-setup sets the new password with the admin).
+Reversal:   a secret store mounted as a file per process (Docker secrets / Kubernetes Secret volume) with PG_DATABASE_URL
+            assembled in-process; the removed derive step showed the shape.
+```
+
+- **Residual: the orphaned `crewflow-db-target` volume still holds a credential.** After cutover the old named volume keeps
+  the previous random `owner-password` (no longer used, but still a valid password until db-setup rotates it, and readable by
+  anyone with access to Docker's volume store or a backup). Step after a verified cutover: `docker volume rm
+  <project>_crewflow-db-target` (keep it only while a rollback to the previous release is still planned, below).
+- **Rollback to the previous release.** It reads `owner-password` on the old volume. If db-setup rotated the password (a
+  `PG_DATABASE_APP_PASSWORD` different from the old file), that file is stale and the old db-setup refuses (64: "The stored
+  crewflow_owner password does not log in. Delete the password file ..."); deleting it lets the old db-setup reset the
+  password to a new random one (its A4 path). Setting `PG_DATABASE_APP_PASSWORD` to the old file's value avoids the rotation and
+  keeps rollback trivial. The old release accepts a NOCREATEROLE crewflow_owner.
+- **TM-DB-1 (updated).** The crewflow_owner URL now also sits in rab-api's and rab-worker's definitions (TM-DB-6);
+  `PG_ADMIN_URL` sits only in db-setup's and db-harden's.
+- **Residual: CREATEROLE window.** Modes a and b: from the first db-setup until db-harden finishes in the same deploy (or its
+  timeout; then until the next db-setup run, at most until the 24 h mark expires, after which the API / Worker refuse to
+  start). Mode c: up to 24 h, then the next start is refused until the operator runs the NOCREATEROLE step. In the window a
+  compromised app login can create roles.
+- **Tests.** Unit: owner-credential (M2), owner-bootstrap (db-harden, the expiring mark, L1, the migration-lock wait),
+  boot-gate CREATEROLE / expiry rule, posture-monitor re-baseline, runtime-login, never-in-runtime-env; mutation proofs for
+  every new refusal. Live (InstaBox, PG16/17/18 + PG15 refusal): the harness incl. M2, L1, L4, the expiry, db-harden happy /
+  already / timeout / other-database / mode c, and the CREATEROLE lifecycle with the real migrate child. Docker suites (CI):
+  run-prestart-shell-tests (L2, harden mode), the compose gates (db-harden).
+
+## SSL like Twenty, and the extra boot refusals (branch feat/twenty-ssl-boot, owner instruction 2026-11-19; read-only SQL only, no migration)
+
+- **sslmode (every URL the code parses: PG_DATABASE_URL, PG_DATABASE_REPLICA_URL, and PG_ADMIN_URL through the same
+  policy).** Production accepts exactly `sslmode=require`, `verify-ca` and `verify-full`, and all three build the SAME
+  verify-full `ssl` object (certificate chain against PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH or the system store, AND the host
+  name; bound to the IP for an IP host). `require` and `verify-ca` are therefore STRONGER than libpq's (no verification / no
+  host name). `disable`, `allow`, `prefer`, `no-verify` and a MISSING sslmode are refused in production with one fixed message
+  (pg-tls.ts PG_SSLMODE_PRODUCTION_REFUSAL). Behaviour change: a production URL without sslmode used to mean verify-full and
+  is now refused. Outside production nothing changes. Proved through a real TLS handshake (pg-tls-ca.integration.spec.ts):
+  with `sslmode=require` (and verify-ca, each with and without `channel_binding=require`) a wrong CA, a self-signed server,
+  the system store only, and a host the certificate does not name (127.0.0.1, ::1) are all refused; the right CA + host works.
+- **channel_binding=require.** Accepted and passed to pg as `enableChannelBinding` (SCRAM-SHA-256-PLUS whenever the server
+  offers it). Refused on a connection without TLS (outside production only; production always has TLS).
+
+```
+SECURITY TRADE-OFF (TLS-1)
+Decision:   channel_binding=require is accepted although pg 8.23 cannot REQUIRE channel binding: when the server does not
+            offer SCRAM-SHA-256-PLUS (or does not use SCRAM at all) pg silently authenticates without it
+            (pg/lib/crypto/sasl.js startSession).
+Reason:     owner instruction 2026-11-19 (accept the provider string as pasted, e.g. Neon's
+            sslmode=require&channel_binding=require); refusing it would break every pasted Neon URL.
+Risk:       a man in the middle who could terminate TLS could downgrade SCRAM-PLUS to SCRAM. He cannot terminate TLS: every
+            production connection verifies the certificate chain and the host name (above), which is what authenticates the
+            server; channel binding would be a second, redundant proof.
+Mitigation: verify-full on every accepted sslmode; channel_binding=require without TLS is refused.
+Reversal:   enforce it in the connection factory (refuse authenticationOk unless the session's SASL mechanism was
+            SCRAM-SHA-256-PLUS) once pg exposes it, or with a Client subclass.
+```
+
+- **Gate 6 (TLS in use), provider-neutral (owner instruction 2026-11-19: "trust our side of the connection ... No
+  proxy-specific exceptions").** In production the gate's connection must be encrypted. It is satisfied when the gate
+  session's own pg socket is a TLSSocket that Node marked `authorized` (certificate chain AND host name verified) under a
+  config that demanded it (`rejectUnauthorized: true`, and either Node's default host-name check or pg-tls.ts's own IP-bound
+  one: isVerifyFullSsl), whatever `pg_stat_ssl` says behind a TLS-terminating proxy (one warning line then); or when the
+  backend itself reports `pg_stat_ssl.ssl = true`. Otherwise refused, as before. No host, provider name or flag is read. The
+  replica validation keeps the server-side rule.
+
+```
+SECURITY TRADE-OFF (TLS-2)
+Decision:   verified client-side TLS satisfies gate 6 even when the backend reports pg_stat_ssl.ssl=false.
+Reason:     owner instruction 2026-11-19; a provider's TLS-terminating proxy (Neon's, for one) makes every backend report
+            ssl=false, which refused every such production start.
+Risk:       the hop between a terminating proxy and the backend is not visible to us; if the operator points the URL at a
+            TLS terminator they run themselves, that hop is theirs to protect.
+Mitigation: only a socket Node verified (chain + host name) under a verify-full config counts; production refuses every
+            config that could produce an unverified socket (PG_SSL_ALLOW_SELF_SIGNED, no-verify, disable, no sslmode); an
+            unverified or unknown client state falls back to the server-side requirement.
+Reversal:   drop the client-side branch of assertTlsGate (database-boot-gate-rules.ts).
+```
+
+- **Boot refusals added (API, Worker, CLI; production; read-only catalog queries).** The login (crewflow_owner) must not own
+  the current database: directly (`datdba`), through any role it is a member of (`pg_has_role(..., 'MEMBER')`, whatever the
+  INHERIT / SET / ADMIN options), or as a member of `pg_database_owner`. Refused in gate 1 (BOOT_FACTS_SQL, fail closed: a
+  missing column counts as ownership) and in posture rule 1 when production (the boot gate and the posture monitor, so a later
+  `ALTER DATABASE ... OWNER TO` is caught too). Outside production it is not checked (dev/test databases are owned by
+  rab_owner, postgres-init/01-roles.sql). Behaviour change: a production install that came from separated mode with rab_owner
+  still owning the database is refused until the admin runs `ALTER DATABASE <db> OWNER TO <admin>`. In every environment the
+  reachability walk now also refuses a reachable role with CREATEROLE (the login's own CREATEROLE keeps its mark rule). The
+  role-name lists are one shared module (database/owner-login/privileged-roles.ts), with `pg_checkpoint`,
+  `pg_use_reserved_connections`, `alloydbsuperuser` and `tsdbadmin` added; db-setup is to switch to it separately.
+- **Security review of #257 (2026-11-19, APPROVE WITH NITS), fixed here.**
+  - L-1: gate 6 needs a verify-full client config AND an authorized socket in production; pg_stat_ssl.ssl=true alone no
+    longer passes; the TLS gate is production when the process OR the connection factory says so.
+  - I-4: NODE_TLS_REJECT_UNAUTHORIZED=0 is refused at production boot.
+  - L-2: the reachability rule is closed-world. Any role the owner login reaches outside rab_owner, rab_app,
+    rab_secure_owner, crewflow, crewflow_app is refused by name; pg_database_owner is allowed only outside production.
+  - I-3: a role walk without the login's own row is refused.
+  - L-3 (partly): the new ownership columns use OPERATOR(pg_catalog.=).
+- **Follow-up (L-3, open): pin search_path for the boot-gate and posture-monitor sessions, with a search_path-independent
+  posture rendering.** Pinning `search_path=pg_catalog,pg_temp` (startup option; SET LOCAL for the monitor) was tried and
+  reverted the same day: the semantic posture renders types through format_type / regprocedure, which schema-qualify
+  anything outside the path (`public.citext` instead of the golden's `citext`), so the gate refused every start (ci-e2e
+  web-live). Until the rendering is search_path-independent, a planted `ALTER ROLE crewflow_owner SET search_path` or
+  `ALTER DATABASE ... SET search_path` applies to those sessions too; their SQL is schema-qualified, and db-setup already
+  refuses a database-wide or crewflow_owner search_path default (security review H1). The factory option
+  (create-pg-pool.ts `pinnedSearchPath`) exists and is tested, but unused.
+- **Tests.** Unit: pg-tls-sslmode.spec (the full sslmode x environment x channel_binding matrix), pg-config.spec, the boot-gate
+  spec (each ownership refusal, fail closed, the client-side gate 6 rule and its four denials), owner-login-posture.spec. Real
+  PostgreSQL (InstaBox): pg-tls-ca.integration.spec (wrong CA / wrong host refused with sslmode=require; gate 6 behind a real
+  TLS-terminating proxy: verified client TLS accepted with pg_stat_ssl.ssl=false, unverified refused), and
+  owner-login-boot-refusals.integration.spec (direct and role ownership, a reachable CREATEROLE role, the added predefined and
+  provider roles, each planted in a rolled-back transaction).
+
+## db-setup, provider-neutral: the password form and a pooled admin URL decided by capability (branch feat/twenty-neon-setup, owner decisions 2026-11-19; SQL listed in the PR)
+
+Trigger: the published 0.6.0 db-setup, against a managed PostgreSQL that refuses pre-hashed role passwords, looped "crewflow_owner
+was being created by another start" three times and exited 70. The server refused the SCRAM verifier at COMMIT with SQLSTATE
+XX000, and XX000 was in the race set. Owner rules: no provider-specific code (no host matching, no provider flag), decide by
+capability at run time, the same code everywhere; and (option 1, "Create login, you set password") Crewflow never sends a
+plain-text password. **Superseded for the password form by owner decision 2026-11-20 (PR #266, next section): a plain-text
+fallback over verified TLS; this option-1 path is now the last resort.**
+
+- **Who can call this?** Only the one-shot db-setup / db-harden services. They alone hold `PG_ADMIN_URL` and
+  `PG_ADMIN_DIRECT_URL`. rab-api / rab-worker refuse both by name (`never-in-runtime-env.ts`, `api-prestart.sh`,
+  `worker-start.sh`) and pin them to "" in both compose files; the placement lint allows exactly that pin.
+- **Whose data?** The crewflow_owner credential (the schema owner of every tenant) and the admin login.
+- **A server that refuses pre-hashed passwords (option 1).** The verifier is always sent first. A refusal of the password FORM
+  switches to the passwordless path. A refusal of the form is 22023 / 28P01 / 0A000 / XX000 (not "tuple concurrently
+  updated") from the CREATE / ALTER ROLE step (fixed DO-block HINT `crewflow-stage=role`) or from the COMMIT of a
+  transaction that set a password. Never 42501, never the DO block's own shape check, never a grant-only transaction.
+  The passwordless path runs under the same advisory lock and the same refusals:
+  - a missing crewflow_owner is created WITHOUT a password and NOLOGIN (`CREATE ROLE crewflow_owner NOLOGIN ...` with no
+    PASSWORD), marked `crewflow:awaiting-password:<unix expiry>` (security re-review R1: a pg_hba trust / peer / cert / ldap
+    rule could otherwise let anyone in as a passwordless CREATEROLE login). The mark expires after 24 h (server clock, like the
+    CREATEROLE mark; independent review L1). No secret leaves db-setup. Q2, both DO blocks and the re-checks accept a NOLOGIN
+    crewflow_owner ONLY with an unexpired mark; a NOLOGIN crewflow_owner with an expired mark is refused (64) with no ALTER
+    ROLE (an admin may have disabled it on purpose), and any other NOLOGIN crewflow_owner stays refused;
+  - an existing role's password is never written;
+  - the grant is added;
+  - exit 64 with fixed steps. The operator runs, once, as the admin login, all the printed lines together in one go
+    (a fresh session, one transaction; psql if the SQL editor runs lines separately): `BEGIN;`, then
+    `SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);` with the placeholder replaced by that
+    value, then a DO block that reads the value from that setting (never from its own text), runs
+    `ALTER ROLE crewflow_owner LOGIN PASSWORD %L` through format() and removes the mark, re-raising any inner error with its
+    SQLSTATE only, then `COMMIT;` (re-review N1). An empty setting (lines run separately) is refused with
+    "run all lines together in one go, inside one transaction". Option 2's CREATE ROLE uses the same shape. Re-check F2-F4:
+    the block starts with `ROLLBACK;` (ends a failed attempt; outside a transaction it only warns), the set_config line
+    returns only `value_set` (no value in a result grid), the SQL is printed between fixed BEGIN SQL / END SQL markers and the
+    instruction says to strip any log prefix, and, on failure, to ROLLBACK, use a NEW value and update the setting.
+  The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
+  with no password write, so never a loop.
+  If the server refuses the passwordless login role too, nothing is created and the reviewed CREATE ROLE + GRANT is printed
+  with a placeholder (option 2).
+- **Residual: the operator's statement** (independent review M1, re-review N1). The value is only in the set_config line.
+  The DO block that uses it holds no value, so a failing ALTER ROLE (a password-check hook, a typo) is quoted in the server
+  log (log_min_error_statement) without it, and pg_stat_statements stores the SELECT normalised (constants replaced) and the
+  DO block without a value. Proven on the pinned PostgreSQL 16 (harness N1): a refused first value and the real value, run
+  statement by statement, appear in no server log line and in no top-level pg_stat_statements row. What remains: the server
+  log at `log_statement = all`, `log_min_duration_statement` or `auto_explain` (they quote the statement text); any error when the editor sends ALL lines as ONE message (the whole message is quoted,
+  set_config line included); pg_stat_statements with `track = all`, which records the ALTER / CREATE ROLE run inside the DO
+  block WITH the value (seen live: one nested row; the default `track = top` does not record it); `pg_stat_activity` while
+  it runs; the provider's own logs, audit and SQL-editor history. The
+  printed steps say so, and: if pg_stat_statements is installed, `SELECT pg_stat_statements_reset();` where permitted,
+  otherwise treat the value as visible to anyone who can read query statistics. The earlier advice to run `SET log_statement = 'none'` first is removed (a non-superuser cannot set it on
+  most providers, and it never covered pg_stat_statements or pg_stat_activity). A provider-generated password is NOT accepted
+  instead (owner decision). That is the provider's tool, outside Crewflow; the same as `own-database-app-login.sql`'s manual
+  path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
+  by db-setup, G1/G2/L1 log guards) is REMOVED.
+- **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
+  login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
+  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Re-review N2: that wrong-password
+  login runs on EVERY run that logs in, right after the successful real login (and once more after COMMIT after a creation,
+  a password change, or any run whose pre-lock login did not work, e.g. 42501 before the CONNECT grant: re-check F1), so a failure counter that a successful login resets never exceeds 1. **Residual:** a lockout that
+  counts total failed logins over a time window can still be reached by many deploys in that window (one failed login each).
+- **The app password's characters** (re-review a). In modes a and b (db-setup creates or sets it) the decoded password,
+  built or inside an explicit PG_DATABASE_URL, must be `^[A-Za-z0-9_-]{32,}$`, refused (64) before connecting; it is what
+  the operator types into the printed SQL, so no quote, `$$` or backslash can break or reshape it.
+- **Role squatting** (independent review L2). Q2 counts the members OF crewflow_owner other than this admin's own ADMIN-only
+  grant (admin_option, no inherit, no set: createrole_self_grant is emptied in the same transaction). Any such member is
+  refused (64) before any probe or write, and again under the advisory lock (Q4 facts), because whoever holds that membership
+  could reset or use the app login. Fix: `REVOKE crewflow_owner FROM <that role>`, or drop crewflow_owner; the member may be
+  the admin's own self-grant with SET or INHERIT (createrole_self_grant), removed with `REVOKE crewflow_owner FROM <admin>`.
+  Owner SQL review 1.17: every printed hint to give the admin rights on crewflow_owner reads exactly
+  `GRANT crewflow_owner TO <admin> WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;` (a plain WITH ADMIN OPTION defaults INHERIT
+  and SET to true on PG16, and this check would refuse the admin). Harness H1 runs the hint as printed, then db-setup: 0.
+  createrole_self_grant applies to CREATE ROLE only, so it plays no part in this GRANT. Owner SQL review 1.12: a password
+  change by db-setup is logged as one fixed line (`passwordSet`), never the value.
+  Re-review N1/N2: only a 28P01 / 28000 refusal of the wrong-password login counts as "password required" (any other
+  failure exits 70, never a pass), and a LOGIN crewflow_owner never keeps the awaiting-password mark (removed under the lock
+  in the CREATEROLE step), so a later NOLOGIN can never count as "awaiting its password".
+- **Verifier and lock waits (re-review F1 remainder).** Before the verifier DO block sets a password, the transaction's
+  lock_timeout is set below deadlock_timeout, so a blocked ALTER ROLE fails (55P03, caught) before `log_lock_waits` could
+  quote the EXECUTEd text with the verifier.
+- **Tampering / a hostile server.** A server that falsely refuses the verifier gains nothing: no password is sent.
+- **A pooled admin URL.** Refused by behaviour, before any read or write, in db-setup AND db-harden: the startup options
+  db-setup sends are refused (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails. Never by its
+  address in db-setup's code or the compose.env lint. On this base, owner-credential / pg-url-policy still match documented
+  pooler host shapes; #258 removes that. `PG_ADMIN_DIRECT_URL` must name the same login and database as `PG_ADMIN_URL`.
+- **Races.** The genuine concurrent-update race is still retried (PostgreSQL's fixed text, compared, never printed); every
+  retry and exhaustion line names the SQLSTATE and the stage. Both DO blocks catch `query_canceled` too.
+- **Failure halfway.** Every write runs in one transaction under the advisory lock; a refusal at COMMIT rolls everything
+  back.
+- **Mode c and a crewflow_owner that owns the database** (lead audit item 6): NOT changed. The reviewed N1 rule keeps mode c
+  the supported path for a transition-shaped database; owner decision.
+- **Shared password ("You set one shared password").** compose builds `PG_DATABASE_URL` from `PG_DATABASE_APP_PASSWORD` and
+  `PG_DATABASE_HOST` / `_PORT` / `_NAME` for db-setup, rab-api and rab-worker alike; an explicit `PG_DATABASE_URL` is the
+  documented alternative, and the compose.env lint refuses both together. db-setup refuses an app URL that names another
+  host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
+  parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
+  independent review I4; nothing after the database name but `?sslmode=verify-full`, re-review N3).
+
+---
+
+## db-setup: crewflow_owner's password in plain text over verified TLS when the server refuses pre-hashed; no automatic change of an existing password (PR #266, owner decision 2026-11-20)
+
+Supersedes, for the password FORM only, "Crewflow never sends a plain-text password" in the section above (owner decision
+2026-11-19, option 1). Owner's reason: on a provider that refuses pre-hashed passwords, the plain password reaches the server
+anyway when the operator types it into the SQL editor; db-setup sending it is no worse and removes the typo risk and the
+manual step. Reference: Twenty's Helm `ensure-database-exists` job (`CREATE USER ... WITH PASSWORD %L`; reference only,
+re-implemented).
+
+- **Who can call this?** Only the one-shot db-setup service (it alone holds `PG_ADMIN_URL`; unchanged). db-harden never sets a
+  password and refuses `CREWFLOW_ROTATE_APP_PASSWORD` (db-setup.sh); rab-api / rab-worker never receive it (compose gate).
+- **Whose data?** The crewflow_owner credential: the schema owner of every tenant's data.
+- **When the plain form is sent (all must hold).**
+  1. The pre-hashed SCRAM verifier was sent first and the server refused its FORM (the unchanged `isPasswordFormRefusal`:
+     22023 / 28P01 / 0A000 / XX000, not the race, from the role step or the COMMIT of a password transaction).
+  2. The admin connection is verified TLS on the CLIENT side: the driver config demands the certificate chain and the host
+     name (`isVerifyFullSsl`; `sslmode` require / verify-ca / verify-full are all built that way since #257). `no-verify`,
+     `PG_SSL_ALLOW_SELF_SIGNED`, `disable` are "not verified": no plain form, the last resort runs with a fixed line.
+     `pg_stat_ssl.ssl` for the own backend is read but does NOT gate (lead decision 2026-11-20): a managed database behind a
+     TLS-terminating proxy reports a non-TLS session; db-setup logs that by reason and continues. The internet hop is the
+     verified one; the proxy-to-database hop is the provider's internal network (residual below).
+  3. A NEW transaction, under the same advisory lock, with the facts and refusals re-read under it.
+- **How the value travels.** Only as bind parameter `$1` of `set_config('crewflow_bootstrap.plain_password', $1, true)`
+  (its own setting, never the verifier's): never in any statement text, `pg_stat_activity.query` or a top-level
+  `pg_stat_statements` row. `SET LOCAL password_encryption = 'scram-sha-256'` first, so the server stores SCRAM, never md5.
+  The short `lock_timeout` (below `deadlock_timeout`) before the role statement, so `log_lock_waits` can never quote it. The
+  DO block (`OWNER_BOOTSTRAP_Q4C_DO_PLAIN`) mirrors the pre-hashed block exactly from the role step on (same attributes,
+  awaiting handling, grant; unit-tested), reads the value from the setting, checks its shape (32+ of `[A-Za-z0-9_-]`, never
+  an md5-hash shape, SCRAM storage in force), runs `format('... PASSWORD %L')` through EXECUTE, and re-raises any error by
+  SQLSTATE with a fixed message and the `crewflow-stage` hint, so no CONTEXT carries the formatted statement. Then the same
+  login probe and wrong-password probe (a trust / peer / cert server is still refused, 64).
+- **Never in Crewflow's own output.** Every log line is fixed text plus a SQLSTATE; unit tests spy on every `io.log` call on
+  the plain path (success, refusal, lock timeout, race) and assert the value is in none, and in no statement text.
+- **Server logging.** The strict "server logging must be off" expectation is dropped for this fallback only (Q1 still turns
+  statement and parameter logging off for a superuser admin; every other path is unchanged). One fixed line says the value
+  may be in the provider's own logs and points to the rotation steps.
+- **Residual (owner-accepted).** The value can remain in: the server log, as the logged bind parameter `$1`, when the admin is
+  NOT a superuser (Q1 is then a no-op and `log_parameter_max_length` is superuser-only) and the server runs with any of
+  `log_statement = all`, `log_min_duration_statement >= 0`, `log_min_duration_sample >= 0`, `log_transaction_sample_rate > 0`,
+  `auto_explain` (PostgreSQL 16+ logs query parameters by default) or `pgaudit.log_parameter = on` (review F9); `pg_stat_statements` with `track = all` (the nested CREATE / ALTER ROLE; the default `top` does not
+  record it); the provider's own logs; and, behind a TLS-terminating proxy, the provider's internal hop. Not at
+  `log_statement = none / ddl / mod`, and not on error (`log_parameter_max_length_on_error = 0`, Q0). Mitigation: rotate
+  (OWNER-LOGIN-DEPLOYMENT.md, "Rotate the crewflow_owner password").
+- **Tampering / a hostile server.** A server (or a MITM, which the verified TLS excludes) that falsely refuses the verifier
+  now receives the plain password: the plain form goes only to the endpoint whose certificate and host name were verified,
+  the same endpoint the admin password already goes to. A server the operator does not trust with the app password should
+  not hold the app's data either.
+- **Independent security review of #266 (F1 part 3, F2, F3, F5), all implemented.** F5: the plain form follows only TWO
+  consecutive pre-hashed refusals with the same stage and SQLSTATE (one extra verifier attempt in a fresh transaction, never a
+  loop); a different second refusal goes to the last resort, never plain text. F3: every read-write bootstrap connection pins
+  `debug_print_parse`, `debug_print_rewritten`, `debug_print_plan` off and `log_parameter_max_length_on_error = 0` as startup
+  options (a database or role default could otherwise dump the nested ALTER ROLE or the bound `$1`). F2: before the plain
+  transaction the admin session sets `client_connection_check_interval = 0` and, on 17+, `transaction_timeout = 0` (messages
+  below ERROR and FATAL bypass the DO block's EXCEPTION handler and would carry the SPI CONTEXT), and the plain form is refused
+  when `deadlock_timeout` < 2 ms (L1's lock_timeout could not stay below it). **Residual (F2):** a backend terminated
+  (`pg_terminate_backend`, a server shutdown) or a logging extension hook (`emit_log_hook`, auditing extensions) acting while
+  the role statement runs can still emit the CONTEXT with the value. F1 part 3: a superuser admin's Q1 also turns off
+  duration / sampling logging, sets `log_min_messages = warning`, and, where loaded, `pg_stat_statements.track = top` and
+  `auto_explain.log_min_duration = -1` (best effort). F4: the notice says the provider receives the password itself and may
+  log or store it.
+- **Owner decision 2026-11-20, F1 a (send anyway, warn by name).** Before the plain transaction (after Q1) the admin session
+  reads, in one read-only SELECT (W1), `log_statement`, `log_min_duration_statement`, `log_min_duration_sample`,
+  `log_transaction_sample_rate`, `log_parameter_max_length`, and, where loaded, `auto_explain.log_min_duration`,
+  `auto_explain.log_parameter_max_length`, `pg_stat_statements.track`, `pgaudit.log_parameter`. When they prove the bound
+  value or the nested role statement will be logged or stored, one fixed warning names those settings (never a value). It
+  is NEVER a refusal: the plain form is sent anyway; an unreadable answer warns that it is unknown.
+- **Owner decision 2026-11-20, F6 a (the opt-in cannot stay on).** `CREWFLOW_ROTATE_APP_PASSWORD=1` with a password that
+  already logs in is a refusal (64, "nothing to rotate. Remove CREWFLOW_ROTATE_APP_PASSWORD from db-setup, then deploy
+  again."), so a forgotten opt-in stops the next deploy instead of silently allowing a later automatic password change. A
+  run that rotates exits 0 with the remove-it line; a run that creates crewflow_owner (nothing existed to rotate) exits 0
+  with one line.
+- **Last resort (unchanged).** No verified TLS, or the plain form refused too: the passwordless NOLOGIN role + printed step
+  (option 1), or the printed manual-role SQL (option 2), exactly as in the section above.
+- **No automatic change of an existing password (Twenty / ZITADEL).** A LOGIN crewflow_owner whose password does not match
+  `PG_DATABASE_URL` is refused (64) with `PG_DATABASE_URL password doesn't match crewflow_owner`, before any transaction and
+  before Q2b. Before this change db-setup SET it with the admin login (an operator typo in `PG_DATABASE_APP_PASSWORD` silently
+  re-keyed the role). Opt-in, one deploy: `CREWFLOW_ROTATE_APP_PASSWORD=1` (exactly `1`; any other non-empty value is
+  refused 64 before connecting, fail closed); then pre-hashed first, plain second, same rules; the ADMIN OPTION / CREATEROLE
+  and other-database (Q2b) guards still apply; a matching password is refused 64 ("nothing to rotate", F6 a below), a
+  rotation prints the remove-it line. Placement: db-setup only, exactly
+  `${CREWFLOW_ROTATE_APP_PASSWORD:-}` (compose-owner-login.cjs: raw text, rendered models, compose.env `1` or empty, refused
+  in database.env / runtime.env and on rab-api, rab-worker, db-harden). Mode c (no admin) ignores it with one line.
+- **ASSUMPTION flagged to the owner.** A NOLOGIN crewflow_owner that db-setup itself created without a password, with a valid
+  (unexpired) awaiting-password mark, is a first deploy in progress: its password is set without the opt-in (LOGIN, mark
+  cleared). An expired mark keeps the refusal (never re-enabled).
+- **Tests.** Unit (owner-bootstrap.spec.ts): no verified client TLS means no plain form; client verified + `pg_stat_ssl` false
+  runs it with the proxy line; a mismatch without the opt-in exits 64 with the exact line before any transaction; a bad
+  opt-in value exits 64 before connecting; the plain value in no log line and only in `$1`; pre-hashed first, then the plain
+  transaction in its exact statement order; a plain refusal falls to the last resort; 55P03 is 70; races retried; the
+  awaiting assumption; the opt-in obeys ADMIN OPTION and Q2b. Live (bootstrap-owner-login-check.ts, CI migration-security):
+  mismatch 64 then set with the opt-in; L4 and no-ADMIN-OPTION still refused with it. Capability harness (fallback-check,
+  N1-N4: refusing PG16 extension with a per-run TLS CA, one-run success with SCRAM stored, no-verified-TLS last resort,
+  refuse-plain last resort, rotation, server-log grep at `log_statement = ddl`). Compose gate self-tests.
+
+## First platform administrator at API boot from `BOOTSTRAP_ADMIN_EMAIL` (2026-11-19)
+
+Owner request: create the first platform admin when rab-api starts, without running a command. When `BOOTSTRAP_ADMIN_EMAIL`
+is set on rab-api, `PlatformAdminBootstrapOnBoot` (`modules/identity/platform-admin-bootstrap`, imported by `AppModule`
+only) runs `PlatformAdminBootstrapService` once in Nest's `onApplicationBootstrap`. That runs after main.ts's identity check,
+boot gates and posture monitor, and before the HTTP listener opens. The service is the `bootstrap-admin` command's own body,
+moved there unchanged; the command now calls it too. No new SQL, grant or migration. Optional inputs:
+`BOOTSTRAP_ADMIN_FIRST_NAME`, `_LAST_NAME`, `_ORG_SLUG`, `_ORG_NAME`. There is no password input.
+
+Who can call this? — Nobody over HTTP. It runs only inside the API process at start, once, from its environment. Whoever
+controls rab-api's environment picks the first administrator's email. That is the same party that already holds
+`PG_DATABASE_URL` (the schema-owning login), so it adds no new authority.
+Whose data is involved? — The new administrator's account (email, names), the bootstrap organisation, one `account_invite`,
+one `email_outbox` row and one `audit_log` row (`platform_admin.bootstrapped`, `actor_user_id` NULL, metadata
+`{ via: 'env_bootstrap', pendingActivation, createdOrganisation, trigger: 'api_boot' }`).
+What if that identity is compromised? — If an attacker can change rab-api's environment before the first admin exists, they
+can name their own email. They could equally replace the database URL, so this is no new capability. Once any admin exists,
+the variable does nothing: `core.bootstrap_first_platform_admin` returns ALREADY_BOOTSTRAPPED (an active admin) or CLOSED
+(admins existed, none active). It can never mint a second or a replacement administrator.
+What if it's malicious? — `BOOTSTRAP_ADMIN_PASSWORD` is refused in every runtime process: by the in-process runtime guard
+(`never-in-runtime-env.ts`, API, Worker and provisioner, before Nest), by `api-prestart.sh` (on the API start and on the
+one-off CLI form), and by the service-level boot hook. The env-file lint refuses it in every file and on every service. The
+five inputs are allowed on rab-api only (compose model gate). `database.env` and `runtime.env` are refused because they also
+reach rab-worker. `DB_TARGET` and `ALLOW_PRODUCTION_DB_COMMANDS` stay refused on the API start.
+What if the request is tampered with? — There is no request. The email is trimmed and lower-cased, then validated again
+inside the SECURITY DEFINER function (22023 on a malformed email, name or slug; the boot logs `invalid-input` and continues).
+What if two callers race? — Two replicas (or a replica and a CLI run) both call the function. It takes
+`pg_advisory_xact_lock(hashtext('rab_bootstrap_platform_admin'))` on the caller's transaction. The operational role, the
+invite, the outbox row and the audit row are written on that same transaction, so the lock covers them all. The loser
+blocks, then (READ COMMITTED, fresh snapshot per statement) sees the committed admin and answers ALREADY_BOOTSTRAPPED,
+writing nothing. The wait is bounded by the pool's 30 s `statement_timeout`. The integration suite runs four concurrent boots
+on two pools and expects exactly one admin, one invite and one outbox row.
+What if the DB returns data written by a lower-trust actor? — An existing non-deleted account with the configured email is
+granted instead of a new one being created (GRANTED_EXISTING, the command's existing rule). No email is sent, and that
+account's existing sessions are ended in the same transaction (CF-07). A match in more than one organisation is refused
+(REFUSED_AMBIGUOUS_EMAIL). See trade-off BOOT-3.
+What if a third party (email/push/storage provider) is compromised? — The activation link is the ordinary single-use
+account-invite token (24 h TTL), stored as a hash. A compromised mail provider can read the link, exactly as for every other
+invite. The Worker revalidates before delivery and cancels expired, revoked or superseded invites.
+What happens when authorisation fails? — The service checks `has_function_privilege` on the function before anything is
+written (layer 2). The runtime login `crewflow_owner` inherits EXECUTE from `crewflow` (BC-11). The schema role
+`crewflow_app` is refused (`not-authorised`) and the database refuses it again (42501). The boot logs one fixed line and
+continues.
+What happens when the operation fails halfway? — Everything is one transaction, so a failure rolls it all back, including
+the outbox row. No email can go out for a failed attempt. The queue publish happens only after commit; if it fails, the
+committed row is still delivered by the dispatcher.
+
+```
+SECURITY TRADE-OFF (BOOT-1): fail closed WITHOUT a crash loop
+Decision:   a failed boot-time bootstrap logs one fixed line (with a fixed reason label, never the error text) and the API
+            keeps starting. One attempt per process start; no in-process retry.
+Reason:     owner instruction. A crash loop would hammer the database and the restart policy for a step the platform can
+            serve without; retries could not spam email anyway (a failed attempt queues none), but they would spam logs.
+Risk:       a deploy can come up serving with no administrator, and the only signal is the error line. Each restart makes
+            one more attempt.
+Mitigation: the line names the reason (not-authorised, function-missing, invalid-input, organisation-suspended,
+            unexpected-result, database-error-<SQLSTATE>, unexpected-error); the bootstrap-admin command remains available;
+            nothing partial is ever committed.
+Reversal:   rethrow from PlatformAdminBootstrapOnBoot.runOnce, which turns any failure into a refused start.
+```
+
+```
+SECURITY TRADE-OFF (BOOT-2): the API process calls the one-time bootstrap function
+Decision:   the long-running API calls core.bootstrap_first_platform_admin at start. No new grant: crewflow_owner already
+            held EXECUTE through its INHERIT membership of crewflow (BC-11, accepted 2026-11-05), and the CLI already ran
+            it as crewflow_owner.
+Reason:     owner request (no command step).
+Risk:       the migration's original note ("crewflow_app gets nothing, a request path can never reach it") described the
+            pre-owner-login runtime. Under the owner login, SQL injection in the API could call the function, but only
+            on a database that has never had a platform admin. On such a database the same injection already controls
+            every table.
+Mitigation: the function is one-time (ALREADY_BOOTSTRAPPED / CLOSED forever after the first admin); the boot path writes
+            nothing once an admin exists (no self-heal, unlike the CLI).
+Reversal:   remove PlatformAdminBootstrapModule from AppModule.
+```
+
+```
+SECURITY TRADE-OFF (BOOT-3): an existing account matching the email is granted without an email round-trip
+Decision:   unchanged CLI rule. If BOOTSTRAP_ADMIN_EMAIL matches exactly one existing account, that account becomes the
+            platform admin, its sessions are ended, and no activation email is sent.
+Reason:     the account can already sign in; the command has always done this.
+Risk:       an operator typo that matches some other existing account makes that person the platform admin.
+Mitigation: on a fresh deploy (the case this feature exists for) there are no other accounts; the boot logs a distinct line
+            for this outcome; the audit row records pendingActivation=false.
+Reversal:   refuse GRANTED_EXISTING in the boot path only (PlatformAdminBootstrapOnBoot), leaving the CLI as it is.
+```
+
+- **MFA at first sign-in (confirmed, unchanged).** The command's path does not enforce MFA itself. The ordinary sign-in policy
+  (`LoginSecondFactorPolicyService`) makes a platform admin enrol at sign-in only when `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true`.
+  The default, including production compose, is false. When the switch is off, the boot logs a warning after creating or
+  granting the admin. ASSUMPTION FLAGGED: whether production should turn it on is the owner's decision; nothing here changes it.
+- **Residual (unchanged from the CLI).** If the 24 h link expires unused, neither a restart nor the command sends another
+  one: the bootstrap is one-time, and forgot-password serves ACTIVE accounts only. Recovery is a deliberate database action
+  today. A resend path for the bootstrap invite would be a separate owner decision.
+- **Operator log lines** are fixed text in `PLATFORM_ADMIN_BOOT_LOG` (no email, user id or database message), context
+  `PlatformAdminBootstrap`.
+- **Tests.** Unit: platform-admin-bootstrap-on-boot.spec (every outcome's line, password refused, no throw, one attempt per
+  process, failure labels), platform-admin-bootstrap.service.spec (ALREADY_BOOTSTRAPPED writes nothing; the one invite is
+  addressed to the configured email; authority refused before the function runs), never-in-runtime-env.spec,
+  compose-owner-login.test.cjs, run-prestart-shell-tests.cjs (cases 1d/1e/3/13b). PostgreSQL:
+  bootstrap-admin-at-boot.integration.spec (fresh, existing admin no-op, four concurrent boots, password refused,
+  crewflow_app refused, malformed email, CLOSED). The existing bootstrap-admin integration suites run the CLI unchanged.
+
+---
+
+## First platform administrator at API boot: independent security review of #264 fixed (2026-11-19)
+
+This entry supersedes these parts of the entry above: its MFA bullet ("unchanged ... the boot logs a warning"), trade-off
+BOOT-3, and the "Residual" bullet.
+
+- **F1 (HIGH), MFA at first sign-in is now required by the boot path.** `PlatformAdminBootstrapOnBoot.runOnce` refuses before
+  the bootstrap runs when `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` is not true. Nothing runs: no transaction, no write, no email. With
+  the switch on, `LoginSecondFactorPolicyService` answers `enroll` for a platform admin without a factor, so the
+  boot-created admin gets the enrolment challenge at its first sign-in and never a session. Proved through the HTTP app:
+  activate, then `POST /auth/login` returns 409 `SECOND_FACTOR_REQUIRED` with `requirement: 'enroll'`. The CLI is unchanged.
+- **F2 (MEDIUM), an existing account is granted at boot only when its email ownership was proven.** Boot policy
+  (`requireProvenExistingAccount`): GRANTED_EXISTING requires `status = 'active'`, `email_verified_at IS NOT NULL`, a
+  non-deleted row and a manager-tier profile. Anything else rolls the whole transaction back (the function's
+  `platform_admin` row included) and is reported as REFUSED_EXISTING_ACCOUNT_UNVERIFIED or REFUSED_EXISTING_ACCOUNT_NOT_MANAGER
+  (staff-only, F3). The check runs on the row the database function resolved, in the same transaction, under its advisory
+  lock and `FOR UPDATE`. That makes it atomic, unlike a separate pre-lookup. The migration and the function are unchanged.
+  The CLI keeps its rule.
+- **F2, defence in depth (all actors, all paths).** `assertPlatformAdminTargetAllowed` (engine/core-modules/platform-admin)
+  answers 404 when the target holds an active platform-admin claim and the actor does not. It is wired into
+  `ManagerService.findPendingProfileOrFail` (resend, re-point and cancel of a pending invitation; before the CEO rule's 403),
+  `ManagerService.changeEmail`, `StaffService.findPendingProfileOrFail` and `StaffService.changeEmail`, and
+  `UserDeletionService.assertCanDelete` (a tenant actor now gets 404 instead of 409 `CANNOT_DELETE_PLATFORM_ADMIN`; another
+  platform admin still gets the 409). The Admin Panel's platform-admin resend keeps working (the actor is an admin).
+- **F5, an existing admin that never activated.** On every later boot, when the existing admin is still invited and holds no
+  unexpired, unused invite, the boot logs a distinct warning (`activationExpired`) and re-sends nothing. **Supported recovery:
+  none exists today.** No command re-sends the bootstrap invite. `grant-platform-admin` needs an existing account and does not
+  send invites. Forgot-password serves ACTIVE accounts only. The tenant resend paths are closed to this account by F2. Do not
+  improvise SQL. A supported path (for example an audited `resend-bootstrap-invite` command) is an owner decision.
+- **F4.** `BOOTSTRAP_ADMIN_PASSWORD` must not exist in any platform environment before this deploys. rab-api and rab-worker
+  refuse to start with it (exit 64 / runtime guard).
+- **I1.** The deploy-file lint (`bootstrapAdminComposeTextProblems`, in the owner-login gate) allows `BOOTSTRAP_ADMIN_*` only
+  under rab-api, only the five inputs, and only as `KEY: ${KEY:-}`. The two compose files themselves are not edited in this PR
+  (see the PR body).
+
+```
+SECURITY TRADE-OFF (BOOT-3, revised): boot grants an existing account only if active, verified and manager-tier
+Decision:   the boot path refuses (rolls back) any other existing account; the operator uses grant-platform-admin for those.
+Reason:     security review F2/F3: an INVITED manager's address can be re-pointed by a tenant manager before activation.
+Risk:       none new; a legitimate existing account that is not manager-tier must be granted with the CLI.
+Mitigation: named refusal lines; nothing is written.
+Reversal:   drop requireProvenExistingAccount from PlatformAdminBootstrapOnBoot.runOnce.
+```
+
+- **Tests added.** Unit: the F1 refusal (bootstrap.run never called), the F2/F3 refusals and rollback, F5 activation states,
+  `assertPlatformAdminTargetAllowed`. PostgreSQL: MFA off is refused with no rows; the INVITED-manager email is refused with no
+  `platform_admin` or outbox row; ambiguous email and ambiguous organisation; a boot racing the CLI gives one admin and one
+  email; the activation token is absent from every log line and from `audit_log.metadata`; F5. HTTP app: F1 activate gives
+  the enrol challenge; a tenant CEO resend or cancel on the pending bootstrap admin gives 404; resend or delete on a granted
+  account gives 404; staff-only email refused. `user-deletion-abuse-cases` expects 404 for a tenant actor.
+
+- **Re-review follow-up (N1, Low) and CF-04 wording (2026-11-19).** `assertPlatformAdminTargetAllowed` (404 unless the actor is
+  an active platform admin) now also guards `ManagerService.update` (PATCH /managers/:id) and `ManagerService.resetPassword`,
+  `StaffService.resetPassword` and the staff status change (deactivate / reactivate), and `MembersService`'s member lookup
+  (suspend, reinstate, role change). Each check runs after the tenant-scoped lookup and before any permission-specific 403.
+  **CF-04 wording, superseded:** "a platform administrator's email cannot be changed through this path (403
+  PROTECTED_ACCOUNT)" is no longer what a tenant actor sees. A tenant actor now gets **404**, and the email stays
+  unchanged. `EmailChangeService`'s 403 `PROTECTED_ACCOUNT` stays as the inner layer, and a platform-admin actor still
+  receives it (tested). In the same way, a tenant actor deleting a platform admin gets 404, while another platform admin
+  still gets 409 `CANNOT_DELETE_PLATFORM_ADMIN`.
+- **REFUSED_AMBIGUOUS_EMAIL test seeding.** The database now refuses a second account with an email that already exists
+  ("This email address is not available for a new account"). So the integration test plants that legacy state with
+  triggers off (`SET LOCAL session_replication_role = replica`, fixture superuser, its own transaction). The function's
+  refusal of the state is still exercised.
+
+## AI: operator-set in production, default off (branch chore/ai-enabled-operator-set, owner decision 2026-11-20; compose and gates only, no SQL, no server code)
+
+The owner wants AI usable in production, Anthropic only. This reverses the "AI pinned off in production" decision: the
+production compose files (`docker-compose.production.yml`, `docker-compose.image.yml`; `docker-compose.local-build.yml` kept
+in step) no longer pin `AI_ENABLED: 'false'` on rab-api and rab-worker. They commit `AI_ENABLED: ${AI_ENABLED:-false}`
+(production: once, in the shared optional list both services merge), so AI is off unless the operator sets
+`AI_ENABLED=true`. No `OPENAI_API_KEY` or other provider key is added (owner: Anthropic only).
+
+- **Who can turn it on?** The operator who controls the deployment's interpolation values: `compose.env` (image compose) or
+  the platform's `AI_ENABLED` variable (OpenShip). The compose-owner-login lint refuses it in `database.env` / `runtime.env`
+  (the committed expression would silently override it there) and accepts exactly `true` or `false` (X3.1 strict switch).
+- **What else is needed (unchanged controls, all fail closed).** `ANTHROPIC_API_KEY` (already passed through, a secret, never
+  committed); each organisation's AI switch, default OFF, which only a platform admin with step-up can change (Settings →
+  AI); and a model the build marks `productionApproved` (catalog.ts). **Today no model is production-approved and
+  `realProviderEnvironment` refuses every real provider under NODE_ENV=production**, so `AI_ENABLED=true` alone gives "AI not
+  configured" (503 to eligible users) until a separate, reviewed code change records release checklist §3.7 (DPA, zero
+  retention, no training, region, sub-processors, DPIA, privacy notice). That change is not in this PR.
+- **Spend ceilings (unchanged, committed defaults).** `AI_DAILY_BUDGET_USD` (per organisation per UTC day, default 2),
+  `AI_USER_DAILY_BUDGET_USD` (per user, effective min with the organisation's, default 1), `AI_ORG_DAILY_TOKEN_BUDGET` (tokens
+  per organisation per day, default 200000), plus the rate and turn limits already in the shared list. A meter failure refuses
+  the step.
+- **Still refused.** `AI_DEV_ALLOW_REAL_PROVIDERS=true` outside development (boot refusal, `aiBootProblems`); it is not
+  listed in any production compose file and compose.env refuses it.
+- **Gates (fail closed).** `scripts/compose-owner-login.cjs`: every uncommented `AI_ENABLED` line of a compose file must be
+  exactly `AI_ENABLED: ${AI_ENABLED:-false}` (a literal `'true'` as much as the old `'false'`, another default, `:?`, no
+  default, a quoted or list form are refused), and `docker-compose.production.yml` must carry it; every rendered combination
+  gives both services a true/false value, the same on both; the gate's own renders (no `AI_ENABLED` in compose.env) must give
+  `"false"` on both (`aiDefaultOffProblems`); the child environment drops a stray `AI_ENABLED` of the machine running the
+  gate. `staging/verify-image-compose.cjs`: the reference render must give `"false"` on both services in both files; in the
+  operator's deployed model `AI_ENABLED` is exactly true or false, identical on rab-api and rab-worker, and never from an env
+  file.
+- **Abuse cases (tests).** A committed literal `'true'` → refused (raw text and rendered default). AI on for the API only, or
+  the Worker only → refused. `AI_ENABLED=yes` / `True` / `1` in compose.env → refused. `AI_ENABLED` in database.env /
+  runtime.env → refused. A blank compose.env value → renders `false`, never the code default.
+
+```
+SECURITY TRADE-OFF: AI_ENABLED is operator-set in production instead of pinned 'false'
+Decision:   a pinned-off control becomes an operator-controlled interpolation value, default off.
+Reason:     owner decision 2026-11-20: AI wanted in production (Anthropic only).
+Risk:       an operator (or anyone who can edit compose.env / the platform variables) can enable the platform AI switch
+            without a code change. Residual: the code default of AI_ENABLED is true (EX-2), so a BLANK service-scoped
+            platform override (OpenShip lets a service value win over the compose expression; no gate can see it)
+            would enable it; the compose expression itself maps blank to false.
+Mitigation: default off; exactly true/false; one value for both services; still needs ANTHROPIC_API_KEY, a per-organisation
+            switch (default OFF, platform admin + step-up) and a production-approved model (none today); budgets and rate
+            limits cap spend; AI_DEV_ALLOW_REAL_PROVIDERS stays refused outside development.
+Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and revert the two gates' AI_ENABLED rules.
+```
