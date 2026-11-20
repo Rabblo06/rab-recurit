@@ -7,10 +7,14 @@
 # through a build-time bind mount (nothing is copied into an image); a version below a floor FAILS the build, there is no
 # warn-only mode. A build argument of the same name can only RAISE a floor, never lower it.
 #
-# node:24-alpine = Node 24.22.2 on Alpine 3.24.3, pinned by its multi-arch OCI INDEX digest (linux/amd64 + linux/arm64/v8;
-# verified 2026-11-02 with `docker buildx imagetools inspect node:24-alpine` and `node -v` on both platforms). The final
-# stage uses the SAME digest: keep the two FROM lines in step.
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS base
+# node:24-alpine (= 24.22.3-alpine3.24) = Node 24.22.3 on Alpine 3.24.4, pinned by its multi-arch OCI INDEX digest
+# (linux/amd64 + linux/arm64/v8 + linux/s390x). Verified 2026-11-19 from the Docker Hub registry API: the 24-alpine,
+# 24.22.3-alpine and 24.22.3-alpine3.24 tags all resolve to this index, whose amd64 and arm64 configs carry
+# NODE_VERSION=24.22.3 on alpine-minirootfs-3.24.4. Node 24.22.3 fixes the 2026-11 Node 24 security release (Alpine secdb
+# nodejs 24.22.3-r0). The base layer still carries libssl3/libcrypto3 3.5.9-r0; the final stage's `apk upgrade` takes
+# 3.5.9-r1 from v3.24/main (CVE-2026-88822, -88823, -95691, -95692, -107496). All three FROM lines (base, worker-modules,
+# rab) use the SAME digest: keep them in step.
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS base
 ARG MIN_NODE_VERSION
 # The Node that compiles the native modules (argon2) in `deps` is held to the same floor as the runtime.
 RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
@@ -112,7 +116,7 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tm
 # packages) reaches the final stage, on top of the API tree above. The Worker tree is pruned exactly like the API tree first
 # (node-gyp also reaches it through bullmq > msgpackr > msgpackr-extract), or the delta would carry node-gyp's tree back;
 # its roots are both processes this tree serves: @rab/worker and @rab/server.
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS worker-modules
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS worker-modules
 WORKDIR /app
 COPY package.json yarn.lock .yarnrc.yml ./
 COPY .yarn ./.yarn
@@ -150,7 +154,7 @@ RUN --mount=type=bind,from=runtime-modules,source=/app/node_modules,target=/api/
 # Chromium's dependency tree (ffmpeg, libxml2, cups, pulse, …) or its unfixable advisories; it re-checks
 # apk-absent:chromium, a build-time guard refuses every OS package of the former browser stack by name, and the image gate
 # fails on any browser-stack package (policy.json forbidden_apk/_npm).
-FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS rab
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS rab
 ARG MIN_NODE_VERSION
 ARG MIN_LIBEXPAT_VERSION
 WORKDIR /app
@@ -219,9 +223,9 @@ COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 COPY --from=build --chmod=0644 /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
 # api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the deploy compose files make api-prestart.sh and
-# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Those two services never
-# receive PG_DATABASE_URL; each builds the crewflow_owner runtime URL from the one-shot db-setup service's target file and
-# crewflow_owner password file (/run/crewflow/db-target, a named volume they mount read-only; never part of this image).
+# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Owner decision
+# 2026-11-18 (Twenty's way): both read PG_DATABASE_URL, the crewflow_owner URL, from their environment; no credential file
+# or volume exists any more.
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/worker-start.sh ./worker-start.sh
 # PR #125 option A: the one-shot db-setup service's entrypoint (the only app-image service with the database admin URL).
@@ -248,14 +252,15 @@ RUN set -eu; \
     chmod 0755 /opt/crewflow-bundle && test "$(stat -c %a /opt/crewflow-bundle/worker-bundle-health.cjs)" = 444; \
     test "$(id -u node)" = 1000; test "$(id -g node)" = 1000; \
     mkdir -p /tmp/crewflow-jobs /run/crewflow-health/jobs; \
-    mkdir -p /run/crewflow/db-target && chown 1000:1000 /run/crewflow/db-target && chmod 0755 /run/crewflow/db-target; \
+\
     chown 1000:1000 /tmp/crewflow-jobs /run/crewflow-health/jobs; \
     chmod 0700 /tmp/crewflow-jobs; chmod 0755 /run/crewflow-health /run/crewflow-health/jobs; \
     test -f /app/packages/rab-server/dist/main.js; \
     test -f /app/packages/rab-worker/dist/main.js; \
     test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js; \
     test -f /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js; \
-    test -f /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js; \
+    test ! -e /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js; \
+    ls /app/packages/rab-server/dist/database/typeorm/core/migrations/ | grep -Eq '^[0-9]{13}-[A-Za-z0-9]+\.js$'; \
     test "$(stat -c %a /app/db-setup.sh)" = 555; \
     test "$(stat -c %a /app/api-prestart.sh)" = 555; test "$(stat -c %a /app/worker-start.sh)" = 555; \
     test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-emails/dist; \

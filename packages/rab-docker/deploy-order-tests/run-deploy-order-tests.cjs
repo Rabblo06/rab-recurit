@@ -7,9 +7,9 @@
  * The production file UNCHANGED (docker-compose.image.yml, with its bundled `db` service since DB-SETUP) plus the test-only
  * overlays deploy-order-tests/docker-compose.deploy-order.yml (infrastructure) and docker-compose.deploy-order-owner.yml (the
  * db's first start runs the shipped 01-crewflow-owner.sql: the hand-made crewflow_owner of an R254/R256 deployment, whose
- * URL compose.env holds as PG_DATABASE_URL: the DB-SETUP pass-through path, D5; PR #125 the Twenty Helm way: only db-setup
- * reads it, checks it read-only and copies its password into the setup volume's password file; the password is never
- * changed, so T3's rollback uses the same crewflow_owner URL), deployed with
+ * password compose.env carries as PG_DATABASE_APP_PASSWORD, so db-setup, rab-api and rab-worker all receive that
+ * crewflow_owner URL (owner decision 2026-11-18, Twenty's way); db-setup finds it logs in and never changes it, so T3's
+ * rollback uses the same compose.env), deployed with
  * THE documented command, exactly:
  *
  *   docker compose pull && docker compose up -d
@@ -93,7 +93,7 @@ let peak = { count: 0, at: '', names: [] };
 const hex = (n) => crypto.randomBytes(n).toString('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** upgrade-lib's redaction: every per-run secret AND every crewflow_owner password read from the password file, plus URLs. */
+/** upgrade-lib's redaction: every per-run secret AND every crewflow_owner password the run used, plus URLs. */
 function redact(text) {
   return L.redact(text);
 }
@@ -202,7 +202,7 @@ class Project {
       .map((e) => ({ t: BigInt(e.timeNano), action: e.Action, service: e.Actor?.Attributes?.['com.docker.compose.service'], id: String(e.Actor?.ID ?? e.id ?? '').slice(0, 12), image: e.Actor?.Attributes?.image }))
       .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   }
-  /** psql as crewflow_owner over TLS / the password that logs in now / the password file: upgrade-lib's. */
+  /** psql as crewflow_owner over TLS / the password that logs in now: upgrade-lib's. */
   psqlOwner(sql, password) {
     return L.Project.prototype.psqlOwner.call(this, sql, password ?? this.ownerPasswordNow());
   }
@@ -211,9 +211,6 @@ class Project {
   }
   ownerPasswordNow() {
     return L.Project.prototype.ownerPasswordNow.call(this);
-  }
-  readPasswordFile() {
-    return L.Project.prototype.readPasswordFile.call(this);
   }
   down() {
     // This run's own disposable project only: its containers, networks and its OWN named volumes (the bundled db's).
@@ -261,15 +258,15 @@ function writeSecrets(dir, opts = {}) {
   L.writeSecrets(dir, opts);
 }
 /**
- * compose.env with the pass-through crewflow_owner URL; a pre-DB-SETUP PREV digest also gets its own start-up (prev overlay).
- * PR #125 (the Twenty Helm way): the NEW image's db-setup uses that URL unchanged (read-only checks, its password copied into
- * the setup volume's password file), so the same URL serves NEW and a rollback to PREV.
+ * compose.env with the hand-made crewflow_owner password as PG_DATABASE_APP_PASSWORD (compose builds the bundled
+ * crewflow_owner URL from it for db-setup, rab-api and rab-worker); a pre-DB-SETUP PREV digest also gets its own start-up
+ * (prev overlay). Owner decision 2026-11-18: the NEW image's db-setup finds that password logs in and never changes it, so
+ * the same compose.env serves NEW and a rollback to PREV.
  */
-function writeComposeEnv(project, digest, urlOverride = null) {
+function writeComposeEnv(project, digest) {
   const prev = PREV_PRE_DB_SETUP && digest === PREV;
   project.files = [...project.baseFiles, ...(prev ? [PREV_OVERLAY] : [])];
-  const databaseUrl = urlOverride ?? (prev ? L.ownerUrl(project.ownerPasswordNow()) : L.ownerUrl());
-  L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl });
+  L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, appPassword: secrets.owner });
 }
 
 // ------------------------------------------------------------------------------------------------------------- cases
@@ -395,14 +392,14 @@ async function main() {
       check(after[s].image === imageRef(NEW), `${s} runs the NEW digest ${after[s].image}`);
     }
     state.t2order = redeployOrder(check, evs, before, after);
-    // PR #125 (the Twenty Helm way): compose.env holds the hand-made crewflow_owner URL; db-setup (its only reader) checks it
-    // read-only and copies its password into the setup volume's password file; the apps build their URL from the target
-    // file + that password file. The password is never changed.
+    // Owner decision 2026-11-18 (Twenty's way): compose.env carries the hand-made crewflow_owner password; db-setup, rab-api
+    // and rab-worker all get that crewflow_owner URL. db-setup finds it logs in and never changes it.
     const sl = main.logs('db-setup');
     evidence('T2-db-setup.log', sl);
     check(main.inspect('db-setup', '{{.State.ExitCode}}') === '0' && /\[owner-bootstrap\] crewflow_owner is ready/.test(sl), 'db-setup used the crewflow_owner URL and exited 0');
-    const pf = main.readPasswordFile();
-    check(pf && pf.password === secrets.owner && main.ownerLoginWorks(secrets.owner), 'the password file holds the URL\'s own (hand-made) password, which still logs in: nothing changed for a rollback');
+    check(!/password set/.test(sl) && main.ownerLoginWorks(secrets.owner), 'the hand-made password (the one compose.env carries) still logs in and db-setup set no password: nothing changed for a rollback');
+    const vols = L.run('docker', ['volume', 'ls', '--format', '{{.Name}}', '--filter', `label=com.docker.compose.project=${main.name}`], { timeout: 60_000 }).stdout;
+    check(!/crewflow-db-target/.test(vols), `no setup (target / password file) volume exists in the project (${vols.split('\n').filter(Boolean).join(', ')})`);
     const ledger = main.psql('SELECT count(*) FROM core.migrations');
     n(`ledger: ${state.prevLedger} -> ${ledger} migrations (the new API migrated on start)`);
     check(Number(ledger) > Number(state.prevLedger), 'the new API applied the new release\'s migrations on start');
@@ -429,15 +426,11 @@ async function main() {
   // ------------------------------------------------------------------------------------------------------------ T3
   await step('T3', 'rollback to the previous digest with the same command: both go back together; the old API warns the schema is AHEAD and serves', async (check, n) => {
     const before = appState(main);
-    // The documented "print the crewflow_owner URL" command (DB-SETUP-LEAD.md, operator command 1), with the CURRENT image,
-    // BEFORE the compose files are switched; its output (SENSITIVE, memory only) is the rollback's PG_DATABASE_URL.
-    const pr = L.printOwnerUrl(main, imageRef(NEW));
-    n(`print command (redacted): ${pr.command}`);
-    const q = pr.parsed;
-    check(pr.code === 0 && pr.lines === 1 && q && q.user === 'crewflow_owner' && q.host === 'db' && q.db === 'crewflow' && main.ownerLoginWorks(q.password), `the documented print command: exit ${pr.code}, one crewflow_owner URL for db/crewflow that logs in (value not shown)`);
-    check(q && !pr.stderr.includes(q.password) && L.run('docker', ['inspect', pr.name], { timeout: 30_000 }).code !== 0, 'nothing but the fixed status line on stderr; the container is gone (--rm, --log-driver none)');
-    writeComposeEnv(main, PREV, q ? pr.url : null);
-    n('the rollback compose.env holds the URL the documented print command produced');
+    // Owner decision 2026-11-18: no URL has to be recovered from a file for the rollback: compose.env already carries the
+    // crewflow_owner password, unchanged by NEW's db-setup.
+    check(main.ownerLoginWorks(secrets.owner), 'before the rollback the password compose.env carries still logs in as crewflow_owner');
+    writeComposeEnv(main, PREV);
+    n('the rollback compose.env is the same operator file (only the image digest differs)');
     const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T3-deploy.log', d.out);

@@ -125,6 +125,10 @@ steps.
 
 ## Production
 
-Not in this release. Production keeps `AI_ENABLED=false`, and no model is approved for production. A production key
+The owner decided on 2026-11-20 that AI may run in production, with Anthropic only. The production compose files commit
+`AI_ENABLED: ${AI_ENABLED:-false}`, so AI stays off unless the operator sets `AI_ENABLED=true` (in `compose.env`, or as the
+platform's variable). It then also needs `ANTHROPIC_API_KEY`, each organisation's AI switch in Settings → AI, and a model
+this build approves for production; no model is approved for production yet, so AI answers "not configured" until one is.
+Spend stops at `AI_DAILY_BUDGET_USD`, `AI_USER_DAILY_BUDGET_USD` and `AI_ORG_DAILY_TOKEN_BUDGET`. A production key
 belongs in the deployment platform's secret store, and only after the provider checklist is complete: signed DPA, zero
 retention, no training on our data, a UK or EU region, sub-processors listed, a DPIA and an updated privacy notice.
