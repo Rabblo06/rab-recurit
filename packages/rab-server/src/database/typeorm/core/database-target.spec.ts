@@ -119,7 +119,7 @@ describe('database target guard (pure resolution)', () => {
       expectRefused({ ...PROD_ENV({ app: NEON_DIRECT }), [name]: NEON_DIRECT }, new RegExp(`refuses the legacy database variable\\(s\\) ${name}`));
     }
     expectRefused({ ...PROD_ENV({ app: NEON_DIRECT }), PGPASSWORD: 'x' }, /libpq environment variable/);
-    expectRefused(PROD_ENV({ app: NEON_DIRECT.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
+    expectRefused(PROD_ENV({ app: NEON_DIRECT.replace('sslmode=require', 'sslmode=disable') }), /must set sslmode=require, verify-ca or verify-full in production/);
     // Outside production an app/admin pair that disagrees on endpoint is still refused before identity.
     expectRefused({ DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', DATABASE_URL: NEON_POOLED, DATABASE_URL_UNPOOLED: OTHER_NEON_DIRECT }, /different databases or endpoints/);
   });

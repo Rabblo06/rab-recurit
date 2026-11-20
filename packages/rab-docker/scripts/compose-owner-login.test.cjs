@@ -50,7 +50,7 @@ test('forbidden names: every second database identity, role password, authority 
     'PG_OPS_APP_DATABASE_URL', 'POSTURE_DATABASE_URL', 'DRIFT_DATABASE_URL', 'SOME_OTHER_DATABASE_URL', 'TEST_DATABASE_URL',
     'CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
     'CREWFLOW_MIGRATOR_PASSWORD', 'CREWFLOW_OPS_RUN', 'ALLOW_PRODUCTION_DB_COMMANDS', 'DB_TARGET', 'CREWFLOW_DB_MODE', 'PGPASSWORD',
-    'PGHOST', 'PGCONNECT_TIMEOUT', 'NODE_OPTIONS', 'BOOTSTRAP_ADMIN_EMAIL', 'WORKER_CLAIM_MODE', 'CREWFLOW_PROVISIONER_ENABLED',
+    'PGHOST', 'PGCONNECT_TIMEOUT', 'NODE_OPTIONS', 'BOOTSTRAP_ADMIN_PASSWORD', 'BOOTSTRAP_ADMIN_ROLE', 'WORKER_CLAIM_MODE', 'CREWFLOW_PROVISIONER_ENABLED',
   ]) {
     assert.ok(forbiddenReason(name), `${name} must be forbidden`);
   }
@@ -148,57 +148,118 @@ test('database env: libpq variables, the mode switch, committed keys, duplicates
   assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_WORKER_BOOTSTRAP_PASSWORD=x`), /role password/);
 });
 
-// DB-SETUP (T-1) + PR #125 option 2 + PG_ADMIN_URL (owner decision 2026-11-17): compose.env holds db-setup's inputs. Three
-// modes: (a) the bundled db (PG_DATABASE_PASSWORD only); (b) CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL (an admin login);
-// (c) CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL (crewflow_owner ONLY). PG_DATABASE_PASSWORD only in (a).
+// Owner decisions 2026-11-17 and 2026-11-18 (Twenty's way): compose.env holds the database inputs. Three modes:
+// (a) the bundled db: PG_DATABASE_PASSWORD (its superuser) and PG_DATABASE_APP_PASSWORD (crewflow_owner), no URL;
+// (b) CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL (an admin login) + PG_DATABASE_URL (crewflow_owner, the same database);
+// (c) CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL (crewflow_owner ONLY). The two passwords only in (a).
 const COMPOSE_BASE = `CREWFLOW_IMAGE_TAG=sha256:${'a'.repeat(64)}\nCREWFLOW_REDIS_IMAGE=redis@sha256:${'b'.repeat(64)}\nCREWFLOW_SECRETS_DIR=/etc/crewflow/secrets`;
-const COMPOSE_OK = `${COMPOSE_BASE}\nPG_DATABASE_PASSWORD=${'c'.repeat(64)}`;
+const APP_PW = 'd'.repeat(64);
+const COMPOSE_DB_PW = `${COMPOSE_BASE}\nPG_DATABASE_PASSWORD=${'c'.repeat(64)}`;
+const COMPOSE_OK = `${COMPOSE_DB_PW}\nPG_DATABASE_APP_PASSWORD=${APP_PW}`;
 const ADMIN_OK = URL_OK.replace('crewflow_owner', 'doadmin');
-test('PG_ADMIN_URL modes: (a) bundled with PG_DATABASE_PASSWORD; (b) own db + PG_ADMIN_URL; (c) own db + a crewflow_owner PG_DATABASE_URL; no password in (b)/(c)', () => {
+const OWN = `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0`;
+test('database modes: (a) bundled with both passwords; (b) own db + PG_ADMIN_URL + PG_DATABASE_URL; (c) own db + a crewflow_owner PG_DATABASE_URL; no password in (b)/(c)', () => {
   assert.deepEqual(lintEnvText('compose', COMPOSE_OK), []);
   assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=1`), []);
+  // (b) both URLs set is the NORMAL own-database mode (owner decision 2026-11-18), whatever the admin login is called.
   for (const login of ['postgres', 'neondb_owner', 'doadmin', 'someone_admin']) {
-    assert.deepEqual(lintEnvText('compose', `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${URL_OK.replace('crewflow_owner', login)}`), [], login);
+    assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${URL_OK.replace('crewflow_owner', login)}\nPG_DATABASE_URL=${URL_OK}`), [], login);
   }
-  assert.deepEqual(lintEnvText('compose', `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0\nPG_DATABASE_URL=${URL_OK}`), []);
-  // The bundled db still running beside a URL stays accepted (an existing deployment's crewflow_owner on the bundled db, the
-  // upgrade-with-data path; or an admin URL), with the bundled db's password.
-  assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}`), []);
-  assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_ADMIN_URL=${ADMIN_OK}`), []);
-  for (const login of ['postgres', 'crewflow_owner']) {
-    const dbUrl = URL_OK.replace('crewflow_owner', login).replace('db.internal.example', 'db');
-    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\n${login === 'postgres' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${dbUrl}\nCREWFLOW_BUNDLED_DB=1`), [], login);
-  }
+  assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_DATABASE_URL=${URL_OK}`), []);
+  // The bundled db running beside your own admin + crewflow_owner URLs stays accepted (it runs unused).
+  assert.deepEqual(lintEnvText('compose', `${COMPOSE_DB_PW}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`), []);
+  // The bundled db with an explicit crewflow_owner URL on the bundled host (instead of PG_DATABASE_APP_PASSWORD).
+  const onDb = (u) => u.replace('db.internal.example', 'db');
+  assert.deepEqual(lintEnvText('compose', `${COMPOSE_DB_PW}\nPG_DATABASE_URL=${onDb(URL_OK)}`), []);
+  assert.deepEqual(lintEnvText('compose', `${COMPOSE_DB_PW}\nPG_ADMIN_URL=${onDb(URL_OK.replace('crewflow_owner', 'postgres'))}\nPG_DATABASE_URL=${onDb(URL_OK)}\nCREWFLOW_BUNDLED_DB=1`), []);
 });
 
-test('DENIAL PG_ADMIN_URL: an admin login in PG_DATABASE_URL is refused ("renamed to PG_ADMIN_URL"), never reinterpreted; crewflow_owner in PG_ADMIN_URL; both at once', () => {
+test('DENIAL database modes: an admin login in PG_DATABASE_URL, crewflow_owner in PG_ADMIN_URL, PG_ADMIN_URL without PG_DATABASE_URL, two databases', () => {
   for (const login of ['postgres', 'neondb_owner', 'doadmin', 'someone_admin']) {
-    for (const base of [COMPOSE_OK, `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0`]) {
-      assertRefused(lintEnvText('compose', `${base}\nPG_DATABASE_URL=${URL_OK.replace('crewflow_owner', login)}`), /^PG_DATABASE_URL: is the app login and must log in as crewflow_owner; it is never an admin URL \(the admin URL was renamed to PG_ADMIN_URL/);
+    for (const base of [COMPOSE_DB_PW, OWN]) {
+      assertRefused(lintEnvText('compose', `${base}\nPG_DATABASE_URL=${URL_OK.replace('crewflow_owner', login)}`), /^PG_DATABASE_URL: is the app login and must log in as crewflow_owner; it is never an admin URL \(an admin URL goes in PG_ADMIN_URL/);
     }
   }
-  assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${URL_OK}`), /^PG_ADMIN_URL: logs in as crewflow_owner, the app login: put that URL in PG_DATABASE_URL/);
-  assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`), /^PG_ADMIN_URL and PG_DATABASE_URL are both set/);
+  assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${URL_OK}\nPG_DATABASE_URL=${URL_OK}`), /^PG_ADMIN_URL: logs in as crewflow_owner, the app login: put that URL in PG_DATABASE_URL/);
+  // PG_ADMIN_URL alone: db-setup would have no crewflow_owner URL (and the bundled default names another database).
+  // Owner decision 2026-11-19: PG_ADMIN_URL needs the crewflow_owner password: PG_DATABASE_APP_PASSWORD (+ PG_DATABASE_HOST), or PG_DATABASE_URL.
+  assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK}`), /^PG_ADMIN_URL needs PG_DATABASE_APP_PASSWORD \(openssl rand -hex 32\) and PG_DATABASE_HOST, or PG_DATABASE_URL/);
+  // The two URLs must name the same database (db-setup refuses it too: targetMismatch).
+  for (const other of [URL_OK.replace('db.internal.example', 'db2.internal.example'), URL_OK.replace(':5432', ':5433'), URL_OK.replace('/crewflow?', '/other?')]) {
+    assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${other}`), /^PG_ADMIN_URL and PG_DATABASE_URL name different databases/);
+  }
+  // The same database written differently (host case, the default port) is the same database.
+  assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK.replace('db.internal.example:5432', 'DB.internal.example')}\nPG_DATABASE_URL=${URL_OK}`), []);
+  // The bundled db without PG_ADMIN_URL: db-setup creates crewflow_owner in the bundled db, so the URL must name it.
+  assertRefused(lintEnvText('compose', `${COMPOSE_DB_PW}\nPG_DATABASE_URL=${URL_OK}`), /^PG_DATABASE_URL: with the bundled db \(CREWFLOW_BUNDLED_DB unset or 1\) and no PG_ADMIN_URL/);
 });
 
-test('DENIAL no dummy password: PG_DATABASE_PASSWORD is required with the bundled db and refused with your own database', () => {
+test('DENIAL no dummy password: both bundled passwords are required with the bundled db and refused with your own database', () => {
   assertRefused(lintEnvText('compose', COMPOSE_BASE), /^PG_DATABASE_PASSWORD: required for the bundled database/);
   assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=1`), /^PG_DATABASE_PASSWORD: required for the bundled database/);
-  assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nPG_DATABASE_URL=${URL_OK}`), /^PG_DATABASE_PASSWORD: required for the bundled database/);
-  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${ADMIN_OK}`), /^PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
-  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=0\nPG_DATABASE_URL=${URL_OK}`), /^PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nPG_DATABASE_APP_PASSWORD=${APP_PW}`), /^PG_DATABASE_PASSWORD: required for the bundled database/);
+  // Owner decision 2026-11-18: the crewflow_owner password of the bundled db (compose builds PG_DATABASE_URL from it).
+  assertRefused(lintEnvText('compose', COMPOSE_DB_PW), /^PG_DATABASE_APP_PASSWORD: required for the bundled database/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_DB_PW}\nCREWFLOW_BUNDLED_DB=1`), /^PG_DATABASE_APP_PASSWORD: required for the bundled database/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_DB_PW}\nPG_DATABASE_APP_PASSWORD=`), /^PG_DATABASE_APP_PASSWORD: required for the bundled database/);
+  for (const urls of [`PG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`, `PG_DATABASE_URL=${URL_OK}`]) {
+    assertRefused(lintEnvText('compose', `${COMPOSE_DB_PW}\nCREWFLOW_BUNDLED_DB=0\n${urls}`), /^PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+    assertRefused(lintEnvText('compose', `${OWN}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\n${urls}`), /^PG_DATABASE_APP_PASSWORD: set it OR PG_DATABASE_URL, never both/);
+  }
+  // Beside an explicit PG_DATABASE_URL the app password would never be used.
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`), /^PG_DATABASE_APP_PASSWORD: set it OR PG_DATABASE_URL, never both/);
+});
+
+test('DENIAL PG_DATABASE_APP_PASSWORD: compose.env only, 32+ of A-Z a-z 0-9 _ -; never an env file or container variable', () => {
+  assert.match(forbiddenReason('PG_DATABASE_APP_PASSWORD'), /compose\.env only/);
+  for (const kind of ['database', 'runtime']) {
+    assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_APP_PASSWORD=${APP_PW}`), /^PG_DATABASE_APP_PASSWORD: an interpolation value of compose\.env only/);
+  }
+  // db-setup.sh refuses the same shapes (it is interpolated unencoded into the crewflow_owner URL).
+  for (const bad of ['short', `${'d'.repeat(40)}@x`, `${'d'.repeat(40)}/x`, `${'d'.repeat(40)}%41`, `${'d'.repeat(40)}.x`, `${'d'.repeat(40)}~x`, `${'d'.repeat(31)}`]) {
+    assertRefused(lintEnvText('compose', COMPOSE_OK.replace(`PG_DATABASE_APP_PASSWORD=${APP_PW}`, `PG_DATABASE_APP_PASSWORD=${bad}`)), /^PG_DATABASE_APP_PASSWORD: must be at least 32 characters of A-Z a-z 0-9 _ -/);
+  }
+  for (const good of ['d'.repeat(32), `${'D'.repeat(20)}_-${'9'.repeat(10)}`]) {
+    assert.deepEqual(lintEnvText('compose', COMPOSE_OK.replace(`PG_DATABASE_APP_PASSWORD=${APP_PW}`, `PG_DATABASE_APP_PASSWORD=${good}`)), [], good);
+  }
+  // The committed template carries a placeholder, accepted in template mode only.
+  assert.deepEqual(lintEnvText('compose', COMPOSE_OK.replace(`PG_DATABASE_APP_PASSWORD=${APP_PW}`, 'PG_DATABASE_APP_PASSWORD=<openssl-rand-hex-32>'), { template: true }), []);
 });
 
 test('DENIAL bundled db switch: 0 without your own database, any value but 0 or 1', () => {
-  assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database in PG_ADMIN_URL or PG_DATABASE_URL/);
+  assertRefused(lintEnvText('compose', OWN), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database's crewflow_owner URL in PG_DATABASE_URL/);
   assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\nPG_DATABASE_URL=\nPG_ADMIN_URL=\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database/);
   // Review F2: the bundled db's own host is not "your own database" (db would never start).
-  for (const [key, login] of [['PG_ADMIN_URL', 'postgres'], ['PG_DATABASE_URL', 'crewflow_owner']]) {
-    const dbUrl = URL_OK.replace('crewflow_owner', login).replace('db.internal.example', 'db');
-    assertRefused(lintEnvText('compose', `${COMPOSE_BASE}\n${key}=${dbUrl}\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database in PG_ADMIN_URL or PG_DATABASE_URL \(a host other than the bundled db\)/);
-  }
+  const dbUrl = (login) => URL_OK.replace('crewflow_owner', login).replace('db.internal.example', 'db');
+  assertRefused(lintEnvText('compose', `${OWN}\nPG_DATABASE_URL=${dbUrl('crewflow_owner')}`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\), but PG_DATABASE_URL names the bundled host db/);
+  assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${dbUrl('postgres')}\nPG_DATABASE_URL=${dbUrl('crewflow_owner')}`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\), but PG_ADMIN_URL names the bundled host db/);
   for (const v of ['2', '', 'false', 'no', '00', '-1', 'true', '"0"x']) {
-    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}\nCREWFLOW_BUNDLED_DB=${v}`), /^CREWFLOW_BUNDLED_DB: must be exactly 0 or 1/);
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=${v}`), /^CREWFLOW_BUNDLED_DB: must be exactly 0 or 1/);
+  }
+});
+
+// Security review L1: the committed default wait ends inside OpenShip's 180 s window for rab-api -> db-setup
+// (service_completed_successfully on a service without a health check), so db-setup exits 70 with its own line first.
+test('db-setup wait: the default bound is below 180 s and the same in db-setup.sh, both compose wrappers and both environments', () => {
+  const wait = require('./db-setup-wait.cjs');
+  assert.ok(Number(wait.WAIT_SECONDS_DEFAULT) < wait.OPENSHIP_DEPENDENCY_WINDOW_SECONDS && wait.OPENSHIP_DEPENDENCY_WINDOW_SECONDS === 180, wait.WAIT_SECONDS_DEFAULT);
+  assert.equal(wait.WAIT_SECONDS_EXPR, `\${CREWFLOW_DB_WAIT_SECONDS:-${wait.WAIT_SECONDS_DEFAULT}}`);
+  for (const rel of ['rab/db-setup.sh', 'docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const defaults = [...text.matchAll(/CREWFLOW_DB_WAIT_SECONDS:-(\d+)\}/g)].map((m) => m[1]);
+    assert.ok(defaults.length >= 2, `${rel}: ${defaults.length} defaults`);
+    assert.deepEqual([...new Set(defaults)], [wait.WAIT_SECONDS_DEFAULT], rel);
+  }
+});
+
+// Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-setup's wait bound, a compose.env value only, 0-900 seconds.
+test('DENIAL db-setup wait: CREWFLOW_DB_WAIT_SECONDS is 0-900 whole seconds in compose.env, never in database.env / runtime.env', () => {
+  for (const v of ['0', '10', '170', '900', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_DB_WAIT_SECONDS=${v}`), [], v);
+  for (const v of ['901', '1000', '-1', '30s', '1e3', '0300', 'x']) {
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_DB_WAIT_SECONDS=${v}`), /^CREWFLOW_DB_WAIT_SECONDS: must be a whole number of seconds from 0 to 900/);
+  }
+  for (const kind of ['database', 'runtime']) {
+    assertRefused(lintEnvText(kind, 'CREWFLOW_DB_WAIT_SECONDS=170'), /^CREWFLOW_DB_WAIT_SECONDS: set it in compose\.env/);
   }
 });
 
@@ -241,7 +302,7 @@ test('DENIAL PG_ADMIN_URL: the old name PG_DATABASE_ADMIN_URL is refused everywh
   for (const kind of ['database', 'runtime']) {
     assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: (a second database URL|holds a PostgreSQL URL|does not belong)/);
   }
-  // PG_DATABASE_URL in an env file: refused (it would reach rab-api / rab-worker, which refuse it).
+  // PG_DATABASE_URL in an env file: refused (the committed expression on db-setup, rab-api and rab-worker overrides it).
   for (const kind of ['database', 'runtime']) {
     assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_URL=${URL_OK}`), /PG_DATABASE_URL: set it in compose\.env/);
   }
@@ -250,15 +311,24 @@ test('DENIAL PG_ADMIN_URL: the old name PG_DATABASE_ADMIN_URL is refused everywh
 test('DENIAL DB-SETUP compose env: the URL still needs verify-full, the direct host and a password; never a former separated login', () => {
   for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow_worker', 'crewflow', 'rab_app', 'rab_secure_owner']) {
     for (const key of ['PG_DATABASE_URL', 'PG_ADMIN_URL']) {
-      assertRefused(lintEnvText('compose', `${COMPOSE_OK}\n${key}=${URL_OK.replace('crewflow_owner', login)}`), new RegExp(`^${key}: logs in as a former separated login or schema role`));
+      assertRefused(lintEnvText('compose', `${OWN}\n${key}=${URL_OK.replace('crewflow_owner', login)}`), new RegExp(`^${key}: logs in as a former separated login or schema role`));
     }
   }
   for (const login of ['doadmin', 'crewflow_owner']) {
-    const withUrl = (url) => `${COMPOSE_OK}\n${login === 'doadmin' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${url.replace('crewflow_owner', login)}`;
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'))), /transaction pooler/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace(':5432', ':6543'))), /transaction pooler/);
+    const withUrl = (url) => `${OWN}\n${login === 'doadmin' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${url.replace('crewflow_owner', login)}`;
+    // Owner rule 2026-11-19: require / verify-ca / verify-full everywhere (all mean full verification), with or without
+    // channel_binding=require; disable / allow / prefer / no-verify / none refused.
+    for (const mode of ['require', 'verify-ca', 'verify-full', 'require&channel_binding=require', 'verify-full&channel_binding=require']) {
+      assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('verify-full', mode))).some((p) => /sslmode|channel_binding/.test(p)), `${login} ${mode}`);
+    }
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) {
+      assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', mode))), /sslmode must be require, verify-ca or verify-full/);
+    }
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be require, verify-ca or verify-full/);
+    // No host-name or port rule for a pooler (provider-neutral; db-setup decides by capability).
+    for (const address of ['pool-a.internal.example:6432', 'db.internal.example:6543']) {
+      assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example:5432', address))).some((p) => /pooler/.test(p)));
+    }
     assertRefused(lintEnvText('compose', withUrl('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full')), /no password/);
     assertRefused(lintEnvText('compose', withUrl('mysql://root:x@db.internal.example:3306/crewflow?sslmode=verify-full')), /not a postgres:\/\/ URL/);
     assertRefused(lintEnvText('compose', withUrl('not a url')), /not a parseable URL/);
@@ -304,13 +374,49 @@ test('BC-11 opt-in: the deployment identity lives in database.env only; O3: the 
   for (const kind of ['database', 'runtime']) {
     for (const mode of ['none', 'token']) assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : ''}CREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), /CREWFLOW_MIGRATION_APPROVAL_MODE: set it in compose\.env/);
   }
-  for (const mode of ['none', 'token']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), []);
+  for (const mode of ['none', 'token']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), [], mode);
   assertRefused(lintEnvText('compose', 'CREWFLOW_MIGRATION_APPROVAL_MODE=off'), /must be exactly none or token/);
   // The compose files may carry only the interpolation, never a literal that pins the mode.
   assert.deepEqual(lintComposeText('x.yml', 'services:\n  a:\n    environment:\n      CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}\n'), []);
   for (const literal of ['none', 'token', '${CREWFLOW_MIGRATION_APPROVAL_MODE:-token}']) {
     assertRefused(lintComposeText('x.yml', `services:\n  a:\n    environment:\n      CREWFLOW_MIGRATION_APPROVAL_MODE: ${literal}\n`), /must be exactly \$\{CREWFLOW_MIGRATION_APPROVAL_MODE:-none\}/);
   }
+});
+
+// Owner decision 2026-11-20 (AI wanted in production, Anthropic only): AI_ENABLED is operator-set, default OFF. The compose
+// files commit exactly ${AI_ENABLED:-false}; compose.env alone may set it (exactly true or false); a committed literal, true
+// as much as the former 'false' pin, another default, `:?` or no default is refused.
+test('DENIAL AI switch: committed only as exactly ${AI_ENABLED:-false}; operator-set in compose.env, never database.env / runtime.env', () => {
+  const { AI_ENABLED_EXPR, aiEnabledExpressionProblems } = gate;
+  assert.equal(AI_ENABLED_EXPR, '${AI_ENABLED:-false}');
+  const svc = (line) => `services:\n  rab-api:\n    environment:\n      ${line}\n`;
+  assert.deepEqual(lintComposeText('x.yml', svc('AI_ENABLED: ${AI_ENABLED:-false}')), []);
+  for (const line of [
+    "AI_ENABLED: 'true'", 'AI_ENABLED: "true"', 'AI_ENABLED: true', "AI_ENABLED: 'false'", 'AI_ENABLED: "false"', 'AI_ENABLED: false',
+    'AI_ENABLED: ${AI_ENABLED:-true}', 'AI_ENABLED: ${AI_ENABLED-false}', 'AI_ENABLED: ${AI_ENABLED}', 'AI_ENABLED: ${AI_ENABLED:?set it}',
+    'AI_ENABLED: "${AI_ENABLED:-false}"', 'AI_ENABLED: ${AI_ENABLED:-false} # on', 'AI_ENABLED:', '- AI_ENABLED=${AI_ENABLED:-false}', '- AI_ENABLED=true',
+  ]) assertRefused(lintComposeText('x.yml', svc(line)), /AI_ENABLED must be committed as exactly AI_ENABLED: \$\{AI_ENABLED:-false\}/);
+  // A comment naming it is not a commitment.
+  assert.deepEqual(lintComposeText('x.yml', svc("# AI_ENABLED: 'true' was the old idea")), []);
+  // docker-compose.production.yml must carry it (the shared optional list both services merge).
+  assertRefused(aiEnabledExpressionProblems('docker-compose.production.yml', 'services: {}\n', { required: true }), /AI_ENABLED is missing/);
+  // The committed files: production carries it exactly once (shared by rab-api and rab-worker), image.yml on each service.
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const count = (f) => (read(f).match(/^\s*AI_ENABLED: \$\{AI_ENABLED:-false\}$/gm) ?? []).length;
+  assert.deepEqual(aiEnabledExpressionProblems('docker-compose.production.yml', read('docker-compose.production.yml'), { required: true }), []);
+  assert.equal(count('docker-compose.production.yml'), 1);
+  assert.deepEqual(aiEnabledExpressionProblems('docker-compose.image.yml', read('docker-compose.image.yml'), { required: true }), []);
+  assert.equal(count('docker-compose.image.yml'), 2);
+  // compose.env: exactly true or false (empty = the default, false); anything else is refused (X3.1 strict switch).
+  assert.ok(gate.STRICT_SWITCHES.includes('AI_ENABLED'));
+  for (const v of ['true', 'false', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nAI_ENABLED=${v}`), [], v);
+  for (const v of ['True', 'yes', '1', 'on']) assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nAI_ENABLED=${v}`), /AI_ENABLED: must be exactly true or false/);
+  // database.env / runtime.env: the committed expression would silently override it, so refused, naming compose.env.
+  for (const kind of ['database', 'runtime']) {
+    for (const v of ['true', 'false']) assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : ''}AI_ENABLED=${v}`), /AI_ENABLED: set it in compose\.env/);
+  }
+  // The development-only real-provider switch is never an operator value in production.
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nAI_DEV_ALLOW_REAL_PROVIDERS=true`), /AI_DEV_ALLOW_REAL_PROVIDERS: compose\.env holds only/);
 });
 
 test('BC-07: CREWFLOW_AUDIT_SINK is required in runtime.env, with a production-accepted value only', () => {
@@ -483,12 +589,38 @@ test('Phase D switches: the gate and the image-compose verifier enforce the same
   assert.deepEqual({ ...verifier.NOTIFICATION_DELIVERY }, { ...gate.NOTIFICATION_DELIVERY });
 });
 
-test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
+test('command authority and a bootstrap password are refused in every env file and on every service', () => {
   for (const kind of ['database', 'runtime', 'compose']) {
-    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_PASSWORD', 'BOOTSTRAP_ADMIN_ROLE']) {
       assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: `));
     }
   }
+  assert.match(forbiddenReason('BOOTSTRAP_ADMIN_PASSWORD'), /a bootstrap password/);
+  assert.match(forbiddenReason('BOOTSTRAP_ADMIN_ROLE'), /unknown bootstrap-admin input/);
+  for (const service of ['rab-api', 'rab-worker']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_PASSWORD']) assert.ok(forbiddenReason(name), `${name} on ${service}`);
+  }
+});
+
+test('first platform admin at boot (2026-11-19): the five BOOTSTRAP_ADMIN_* inputs are allowed for rab-api only', () => {
+  assert.deepEqual([...gate.RAB_API_BOOTSTRAP_ADMIN_KEYS], [
+    'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME',
+  ]);
+  for (const name of gate.RAB_API_BOOTSTRAP_ADMIN_KEYS) {
+    assert.equal(forbiddenReason(name), null, name);
+    // On rab-api: allowed. On any other service: refused.
+    assert.equal(gate.bootstrapAdminPlacementProblem(name, { service: 'rab-api' }), null);
+    for (const service of ['rab-worker', 'db-setup', 'db-harden', 'rab-redis']) {
+      assert.match(gate.bootstrapAdminPlacementProblem(name, { service }), /rab-api only/, `${name} on ${service}`);
+    }
+    // compose.env (the interpolation file) may carry it for rab-api's committed expression; database.env and runtime.env
+    // reach rab-worker as well, so they may not.
+    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}
+${name}=admin@example.test`), []);
+    for (const kind of ['database', 'runtime']) assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: rab-api only`));
+  }
+  // Not one of the five: never placement-checked (forbiddenReason decides).
+  assert.equal(gate.bootstrapAdminPlacementProblem('APP_SECRET', { service: 'rab-worker' }), null);
 });
 
 test('compose env: interpolation values only, digests, never a secret, never every interface', () => {
@@ -524,6 +656,44 @@ test('raw compose text: build, a committed token, the mode switch and privileged
   assertRefused(lintComposeText('x.yml', 'services:\n  a:\n    environment:\n      CREWFLOW_DB_MODE: twenty\n'), /no mode switch/);
   assertRefused(lintComposeText('x.yml', 'services:\n  a:\n    privileged: true\n'), /privileged/);
   assert.deepEqual(lintComposeText('x.yml', '# run -e CREWFLOW_MIGRATION_APPROVED=<token> rab-migrate\n'), []);
+});
+
+// Owner decision 2026-11-18 (Twenty's way): PG_DATABASE_URL is interpolated ONLY as the one committed crewflow_owner
+// expression, and the retired setup volume never comes back.
+test('raw compose text: PG_DATABASE_URL only as the committed crewflow_owner expression; the retired setup volume is refused', () => {
+  const expr = gate.APP_URL_EXPR;
+  assert.equal(expr, '${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}');
+  const svc = (line) => `services:\n  rab-api:\n    environment:\n      ${line}\n`;
+  assert.deepEqual(lintComposeText('x.yml', svc(`PG_DATABASE_URL: ${expr}`)), []);
+  assert.deepEqual(lintComposeText('x.yml', `${svc(`PG_DATABASE_URL: ${expr}`)}  rab-worker:\n    environment:\n      PG_DATABASE_URL: ${expr}\n`), []);
+  for (const line of [
+    'PG_DATABASE_URL: ${PG_DATABASE_URL:-}', // the pre-2026-11-18 db-setup line: no bundled default
+    'PG_DATABASE_URL: ${PG_DATABASE_URL}',
+    'PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}', // the superuser
+    `PG_DATABASE_URL: ${expr.replace('verify-full', 'require')}`,
+    `PG_DATABASE_URL: ${expr.replace('${PG_DATABASE_HOST:-db}', 'db.evil.example')}`,
+    `OTHER_URL: ${expr}`,
+    'X: ${PG_DATABASE_APP_PASSWORD:-}',
+    'PG_DATABASE_URL: postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD}@db:5432/crewflow?sslmode=verify-full',
+    `- PG_DATABASE_URL=${expr}`,
+  ]) {
+    assertRefused(lintComposeText('x.yml', svc(line)), /interpolates \$\{PG_DATABASE_URL\.\.\.\} or \$\{PG_DATABASE_APP_PASSWORD\.\.\.\} other than as the committed line/);
+  }
+  assertRefused(lintComposeText('x.yml', svc('PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:?required}@db:5432/crewflow?sslmode=verify-full}')), /PG_DATABASE_APP_PASSWORD:\?\.\.\.\} demands the bundled crewflow_owner password/);
+  // A comment may name anything.
+  assert.deepEqual(lintComposeText('x.yml', `# PG_DATABASE_URL: \${PG_DATABASE_URL:-}\n# crewflow-db-target was retired\n${svc(`PG_DATABASE_URL: ${expr}`)}`), []);
+  for (const text of [
+    'services:\n  db-setup:\n    volumes:\n      - crewflow-db-target:/run/crewflow/db-target\n',
+    'services:\n  rab-api:\n    volumes:\n      - other:/run/crewflow/db-target:ro\n',
+    'volumes:\n  crewflow-db-target:\n',
+  ]) assertRefused(lintComposeText('x.yml', text), /names the retired crewflow-db-target volume or \/run\/crewflow\/db-target/);
+  // The same two rules on docker-compose.production.yml (its other rules are other gates'), and the committed file passes.
+  assert.deepEqual(gate.databaseExpressionProblems('docker-compose.production.yml', fs.readFileSync(gate.PRODUCTION_FILE, 'utf8')), []);
+  assertRefused(gate.databaseExpressionProblems('p.yml', svc('PG_DATABASE_URL: ""').replace('""', '${PG_DATABASE_URL:-}')), /other than as the committed line/);
+  assertRefused(gate.databaseExpressionProblems('p.yml', 'volumes:\n  crewflow-db-target:\n'), /retired crewflow-db-target/);
+  const prod = fs.readFileSync(gate.PRODUCTION_FILE, 'utf8');
+  assert.ok(prod.includes(`PG_DATABASE_URL: ${expr}`), 'production commits the expression');
+  assertRefused(gate.databaseExpressionProblems('docker-compose.production.yml', prod.replace(`PG_DATABASE_URL: ${expr}`, 'PG_DATABASE_URL: ${PG_DATABASE_URL:-}')), /other than as the committed line/);
 });
 
 // ------------------------------------------------------------------------------------------------ bundled database
@@ -615,7 +785,7 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { s.db.volumes.push({ type: 'bind', source: '/x/01-crewflow-owner.sql', target: '/docker-entrypoint-initdb.d/01.sql', read_only: true }); }), /mounts an init script/);
 });
 
-test('DENIAL bundled db: internal network only, its own volumes, rab-api waits for it, the app mounts only its CA read-only', { skip }, () => {
+test('DENIAL bundled db: internal network only, its own volumes, nothing depends on it, the app mounts only its CA read-only', { skip }, () => {
   assertRefused(problemsAfter((s) => { s.db.networks.default = null; }), /internal crewflow-db network only/);
   assertRefused(problemsAfter((s, m) => { m.networks['crewflow-db'].internal = false; }), /crewflow-db is not internal/);
   assertRefused(problemsAfter((s) => { s.db.volumes = s.db.volumes.filter((v) => v.target !== '/var/lib/postgresql'); }), /crewflow-db-data at \/var\/lib\/postgresql is missing/);
@@ -623,7 +793,11 @@ test('DENIAL bundled db: internal network only, its own volumes, rab-api waits f
   assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/tmp').source = 'other'; }), /db: unexpected named volume/);
   // The pre-fix layout (data on /var/lib/postgresql/data: root-owned on postgres:18, so the db cannot start there).
   assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/lib/postgresql').target = '/var/lib/postgresql/data'; }), /db: unexpected named volume at \/var\/lib\/postgresql\/data/);
-  assertRefused(problemsAfter((s) => { delete s['rab-api'].depends_on.db; }), /rab-api: does not wait for a healthy db/);
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): nothing depends on db (with CREWFLOW_BUNDLED_DB=0 it has no
+  // container, and OpenShip then skipped the dependent instead of starting it); db-setup waits for the database itself.
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {
+    assertRefused(problemsAfter((s) => { s[svc].depends_on = { ...(s[svc].depends_on ?? {}), db: { condition: 'service_healthy', required: true } }; }), new RegExp(`${svc}: depends on db`));
+  }
   for (const svc of ['rab-api', 'rab-worker']) {
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
     assertRefused(problemsAfter((s) => { s[svc].volumes.find((v) => v.source === 'crewflow-db-ca').read_only = false; }), new RegExp(`${svc}: (the bundled db's CA volume must be mounted read-only|does not mount)`));
@@ -802,10 +976,11 @@ test('ADMIN_URL_PLACEMENT (owner requirement 2026-11-17): every committed compos
     assert.ok(files.some((f) => f.endsWith(path.join('rab-docker', rel))), rel);
   }
   for (const file of files) assert.deepEqual(gate.adminUrlPlacementProblems(file, fs.readFileSync(file, 'utf8')), [], file);
-  // The deploy files do interpolate it, on db-setup, exactly once.
+  // The deploy files do interpolate it, once on db-setup and once on db-harden (owner decision 2026-11-18, M1). `$$` is
+  // Compose's literal `$`: db-setup's wait-for-db wrapper reads the variable in its own shell, which is not an interpolation.
   for (const rel of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
     const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
-    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_ADMIN_URL')).length, 1, rel);
+    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.split('$$').join('').includes('${PG_ADMIN_URL')).length, 2, rel);
   }
 });
 
@@ -813,6 +988,9 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   const setup = 'services:\n  db-setup:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n';
   const pinned = `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: ""\n  rab-worker:\n    environment:\n      PG_ADMIN_URL: ''\n`;
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', setup), []);
+  // An escaped `$${PG_ADMIN_URL}` (a shell reference inside db-setup) is not an interpolation; an unescaped second one is.
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', `${setup}    entrypoint: ["/bin/sh", "-c", "echo ` + '$${PG_ADMIN_URL:-}"]\n'), []);
+  assert.match(gate.adminUrlPlacementProblems('x.yml', `${setup}    entrypoint: ["/bin/sh", "-c", "echo ` + '$$${PG_ADMIN_URL:-}"]\n').join('\n'), /interpolates \$\{PG_ADMIN_URL\.\.\.\} 2 times/);
   // Owner decision L-2: the exact empty pin on rab-api / rab-worker is the one allowed occurrence outside db-setup.
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', pinned), []);
   // ... and on the dev / QA stacks' server / worker (follow-up of the review: the same pin there).
@@ -860,6 +1038,151 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   // lintComposeText (the deploy files) runs the same rule, and refuses a `:?` on the bundled db's password.
   assertRefused(lintComposeText('bad.yml', `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: x\n`), /PG_ADMIN_URL in service rab-api/);
   assertRefused(lintComposeText('bad.yml', 'services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?required}\n'), /demands the bundled db's password with your own database too/);
+});
+
+// ------------------------------------------------------------------------------------------------ db-harden (M1)
+// Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot CREATEROLE hardening service. These cases need no
+// rendering: the raw-text rules, the env lint and dbHardenProblems on a hand-built model of the committed shape.
+
+test('db-harden: both deploy files commit it with db-setup\'s database settings, its own entrypoint and timeout, no depends_on', () => {
+  for (const rel of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const block = text.split(/\n(?=  [a-z][a-z0-9-]*:\n)/).find((b) => b.startsWith('  db-harden:\n'));
+    assert.ok(block, `${rel}: db-harden is committed`);
+    const code = block.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    assert.match(code, /entrypoint: \["\.\/db-setup\.sh", "harden"\]/, rel);
+    assert.match(code, /PG_ADMIN_URL: \$\{PG_ADMIN_URL:-\}/, rel);
+    assert.ok(code.includes(`PG_DATABASE_URL: ${gate.APP_URL_EXPR}`), rel);
+    assert.match(code, /CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql:\/\/postgres:\$\{PG_DATABASE_PASSWORD:-\}@db:5432\/crewflow\?sslmode=verify-full/, rel);
+    assert.ok(code.includes(`${gate.HARDEN_TIMEOUT_KEY}: ${gate.HARDEN_TIMEOUT_EXPR}`), rel);
+    assert.match(code, /restart: "no"/, rel);
+    assert.doesNotMatch(code, /depends_on/, `${rel}: db-harden has no depends_on`);
+    assert.doesNotMatch(code, /runtime\.env/, `${rel}: db-harden never reads runtime.env`);
+    // Nothing waits for it: no depends_on entry anywhere names it.
+    // (Services sit at two spaces; a depends_on entry naming db-harden would sit deeper, or be a list item.)
+    const lines = text.split('\n').filter((l) => !/^\s*#/.test(l));
+    assert.ok(!lines.some((l) => /^ {4,}db-harden:\s*$/.test(l) || /^\s*-\s*db-harden\s*$/.test(l)), `${rel}: no service depends on db-harden`);
+  }
+});
+
+test('DENIAL ADMIN_URL_PLACEMENT (M1): db-harden may hold the admin login under db-setup\'s rules; one interpolation per admin service; no anchor on it', () => {
+  const both = 'services:\n  db-setup:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n  db-harden:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n';
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', both), []);
+  const cases = [
+    [`${both}      X: \${PG_ADMIN_URL:-}\n`, /interpolates \$\{PG_ADMIN_URL\.\.\.\} 2 times in db-harden/],
+    ['services:\n  db-harden: &h\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n  rab-api:\n    <<: *h\n', /an anchor on the db-harden service/],
+    ['services:\n  db-harden:\n    environment: &henv\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n  rab-api:\n    environment:\n      <<: *henv\n', /an anchor defined inside the db-harden service/],
+    // Any other name is still refused (db-harden2, a renamed copy).
+    ['services:\n  db-harden2:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n', /interpolated in service db-harden2/],
+    ['services:\n  db-harden2:\n    environment:\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n', /CREWFLOW_BUNDLED_DB_ADMIN_URL in service db-harden2/],
+  ];
+  for (const [text, pattern] of cases) assertRefused(gate.adminUrlPlacementProblems('bad.yml', text), pattern);
+});
+
+test('DENIAL db-harden timeout: committed only as ${CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS:-1200}; compose.env only, 60-7200', () => {
+  assert.deepEqual(lintComposeText('ok.yml', `services:\n  db-harden:\n    environment:\n      ${gate.HARDEN_TIMEOUT_KEY}: ${gate.HARDEN_TIMEOUT_EXPR}\n`), []);
+  assertRefused(lintComposeText('bad.yml', `services:\n  db-harden:\n    environment:\n      ${gate.HARDEN_TIMEOUT_KEY}: "30"\n`), /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be exactly/);
+  for (const ok of ['60', '1200', '7200']) assert.deepEqual(lintEnvText('compose', `${gate.HARDEN_TIMEOUT_KEY}=${ok}\n`).filter((x) => x.startsWith(gate.HARDEN_TIMEOUT_KEY)), [], ok);
+  for (const bad of ['59', '7201', '20m', '-1', '1e3']) assertRefused(lintEnvText('compose', `${gate.HARDEN_TIMEOUT_KEY}=${bad}\n`), /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: must be a whole number of seconds from 60 to 7200/);
+  for (const kind of ['database', 'runtime']) assertRefused(lintEnvText(kind, `${gate.HARDEN_TIMEOUT_KEY}=1200\n`), /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: set it in compose\.env/);
+  assert.equal(gate.hardenTimeoutOk('1200'), true);
+  assert.equal(gate.hardenTimeoutOk('7201'), false);
+});
+
+/** A hand-built model of the committed db-setup / db-harden / rab-api shapes (what `docker compose config` renders). */
+function hardenModel() {
+  const image = `adhin007/adolphus@sha256:${'0'.repeat(64)}`;
+  const want = {
+    PG_ADMIN_URL: '',
+    PG_ADMIN_DIRECT_URL: '',
+    PG_DATABASE_HOST: '',
+    PG_DATABASE_URL: gate.BUNDLED_APP_URL,
+    CREWFLOW_BUNDLED_DB: '1',
+    CREWFLOW_BUNDLED_DB_ADMIN_URL: gate.BUNDLED_URL,
+  };
+  const oneShot = (entrypoint, extraEnv) => ({
+    image,
+    entrypoint,
+    environment: { ...want, ...extraEnv, NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' },
+    networks: { default: null, 'crewflow-db': null },
+    volumes: [{ type: 'volume', source: 'crewflow-db-ca', target: '/run/crewflow/db-ca', read_only: true }],
+    restart: 'no',
+    logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '5' } },
+    user: '1000:1000',
+    read_only: true,
+    cap_drop: ['ALL'],
+    security_opt: ['no-new-privileges:true'],
+    pids_limit: 64,
+    mem_limit: '268435456',
+    cpus: 1,
+    stop_grace_period: '30s',
+  });
+  const services = {
+    'rab-api': { image, depends_on: { 'db-setup': { condition: 'service_completed_successfully' } } },
+    'rab-worker': { image, depends_on: { 'rab-api': { condition: 'service_healthy' } } },
+    'db-setup': { ...oneShot(['./db-setup.sh'], { CREWFLOW_DB_WAIT_SECONDS: '170' }), depends_on: { db: { condition: 'service_healthy' } }, stop_grace_period: '40s' },
+    'db-harden': oneShot(['./db-setup.sh', 'harden'], { [gate.HARDEN_TIMEOUT_KEY]: '1200', CREWFLOW_DB_WAIT_SECONDS: '170' }),
+  };
+  return { services, want };
+}
+const hardenProblems = (mutate, timeout = '1200') => {
+  const { services, want } = hardenModel();
+  if (mutate) mutate(services);
+  const out = [];
+  gate.dbHardenProblems(services, (m) => out.push(m), want, timeout);
+  return out;
+};
+
+test('dbHardenProblems: the committed shape passes', () => {
+  assert.deepEqual(hardenProblems(), []);
+});
+
+test('DENIAL dbHardenProblems: missing, any depends_on, a service depending on it, another entrypoint or image, a different database setting, the timeout, runtime.env', () => {
+  const cases = [
+    [(s) => { delete s['db-harden']; }, /db-harden: missing/],
+    [(s) => { s['db-harden'].depends_on = { db: { condition: 'service_healthy' } }; }, /db-harden: has depends_on/],
+    [(s) => { s['db-harden'].depends_on = { 'rab-api': { condition: 'service_started' } }; }, /db-harden: has depends_on/],
+    [(s) => { s['rab-api'].depends_on['db-harden'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on db-harden/],
+    [(s) => { s['rab-worker'].depends_on['db-harden'] = { condition: 'service_started' }; }, /rab-worker: depends on db-harden/],
+    [(s) => { s['rab-worker'].depends_on = ['db-harden']; }, /rab-worker: depends on db-harden/],
+    [(s) => { s['db-harden'].entrypoint = ['./db-setup.sh']; }, /entrypoint is not exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].entrypoint = ['./api-prestart.sh']; }, /entrypoint is not exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].command = ['harden']; }, /db-harden: has a command/],
+    [(s) => { s['db-harden'].image = `adhin007/adolphus@sha256:${'1'.repeat(64)}`; }, /db-harden: image differs from rab-api/],
+    [(s) => { s['db-harden'].environment.PG_ADMIN_URL = 'postgresql://x:y@elsewhere:5432/crewflow'; }, /db-harden: PG_ADMIN_URL is not db-setup's committed value/],
+    [(s) => { delete s['db-harden'].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL; }, /db-harden: CREWFLOW_BUNDLED_DB_ADMIN_URL is missing/],
+    [(s) => { delete s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY]; }, /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is missing/],
+    [(s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = '30'; }, /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is "30"/],
+    // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-harden's database wait, bounded by db-setup's value.
+    [(s) => { delete s['db-harden'].environment.CREWFLOW_DB_WAIT_SECONDS; }, /db-harden: CREWFLOW_DB_WAIT_SECONDS is missing/],
+    [(s) => { s['db-harden'].environment.CREWFLOW_DB_WAIT_SECONDS = '900'; }, /db-harden: CREWFLOW_DB_WAIT_SECONDS is not db-setup's committed value/],
+    [(s) => { s['db-harden'].environment.CREWFLOW_DB_WAIT_SECONDS = '901'; s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '901'; }, /db-harden: CREWFLOW_DB_WAIT_SECONDS is not db-setup's committed value/],
+    [(s) => { s['db-harden'].restart = 'on-failure'; }, /db-harden: restart is "on-failure", expected "no"/],
+    [(s) => { s['db-harden'].profiles = ['harden']; }, /db-harden: has profiles/],
+    [(s) => { s['db-harden'].env_file = [{ path: '/secrets/runtime.env' }]; }, /db-harden: reads runtime\.env/],
+    [(s) => { s['db-harden'].environment.APP_SECRET = 'x'; }, /db-harden: has APP_SECRET/],
+    [(s) => { s['db-harden'].user = '0:0'; }, /db-harden: user is "0:0"/],
+    [(s) => { s['db-harden'].volumes = []; }, /db-harden: does not mount the bundled db's CA read-only/],
+    [(s) => { s['db-harden'].networks = { default: null }; }, /db-harden: is not on the crewflow-db network/],
+    [(s) => { s['db-harden'].environment.NODE_ENV = 'development'; }, /db-harden: NODE_ENV is not production/],
+    [(s) => { s['db-harden'].environment.RAB_RUNTIME_ENV = 'staging'; }, /db-harden: RAB_RUNTIME_ENV is not production/],
+    [(s) => { s['db-harden'].environment.PG_DATABASE_ADMIN_URL = ''; }, /db-harden: has PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL\)/],
+    [(s) => { s['db-harden'].depends_on = ['db']; }, /db-harden: has depends_on/],
+    [(s) => { s['db-harden'].init = true; }, /db-harden: init: true/],
+    // Its own rule (exact message), beside the shared hardening rule that also refuses any port off rab-api.
+    [(s) => { s['db-harden'].ports = [{ target: 5432, published: '5432' }]; }, /^db-harden: publishes a port$/],
+    [(s) => { s['db-harden'].deploy = { replicas: 2 }; }, /db-harden: 2 replicas/],
+    // db-setup's container hardening (stop_grace_period aside).
+    [(s) => { s['db-harden'].read_only = false; }, /db-harden: read_only root filesystem is not set/],
+    [(s) => { s['db-harden'].cap_drop = []; }, /db-harden: cap_drop ALL is missing/],
+    [(s) => { s['db-harden'].security_opt = []; }, /db-harden: security_opt no-new-privileges:true is missing/],
+    [(s) => { delete s['db-harden'].pids_limit; }, /db-harden: pids_limit is missing/],
+    [(s) => { delete s['db-harden'].mem_limit; }, /db-harden: mem_limit is missing/],
+  ];
+  for (const [mutate, pattern] of cases) assertRefused(hardenProblems(mutate), pattern);
+  // A rendered compose.env value outside the child's bounds (the lint refuses it too).
+  for (const v of ['30', '7201', '99999']) assertRefused(hardenProblems((s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = v; }, v), /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be a whole number of seconds from 60 to 7200/);
+  assert.deepEqual(hardenProblems((s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = '600'; }, '600'), []);
 });
 
 // Review of PR #230, I-2: the db entrypoint's password check, run for real (sh) from the committed production file.
@@ -912,20 +1235,132 @@ test('I-2: the db entrypoint refuses an empty password always, and a weak one on
 
 test('dbSettingsProblems: the shared rule of the compose.env lint and the --environment preflight', () => {
   const r = gate.dbSettingsProblems;
-  assert.deepEqual(r({ bundled: '1', passwordSet: true }), []);
-  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK }), []);
+  assert.deepEqual(r({ bundled: '1', passwordSet: true, appPasswordSet: true }), []);
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK }), []);
   assert.deepEqual(r({ bundled: '0', appUrl: URL_OK }), []);
   assertRefused(r({ bundled: '1' }), /^PG_DATABASE_PASSWORD: required for the bundled database/);
+  // Fail closed: a caller that does not say the app password is set gets it reported missing in the bundled mode.
+  assertRefused(r({ bundled: '1', passwordSet: true }), /^PG_DATABASE_APP_PASSWORD: required for the bundled database/);
   assertRefused(r({ bundled: '0' }), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK }), /^PG_ADMIN_URL needs PG_DATABASE_APP_PASSWORD/);
   assertRefused(r({ bundled: '0', appUrl: ADMIN_OK }), /^PG_DATABASE_URL: is the app login/);
-  assertRefused(r({ bundled: '0', adminUrl: URL_OK }), /^PG_ADMIN_URL: logs in as crewflow_owner/);
-  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK }), /both set/);
-  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, passwordSet: true }), /remove it with CREWFLOW_BUNDLED_DB=0/);
+  assertRefused(r({ bundled: '0', adminUrl: URL_OK, appUrl: URL_OK }), /^PG_ADMIN_URL: logs in as crewflow_owner/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK.replace('/crewflow?', '/other?') }), /name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK, passwordSet: true }), /PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+  assertRefused(r({ bundled: '0', appUrl: URL_OK, appPasswordSet: true }), /PG_DATABASE_APP_PASSWORD: set it OR PG_DATABASE_URL, never both/);
+  // Owner decision 2026-11-19 ("You set one shared password"): PG_ADMIN_URL + PG_DATABASE_APP_PASSWORD + the address.
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example', dbName: 'crewflow' }), []);
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'DB.internal.example', dbPort: '5432' }), []);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true }), /^PG_DATABASE_HOST: required with CREWFLOW_BUNDLED_DB=0 and PG_DATABASE_APP_PASSWORD/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db2.internal.example' }), /^PG_ADMIN_URL and PG_DATABASE_HOST \/ PG_DATABASE_PORT \/ PG_DATABASE_NAME name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example', dbName: 'other' }), /name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example', dbPort: '6432' }), /name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db' }), /names the bundled host db/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'x@evil:1/db' }), /^PG_DATABASE_HOST: a host name only/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK, dbHost: 'db.internal.example' }), /PG_DATABASE_HOST \/ PG_DATABASE_PORT \/ PG_DATABASE_NAME: remove them/);
+  assertRefused(r({ bundled: '1', passwordSet: true, appPasswordSet: true, dbHost: 'db.internal.example' }), /only for your own database/);
+  // PG_ADMIN_DIRECT_URL: the pooled PG_ADMIN_URL pasted as-is, the direct address beside it (same login and database).
+  const pooled = ADMIN_OK.replace('db.internal.example:5432', 'pool.internal.example:6432').replace('verify-full', 'require');
+  assert.deepEqual(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example' }), []);
+  assertRefused(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: ADMIN_OK.replace('doadmin', 'other'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: must name the same login and database/);
+  assertRefused(r({ bundled: '0', adminDirectUrl: ADMIN_OK, appUrl: URL_OK }), /^PG_ADMIN_DIRECT_URL: needs PG_ADMIN_URL/);
+  // No address rule for a pooler: PG_ADMIN_DIRECT_URL is checked by db-setup's capability probe, not by its host or port.
+  assert.ok(!r({ bundled: '0', adminUrl: pooled, adminDirectUrl: pooled, appPasswordSet: true, dbHost: 'pool.internal.example', dbPort: '6432' }).some((p) => /pooler/.test(p)));
+  // Owner decision 2026-11-18: both URLs set is no longer a refusal.
+  assert.ok(!r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK }).some((p) => /both set/.test(p)));
   // Review of PR #230, I-4: an encoded crewflow_owner login is the same login (decoded first); a login in a query parameter
   // is refused.
   assert.deepEqual(r({ bundled: '0', appUrl: URL_OK.replace('crewflow_owner', 'crewflow%5Fowner') }), []);
   for (const param of ['user=crewflow_owner', 'user=postgres', 'password=x', 'host=elsewhere', 'dbname=other']) {
-    assertRefused(r({ bundled: '0', adminUrl: `${ADMIN_OK}&${param}` }), new RegExp(`^PG_ADMIN_URL: has a \\?${param.split('=')[0]}= query parameter`));
+    assertRefused(r({ bundled: '0', adminUrl: `${ADMIN_OK}&${param}`, appUrl: URL_OK }), new RegExp(`^PG_ADMIN_URL: has a \\?${param.split('=')[0]}= query parameter`));
     assertRefused(r({ bundled: '0', appUrl: `${URL_OK}&${param}` }), new RegExp(`^PG_DATABASE_URL: has a \\?${param.split('=')[0]}= query parameter`));
+  }
+});
+
+test('owner decision 2026-11-19: compose.env holds PG_ADMIN_DIRECT_URL and PG_DATABASE_HOST / PORT / NAME; no other env file does', () => {
+  const direct = ADMIN_OK;
+  const pooled = ADMIN_OK.replace('db.internal.example:5432', 'pool.internal.example:6432').replace('verify-full', 'require');
+  const canonical = `${OWN}\nPG_ADMIN_URL=${pooled}\nPG_ADMIN_DIRECT_URL=${direct}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\nPG_DATABASE_HOST=db.internal.example\nPG_DATABASE_PORT=5432\nPG_DATABASE_NAME=crewflow`;
+  assert.deepEqual(lintEnvText('compose', canonical), []);
+  assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\nPG_DATABASE_HOST=db.internal.example`), []);
+  for (const kind of ['database', 'runtime']) {
+    const base = kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n';
+    assertRefused(lintEnvText(kind, `${base}PG_ADMIN_DIRECT_URL=${direct}`), /^PG_ADMIN_DIRECT_URL: set it in compose\.env/);
+    assertRefused(lintEnvText(kind, `${base}PG_DATABASE_HOST=db.internal.example`), /^PG_DATABASE_HOST: set it in compose\.env/);
+  }
+  // Security review F2 of #259: rab-api / rab-worker may only PIN it to "" (like PG_ADMIN_URL); any value, or any other
+  // service, is refused.
+  assert.ok(!lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n').some((p) => /PG_ADMIN_DIRECT_URL in/.test(p)));
+  assertRefused(lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}\n'), /PG_ADMIN_DIRECT_URL in service rab-api/);
+  assertRefused(lintComposeText('x.yml', 'services:\n  other:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n'), /PG_ADMIN_DIRECT_URL in service other/);
+  // Both committed files pin it on rab-api and rab-worker.
+  for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.equal((text.match(/^ {6}PG_ADMIN_DIRECT_URL: ""$/gm) ?? []).length >= 2, true, `${file}: PG_ADMIN_DIRECT_URL pinned on rab-api and rab-worker`);
+  }
+});
+
+test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL)', () => {
+  assert.deepEqual([...gate.ACCEPTED_SSLMODES], ['require', 'verify-ca', 'verify-full']);
+  for (const key of ['PG_DATABASE_URL', 'PG_DATABASE_SESSION_URL', 'PG_ADMIN_URL', 'PG_ADMIN_DIRECT_URL']) {
+    for (const mode of ['require', 'verify-ca', 'verify-full']) assert.equal(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), null);
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), new RegExp(`^${key}: sslmode must be`));
+    assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be/);
+    // channel_binding: the runtime parser's three values only (pg-url-policy.ts).
+    for (const cb of ['require', 'prefer', 'disable']) assert.equal(gate.sslmodeProblem(key, new URL(`${URL_OK}&channel_binding=${cb}`)), null);
+    for (const cb of ['', 'required', 'on', 'REQUIRE']) assert.equal(gate.sslmodeProblem(key, new URL(`${URL_OK}&channel_binding=${cb}`)), `${key}: channel_binding must be require, prefer or disable (value not shown)`);
+  }
+  const r = gate.dbSettingsProblems;
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK.replace('verify-full', 'verify-ca'), adminDirectUrl: ADMIN_OK.replace('verify-full', 'require&channel_binding=require'), appUrl: URL_OK.replace('verify-full', 'require') }), []);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, adminDirectUrl: ADMIN_OK.replace('verify-full', 'prefer'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: sslmode must be/);
+  // #257 + #259 combined: an operator's compose.env with PG_ADMIN_URL at sslmode=require (mode b, the shared password) passes
+  // the env-file lint and the deployed-model rule; no check anywhere demands verify-full of an operator-supplied URL.
+  const requireAdmin = ADMIN_OK.replace('verify-full', 'require');
+  assert.deepEqual(r({ bundled: '0', adminUrl: requireAdmin, appPasswordSet: true, dbHost: 'db.internal.example', dbPort: '5432', dbName: 'crewflow' }), []);
+  assert.deepEqual(lintEnvText('compose', `CREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${requireAdmin}\nPG_DATABASE_APP_PASSWORD=${'a1'.repeat(20)}\nPG_DATABASE_HOST=db.internal.example\nPG_DATABASE_PORT=5432\nPG_DATABASE_NAME=crewflow`).filter((p) => /sslmode|PG_ADMIN_URL/.test(p)), []);
+});
+
+test('first platform admin at boot (#264 I1): deploy compose files pass BOOTSTRAP_ADMIN_* through on rab-api only, never a value', () => {
+  const lint = gate.bootstrapAdminComposeTextProblems;
+  const pass = (key) => `      ${key}: \${${key}:-}`;
+  const doc = (apiLines, workerLines = []) =>
+    ['services:', '  rab-api:', '    environment:', ...apiLines, '  rab-worker:', '    environment:', '      APP_SECRET: x', ...workerLines, 'volumes: {}'].join('\n');
+  assert.deepEqual(lint('t', doc(gate.RAB_API_BOOTSTRAP_ADMIN_KEYS.map(pass))), []);
+  assert.deepEqual(lint('t', doc([])), []); // absent is fine: a platform may set them as rab-api variables
+  assert.deepEqual(lint('t', doc(['      # BOOTSTRAP_ADMIN_PASSWORD: never'])), []); // comments are ignored
+  assertRefused(lint('t', doc([], [pass('BOOTSTRAP_ADMIN_EMAIL')])), /service rab-worker sets BOOTSTRAP_ADMIN_EMAIL \(rab-api only\)/);
+  assertRefused(lint('t', doc(['      BOOTSTRAP_ADMIN_EMAIL: admin@example.test'])), /must pass BOOTSTRAP_ADMIN_EMAIL through/);
+  assertRefused(lint('t', doc([pass('BOOTSTRAP_ADMIN_PASSWORD')])), /sets BOOTSTRAP_ADMIN_PASSWORD \(a bootstrap password/);
+  assertRefused(lint('t', doc(['      - BOOTSTRAP_ADMIN_ROLE=x'])), /sets BOOTSTRAP_ADMIN_ROLE \(an unknown bootstrap-admin input/);
+  // The committed deploy files themselves.
+  for (const file of [gate.FILES.image, gate.PRODUCTION_FILE]) {
+    assert.deepEqual(lint(path.basename(file), fs.readFileSync(file, 'utf8')), [], file);
+  }
+});
+
+test('owner decision 2026-11-20: CREWFLOW_ROTATE_APP_PASSWORD is a db-setup-only switch (compose.env: 1 or empty; never another service or env file)', () => {
+  assert.equal(gate.ROTATE_KEY, 'CREWFLOW_ROTATE_APP_PASSWORD');
+  assert.equal(gate.ROTATE_EXPR, '${CREWFLOW_ROTATE_APP_PASSWORD:-}');
+  // compose.env: exactly 1 or empty (a switch, not a secret-like name); anything else refused.
+  for (const v of ['1', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_ROTATE_APP_PASSWORD=${v}`), [], v);
+  for (const v of ['0', 'true', 'yes', '2', 'on']) assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_ROTATE_APP_PASSWORD=${v}`), /^CREWFLOW_ROTATE_APP_PASSWORD: must be exactly 1 \(for one deploy\) or empty/);
+  // database.env / runtime.env (both reach rab-api and rab-worker): refused.
+  for (const kind of ['database', 'runtime']) {
+    const base = kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n';
+    assertRefused(lintEnvText(kind, `${base}CREWFLOW_ROTATE_APP_PASSWORD=1`), /^CREWFLOW_ROTATE_APP_PASSWORD: set it in compose\.env .*db-setup only/);
+  }
+  // Raw compose text: db-setup only, exactly the committed expression, once.
+  const ok = 'services:\n  db-setup:\n    environment:\n      CREWFLOW_ROTATE_APP_PASSWORD: ${CREWFLOW_ROTATE_APP_PASSWORD:-}\n';
+  assert.ok(!lintComposeText('x.yml', ok).some((p) => /CREWFLOW_ROTATE_APP_PASSWORD/.test(p)), 'the committed line passes');
+  for (const svc of ['rab-api', 'rab-worker', 'db-harden', 'server', 'worker', 'other']) {
+    assertRefused(lintComposeText('x.yml', ok.replace('db-setup', svc)), new RegExp(`CREWFLOW_ROTATE_APP_PASSWORD in service ${svc}`));
+  }
+  assertRefused(lintComposeText('x.yml', ok.replace('${CREWFLOW_ROTATE_APP_PASSWORD:-}', '"1"')), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  assertRefused(lintComposeText('x.yml', ok.replace('${CREWFLOW_ROTATE_APP_PASSWORD:-}', '${CREWFLOW_ROTATE_APP_PASSWORD:-1}')), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  assertRefused(lintComposeText('x.yml', `${ok}      - CREWFLOW_ROTATE_APP_PASSWORD=1\n`), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  // Both committed deploy files carry it on db-setup exactly once, and nowhere else.
+  for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.equal((text.match(/^ {6}CREWFLOW_ROTATE_APP_PASSWORD: \$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}$/gm) ?? []).length, 1, `${file}: once on db-setup`);
   }
 });

@@ -14,7 +14,7 @@
  * Checks (owner list, plus the cluster identity):
  *   1. pg_is_in_recovery() = true on the replica                         else configuration error (writable primary)
  *   2. runtime role gates on the replica: current_user = session_user = crewflow_app, no SUPERUSER/BYPASSRLS, no
- *      owner-role membership (the same assertRoleGate the API boot uses); TLS in use in production (assertTlsGate)
+ *      owner-role membership (the same assertRoleGate the API boot uses); TLS in use in production (assertServerTlsGate)
  *   3. same database name, and the same cluster: pg_control_system().system_identifier equal on both (a physical
  *      standby reports its primary's identifier). Skipped with a warning only when the runtime role may not call the
  *      function on either side.
@@ -27,7 +27,7 @@
 import {
   assertForceRlsGate,
   assertRoleGate,
-  assertTlsGate,
+  assertServerTlsGate,
   BOOT_FACTS_SQL,
   DatabaseBootGateError,
   FORCE_RLS_SPOT_CHECK_TABLES,
@@ -117,7 +117,7 @@ export async function validateReplica(input: ValidateReplicaInput): Promise<Repl
   const facts = parseBootFacts(factsRow);
   try {
     assertRoleGate(facts, [RUNTIME_ROLE], 'replica connection');
-    assertTlsGate(facts, production);
+    assertServerTlsGate(facts, production);
   } catch (error) {
     if (error instanceof DatabaseBootGateError) throw new ReplicaConfigurationError(error.message.includes('TLS') ? 'tls' : 'role', error.message);
     throw error;
