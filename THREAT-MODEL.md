@@ -10060,3 +10060,69 @@ Mitigation: default off; exactly true/false; one value for both services; still 
             limits cap spend; AI_DEV_ALLOW_REAL_PROVIDERS stays refused outside development.
 Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and revert the two gates' AI_ENABLED rules.
 ```
+
+## SF-2 review L-1 — the Venue Manager route flag pins every per-record Manager action to the caller's own Venue Managers (branch fix/venue-manager-target-pin, 2026-11-18; no SQL)
+- **Threat:** a job, CLI command, AI tool or another service calls a per-record `ManagerService` method directly with
+  `requiredPermission = venue_manager.create` (the flag `VenueManagerService` passes for the `/venue-managers` routes):
+  `update`, `setActive`, `resetPassword`, `changePendingEmail`, `changeEmail`, `getTimeline`, `listNotes`, `addNote`,
+  `listEmails`. The service re-checked that flag (SF-2 part 1) but not the target: only
+  `VenueManagerService.assertOwnWorkspaceVenueManager` pinned it to a Venue Manager of the caller's own workspace, and in a
+  separate transaction. A caller holding `venue_manager.create` that can see an Internal Manager, a CEO or another
+  workspace's Venue Manager under RLS (e.g. a CEO granted the flag) could rename, suspend / reactivate, admin-reset the
+  password of, correct or change the email of, or add a note to that account, or read its timeline, notes and email log,
+  through the Venue Manager authority (finding L-1 of the PR #237 review; Low: needs a direct service call, no HTTP route
+  reaches it).
+- **Control:** `assertVenueRouteTargetTx` (the same helper, same name and signature, as PR #237 adds for `resendInvite` /
+  `cancelInvite`): when the flag is `venue_manager.create`, in the action's own transaction, after the route-flag check
+  (403) and before any row read, the target must be `{ id, organisationId, workspaceId: ctx.workspaceId, type: venue }`
+  (organisation and workspace from the verified context, never from the caller's input); anything else, or a context with
+  no organisation or workspace, is 404. All nine methods above call it (`addNote`: after its 400 body checks, which read no
+  row; `changeEmail`: before the direct correction and before the verified path's `EmailChangeService.request`). No-op for
+  the `/managers` flag (`manager.manage`), whose behaviour is unchanged. Layers: route guard
+  (`PermissionGuard(venue_manager.create)`) → `VenueManagerService` gate → this in-transaction pin → organisation-scoped
+  lookup → `manager_profile` RLS.
+- **Verified email change (security review of PR #248, Low):** `EmailChangeService.request` read the target only by
+  organisation, so a direct caller holding `venue_manager.create` (or `staff.edit`) and its own password could start a
+  verified email change (a token to an address it chooses, i.e. an account-takeover path) for any Internal Manager, CEO or
+  other Manager's staff member it can see. `request` now takes a required `targetScope` (`manager` | `venue_manager` |
+  `staff`) instead of a free permission flag; the scope fixes the flag re-checked (`manager.manage` /
+  `venue_manager.create` / `staff.edit`; anything else 403 before any read) and, against the target's `core.user` row
+  locked FOR UPDATE in the same transaction, the reach: `manager` = a Manager profile of the organisation (a CEO only for
+  an active platform administrator, 403, the existing `ManagerService` CEO rule); `venue_manager` = a `type: venue`
+  profile of `ctx.workspaceId`; `staff` = a staff profile in the caller's workspace that the caller created (mirrors
+  `StaffService.changeEmail`'s `assertOwned`). Out of scope, or no workspace for the two workspace scopes, is 404, before
+  any other check on the target. `ManagerService.changeEmail` passes `venue_manager` for the Venue Manager flag and
+  `manager` otherwise; `StaffService.changeEmail` passes `staff`.
+- **Invariant the pins rely on:** `manager_profile.type` never changes after creation and `manager_profile.workspace_id`
+  only goes from NULL to a value (first venue assignment, own-workspace creation), enforced in application code only. A
+  future "move a Venue Manager between workspaces" or "change a profile's type" feature must revisit
+  `assertVenueRouteTargetTx` and the `venue_manager` email-change scope (both say so in code).
+- **Behaviour change:** none over HTTP (the `/venue-managers` routes already 404 these targets in `VenueManagerService`). A
+  direct service call with the Venue Manager flag on a target that is not a Venue Manager of the caller's own workspace is
+  now 404 instead of acting or returning data.
+- **Related, different shape (flagged, not changed here):** `ManagerService.bulkEmail` also accepts `venue_manager.create`
+  but takes a list of ids, and only `VenueManagerService.bulkEmail` narrows that list to the caller's own Venue Managers. A
+  direct caller passing the Venue Manager flag can still email any Manager of the organisation it can see. Whether
+  out-of-scope ids should be skipped or refuse the whole batch (404) is an owner decision, so it is left for a follow-up.
+- **Tests:** `venue-manager-target-pin.integration.spec.ts` (real PostgreSQL, RLS on as `crewflow_app`, service called
+  directly): a CEO that CAN read the Internal Managers and the Internal Manager's notes under RLS (precondition asserted
+  through `ManagerService.get` / `listNotes`), holding `venue_manager.create` through a real per-user grant override plus
+  `user.reset_password`, with a workspace and a real signed-in session for the step-up-gated methods. On an Internal
+  Manager: `update`, `setActive` (suspend and reactivate), `resetPassword`, `changePendingEmail` (pending target),
+  `changeEmail` (direct path on a pending target, verified path on an active one) and `addNote` are 404 and leave the
+  organisation inert (audit log, outbox, reset tokens, revoked refresh tokens, invites and live invites, email-change
+  requests, notes, every user's email / name / phone / status / must-reset / security version, every manager profile's job
+  title / archive); `getTimeline`, `listNotes` and `listEmails` are 404, return nothing, and leave it inert. `update`,
+  `setActive` and `resetPassword` are also 404 + inert for the caller's own CEO profile and another workspace's Venue
+  Manager. Positive controls: the same caller updates, suspends, reactivates and resets an own-workspace Venue Manager
+  (audit rows written); corrects and changes a pending own-workspace Venue Manager's email; adds a note to and reads the
+  timeline, notes and emails of an own-workspace Venue Manager; the `/managers` flag still updates the Internal Manager.
+  The six newer methods are also 404 + inert (reads return nothing) for the caller's own CEO profile and another
+  workspace's Venue Manager; a context with no workspace gets 404 with the Venue Manager flag even on the caller's own Venue
+  Manager. `EmailChangeService.request`: the `venue_manager` scope on an Internal Manager, a CEO and another workspace's
+  Venue Manager, the `staff` scope on a staff member another Manager created (caller holding `staff.edit`), and the
+  `venue_manager` scope with no workspace are 404 + inert; an unknown scope is 403 + inert; positive controls start a
+  verified change for an active own-workspace Venue Manager (through `ManagerService.changeEmail`) and for the caller's own
+  staff member. Fail-first: with the `assertVenueRouteTargetTx` calls removed, every ManagerService refusal fails (the
+  calls act or return data); with only the email-change scope check removed, every `EmailChangeService.request` refusal
+  fails (a request is written).

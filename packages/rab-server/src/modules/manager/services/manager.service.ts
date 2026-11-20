@@ -735,6 +735,7 @@ export class ManagerService {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -781,6 +782,7 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -874,6 +876,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // SF-2 layer 2: the route's class flag AND its method guard user.reset_password.
       await this.assertRouteFlagTx(manager, ctx, requiredPermission, PermissionFlag.USER_RESET_PASSWORD);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -934,6 +937,27 @@ export class ManagerService {
   }
 
   /**
+   * The Venue Manager route's flag (`venue_manager.create`) authorises Venue Manager records of the caller's own workspace
+   * only. `VenueManagerService` checks that before delegating; this repeats it in the action's own transaction so a direct
+   * caller passing that flag cannot reach an Internal Manager or CEO (or another workspace's Venue Manager): 404 otherwise.
+   * No-op for the `/managers` flag. (SF-2 review L-1: every method here that accepts the Venue Manager flag calls it after
+   * the route-flag check and before any row read: `update`, `setActive`, `resetPassword`, `changePendingEmail`,
+   * `changeEmail`, `getTimeline`, `listNotes`, `addNote`, `listEmails`.)
+   *
+   * Relies on two invariants of `manager_profile`: `type` never changes after creation, and `workspace_id` only ever goes
+   * from NULL to a value. A future feature that moves a Venue Manager between workspaces (or changes a profile's type) must
+   * revisit this pin and `EmailChangeService`'s `venue_manager` scope.
+   */
+  private async assertVenueRouteTargetTx(manager: EntityManager, ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag): Promise<void> {
+    if (requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) return;
+    if (!ctx.organisationId || !ctx.workspaceId) throw new NotFoundException('Venue Manager not found.');
+    const ownVenueManager = await manager.exists(ManagerProfile, {
+      where: { id, organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, type: ManagerType.VENUE },
+    });
+    if (!ownVenueManager) throw new NotFoundException('Venue Manager not found.');
+  }
+
+  /**
    * Corrects a wrong pending email before activation. SECURITY TRADE-OFF /
    * explicit decision: the 3-attempt count is NOT reset by this action — it
    * stays cumulative across the correction. Resetting it on every edit would
@@ -949,6 +973,7 @@ export class ManagerService {
     let emailChangedFor: string | null = null;
     const invite = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission, PermissionFlag.USER_RESET_PASSWORD);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already the pending email for this account.');
@@ -1195,6 +1220,7 @@ export class ManagerService {
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // SF-2 layer 2: also for the direct (INVITED) correction; the verified path re-checks it in EmailChangeService.
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -1222,7 +1248,12 @@ export class ManagerService {
     });
     if (outcome.verify) {
       // The verified path changes nothing yet; EmailChangeService.confirm() clears the entry when it does.
-      return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission });
+      return this.emailChange.request(ctx, {
+        targetUserId: outcome.userId,
+        newEmail: dto.email,
+        currentPassword: dto.currentPassword,
+        targetScope: requiredPermission === PermissionFlag.VENUE_MANAGER_CREATE ? 'venue_manager' : 'manager',
+      });
     }
     await this.invalidateUserDisplay(outcome.userId);
     return { email: outcome.email };
@@ -1232,6 +1263,7 @@ export class ManagerService {
   async getTimeline(ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<AuditLogListItem[]> {
     const profile = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const p = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!p) throw new NotFoundException('Manager not found.');
       return p;
@@ -1243,6 +1275,7 @@ export class ManagerService {
   async listNotes(ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<UserNoteItem[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
       return this.userNote.list(manager, ctx, profile.userId);
@@ -1256,7 +1289,8 @@ export class ManagerService {
    *   - `POST /rest/v1/venue-managers/:id/notes` → PermissionGuard(VENUE_MANAGER_CREATE) → `VenueManagerService.addNote`
    *     (own-workspace Venue Manager gate, 404 otherwise) → this method with VENUE_MANAGER_CREATE.
    * The flag is checked first, in the same tenant transaction (403 for any id, before any lookup — jobs / other services
-   * never pass the guard), then the 2,000-character cap (400; a direct caller never passes the ValidationPipe), then the
+   * never pass the guard), then the 2,000-character cap (400; a direct caller never passes the ValidationPipe), then, with
+   * VENUE_MANAGER_CREATE, the own-workspace Venue Manager pin (`assertVenueRouteTargetTx`, 404), then the
    * organisation-scoped lookup (404), then the write. The note and its `manager.note_added` audit row commit or roll back
    * together; the audit metadata carries the note id and length, never the text.
    */
@@ -1277,6 +1311,7 @@ export class ManagerService {
       const body = dto?.body;
       if (typeof body !== 'string' || body.length === 0) throw new BadRequestException('A note cannot be empty.');
       if (body.length > NOTE_BODY_MAX_LENGTH) throw new BadRequestException(`A note can be at most ${NOTE_BODY_MAX_LENGTH} characters.`);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
       const note = await this.userNote.add(manager, ctx, profile.userId, body);
@@ -1298,6 +1333,7 @@ export class ManagerService {
   ): Promise<Array<{ id: string; subject: string; status: string; createdAt: Date; sentAt: Date | null }>> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
       const rows = await manager.find(EmailOutbox, {

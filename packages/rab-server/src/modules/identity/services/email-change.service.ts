@@ -1,4 +1,4 @@
-import { EmailOutboxJobType, normalizeEmail, PermissionFlagType, UserStatus } from '@rab/shared';
+import { EmailOutboxJobType, ManagerType, normalizeEmail, PermissionFlag, PermissionFlagType, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
@@ -14,11 +14,32 @@ import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cach
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { EMAIL_UNAVAILABLE_CODE, EMAIL_UNAVAILABLE_MESSAGE, isEmailUnavailableViolation } from '../../../engine/filters/email-unavailable';
 
 const REQUEST_TTL_HOURS = 24;
 const INVALID_LINK = 'This confirmation link is invalid or has expired.';
+
+/**
+ * Which accounts the caller's route may start a verified email change for (SF-2 review, PR #248). The route also fixes the
+ * permission re-checked in `request`, so a caller cannot pair one route's flag with another route's reach:
+ *  - `manager` (`/managers`, `manager.manage`): a Manager or CEO profile of the organisation; a CEO only for an active
+ *    platform administrator (403 otherwise), the rule `ManagerService` applies to every CEO mutation;
+ *  - `venue_manager` (`/venue-managers`, `venue_manager.create`): a `type: venue` Manager profile of the caller's own
+ *    workspace (`ctx.workspaceId`), the scope `VenueManagerService` and `ManagerService.assertVenueRouteTargetTx` enforce;
+ *  - `staff` (`/staff`, `staff.edit`): a staff profile of the caller's workspace that the caller created, the scope
+ *    `StaffService.changeEmail` enforces (`assertOwned`).
+ * Out of scope (or no workspace for the two workspace scopes) is 404. The check runs against the target row locked with
+ * FOR UPDATE, in the same transaction that writes the request.
+ */
+export type EmailChangeTargetScope = 'manager' | 'venue_manager' | 'staff';
+
+const TARGET_SCOPE_FLAG: Readonly<Record<EmailChangeTargetScope, PermissionFlagType>> = {
+  manager: PermissionFlag.MANAGER_MANAGE,
+  venue_manager: PermissionFlag.VENUE_MANAGER_CREATE,
+  staff: PermissionFlag.STAFF_EDIT,
+};
 
 export interface EmailChangeRequestResult {
   status: 'pending_verification';
@@ -65,15 +86,18 @@ export class EmailChangeService {
 
   async request(
     ctx: AuthContext,
-    params: { targetUserId: string; newEmail: string; currentPassword: string | undefined; requiredPermission: PermissionFlagType },
+    params: { targetUserId: string; newEmail: string; currentPassword: string | undefined; targetScope: EmailChangeTargetScope },
   ): Promise<EmailChangeRequestResult> {
+    // Fail closed on anything but the three scopes (e.g. through an `as never` cast): no flag, no reach.
+    const requiredPermission = Object.prototype.hasOwnProperty.call(TARGET_SCOPE_FLAG, params?.targetScope) ? TARGET_SCOPE_FLAG[params.targetScope] : null;
+    if (!requiredPermission) throw new ForbiddenException('You do not have access to this. Ask an administrator if you need it.');
     await this.assertStepUp(ctx, params.currentPassword);
     const newEmail = normalizeEmail(params.newEmail);
     const token = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(token).digest('hex');
 
     const queued = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      if (!(await this.permissions.userHasPermissionTx(manager, ctx, params.requiredPermission))) {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, requiredPermission))) {
         throw new ForbiddenException('You do not have access to this. Ask an administrator if you need it.');
       }
       const [target] = await manager.query<Array<{ id: string; email: string; first_name: string; status: string }>>(
@@ -82,6 +106,7 @@ export class EmailChangeService {
         [params.targetUserId, ctx.organisationId],
       );
       if (!target) throw new NotFoundException('User not found.');
+      await this.assertTargetInScopeTx(manager, ctx, target.id, params.targetScope);
       if (target.status !== UserStatus.ACTIVE) throw new BadRequestException('Only an active account needs a confirmed email change.');
       await this.assertNotProtectedTx(manager, target.id);
       if (normalizeEmail(target.email) === newEmail) throw new BadRequestException("This is already this account's email.");
@@ -216,6 +241,49 @@ export class EmailChangeService {
   private async isProtectedTx(manager: EntityManager, userId: string): Promise<boolean> {
     const [row] = await manager.query<Array<{ ok: boolean }>>(`SELECT core.is_active_platform_admin($1) AS ok`, [userId]);
     return row?.ok === true;
+  }
+
+  /**
+   * The route's reach (see `EmailChangeTargetScope`), checked after the target's `core.user` row is locked and before
+   * anything else about it is read or written. 404 out of scope.
+   *
+   * Relies on two invariants of `manager_profile`: `type` never changes after creation, and `workspace_id` only ever goes
+   * from NULL to a value. A future feature that moves a Venue Manager between workspaces or changes a profile's type must
+   * revisit this check and `ManagerService.assertVenueRouteTargetTx` (a request started in one scope must not survive a move).
+   */
+  private async assertTargetInScopeTx(manager: EntityManager, ctx: AuthContext, targetUserId: string, scope: EmailChangeTargetScope): Promise<void> {
+    const notFound = () => new NotFoundException('User not found.');
+    if (scope === 'manager') {
+      const profiles = await manager.query<Array<{ type: string }>>(
+        `SELECT type FROM core.manager_profile WHERE user_id = $1 AND organisation_id = $2`,
+        [targetUserId, ctx.organisationId],
+      );
+      if (profiles.length === 0) throw notFound();
+      if (profiles.some((p) => p.type === ManagerType.CEO)) {
+        const [admin] = await manager.query<Array<{ active: boolean }>>(`SELECT core.is_active_platform_admin($1) AS active`, [ctx.userId]);
+        if (!admin?.active) throw new ForbiddenException('Only the platform administrator can manage a CEO account.');
+      }
+      return;
+    }
+    if (!ctx.workspaceId) throw notFound();
+    if (scope === 'venue_manager') {
+      const [own] = await manager.query<unknown[]>(
+        `SELECT 1 FROM core.manager_profile WHERE user_id = $1 AND organisation_id = $2 AND workspace_id = $3 AND type = $4`,
+        [targetUserId, ctx.organisationId, ctx.workspaceId, ManagerType.VENUE],
+      );
+      if (!own) throw notFound();
+      return;
+    }
+    if (scope === 'staff') {
+      const t = businessTables(manager);
+      const [own] = await manager.query<unknown[]>(
+        `SELECT 1 FROM ${t.staff_profile} WHERE user_id = $1 AND organisation_id = $2 AND created_by = $3`,
+        [targetUserId, ctx.organisationId, ctx.userId],
+      );
+      if (!own) throw notFound();
+      return;
+    }
+    throw notFound();
   }
 
   private async assertNotProtectedTx(manager: EntityManager, userId: string): Promise<void> {
