@@ -1301,3 +1301,30 @@ test('first platform admin at boot (#264 I1): deploy compose files pass BOOTSTRA
     assert.deepEqual(lint(path.basename(file), fs.readFileSync(file, 'utf8')), [], file);
   }
 });
+
+test('owner decision 2026-11-20: CREWFLOW_ROTATE_APP_PASSWORD is a db-setup-only switch (compose.env: 1 or empty; never another service or env file)', () => {
+  assert.equal(gate.ROTATE_KEY, 'CREWFLOW_ROTATE_APP_PASSWORD');
+  assert.equal(gate.ROTATE_EXPR, '${CREWFLOW_ROTATE_APP_PASSWORD:-}');
+  // compose.env: exactly 1 or empty (a switch, not a secret-like name); anything else refused.
+  for (const v of ['1', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_ROTATE_APP_PASSWORD=${v}`), [], v);
+  for (const v of ['0', 'true', 'yes', '2', 'on']) assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_ROTATE_APP_PASSWORD=${v}`), /^CREWFLOW_ROTATE_APP_PASSWORD: must be exactly 1 \(for one deploy\) or empty/);
+  // database.env / runtime.env (both reach rab-api and rab-worker): refused.
+  for (const kind of ['database', 'runtime']) {
+    const base = kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n';
+    assertRefused(lintEnvText(kind, `${base}CREWFLOW_ROTATE_APP_PASSWORD=1`), /^CREWFLOW_ROTATE_APP_PASSWORD: set it in compose\.env .*db-setup only/);
+  }
+  // Raw compose text: db-setup only, exactly the committed expression, once.
+  const ok = 'services:\n  db-setup:\n    environment:\n      CREWFLOW_ROTATE_APP_PASSWORD: ${CREWFLOW_ROTATE_APP_PASSWORD:-}\n';
+  assert.ok(!lintComposeText('x.yml', ok).some((p) => /CREWFLOW_ROTATE_APP_PASSWORD/.test(p)), 'the committed line passes');
+  for (const svc of ['rab-api', 'rab-worker', 'db-harden', 'server', 'worker', 'other']) {
+    assertRefused(lintComposeText('x.yml', ok.replace('db-setup', svc)), new RegExp(`CREWFLOW_ROTATE_APP_PASSWORD in service ${svc}`));
+  }
+  assertRefused(lintComposeText('x.yml', ok.replace('${CREWFLOW_ROTATE_APP_PASSWORD:-}', '"1"')), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  assertRefused(lintComposeText('x.yml', ok.replace('${CREWFLOW_ROTATE_APP_PASSWORD:-}', '${CREWFLOW_ROTATE_APP_PASSWORD:-1}')), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  assertRefused(lintComposeText('x.yml', `${ok}      - CREWFLOW_ROTATE_APP_PASSWORD=1\n`), /CREWFLOW_ROTATE_APP_PASSWORD on db-setup must be exactly/);
+  // Both committed deploy files carry it on db-setup exactly once, and nowhere else.
+  for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.equal((text.match(/^ {6}CREWFLOW_ROTATE_APP_PASSWORD: \$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}$/gm) ?? []).length, 1, `${file}: once on db-setup`);
+  }
+});

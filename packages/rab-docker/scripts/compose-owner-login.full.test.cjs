@@ -755,3 +755,22 @@ test('DENIAL security review L3: volumes_from, secrets/configs under /run/crewfl
     }
   }
 });
+
+// Owner decision 2026-11-20: the one-deploy password rotation opt-in, rendered.
+test('CREWFLOW_ROTATE_APP_PASSWORD renders on db-setup only (empty by default); missing there, a value other than 1 / empty, or on another service is refused', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    assert.equal(m.services['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD, '', `${c.name}: db-setup renders it empty`);
+    for (const [name, svc] of Object.entries(m.services)) {
+      if (name !== 'db-setup') assert.ok(!('CREWFLOW_ROTATE_APP_PASSWORD' in (svc.environment ?? {})), `${c.name}: ${name} has it`);
+    }
+    const cases = [
+      [(s) => { delete s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD; }, /db-setup: CREWFLOW_ROTATE_APP_PASSWORD is missing/],
+      [(s) => { s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD = 'yes'; }, /db-setup: CREWFLOW_ROTATE_APP_PASSWORD must render to exactly 1 or empty/],
+      ...['rab-api', 'rab-worker', 'db-harden'].map((svc) => [(s) => { s[svc].environment.CREWFLOW_ROTATE_APP_PASSWORD = ''; }, new RegExp(`${svc}: has CREWFLOW_ROTATE_APP_PASSWORD`)]),
+    ];
+    for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c.name, mutate), pattern);
+    // 1 (the operator's one-deploy opt-in) passes.
+    assert.ok(!problemsAfter(c.name, (s) => { s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD = '1'; }).some((p) => /ROTATE/.test(p)), `${c.name}: 1 passes`);
+  }
+});

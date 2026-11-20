@@ -39,8 +39,13 @@ import {
   HardenIo,
   hardenOwnerWithIo,
   hardenTimeoutSeconds,
+  failureResult,
   imageMigrationNames,
   isSchemaComplete,
+  isVerifiedTlsConfig,
+  plainLoggingRisks,
+  rotateAppPasswordSetting,
+  ROTATE_APP_PASSWORD_LABEL,
   OWNER_BOOTSTRAP_APPLICATION_NAME,
   OWNER_BOOTSTRAP_MESSAGES,
   OWNER_PROBE_APPLICATION_NAME,
@@ -70,6 +75,15 @@ import {
   OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD,
+  OWNER_BOOTSTRAP_Q4C_DO_PLAIN,
+  OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS,
+  OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
+  OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS,
+  OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION,
+  OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
+  OWNER_BOOTSTRAP_PLAIN_STATEMENTS,
+  OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING,
+  PLAIN_MIN_DEADLOCK_TIMEOUT_MS,
   OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY,
   OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_AWAITING_PASSWORD_MARK,
@@ -245,13 +259,25 @@ describe('owner bootstrap: §3.4 the write plan (the password inside PG_DATABASE
   it('adds only the grant when the password is right', () => {
     expect(planWrite({ ...existing, oHasDbGrant: false }, { ok: true })).toEqual({ write: true, create: false, needPassword: false, needGrant: true });
   });
-  it('28P01 (the password does not log in): SET it when the admin may', () => {
-    expect(planWrite(existing, { ok: false, code: '28P01' })).toEqual({ write: true, create: false, needPassword: true, needGrant: false });
-    expect(planWrite({ ...existing, adminCreateRole: false, adminSuper: true }, { ok: false, code: '28P01' })).toMatchObject({ needPassword: true });
+  it('DENIAL owner decision 2026-11-20: 28P01 on an existing LOGIN role is NEVER changed by itself: refused with the exact line', () => {
+    expect(refusalOf(() => planWrite(existing, { ok: false, code: '28P01' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.passwordMismatch);
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordMismatch.startsWith("PG_DATABASE_URL password doesn't match crewflow_owner. ")).toBe(true);
+    // Before the ADMIN OPTION / CREATEROLE checks: the mismatch is the line the operator needs.
+    expect(refusalOf(() => planWrite({ ...existing, adminHasAdminOption: false }, { ok: false, code: '28P01' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.passwordMismatch);
   });
-  it('28P01 refuses a password change without ADMIN OPTION, or without CREATEROLE (and not superuser)', () => {
-    expect(refusalOf(() => planWrite({ ...existing, adminHasAdminOption: false }, { ok: false, code: '28P01' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
-    expect(refusalOf(() => planWrite({ ...existing, adminCreateRole: false, adminSuper: false }, { ok: false, code: '28P01' }))).toBe(
+  it('28P01 with the opt-in (CREWFLOW_ROTATE_APP_PASSWORD=1): SET it when the admin may', () => {
+    expect(planWrite(existing, { ok: false, code: '28P01' }, { rotate: true })).toEqual({ write: true, create: false, needPassword: true, needGrant: false });
+    expect(planWrite({ ...existing, adminCreateRole: false, adminSuper: true }, { ok: false, code: '28P01' }, { rotate: true })).toMatchObject({ needPassword: true });
+  });
+  it("ASSUMPTION (owner decision 2026-11-20): db-setup's own NOLOGIN role with a VALID awaiting mark is a first deploy in progress: set without the opt-in", () => {
+    const awaiting: OwnerFacts = { ...existing, oLogin: false, oAwaitingPassword: true };
+    expect(planWrite(awaiting, { ok: false, code: '28P01' })).toEqual({ write: true, create: false, needPassword: true, needGrant: false });
+    // An expired mark keeps today's refusal (decideBeforeProbe, before any probe).
+    expect(refusalOf(() => decideBeforeProbe({ ...existing, oLogin: false, oAwaitingMarkExpired: true }))).toBe(OWNER_BOOTSTRAP_MESSAGES.awaitingMarkExpired);
+  });
+  it('28P01 refuses a password change without ADMIN OPTION, or without CREATEROLE (and not superuser), also with the opt-in', () => {
+    expect(refusalOf(() => planWrite({ ...existing, adminHasAdminOption: false }, { ok: false, code: '28P01' }, { rotate: true }))).toBe(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
+    expect(refusalOf(() => planWrite({ ...existing, adminCreateRole: false, adminSuper: false }, { ok: false, code: '28P01' }, { rotate: true }))).toBe(
       OWNER_BOOTSTRAP_MESSAGES.adminCannotResetPassword,
     );
   });
@@ -306,6 +332,19 @@ describe('owner bootstrap: error mapping', () => {
   });
 });
 
+/** W1 on a server with PostgreSQL's default logging and no logging extension loaded (nothing logs the value). */
+const QUIET_LOGGING: Record<string, string | null> = {
+  log_statement: 'none',
+  log_min_duration_statement: '-1',
+  log_min_duration_sample: '-1',
+  log_transaction_sample_rate: '0',
+  log_parameter_max_length: '-1',
+  auto_explain_log_min_duration: null,
+  auto_explain_log_parameter_max_length: null,
+  pg_stat_statements_track: null,
+  pgaudit_log_parameter: null,
+};
+
 /** The last statement of a run, ignoring the migration-lock release that follows a removal's COMMIT / ROLLBACK. */
 const lastTx = (t: readonly string[]): string | undefined => t.filter((x) => x !== OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK).slice(-1)[0];
 
@@ -326,6 +365,19 @@ function fakeIo(
     schemaComplete?: boolean;
     migrationBusy?: boolean;
     legacyLogin?: string[];
+    /** CREWFLOW_ROTATE_APP_PASSWORD=1 (owner decision 2026-11-20). */
+    rotate?: boolean;
+    /**
+     * The plain-text fallback's inputs (owner decision 2026-11-20): 'verified' = the client config is verify-full and the
+     * server reports TLS for the backend (T1); 'client-only' = the config is verified but T1 says no TLS (TLS ends at a
+     * proxy: still verified, one more line); 'none' = the client config is not verified. Absent = the io has no plain value
+     * and no TLS check at all (the pre-2026-11-20 shape: last resort only).
+     */
+    tls?: 'verified' | 'client-only' | 'none';
+    /** The server's deadlock_timeout in ms as P0 reports it (default 1000). */
+    deadlockMs?: number;
+    /** W1's row, over QUIET_LOGGING (owner decision F1 a). */
+    loggingSettings?: Record<string, string | null>;
   } = {},
 ) {
   const sent: Array<{ text: string; values?: unknown[] }> = [];
@@ -355,6 +407,9 @@ function fakeIo(
       if (text === OWNER_HARDEN_R1_LEGACY_LOGINS) return { rows: legacyLeft.map((name) => ({ name })) };
       if (text.startsWith('ALTER ROLE crewflow') && text.includes('NOLOGIN PASSWORD NULL')) legacyLeft = legacyLeft.filter((n) => !text.includes(`ROLE ${n} `));
       if (text === OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK) return { rows: [{ released: true }] };
+      if (text === OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL) return { rows: [{ ssl: opts.tls === 'verified' }] };
+      if (text === OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS) return { rows: [{ ...QUIET_LOGGING, ...(opts.loggingSettings ?? {}) }] };
+      if (text === OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS) return { rows: [{ done: true, deadlock_timeout_ms: String(opts.deadlockMs ?? 1000) }] };
       return { rows: [] };
     },
     async end() {
@@ -381,6 +436,11 @@ function fakeIo(
     now: () => clock,
   };
   if ('schemaComplete' in opts) io.schemaComplete = async () => opts.schemaComplete as boolean;
+  if (opts.rotate) io.rotateAppPassword = true;
+  if (opts.tls) {
+    io.plainPassword = () => OWNER_PW;
+    io.adminTlsVerified = () => opts.tls !== 'none';
+  }
   return { io, sent, lines, texts: () => sent.map((s) => s.text) };
 }
 
@@ -405,8 +465,8 @@ describe('owner bootstrap: the admin session', () => {
     expect(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT).toBe("SELECT pg_catalog.set_config('createrole_self_grant', '', true);");
   });
 
-  it('a password that does not log in on an EXISTING role: Q2b runs BEFORE the write (and again under the lock), then the password is SET ("updated", passwordSet log line)', async () => {
-    const { io, sent, texts, lines } = fakeIo([existing, existing, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }]);
+  it('a password that does not log in on an EXISTING role, with the opt-in: Q2b runs BEFORE the write (and again under the lock), then the password is SET ("updated", passwordSet + rotateDone lines)', async () => {
+    const { io, sent, texts, lines } = fakeIo([existing, existing, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }], { rotate: true });
     const result = await bootstrapOwnerWithIo(io);
     expect(result).toMatchObject({ outcome: 'updated', exitCode: 0, created: false, passwordSet: true, grantAdded: false });
     const t = texts();
@@ -414,10 +474,11 @@ describe('owner bootstrap: the admin session', () => {
     expect(t.lastIndexOf(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES)).toBeGreaterThan(t.indexOf(OWNER_BOOTSTRAP_Q4A_LOCK));
     expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)?.values?.[1]).toBe('true');
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.passwordSet);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.rotateDone);
   });
 
-  it('DENIAL L4: setting the password while crewflow_owner is used by another database is refused (64) before any transaction', async () => {
-    const { io, texts } = fakeIo([existing, existing], [{ ok: false, code: '28P01' }], { otherDatabase: true });
+  it('DENIAL L4: setting the password while crewflow_owner is used by another database is refused (64) before any transaction (the opt-in does not lift it)', async () => {
+    const { io, texts } = fakeIo([existing, existing], [{ ok: false, code: '28P01' }], { otherDatabase: true, rotate: true });
     const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
     expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase);
@@ -439,16 +500,17 @@ describe('owner bootstrap: the admin session', () => {
   });
 
   it('fail closed: a Q2b row that is not exactly one boolean is a failure (70), never a password change', async () => {
-    const { io, texts } = fakeIo([existing], [{ ok: false, code: '28P01' }], { otherDatabase: 'true' });
+    const { io, texts } = fakeIo([existing], [{ ok: false, code: '28P01' }], { otherDatabase: 'true', rotate: true });
     await expect(bootstrapOwnerWithIo(io)).rejects.toBeInstanceOf(OwnerBootstrapFailure);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
   });
 
-  it('grant only, then the post-commit probe is 28P01: the attempt re-runs and SETS the password (never a silent success, never a refusal)', async () => {
+  it('grant only, then the post-commit probe is 28P01: with the opt-in the attempt re-runs and SETS the password (never a silent success)', async () => {
     const noGrant = { ...existing, oHasDbGrant: false };
     const { io, sent, lines } = fakeIo(
       [noGrant, noGrant, existing, existing, existing, existing],
       [{ ok: false, code: '42501' }, { ok: false, code: '42501' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }],
+      { rotate: true },
     );
     const result = await bootstrapOwnerWithIo(io);
     expect(result).toMatchObject({ outcome: 'updated', exitCode: 0, passwordSet: true, grantAdded: false });
@@ -1765,7 +1827,7 @@ describe('owner decision 2026-11-19, option 1 "Create login, you set password": 
 
   it('the fixed texts (the docs reconcile against these)', () => {
     expect(OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000')).toBe(
-      'The server refused a pre-hashed password (SQLSTATE XX000 at COMMIT). Crewflow never sends a plain-text password.',
+      'The server refused a pre-hashed password (SQLSTATE XX000 at COMMIT).',
     );
     // Re-review N1 of #259: the value only in the set_config line; the DO block reads it from the setting. Pinned exactly.
     const doHead = `DO $$
@@ -1823,17 +1885,20 @@ ${doTail}`,
   });
 
   it('role missing, the verifier refused at COMMIT: crewflow_owner created WITHOUT a password, grant added, the steps, 64 (awaiting-password)', async () => {
-    const { io, sent, texts, lines } = fakeIo([base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1 });
+    const { io, sent, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2 });
     const result = await bootstrapOwnerWithIo(io);
     expect(result).toEqual({ outcome: 'awaiting-password', exitCode: 64, created: true, passwordSet: false, grantAdded: true, createRole: 'not-run', code: 'XX000' });
     const t = texts();
-    expect(t.filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO)).toHaveLength(1);
+    // Independent security review F5 of #266: the verifier is tried twice (two identical refusals) before any fallback.
+    expect(t.filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO)).toHaveLength(2);
     expect(t.filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD)).toHaveLength(1);
     expect(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD));
     expect(t.lastIndexOf(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD));
     expect(t.lastIndexOf(OWNER_BOOTSTRAP_Q4A_LOCK)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD));
     expect(lines).toEqual([
       OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls,
       OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
       OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
       OWNER_SQL_BEGIN_MARKER,
@@ -1846,28 +1911,28 @@ ${doTail}`,
   });
 
   it('a verifier refused in the role step (28P01, a password hook) takes the same path', async () => {
-    const { io, lines } = fakeIo([base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_Q4C_DO, failCode: '28P01', failHint: 'crewflow-stage=role', failTimes: 1 });
+    const { io, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_Q4C_DO, failCode: '28P01', failHint: 'crewflow-stage=role', failTimes: 2 });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64, created: true });
     expect(lines[0]).toBe(OWNER_BOOTSTRAP_MESSAGES.verifierRefused('statement', '28P01'));
   });
 
-  it('role exists and PG_DATABASE_APP_PASSWORD does not log in, verifier refused again: the password is LEFT ALONE, nothing written, the steps again, 64 (no loop)', async () => {
-    const { io, sent, texts, lines } = fakeIo([existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1 });
+  it('role exists, the opt-in is set and PG_DATABASE_APP_PASSWORD does not log in, verifier refused, no verified TLS: the password is LEFT ALONE, nothing written, the steps, 64 (no loop)', async () => {
+    const { io, sent, texts, lines } = fakeIo([existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, rotate: true });
     const result = await bootstrapOwnerWithIo(io);
     expect(result).toEqual({ outcome: 'awaiting-password', exitCode: 64, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: 'XX000' });
-    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO)).toHaveLength(1);
+    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO)).toHaveLength(2);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
     const afterLastBegin = texts().slice(texts().lastIndexOf(OWNER_BOOTSTRAP_BEGIN));
     expect(afterLastBegin).toContain(OWNER_BOOTSTRAP_ROLLBACK);
     expect(afterLastBegin).not.toContain(OWNER_BOOTSTRAP_COMMIT);
-    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_COMMIT)).toHaveLength(1);
+    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_COMMIT)).toHaveLength(2);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.passwordlessKept);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep);
     neverPlainText(sent);
   });
 
   it('role exists without its grant: only the grant is added (the no-password block never touches an existing password)', async () => {
-    const { io, texts } = fakeIo([noGrant, noGrant, noGrant, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1 });
+    const { io, texts } = fakeIo([noGrant, noGrant, noGrant, noGrant, noGrant, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, rotate: true });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', created: false, grantAdded: true });
     expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
   });
@@ -1884,6 +1949,8 @@ ${doTail}`,
     expect(result).toEqual({ outcome: 'awaiting-manual-role', exitCode: 64, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: 'XX000' });
     expect(lines).toEqual([
       OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls,
       OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused('commit', 'XX000'),
       OWNER_BOOTSTRAP_MESSAGES.manualRoleStep,
       OWNER_SQL_BEGIN_MARKER,
@@ -1892,13 +1959,13 @@ ${doTail}`,
       OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
       OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole,
     ]);
-    expect(sent.filter((s) => s.text === OWNER_BOOTSTRAP_COMMIT)).toHaveLength(2);
+    expect(sent.filter((s) => s.text === OWNER_BOOTSTRAP_COMMIT)).toHaveLength(3);
     neverPlainText(sent);
   });
 
   it('a passwordless transaction that fails for another reason (42501) is that refusal, never the manual path', async () => {
     let commits = 0;
-    const { io } = fakeIo([base], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1 });
+    const { io } = fakeIo([base], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2 });
     const realOpen = io.openAdmin.bind(io);
     io.openAdmin = async () => {
       const s = await realOpen();
@@ -1912,7 +1979,7 @@ ${doTail}`,
       };
     };
     await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.writeRefused('42501'));
-    expect(commits).toBe(1);
+    expect(commits).toBe(2);
   });
 
   it('runOwnerBootstrap never prints the ready line for a 64 result', async () => {
@@ -1946,7 +2013,7 @@ describe('security re-review R1 of #259: the passwordless role is NOLOGIN; a ser
   });
 
   it('run 2 in the awaiting state: the verifier is refused again, the role stays NOLOGIN and passwordless (no write), the steps again, 64', async () => {
-    const { io, texts, lines } = fakeIo([awaiting], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1 });
+    const { io, texts, lines } = fakeIo([awaiting], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2 });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64, created: false });
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.passwordlessKept);
@@ -1976,7 +2043,7 @@ describe('security re-review R1 of #259: the passwordless role is NOLOGIN; a ser
     const ok = fakeIo([existing], [{ ok: true }]);
     ok.io.probeWrongPassword = async () => ({ ok: false, code: '28P01' });
     expect(await bootstrapOwnerWithIo(ok.io)).toMatchObject({ outcome: 'unchanged', exitCode: 0 });
-    const failing = fakeIo([awaiting], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1 });
+    const failing = fakeIo([awaiting], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2 });
     let tried = 0;
     failing.io.probeWrongPassword = async () => {
       tried += 1;
@@ -2195,7 +2262,7 @@ describe('independent review of #259 (L1, L2, L3, I5) and its re-review (N2, N5,
     expect(OWNER_BOOTSTRAP_MESSAGES.passwordSet).toBe(
       'db-setup CHANGED the crewflow_owner password: the password inside PG_DATABASE_URL did not log in, so crewflow_owner now uses it (set with the admin login, PG_ADMIN_URL). Anything else that used the old password no longer logs in. Value not shown.',
     );
-    const { io, lines } = fakeIo([existing, existing, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }]);
+    const { io, lines } = fakeIo([existing, existing, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }], { rotate: true });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', passwordSet: true, created: false });
     expect(lines.filter((l) => l === OWNER_BOOTSTRAP_MESSAGES.passwordSet)).toHaveLength(1);
     const created = fakeIo([base, base, { ...existing, oCreateRolePending: true }], [{ ok: true }]);
@@ -2250,5 +2317,623 @@ describe('independent review of #259 (L1, L2, L3, I5) and its re-review (N2, N5,
     const e = classifyWriteError(Object.assign(new Error('x'), { code: '55000', hint: 'crewflow-stage=check' }), { passwordSent: false });
     expect(e).toBeInstanceOf(OwnerBootstrapRefusal);
     expect((e as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.awaitingNotWritable);
+  });
+});
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Owner decision 2026-11-20: the plain-text fallback over verified TLS, and no automatic change of an existing password.
+// ---------------------------------------------------------------------------------------------------------------------
+
+describe('owner decision 2026-11-20: the plain-text fallback (first deploy in one run) and the rotation opt-in', () => {
+  const awaiting: OwnerFacts = { ...existing, oLogin: false, oAwaitingPassword: true };
+  /** Every io.log line (a spy on each call) and every statement text: the plain value is in none of them. */
+  const assertNoPlainValue = (lines: string[], sent: Array<{ text: string; values?: unknown[] }>) => {
+    for (const line of lines) expect(line).not.toContain(OWNER_PW);
+    for (const s of sent) expect(s.text).not.toContain(OWNER_PW);
+    // The value travels ONLY as bind parameter $1 of the plain input statement.
+    for (const s of sent) for (const v of s.values ?? []) if (String(v).includes(OWNER_PW)) expect(s.text).toBe(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS);
+  };
+  const plainBlock = (t: string[]) => t.slice(t.indexOf(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL));
+
+  it('the fixed lines (tests and docs reconcile against these)', () => {
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000')).toBe(
+      "crewflow_owner's password was set in plain text over verified TLS: the server refused a pre-hashed password (SQLSTATE XX000 at COMMIT).",
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('statement', '22023')).toBe(
+      "crewflow_owner's password was set in plain text over verified TLS: the server refused a pre-hashed password (SQLSTATE 22023 in the write transaction).",
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice).toContain("Your database provider received crewflow_owner's password itself and may log or store it");
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice).toContain('Turn off provider-side password storage where it is offered, use a different password in every environment');
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice).toContain('Rotate the crewflow_owner password');
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls).toContain('not TLS with a verified certificate');
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordMismatch).toBe(
+      "PG_DATABASE_URL password doesn't match crewflow_owner. db-setup never changes it by itself: put crewflow_owner's real password in PG_DATABASE_URL, or set CREWFLOW_ROTATE_APP_PASSWORD=1 on db-setup for one deploy to change it to the one in PG_DATABASE_URL.",
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo).toBe(
+      'CREWFLOW_ROTATE_APP_PASSWORD=1 is set, but the password inside PG_DATABASE_URL already logs in: nothing to rotate. Remove CREWFLOW_ROTATE_APP_PASSWORD from db-setup, then deploy again.',
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.rotateDone).toContain('remove CREWFLOW_ROTATE_APP_PASSWORD');
+    // The reason, never a provider.
+    for (const text of Object.values(OWNER_BOOTSTRAP_MESSAGES)) if (typeof text === 'string') expect(text).not.toMatch(/neon|supabase|digitalocean/i);
+  });
+
+  it('verified TLS, role missing, the verifier refused at COMMIT: the pre-hashed path FIRST, then the same password in plain text in a NEW transaction: created, 0, the reason line', async () => {
+    const { io, sent, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    const result = await bootstrapOwnerWithIo(io);
+    expect(result).toEqual({ outcome: 'created', exitCode: 0, created: true, passwordSet: true, grantAdded: true, createRole: 'not-run', code: null, plainText: true });
+    const t = texts();
+    // Pre-hashed first: its transaction (verifier as $1, Q4C_DO) is rolled back before anything plain is sent.
+    expect(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO)).toBeGreaterThan(-1);
+    expect(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL));
+    expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)?.values).toEqual(['SCRAM-SHA-256$4096:c2FsdA==$stored:server', 'true']);
+    // The plain transaction, in this exact order (a NEW transaction: its own BEGIN, the lock, the facts again).
+    expect(plainBlock(t)).toEqual([
+      OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
+      OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
+      OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS,
+      OWNER_BOOTSTRAP_BEGIN,
+      OWNER_BOOTSTRAP_Q4A_LOCK,
+      OWNER_BOOTSTRAP_Q2_FACTS,
+      OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION,
+      OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS,
+      OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
+      OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
+      OWNER_BOOTSTRAP_Q4C_DO_PLAIN,
+      OWNER_BOOTSTRAP_Q4D_REVERIFY,
+      OWNER_BOOTSTRAP_COMMIT,
+      OWNER_BOOTSTRAP_Q2_FACTS,
+    ]);
+    expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS)?.values).toEqual([OWNER_PW, 'true']);
+    expect(t).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+    ]);
+    assertNoPlainValue(lines, sent);
+  });
+
+  it('after the plain set: the login probe AND the wrong-password probe run (a server that needs no password is still refused)', async () => {
+    const { io } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    let wrong = 0;
+    io.probeWrongPassword = async () => {
+      wrong += 1;
+      return { ok: true };
+    };
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword);
+    expect(wrong).toBe(1);
+    const failedLogin = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    await expect(bootstrapOwnerWithIo(failedLogin.io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
+  });
+
+  it('DENIAL the client config is not verified (no TLS, no-verify, a self-signed allowance): no plain fallback; the fixed reason line; the last resort (passwordless + printed step, 64)', async () => {
+    const { io, sent, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'none' });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64, created: true });
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION);
+    // The server's view is never even read when the client side is not verified.
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL);
+    expect(lines.slice(0, 4)).toEqual([OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'), OWNER_BOOTSTRAP_MESSAGES.verifierRetry, OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls, OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated]);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.awaitingPassword);
+    assertNoPlainValue(lines, sent);
+    for (const s of sent) for (const v of s.values ?? []) expect(String(v)).not.toContain(OWNER_PW);
+  });
+
+  it('lead decision 2026-11-20: client verified + the database reports a non-TLS session (pg_stat_ssl false: TLS ends at a proxy): the fallback RUNS, with the fixed proxy line', async () => {
+    const { io, sent, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'client-only' });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+    ]);
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy.startsWith('TLS was verified to the database endpoint, but the database reports a non-TLS session: TLS ends at a proxy in front of it.')).toBe(true);
+    assertNoPlainValue(lines, sent);
+  });
+
+  it('any T1 answer but exactly one true row prints the proxy line (never silently); the client side alone decides', async () => {
+    for (const rows of [[], [{ ssl: 'true' }], [{ ssl: true }, { ssl: true }], [{ ssl: null }], [{ ssl: false }]]) {
+      const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+      const realOpen = io.openAdmin.bind(io);
+      io.openAdmin = async () => {
+        const s = await realOpen();
+        return { query: async (text: string, values?: unknown[]) => (text === OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL ? { rows } : s.query(text, values)), end: () => s.end() };
+      };
+      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+      expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+      expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
+    }
+    const tlsAll = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    await bootstrapOwnerWithIo(tlsAll.io);
+    expect(tlsAll.lines).not.toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
+  });
+
+  it('the plain form refused too (XX000 at its COMMIT): the fixed line, then the last resort unchanged (passwordless NOLOGIN + the printed step, 64)', async () => {
+    const { io, sent, texts, lines } = fakeIo([base, base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 3, tls: 'verified' });
+    expect(await bootstrapOwnerWithIo(io)).toEqual({ outcome: 'awaiting-password', exitCode: 64, created: true, passwordSet: false, grantAdded: true, createRole: 'not-run', code: 'XX000' });
+    const t = texts();
+    expect(t.filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO_PLAIN)).toHaveLength(1);
+    expect(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_PLAIN)).toBeLessThan(t.indexOf(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD));
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
+      OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+      OWNER_SQL_BEGIN_MARKER,
+      ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')),
+      OWNER_SQL_END_MARKER,
+      OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
+      OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
+    ]);
+    assertNoPlainValue(lines, sent);
+  });
+
+  it('the plain form refused in its role step (22023 from a password-check hook): the same last resort', async () => {
+    const { io, lines } = fakeIo([base, base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    const realOpen = io.openAdmin.bind(io);
+    io.openAdmin = async () => {
+      const s = await realOpen();
+      return {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === OWNER_BOOTSTRAP_Q4C_DO_PLAIN) throw Object.assign(new Error(`ALTER ROLE ... PASSWORD '${OWNER_PW}'`), { code: '22023', hint: 'crewflow-stage=role' });
+          return s.query(text, values);
+        },
+        end: () => s.end(),
+      };
+    };
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64 });
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackRefused('statement', '22023'));
+    for (const line of lines) expect(line).not.toContain(OWNER_PW);
+  });
+
+  it('a lock timeout (55P03) in the plain transaction is a failure (70), never the last resort and never a retry loop; no value in any line', async () => {
+    const { io, lines, texts } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    let plainCalls = 0;
+    const realOpen = io.openAdmin.bind(io);
+    io.openAdmin = async () => {
+      const s = await realOpen();
+      return {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === OWNER_BOOTSTRAP_Q4C_DO_PLAIN && ++plainCalls > 0) throw Object.assign(new Error(`canceling statement due to lock timeout ${OWNER_PW}`), { code: '55P03', hint: 'crewflow-stage=role' });
+          return s.query(text, values);
+        },
+        end: () => s.end(),
+      };
+    };
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapFailure);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.writeFailed('55P03'));
+    expect((error as Error).message).not.toContain(OWNER_PW);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
+    expect(plainCalls).toBe(1);
+    for (const line of lines) expect(line).not.toContain(OWNER_PW);
+  });
+
+  it('a race in the plain transaction (42710) is retried from the facts under the lock', async () => {
+    const { io, lines, texts } = fakeIo([base, base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    let plainCalls = 0;
+    const realOpen = io.openAdmin.bind(io);
+    io.openAdmin = async () => {
+      const s = await realOpen();
+      return {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === OWNER_BOOTSTRAP_Q4C_DO_PLAIN && ++plainCalls === 1) throw Object.assign(new Error('x'), { code: '42710', hint: 'crewflow-stage=role' });
+          return s.query(text, values);
+        },
+        end: () => s.end(),
+      };
+    };
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(plainCalls).toBe(2);
+    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO_PLAIN)).toHaveLength(1);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.raceRetry('statement', '42710'));
+  });
+
+  it('an io without a plain value never runs the plain path (fail closed), even over verified TLS', async () => {
+    const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    delete io.plainPassword;
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64 });
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls);
+  });
+
+  it('ASSUMPTION: the awaiting-password role (valid mark) gets its password without the opt-in: pre-hashed refused, plain over verified TLS, LOGIN, mark cleared, 0', async () => {
+    const { io, sent, lines } = fakeIo([awaiting, awaiting, awaiting, awaiting, awaiting, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }], {
+      failOn: OWNER_BOOTSTRAP_COMMIT,
+      failCode: 'XX000',
+      failTimes: 2,
+      tls: 'verified',
+    });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', exitCode: 0, passwordSet: true, plainText: true });
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+      OWNER_BOOTSTRAP_MESSAGES.awaitingPasswordSet,
+    ]);
+    // The existing-role password write still checks Q2b (pre-lock and under the lock).
+    expect(sent.filter((s) => s.text === OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES).length).toBeGreaterThanOrEqual(2);
+    assertNoPlainValue(lines, sent);
+    // The DO block makes it LOGIN and clears the mark exactly like the pre-hashed block.
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain("EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', v_plain);\n          COMMENT ON ROLE crewflow_owner IS NULL;");
+  });
+
+  it('DENIAL a mismatch without the opt-in: exit 64 with the exact line, before any transaction or Q2b', async () => {
+    const { io, texts, lines, sent } = fakeIo([existing], [{ ok: false, code: '28P01' }], { tls: 'verified' });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.passwordMismatch);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
+    assertNoPlainValue(lines, sent);
+  });
+
+  it('DENIAL runOwnerBootstrap: CREWFLOW_ROTATE_APP_PASSWORD other than unset / empty / 1 is exit 64 BEFORE connecting (fail closed)', async () => {
+    expect(ROTATE_APP_PASSWORD_LABEL).toBe('CREWFLOW_ROTATE_APP_PASSWORD');
+    expect(rotateAppPasswordSetting({})).toBe(false);
+    expect(rotateAppPasswordSetting({ CREWFLOW_ROTATE_APP_PASSWORD: '' })).toBe(false);
+    expect(rotateAppPasswordSetting({ CREWFLOW_ROTATE_APP_PASSWORD: '1' })).toBe(true);
+    for (const bad of ['0', 'true', 'yes', ' 1', '1 ', '01', 'on', 'TRUE', ' ']) {
+      expect(() => rotateAppPasswordSetting({ CREWFLOW_ROTATE_APP_PASSWORD: bad })).toThrow(OWNER_BOOTSTRAP_MESSAGES.rotateInvalidValue);
+      const lines: string[] = [];
+      // 127.0.0.1:1 is unreachable: a 64 (not the 70 of a failed connection) proves the refusal came before connecting.
+      const result = await runOwnerBootstrap(
+        {
+          PG_ADMIN_URL: `postgres://dbadmin:${ADMIN_PW}@127.0.0.1:1/crewflow_unit`,
+          PG_DATABASE_URL: `postgres://crewflow_owner:${OWNER_PW}@127.0.0.1:1/crewflow_unit`,
+          CREWFLOW_ROTATE_APP_PASSWORD: bad,
+        },
+        { log: (l) => lines.push(l), retryWindowMs: 0 },
+      );
+      expect({ bad, exit: result.exitCode, outcome: result.outcome }).toEqual({ bad, exit: 64, outcome: 'refused' });
+      expect(lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.rotateInvalidValue]);
+      for (const l of lines) expect(l).not.toContain(OWNER_PW);
+    }
+  });
+
+  it('DENIAL owner decision F6 a: the opt-in with a password that already logs in is a REFUSAL (64, the opt-in cannot stay on); nothing written', async () => {
+    const { io, texts, lines } = fakeIo([existing], [{ ok: true }], { rotate: true, schemaComplete: false });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo);
+    expect(failureResult(error).exitCode).toBe(64);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(lines).toEqual([]);
+    // Without the opt-in the same database is a normal 0.
+    expect(await bootstrapOwnerWithIo(fakeIo([existing], [{ ok: true }]).io)).toMatchObject({ outcome: 'unchanged', exitCode: 0 });
+    const created = fakeIo([base, base, existing], [{ ok: true }], { rotate: true });
+    expect(await bootstrapOwnerWithIo(created.io)).toMatchObject({ outcome: 'created' });
+    expect(created.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.rotateNothingCreated]);
+  });
+
+  it('the opt-in on a server that refuses pre-hashed passwords: pre-hashed first, plain over verified TLS second, then the remove-it line', async () => {
+    const { io, sent, lines } = fakeIo([existing, existing, existing, existing, existing, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }], {
+      failOn: OWNER_BOOTSTRAP_COMMIT,
+      failCode: 'XX000',
+      failTimes: 2,
+      tls: 'verified',
+      rotate: true,
+    });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', exitCode: 0, passwordSet: true, plainText: true });
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+      OWNER_BOOTSTRAP_MESSAGES.passwordSet,
+      OWNER_BOOTSTRAP_MESSAGES.rotateDone,
+    ]);
+    assertNoPlainValue(lines, sent);
+  });
+
+  it('the opt-in still obeys the ADMIN OPTION and other-database guards (refused, nothing plain sent)', async () => {
+    const noAdmin = fakeIo([{ ...existing, adminHasAdminOption: false }], [{ ok: false, code: '28P01' }], { tls: 'verified', rotate: true });
+    await expect(bootstrapOwnerWithIo(noAdmin.io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
+    expect(noAdmin.texts()).not.toContain(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS);
+    const other = fakeIo([existing], [{ ok: false, code: '28P01' }], { tls: 'verified', rotate: true, otherDatabase: true });
+    await expect(bootstrapOwnerWithIo(other.io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase);
+    expect(other.texts()).not.toContain(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS);
+  });
+
+  it('mode c (no admin) with the opt-in: one line that it has no effect; the password is never changed there', async () => {
+    const lines: string[] = [];
+    const result = await runOwnerBootstrap(
+      { PG_DATABASE_URL: `postgres://crewflow_owner:${OWNER_PW}@127.0.0.1:1/crewflow_unit`, CREWFLOW_ROTATE_APP_PASSWORD: '1' },
+      { log: (l) => lines.push(l), retryWindowMs: 0 },
+    );
+    expect(result.exitCode).toBe(70);
+    expect(lines.slice(0, 2)).toEqual([OWNER_BOOTSTRAP_MESSAGES.passThrough, OWNER_BOOTSTRAP_MESSAGES.rotateWithoutAdmin]);
+  });
+
+  it('isVerifiedTlsConfig: only rejectUnauthorized with the host-name check (verify-full); production require / verify-ca / verify-full all qualify, disable and no-verify never', () => {
+    expect(isVerifiedTlsConfig({ ssl: undefined })).toBe(false);
+    expect(isVerifiedTlsConfig({ ssl: false })).toBe(false);
+    expect(isVerifiedTlsConfig({ ssl: true })).toBe(false);
+    expect(isVerifiedTlsConfig({ ssl: { rejectUnauthorized: false } })).toBe(false);
+    expect(isVerifiedTlsConfig({ ssl: { rejectUnauthorized: true, checkServerIdentity: () => undefined } })).toBe(false);
+    expect(isVerifiedTlsConfig({ ssl: { rejectUnauthorized: true } })).toBe(true);
+    const admin = (url: string, extra: Record<string, string> = {}) =>
+      bootstrapDriverConfigs(resolvePgEnvironment({ PG_DATABASE_URL: url, ...extra }, { processRole: 'migrate' }), `${APP_URL}${url.slice(ADMIN_URL.length)}`).admin;
+    for (const mode of ['require', 'verify-ca', 'verify-full']) {
+      expect({ mode, ok: isVerifiedTlsConfig(admin(`${ADMIN_URL}?sslmode=${mode}`, { NODE_ENV: 'production' })) }).toEqual({ mode, ok: true });
+    }
+    expect(isVerifiedTlsConfig(admin(`${ADMIN_URL}?sslmode=disable`, { NODE_ENV: 'test' }))).toBe(false);
+    expect(isVerifiedTlsConfig(admin(`${ADMIN_URL}?sslmode=no-verify`, { NODE_ENV: 'test', PG_SSL_ALLOW_SELF_SIGNED: 'true' }))).toBe(false);
+  });
+
+  it('the plain SQL: Q4C_DO_PLAIN mirrors Q4C_DO exactly from the role step on (attributes, awaiting handling, grant, re-raise), with its own setting and shape check', () => {
+    const noComments = (sql: string) => sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n');
+    const tail = (sql: string) => noComments(sql).slice(noComments(sql).indexOf("    IF NOT FOUND THEN\n      v_stage := 'role';"));
+    expect(tail(OWNER_BOOTSTRAP_Q4C_DO_PLAIN)).toBe(tail(OWNER_BOOTSTRAP_Q4C_DO).split('v_verifier').join('v_plain'));
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain("v_plain    text := pg_catalog.current_setting('crewflow_bootstrap.plain_password');");
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).not.toContain('crewflow_bootstrap.verifier');
+    expect(OWNER_BOOTSTRAP_Q4C_DO).not.toContain('crewflow_bootstrap.plain_password');
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain("NOT (v_plain OPERATOR(pg_catalog.~) '^[A-Za-z0-9_-]{32,}$')");
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain("v_plain OPERATOR(pg_catalog.~) '^md5[0-9a-f]{32}$'");
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain("pg_catalog.current_setting('password_encryption') OPERATOR(pg_catalog.<>) 'scram-sha-256'");
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain('EXCEPTION WHEN OTHERS OR query_canceled THEN');
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAIN).toContain("RAISE EXCEPTION 'crewflow_owner bootstrap failed (%)', SQLSTATE USING ERRCODE = SQLSTATE, HINT = 'crewflow-stage=' || v_stage;");
+    expect(OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION).toBe("SET LOCAL password_encryption = 'scram-sha-256';");
+    expect(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS).toContain("set_config('crewflow_bootstrap.plain_password', $1, true) IS NOT NULL");
+    expect(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS).toContain("set_config('crewflow_bootstrap.need_password', $2, true) IS NOT NULL AS done");
+    expect(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL).toBe(
+      'SELECT COALESCE((SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()), false) AS ssl;',
+    );
+    // No statement of the plain path can carry a value in its text: only code constants, inputs as $1 / $2.
+    for (const st of OWNER_BOOTSTRAP_PLAIN_STATEMENTS) {
+      expect(st).not.toContain(OWNER_PW);
+      expect(st).not.toMatch(/\$[3-9]/);
+    }
+    expect(OWNER_BOOTSTRAP_PLAIN_STATEMENTS.filter((st) => st.includes('$1'))).toEqual([OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS]);
+  });
+
+  it('a DO-block shape check (stage check) is never "the server refused the form", on either path', () => {
+    const e = Object.assign(new Error('x'), { code: '22023', hint: 'crewflow-stage=check' });
+    expect(isPasswordFormRefusal(e, true)).toBe(false);
+    expect(classifyWriteError(e, { passwordSent: true })).toBeInstanceOf(OwnerBootstrapRefusal);
+  });
+});
+
+describe('independent security review of #266: F1 (part 3), F2, F3, F5', () => {
+  it('F5: ONE pre-hashed refusal, then the retry commits: the plain value is never read, no plain statement is sent', async () => {
+    const { io, texts, lines, sent } = fakeIo([base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'verified' });
+    let plainReads = 0;
+    io.plainPassword = () => {
+      plainReads += 1;
+      return OWNER_PW;
+    };
+    const result = await bootstrapOwnerWithIo(io);
+    expect(result).toEqual({ outcome: 'created', exitCode: 0, created: true, passwordSet: true, grantAdded: true, createRole: 'not-run', code: null });
+    expect(plainReads).toBe(0);
+    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO)).toHaveLength(2);
+    for (const st of [OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL, OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS, OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS, OWNER_BOOTSTRAP_Q4C_DO_PLAIN]) expect(texts()).not.toContain(st);
+    expect(lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'), OWNER_BOOTSTRAP_MESSAGES.verifierRetry]);
+    for (const s of sent) for (const v of s.values ?? []) expect(String(v)).not.toContain(OWNER_PW);
+  });
+
+  it('F5: two IDENTICAL refusals (same stage and SQLSTATE) lead to the plain form; exactly two verifier attempts, never a loop', async () => {
+    const { io, texts } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', plainText: true });
+    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO)).toHaveLength(2);
+    expect(texts().filter((x) => x === OWNER_BOOTSTRAP_Q4C_DO_PLAIN)).toHaveLength(1);
+  });
+
+  it('F5: two DIFFERENT refusals (another stage or SQLSTATE) never lead to plain text: the last resort', async () => {
+    const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'verified' });
+    let doCalls = 0;
+    const realOpen = io.openAdmin.bind(io);
+    io.openAdmin = async () => {
+      const s = await realOpen();
+      return {
+        query: async (text: string, values?: unknown[]) => {
+          // The retry's role step is refused with another SQLSTATE in the statement stage (not the same refusal twice).
+          if (text === OWNER_BOOTSTRAP_Q4C_DO && ++doCalls === 2) throw Object.assign(new Error('x'), { code: '22023', hint: 'crewflow-stage=role' });
+          return s.query(text, values);
+        },
+        end: () => s.end(),
+      };
+    };
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64, code: '22023' });
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL);
+    expect(lines.slice(0, 3)).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.verifierRetry,
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('statement', '22023'),
+    ]);
+  });
+
+  it('F2: P0 runs on the admin session BEFORE the plain transaction (session level: client_connection_check_interval, transaction_timeout on 17+ only)', async () => {
+    const { io, texts } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    await bootstrapOwnerWithIo(io);
+    const t = texts();
+    const p0 = t.indexOf(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS);
+    expect(p0).toBeGreaterThan(t.indexOf(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL));
+    expect(t[p0 + 1]).toBe(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS);
+    expect(t[p0 + 2]).toBe(OWNER_BOOTSTRAP_BEGIN);
+    expect(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS).toContain("pg_catalog.set_config('client_connection_check_interval', '0', false)");
+    expect(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS).toContain(
+      "CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 170000\n                THEN pg_catalog.set_config('transaction_timeout', '0', false) IS NOT NULL\n                ELSE true END",
+    );
+    expect(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS).toContain("WHERE s.name = 'deadlock_timeout') AS deadlock_timeout_ms");
+    // transaction_timeout is NOT a startup option (it does not exist on PostgreSQL 16: the connection would be refused).
+    expect(BOOTSTRAP_SESSION_STARTUP_OPTIONS).not.toContain('transaction_timeout');
+  });
+
+  it.each([0, 1])('DENIAL F2: deadlock_timeout = %d ms (< 2): no plain form; the fixed reason line; the last resort', async (ms) => {
+    const { io, texts, lines, sent } = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified', deadlockMs: ms });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64 });
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackDeadlockTimeout);
+    for (const s of sent) for (const v of s.values ?? []) expect(String(v)).not.toContain(OWNER_PW);
+    expect(PLAIN_MIN_DEADLOCK_TIMEOUT_MS).toBe(2);
+  });
+
+  it('DENIAL F2: an unreadable P0 answer (no row, done not true, a non-integer) refuses the plain form (fail closed)', async () => {
+    for (const rows of [[], [{ done: false, deadlock_timeout_ms: '1000' }], [{ done: true, deadlock_timeout_ms: 'x' }], [{ done: true, deadlock_timeout_ms: null }]]) {
+      const { io, texts } = fakeIo([base, base, base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+      const realOpen = io.openAdmin.bind(io);
+      io.openAdmin = async () => {
+        const s = await realOpen();
+        return { query: async (text: string, values?: unknown[]) => (text === OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS ? { rows } : s.query(text, values)), end: () => s.end() };
+      };
+      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64 });
+      expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    }
+  });
+
+  it('F2: deadlock_timeout of exactly 2 ms is accepted (L1 then sets 1 ms)', async () => {
+    const { io, texts } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified', deadlockMs: 2 });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+  });
+
+  it('F3: every read-write bootstrap connection pins the parse / rewrite / plan dumps off and log_parameter_max_length_on_error = 0 at startup', () => {
+    expect(BOOTSTRAP_SESSION_STARTUP_OPTIONS).toBe(
+      '-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off -c debug_print_parse=off -c debug_print_rewritten=off -c debug_print_plan=off -c log_parameter_max_length_on_error=0',
+    );
+    const configs = bootstrapDriverConfigs(resolvePgEnvironment({ PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'test' }, { processRole: 'migrate' }), APP_URL);
+    for (const name of ['admin', 'probe'] as const) {
+      for (const pin of ['-c debug_print_parse=off', '-c debug_print_rewritten=off', '-c debug_print_plan=off', '-c log_parameter_max_length_on_error=0']) {
+        expect({ name, pin, has: String(configs[name].options ?? '').includes(pin) }).toEqual({ name, pin, has: true });
+      }
+    }
+  });
+
+  it('F1 part 3: a superuser admin also turns off duration / sampling logging, log_min_messages = warning, and (where loaded) pg_stat_statements.track = top and auto_explain; never a refusal', () => {
+    for (const piece of [
+      "pg_catalog.set_config('log_min_duration_statement', '-1', false)",
+      "pg_catalog.set_config('log_min_duration_sample', '-1', false)",
+      "pg_catalog.set_config('log_transaction_sample_rate', '0', false)",
+      "CASE WHEN pg_catalog.current_setting('log_min_messages') IN ('debug5', 'debug4', 'debug3', 'debug2', 'debug1', 'info', 'notice')\n            THEN pg_catalog.set_config('log_min_messages', 'warning', false) END",
+      "CASE WHEN pg_catalog.current_setting('pg_stat_statements.track', true) IS NOT NULL\n            THEN pg_catalog.set_config('pg_stat_statements.track', 'top', false) END",
+      "CASE WHEN pg_catalog.current_setting('auto_explain.log_min_duration', true) IS NOT NULL\n            THEN pg_catalog.set_config('auto_explain.log_min_duration', '-1', false) END",
+      'FROM pg_catalog.pg_roles WHERE rolname = current_user AND rolsuper;',
+    ]) {
+      expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).toContain(piece);
+    }
+    expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).not.toMatch(/RAISE|EXCEPTION/);
+    // Review F8: log_min_messages is never set unconditionally (a stricter error / log / fatal / panic stays as it is).
+    expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING.match(/set_config\('log_min_messages'/g)).toHaveLength(1);
+    expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).not.toMatch(/^\s*pg_catalog\.set_config\('log_min_messages'/m);
+    for (const strict of ['warning', 'error', 'log', 'fatal', 'panic']) expect(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING).not.toContain(`'${strict}', 'debug`);
+  });
+
+  it('F11: a T1 read that FAILS never aborts the run: treated as non-TLS, the proxy line, the plain form still runs', async () => {
+    const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    const realOpen = io.openAdmin.bind(io);
+    io.openAdmin = async () => {
+      const s = await realOpen();
+      return {
+        query: async (text: string, values?: unknown[]) => {
+          if (text === OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL) throw Object.assign(new Error('permission denied for view pg_stat_ssl'), { code: '42501' });
+          return s.query(text, values);
+        },
+        end: () => s.end(),
+      };
+    };
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
+    for (const l of lines) expect(l).not.toContain('permission denied');
+  });
+});
+
+describe('owner decision 2026-11-20, F1 a: send anyway, but warn by name', () => {
+  const risks = (over: Record<string, string | null>) => plainLoggingRisks({ ...QUIET_LOGGING, ...over });
+
+  it.each<[string, Record<string, string | null>, string[]]>([
+    ['PostgreSQL defaults, no extension loaded', {}, []],
+    ['log_statement = all (parameters logged)', { log_statement: 'all' }, ['log_statement']],
+    ['log_statement = ddl / mod (a DO block and a SELECT are neither)', { log_statement: 'mod' }, []],
+    ['log_statement = all but log_parameter_max_length = 0 (no parameter logged)', { log_statement: 'all', log_parameter_max_length: '0' }, []],
+    ['log_parameter_max_length = 0B (unit form)', { log_statement: 'all', log_parameter_max_length: '0B' }, []],
+    ['log_parameter_max_length = 64B (a prefix of the value)', { log_statement: 'all', log_parameter_max_length: '64B' }, ['log_statement']],
+    ['log_min_duration_statement = 0', { log_min_duration_statement: '0' }, ['log_min_duration_statement']],
+    ['log_min_duration_statement = 250ms', { log_min_duration_statement: '250ms' }, ['log_min_duration_statement']],
+    ['log_min_duration_sample = 0', { log_min_duration_sample: '0' }, ['log_min_duration_sample']],
+    ['log_transaction_sample_rate = 0.01', { log_transaction_sample_rate: '0.01' }, ['log_transaction_sample_rate']],
+    ['auto_explain on, parameter length at its default (unset)', { auto_explain_log_min_duration: '0' }, ['auto_explain.log_min_duration']],
+    ['auto_explain on, parameters off', { auto_explain_log_min_duration: '0', auto_explain_log_parameter_max_length: '0' }, []],
+    ['auto_explain loaded but off', { auto_explain_log_min_duration: '-1', auto_explain_log_parameter_max_length: '-1' }, []],
+    ['pg_stat_statements.track = all (the nested role statement)', { pg_stat_statements_track: 'all' }, ['pg_stat_statements.track']],
+    ['pg_stat_statements.track = top', { pg_stat_statements_track: 'top' }, []],
+    ['pgaudit.log_parameter = on', { pgaudit_log_parameter: 'on' }, ['pgaudit.log_parameter']],
+    ['pgaudit.log_parameter = off', { pgaudit_log_parameter: 'off' }, []],
+    [
+      'everything at once, in a fixed order',
+      { log_statement: 'all', log_min_duration_statement: '0', log_min_duration_sample: '0', log_transaction_sample_rate: '1', auto_explain_log_min_duration: '0', pg_stat_statements_track: 'all', pgaudit_log_parameter: 'on' },
+      ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'auto_explain.log_min_duration', 'pg_stat_statements.track', 'pgaudit.log_parameter'],
+    ],
+  ])('%s', (_label, over, want) => {
+    expect(risks(over)).toEqual(want);
+  });
+
+  it('the warning names the settings, never a value, and the plain form is STILL sent (never a refusal)', async () => {
+    const settings = { log_statement: 'all', pg_stat_statements_track: 'all', log_min_duration_statement: '1234ms' };
+    const { io, texts, lines, sent } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified', loggingSettings: settings });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    const warning = OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsWarning(['log_statement', 'log_min_duration_statement', 'pg_stat_statements.track']);
+    expect(warning).toBe(
+      "Warning: this server's settings log or store the password that is about to be sent (log_statement, log_min_duration_statement, pg_stat_statements.track). It is sent anyway (owner decision F1 a); rotate it afterwards if those logs are readable by others.",
+    );
+    expect(lines).toContain(warning);
+    for (const l of lines) for (const v of ['1234ms', OWNER_PW]) expect(l).not.toContain(v);
+    // W1 is read before the plain transaction (after T1 and P0), outside any transaction.
+    const t = texts();
+    expect(t.indexOf(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)).toBeLessThan(t.lastIndexOf(OWNER_BOOTSTRAP_BEGIN));
+    expect(t.indexOf(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)).toBeGreaterThan(t.indexOf(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS));
+    for (const s of sent.filter((x) => x.text === OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)) expect(s.values).toBeUndefined();
+  });
+
+  it('quiet settings: no warning at all', async () => {
+    const { io, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    await bootstrapOwnerWithIo(io);
+    expect(lines.filter((l) => l.startsWith('Warning:'))).toEqual([]);
+  });
+
+  it('never a refusal: an unreadable or failing W1 warns that it is unknown, and the plain form is still sent', async () => {
+    for (const mode of ['empty', 'throws'] as const) {
+      const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+      const realOpen = io.openAdmin.bind(io);
+      io.openAdmin = async () => {
+        const s = await realOpen();
+        return {
+          query: async (text: string, values?: unknown[]) => {
+            if (text === OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS) {
+              if (mode === 'throws') throw Object.assign(new Error('unrecognized configuration parameter'), { code: '42704' });
+              return { rows: [] };
+            }
+            return s.query(text, values);
+          },
+          end: () => s.end(),
+        };
+      };
+      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+      expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+      expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsUnread);
+    }
+  });
+
+  it('W1 is one read-only SELECT of fixed names (extension settings with missing_ok), no parameter', () => {
+    expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS.startsWith('SELECT ')).toBe(true);
+    expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).not.toMatch(/\$\d|set_config|FROM/);
+    for (const ext of ['auto_explain.log_min_duration', 'auto_explain.log_parameter_max_length', 'pg_stat_statements.track', 'pgaudit.log_parameter']) {
+      expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).toContain(`pg_catalog.current_setting('${ext}', true)`);
+    }
+    for (const core of ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'log_parameter_max_length']) {
+      expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).toContain(`pg_catalog.current_setting('${core}') AS ${core}`);
+    }
   });
 });

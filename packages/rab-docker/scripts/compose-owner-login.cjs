@@ -191,6 +191,16 @@ const HARDEN_TIMEOUT_MIN_S = 60;
 const HARDEN_TIMEOUT_MAX_S = 7200;
 const HARDEN_ENTRYPOINT = Object.freeze(['./db-setup.sh', 'harden']);
 /**
+ * Owner decision 2026-11-20 (like Twenty and ZITADEL): db-setup never changes an existing crewflow_owner password by itself;
+ * the operator opts in for ONE deploy with CREWFLOW_ROTATE_APP_PASSWORD=1 (owner-bootstrap.ts rotateAppPasswordSetting:
+ * exactly 1 or empty, anything else refused). A switch, not a credential (it holds no password, despite its name): a
+ * compose.env value interpolated into db-setup ONLY, committed exactly as ROTATE_EXPR; never rab-api, rab-worker or
+ * db-harden, never database.env / runtime.env.
+ */
+const ROTATE_KEY = 'CREWFLOW_ROTATE_APP_PASSWORD';
+const ROTATE_EXPR = '${CREWFLOW_ROTATE_APP_PASSWORD:-}';
+const ROTATE_VALUES = Object.freeze(['', '1']);
+/**
  * RETIRED (owner decision 2026-11-18): PR #125 option 2's setup volume, which held a credential-free target file and the
  * crewflow_owner password file. No file carries a credential any more: the volume, and any mount at its path, is refused
  * everywhere, so it can never come back unreviewed.
@@ -684,6 +694,8 @@ function adminUrlPlacementProblems(rel, text) {
   const ANCHOR = /(?:^|[\s:[{,-])&[A-Za-z0-9_.-]+/;
   const PIN = /^\s*PG_ADMIN_URL\s*:\s*(""|'')\s*$/;
   const DIRECT_PIN = /^\s*PG_ADMIN_DIRECT_URL\s*:\s*(""|'')\s*$/;
+  const ROTATE_LINE = /^\s*CREWFLOW_ROTATE_APP_PASSWORD\s*:\s*\$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}\s*$/;
+  let rotateLines = 0;
   // The services that may carry that pin: production's rab-api / rab-worker and the dev / QA stacks' server / worker.
   const PIN_SERVICES = [...APP_SERVICES, 'server', 'worker'];
   String(text).split(/\r?\n/).forEach((raw, i) => {
@@ -718,7 +730,15 @@ function adminUrlPlacementProblems(rel, text) {
       problems.push(`${rel}:${i + 1}: ${ADMIN_DIRECT_URL_KEY} in ${where} (the direct admin address; db-setup and db-harden only; rab-api / rab-worker only pin it to "")`);
     }
     if (!inSetup && /\bCREWFLOW_BUNDLED_DB_ADMIN_URL\b/.test(line)) problems.push(`${rel}:${i + 1}: ${BUNDLED_ADMIN_URL_KEY} in ${where} (the bundled db's superuser URL; db-setup and db-harden only)`);
+    // Owner decision 2026-11-20: the rotation opt-in reaches db-setup only (never db-harden, rab-api or rab-worker), once,
+    // exactly as committed.
+    if (/\bCREWFLOW_ROTATE_APP_PASSWORD\b/.test(line)) {
+      if (!(top === 'services' && service === DB_SETUP_SERVICE)) problems.push(`${rel}:${i + 1}: ${ROTATE_KEY} in ${where} (the one-deploy password rotation opt-in: db-setup only, never db-harden, rab-api or rab-worker)`);
+      else if (!ROTATE_LINE.test(line)) problems.push(`${rel}:${i + 1}: ${ROTATE_KEY} on db-setup must be exactly ${ROTATE_KEY}: ${ROTATE_EXPR}`);
+      else rotateLines += 1;
+    }
   });
+  if (rotateLines > 1) problems.push(`${rel}: ${ROTATE_KEY} appears ${rotateLines} times on db-setup (once)`);
   for (const [name, count] of perService) {
     if (count > 1) problems.push(`${rel}: interpolates \${PG_ADMIN_URL...} ${count} times in ${name} (one line per admin service)`);
   }
@@ -1040,6 +1060,15 @@ function dbSetupProblems(services, p, want) {
     else if (String(env[key]) !== String(expected[key] ?? '')) p(`${DB_SETUP_SERVICE}: ${key} is not the committed value (compose.env's, or the bundled db's URL; value not shown)`);
   }
   for (const key of RETIRED_ADMIN_URL_KEYS) if (key in env) p(`${DB_SETUP_SERVICE}: has ${key} (renamed to ${ADMIN_URL_KEY})`);
+  // Owner decision 2026-11-20: the rotation opt-in, committed on db-setup (rendered: compose.env's value, '' or 1), and on no
+  // other service.
+  if (!(ROTATE_KEY in env)) p(`${DB_SETUP_SERVICE}: ${ROTATE_KEY} is missing (committed: ${ROTATE_EXPR}; the one-deploy rotation opt-in)`);
+  else if (!ROTATE_VALUES.includes(String(env[ROTATE_KEY] ?? ''))) p(`${DB_SETUP_SERVICE}: ${ROTATE_KEY} must render to exactly 1 or empty (value not shown)`);
+  for (const [name, svc] of Object.entries(services)) {
+    if (name !== DB_SETUP_SERVICE && svc && typeof svc.environment === 'object' && svc.environment !== null && ROTATE_KEY in svc.environment) {
+      p(`${name}: has ${ROTATE_KEY} (db-setup only: the one-deploy password rotation opt-in)`);
+    }
+  }
   if (env.NODE_ENV !== 'production') p(`${DB_SETUP_SERVICE}: NODE_ENV is not production`);
   if (env.RAB_RUNTIME_ENV !== 'production') p(`${DB_SETUP_SERVICE}: RAB_RUNTIME_ENV is not production`);
   // Twenty Helm model: APP_SECRET is never part of a database credential; db-setup does not receive it (db-setup.sh refuses it).
@@ -1427,6 +1456,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     const bootstrapPlacement = bootstrapAdminPlacementProblem(key, { envKind: kind });
     if (bootstrapPlacement) problems.push(`${key}: ${bootstrapPlacement}`);
     if (kind !== 'compose' && key === HARDEN_TIMEOUT_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-harden's committed ${HARDEN_TIMEOUT_EXPR} would silently override a value here`);
+    if (kind !== 'compose' && key === ROTATE_KEY) problems.push(`${key}: set it in compose.env (the interpolation file), for one deploy: it belongs to db-setup only`);
+    if (kind === 'compose' && key === ROTATE_KEY && !ROTATE_VALUES.includes(value)) problems.push(`${key}: must be exactly 1 (for one deploy) or empty (value not shown)`);
     if (kind !== 'compose' && key === ADMIN_DIRECT_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup and db-harden only`);
     if (kind !== 'compose' && [DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY].includes(key)) problems.push(`${key}: set it in compose.env (the interpolation file): compose builds PG_DATABASE_URL from it`);
     if (kind !== 'compose' && key === ADMIN_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only, and rab-api / rab-worker refuse it (an env file here would hand the admin URL to them)`);
@@ -1464,7 +1495,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
       const bootstrapKey = RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key);
       if (!key.startsWith('CREWFLOW_') && !dbKey && !bootstrapKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')}, and rab-api's ${RAB_API_BOOTSTRAP_ADMIN_KEYS.join(', ')})`);
       // CREWFLOW_SECRETS_DIR names a directory, not a secret.
-      if (key !== 'CREWFLOW_SECRETS_DIR' && !dbKey && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
+      // CREWFLOW_ROTATE_APP_PASSWORD is a switch (1 or empty, checked above), not a password.
+      if (key !== 'CREWFLOW_SECRETS_DIR' && key !== ROTATE_KEY && !dbKey && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
       if (!dbKey && /:\/\/[^/\s]*@/.test(value)) problems.push(`${key}: a URL with credentials in the interpolation file`);
       if (key === DB_PASSWORD_KEY && !(template && isPlaceholder(value)) && !DB_PASSWORD_SHAPE.test(value)) {
         problems.push(`${key}: must be at least 32 URL-safe characters (letters, digits, - . _ ~; e.g. openssl rand -hex 32): it is interpolated into the bundled db's admin URL`);
@@ -1778,6 +1810,7 @@ module.exports = {
   ACCEPTED_SSLMODES, sslmodeProblem, ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY, RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_URL_NO_PASSWORD, DB_SETUP_DB_KEYS, dbSettingsProblems,
   APP_PASSWORD_KEY, APP_URL_EXPR, APP_PASSWORD_SHAPE, SENTINEL_APP_PW, BUNDLED_APP_URL, OWNER_PASSWORD_SENTINELS,
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
+  ROTATE_KEY, ROTATE_EXPR, ROTATE_VALUES,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,

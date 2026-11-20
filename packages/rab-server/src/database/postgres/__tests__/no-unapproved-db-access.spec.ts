@@ -91,8 +91,8 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   // plus the per-run admin it creates; it plays the operator's printed SQL and reads the evidence (logs, catalogs,
   // pg_stat_statements), so it connects with raw clients on purpose, never through the factory.
   'packages/rab-server/src/database/typeorm/scripts/owner-login/fallback-check/bootstrap-owner-login-fallback-check.ts': {
-    hits: 5,
-    why: 'db-setup capability harness on throwaway clusters: superuser / per-run admin / operator-step / evidence Clients only',
+    hits: 1,
+    why: 'db-setup capability harness on throwaway clusters: ONE rawClient() constructor (verify-full, loopback) for its superuser / per-run admin / operator-step / evidence connections',
   },
   'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts': {
     hits: 1,
