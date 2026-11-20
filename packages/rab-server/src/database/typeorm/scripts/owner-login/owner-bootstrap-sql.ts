@@ -139,7 +139,12 @@ export const OWNER_BOOTSTRAP_Q0_SESSION = `SET search_path TO pg_catalog, pg_tem
  * ALTER ROLE / ALTER DATABASE ... SET defaults, so a planted search_path or a forced read-only default never applies to
  * these sessions. Fixed text; a spec asserts every driver config carries it.
  */
-export const BOOTSTRAP_SESSION_STARTUP_OPTIONS = '-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off';
+//
+// Independent security review F3 of #266: the four logging pins (all USERSET on PostgreSQL 16-18) are startup options too, so
+// a database- or role-level default can never make the server print a parse / rewrite / plan tree (which would quote the
+// nested ALTER / CREATE ROLE with its value) or a failing statement's bound $1 (the plain-text fallback's input).
+export const BOOTSTRAP_SESSION_STARTUP_OPTIONS =
+  '-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off -c debug_print_parse=off -c debug_print_rewritten=off -c debug_print_plan=off -c log_parameter_max_length_on_error=0';
 
 /**
  * Security review I1 (owner decision 2026-11-13: approved, read-only): the crewflow_owner session of the owner-URL mode
@@ -148,10 +153,23 @@ export const BOOTSTRAP_SESSION_STARTUP_OPTIONS = '-c search_path=pg_catalog,pg_t
  */
 export const OWNER_URL_SESSION_STARTUP_OPTIONS = '-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=on';
 
-/** Q1: superuser-only settings; a no-op row for a non-superuser admin (same trick as 01-crewflow-owner.sql). */
+/**
+ * Q1: superuser-only settings; a no-op row for a non-superuser admin (same trick as 01-crewflow-owner.sql). Independent
+ * security review F1 (part 3) of #266: also the duration, sampling and message-level logging, and, only where the module is
+ * loaded (current_setting(..., true) IS NOT NULL), pg_stat_statements.track = top (never the nested role statement) and
+ * auto_explain off. Session-level, best effort: never a refusal based on logging settings (owner decision pending).
+ */
 export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_config('log_statement', 'none', false),
        pg_catalog.set_config('log_min_error_statement', 'panic', false),
-       pg_catalog.set_config('log_parameter_max_length', '0', false)
+       pg_catalog.set_config('log_parameter_max_length', '0', false),
+       pg_catalog.set_config('log_min_duration_statement', '-1', false),
+       pg_catalog.set_config('log_min_duration_sample', '-1', false),
+       pg_catalog.set_config('log_transaction_sample_rate', '0', false),
+       pg_catalog.set_config('log_min_messages', 'warning', false),
+       CASE WHEN pg_catalog.current_setting('pg_stat_statements.track', true) IS NOT NULL
+            THEN pg_catalog.set_config('pg_stat_statements.track', 'top', false) END,
+       CASE WHEN pg_catalog.current_setting('auto_explain.log_min_duration', true) IS NOT NULL
+            THEN pg_catalog.set_config('auto_explain.log_min_duration', '-1', false) END
   FROM pg_catalog.pg_roles WHERE rolname = current_user AND rolsuper;`;
 
 /**
@@ -442,6 +460,24 @@ export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
  */
 export const OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL = `SELECT COALESCE((SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()), false) AS ssl;`;
 
+/**
+ * P0 (plain-text fallback; admin session, BEFORE its transaction; independent security review F2 of #266): messages below
+ * ERROR and FATAL are not caught by the DO block's EXCEPTION handler and would carry the SPI CONTEXT (the formatted role
+ * statement). Session-level: client_connection_check_interval = 0 (no FATAL for a dropped client mid-statement) and, on
+ * PostgreSQL 17+ only (the setting does not exist on 16; CASE evaluates it only there), transaction_timeout = 0 (no FATAL at
+ * a database- or role-level transaction timeout). Returns deadlock_timeout in ms: below 2 ms, L1's lock_timeout
+ * (GREATEST(1, deadlock_timeout / 2)) would race the deadlock timer (log_lock_waits), so the plain path is refused.
+ * Fixed text, no input.
+ */
+export const OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS = `SELECT pg_catalog.set_config('client_connection_check_interval', '0', false) IS NOT NULL
+       AND CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 170000
+                THEN pg_catalog.set_config('transaction_timeout', '0', false) IS NOT NULL
+                ELSE true END AS done,
+       (SELECT s.setting::bigint FROM pg_catalog.pg_settings s WHERE s.name = 'deadlock_timeout') AS deadlock_timeout_ms;`;
+
+/** Below this deadlock_timeout (ms) the plain path is refused (review F2): L1 could not stay strictly below it. */
+export const PLAIN_MIN_DEADLOCK_TIMEOUT_MS = 2;
+
 /** P1 (plain-text fallback, in its transaction, before the role statement): the server stores a SCRAM verifier, never md5. */
 export const OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION = `SET LOCAL password_encryption = 'scram-sha-256';`;
 
@@ -691,6 +727,7 @@ export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
  */
 export const OWNER_BOOTSTRAP_PLAIN_STATEMENTS = [
   OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
+  OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q2_FACTS,

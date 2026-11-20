@@ -120,8 +120,10 @@ import {
   OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD,
   OWNER_BOOTSTRAP_Q4C_DO_PLAIN,
   OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS,
+  OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
   OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION,
   OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
+  PLAIN_MIN_DEADLOCK_TIMEOUT_MS,
   OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY,
   OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
@@ -261,7 +263,10 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   plainFallbackUsed: (stage: WriteStage, sqlstate: string) =>
     `crewflow_owner's password was set in plain text over verified TLS: the server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}).`,
   plainFallbackLogsNotice:
-    "The password may appear in your database provider's own logs (db-setup cannot switch server logging off there). To replace it, follow \"Rotate the crewflow_owner password\" in packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md.",
+    "Your database provider received crewflow_owner's password itself and may log or store it (some providers can show stored role passwords to their users). Turn off provider-side password storage where it is offered, use a different password in every environment, and to replace this one follow \"Rotate the crewflow_owner password\" in packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md.",
+  plainFallbackDeadlockTimeout:
+    'db-setup does not set the password in plain text: the server\'s deadlock_timeout is below 2 ms, so the lock timeout that keeps the statement out of the lock-wait log cannot stay below it. Falling back to the manual step.',
+  verifierRetry: 'Trying the pre-hashed password once more, in a new transaction (a passing error must not lead to a plain-text password).',
   plainFallbackNoVerifiedTls:
     'db-setup does not set the password in plain text: the PG_ADMIN_URL session is not TLS with a verified certificate (sslmode=require, verify-ca or verify-full, each verified fully: the certificate chain and the host name). Falling back to the manual step.',
   plainFallbackTlsEndsAtProxy:
@@ -1006,6 +1011,14 @@ async function plainFallback(session: SqlSession, io: OwnerBootstrapIo, refused:
     io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls);
     return 'last-resort';
   }
+  // Independent security review F2 of #266: no FATAL from a connection check or (17+) a transaction timeout during the
+  // role statement, and a deadlock_timeout that L1's lock_timeout can stay below. Anything unreadable: refused (fail closed).
+  const guards = (await session.query(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS)).rows;
+  const deadlockMs = guards.length === 1 && guards[0]?.done === true ? Number(guards[0]?.deadlock_timeout_ms) : Number.NaN;
+  if (!(Number.isInteger(deadlockMs) && deadlockMs >= PLAIN_MIN_DEADLOCK_TIMEOUT_MS)) {
+    io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackDeadlockTimeout);
+    return 'last-resort';
+  }
   let lastRace: WriteFailureInfo | null = null;
   for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
     const r = await writeTransaction(session, io, { kind: 'plain', refused }, false);
@@ -1277,16 +1290,28 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     let result: OwnerBootstrapResult | null = null;
     let lastRace: WriteFailureInfo | null = null;
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
-      const r = await attempt(session, io);
+      let r = await attempt(session, io);
       if (r !== 'recheck' && 'verifierRefused' in r) {
-        const { stage, code } = r.verifierRefused;
-        io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRefused(stage, code));
-        // Owner decision 2026-11-20: the same password in plain text, over verified TLS only. Last resort (owner decision
-        // 2026-11-19, option 1, unchanged): a passwordless crewflow_owner and fixed steps.
-        const plain = await plainFallback(session, io, r.verifierRefused);
-        if (plain === 'last-resort') return await passwordlessSetup(session, io, code);
-        result = plain;
-        break;
+        const first = r.verifierRefused;
+        io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRefused(first.stage, first.code));
+        // Independent security review F5 of #266: a passing error must not lead to a plain-text password. One more verifier
+        // attempt in a fresh transaction (never a loop); only a second refusal with the SAME stage and SQLSTATE counts.
+        io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRetry);
+        r = await attempt(session, io);
+        if (r !== 'recheck' && 'verifierRefused' in r) {
+          const { stage, code } = r.verifierRefused;
+          if (stage !== first.stage || code !== first.code) {
+            // Not the same refusal twice: not proven to be the password form. The last resort, never plain text.
+            io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRefused(stage, code));
+            return await passwordlessSetup(session, io, code);
+          }
+          // Owner decision 2026-11-20: the same password in plain text, over verified TLS only. Last resort (owner decision
+          // 2026-11-19, option 1, unchanged): a passwordless crewflow_owner and fixed steps.
+          const plain = await plainFallback(session, io, r.verifierRefused);
+          if (plain === 'last-resort') return await passwordlessSetup(session, io, code);
+          result = plain;
+          break;
+        }
       }
       if (r !== 'recheck' && 'plainRefused' in r) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('plain refusal outside the plain-text fallback'));
       if (r !== 'recheck' && !('race' in r)) {

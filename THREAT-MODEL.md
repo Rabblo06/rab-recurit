@@ -9793,6 +9793,19 @@ re-implemented).
   now receives the plain password: the plain form goes only to the endpoint whose certificate and host name were verified,
   the same endpoint the admin password already goes to. A server the operator does not trust with the app password should
   not hold the app's data either.
+- **Independent security review of #266 (F1 part 3, F2, F3, F5), all implemented.** F5: the plain form follows only TWO
+  consecutive pre-hashed refusals with the same stage and SQLSTATE (one extra verifier attempt in a fresh transaction, never a
+  loop); a different second refusal goes to the last resort, never plain text. F3: every read-write bootstrap connection pins
+  `debug_print_parse`, `debug_print_rewritten`, `debug_print_plan` off and `log_parameter_max_length_on_error = 0` as startup
+  options (a database or role default could otherwise dump the nested ALTER ROLE or the bound `$1`). F2: before the plain
+  transaction the admin session sets `client_connection_check_interval = 0` and, on 17+, `transaction_timeout = 0` (messages
+  below ERROR and FATAL bypass the DO block's EXCEPTION handler and would carry the SPI CONTEXT), and the plain form is refused
+  when `deadlock_timeout` < 2 ms (L1's lock_timeout could not stay below it). **Residual (F2):** a backend terminated
+  (`pg_terminate_backend`, a server shutdown) or a logging extension hook (`emit_log_hook`, auditing extensions) acting while
+  the role statement runs can still emit the CONTEXT with the value. F1 part 3: a superuser admin's Q1 also turns off
+  duration / sampling logging, sets `log_min_messages = warning`, and, where loaded, `pg_stat_statements.track = top` and
+  `auto_explain.log_min_duration = -1` (best effort; no refusal based on logging settings: owner decision pending, as is the
+  F6 "sticky opt-in" finding). F4: the notice says the provider receives the password itself and may log or store it.
 - **Last resort (unchanged).** No verified TLS, or the plain form refused too: the passwordless NOLOGIN role + printed step
   (option 1), or the printed manual-role SQL (option 2), exactly as in the section above.
 - **No automatic change of an existing password (Twenty / ZITADEL).** A LOGIN crewflow_owner whose password does not match
