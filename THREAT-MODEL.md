@@ -9744,3 +9744,174 @@ plain-text password.
   host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
   parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
   independent review I4; nothing after the database name but `?sslmode=verify-full`, re-review N3).
+
+---
+
+## First platform administrator at API boot from `BOOTSTRAP_ADMIN_EMAIL` (2026-11-19)
+
+Owner request: create the first platform admin when rab-api starts, without running a command. When `BOOTSTRAP_ADMIN_EMAIL`
+is set on rab-api, `PlatformAdminBootstrapOnBoot` (`modules/identity/platform-admin-bootstrap`, imported by `AppModule`
+only) runs `PlatformAdminBootstrapService` once in Nest's `onApplicationBootstrap`. That runs after main.ts's identity check,
+boot gates and posture monitor, and before the HTTP listener opens. The service is the `bootstrap-admin` command's own body,
+moved there unchanged; the command now calls it too. No new SQL, grant or migration. Optional inputs:
+`BOOTSTRAP_ADMIN_FIRST_NAME`, `_LAST_NAME`, `_ORG_SLUG`, `_ORG_NAME`. There is no password input.
+
+Who can call this? — Nobody over HTTP. It runs only inside the API process at start, once, from its environment. Whoever
+controls rab-api's environment picks the first administrator's email. That is the same party that already holds
+`PG_DATABASE_URL` (the schema-owning login), so it adds no new authority.
+Whose data is involved? — The new administrator's account (email, names), the bootstrap organisation, one `account_invite`,
+one `email_outbox` row and one `audit_log` row (`platform_admin.bootstrapped`, `actor_user_id` NULL, metadata
+`{ via: 'env_bootstrap', pendingActivation, createdOrganisation, trigger: 'api_boot' }`).
+What if that identity is compromised? — If an attacker can change rab-api's environment before the first admin exists, they
+can name their own email. They could equally replace the database URL, so this is no new capability. Once any admin exists,
+the variable does nothing: `core.bootstrap_first_platform_admin` returns ALREADY_BOOTSTRAPPED (an active admin) or CLOSED
+(admins existed, none active). It can never mint a second or a replacement administrator.
+What if it's malicious? — `BOOTSTRAP_ADMIN_PASSWORD` is refused in every runtime process: by the in-process runtime guard
+(`never-in-runtime-env.ts`, API, Worker and provisioner, before Nest), by `api-prestart.sh` (on the API start and on the
+one-off CLI form), and by the service-level boot hook. The env-file lint refuses it in every file and on every service. The
+five inputs are allowed on rab-api only (compose model gate). `database.env` and `runtime.env` are refused because they also
+reach rab-worker. `DB_TARGET` and `ALLOW_PRODUCTION_DB_COMMANDS` stay refused on the API start.
+What if the request is tampered with? — There is no request. The email is trimmed and lower-cased, then validated again
+inside the SECURITY DEFINER function (22023 on a malformed email, name or slug; the boot logs `invalid-input` and continues).
+What if two callers race? — Two replicas (or a replica and a CLI run) both call the function. It takes
+`pg_advisory_xact_lock(hashtext('rab_bootstrap_platform_admin'))` on the caller's transaction. The operational role, the
+invite, the outbox row and the audit row are written on that same transaction, so the lock covers them all. The loser
+blocks, then (READ COMMITTED, fresh snapshot per statement) sees the committed admin and answers ALREADY_BOOTSTRAPPED,
+writing nothing. The wait is bounded by the pool's 30 s `statement_timeout`. The integration suite runs four concurrent boots
+on two pools and expects exactly one admin, one invite and one outbox row.
+What if the DB returns data written by a lower-trust actor? — An existing non-deleted account with the configured email is
+granted instead of a new one being created (GRANTED_EXISTING, the command's existing rule). No email is sent, and that
+account's existing sessions are ended in the same transaction (CF-07). A match in more than one organisation is refused
+(REFUSED_AMBIGUOUS_EMAIL). See trade-off BOOT-3.
+What if a third party (email/push/storage provider) is compromised? — The activation link is the ordinary single-use
+account-invite token (24 h TTL), stored as a hash. A compromised mail provider can read the link, exactly as for every other
+invite. The Worker revalidates before delivery and cancels expired, revoked or superseded invites.
+What happens when authorisation fails? — The service checks `has_function_privilege` on the function before anything is
+written (layer 2). The runtime login `crewflow_owner` inherits EXECUTE from `crewflow` (BC-11). The schema role
+`crewflow_app` is refused (`not-authorised`) and the database refuses it again (42501). The boot logs one fixed line and
+continues.
+What happens when the operation fails halfway? — Everything is one transaction, so a failure rolls it all back, including
+the outbox row. No email can go out for a failed attempt. The queue publish happens only after commit; if it fails, the
+committed row is still delivered by the dispatcher.
+
+```
+SECURITY TRADE-OFF (BOOT-1): fail closed WITHOUT a crash loop
+Decision:   a failed boot-time bootstrap logs one fixed line (with a fixed reason label, never the error text) and the API
+            keeps starting. One attempt per process start; no in-process retry.
+Reason:     owner instruction. A crash loop would hammer the database and the restart policy for a step the platform can
+            serve without; retries could not spam email anyway (a failed attempt queues none), but they would spam logs.
+Risk:       a deploy can come up serving with no administrator, and the only signal is the error line. Each restart makes
+            one more attempt.
+Mitigation: the line names the reason (not-authorised, function-missing, invalid-input, organisation-suspended,
+            unexpected-result, database-error-<SQLSTATE>, unexpected-error); the bootstrap-admin command remains available;
+            nothing partial is ever committed.
+Reversal:   rethrow from PlatformAdminBootstrapOnBoot.runOnce, which turns any failure into a refused start.
+```
+
+```
+SECURITY TRADE-OFF (BOOT-2): the API process calls the one-time bootstrap function
+Decision:   the long-running API calls core.bootstrap_first_platform_admin at start. No new grant: crewflow_owner already
+            held EXECUTE through its INHERIT membership of crewflow (BC-11, accepted 2026-11-05), and the CLI already ran
+            it as crewflow_owner.
+Reason:     owner request (no command step).
+Risk:       the migration's original note ("crewflow_app gets nothing, a request path can never reach it") described the
+            pre-owner-login runtime. Under the owner login, SQL injection in the API could call the function, but only
+            on a database that has never had a platform admin. On such a database the same injection already controls
+            every table.
+Mitigation: the function is one-time (ALREADY_BOOTSTRAPPED / CLOSED forever after the first admin); the boot path writes
+            nothing once an admin exists (no self-heal, unlike the CLI).
+Reversal:   remove PlatformAdminBootstrapModule from AppModule.
+```
+
+```
+SECURITY TRADE-OFF (BOOT-3): an existing account matching the email is granted without an email round-trip
+Decision:   unchanged CLI rule. If BOOTSTRAP_ADMIN_EMAIL matches exactly one existing account, that account becomes the
+            platform admin, its sessions are ended, and no activation email is sent.
+Reason:     the account can already sign in; the command has always done this.
+Risk:       an operator typo that matches some other existing account makes that person the platform admin.
+Mitigation: on a fresh deploy (the case this feature exists for) there are no other accounts; the boot logs a distinct line
+            for this outcome; the audit row records pendingActivation=false.
+Reversal:   refuse GRANTED_EXISTING in the boot path only (PlatformAdminBootstrapOnBoot), leaving the CLI as it is.
+```
+
+- **MFA at first sign-in (confirmed, unchanged).** The command's path does not enforce MFA itself. The ordinary sign-in policy
+  (`LoginSecondFactorPolicyService`) makes a platform admin enrol at sign-in only when `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true`.
+  The default, including production compose, is false. When the switch is off, the boot logs a warning after creating or
+  granting the admin. ASSUMPTION FLAGGED: whether production should turn it on is the owner's decision; nothing here changes it.
+- **Residual (unchanged from the CLI).** If the 24 h link expires unused, neither a restart nor the command sends another
+  one: the bootstrap is one-time, and forgot-password serves ACTIVE accounts only. Recovery is a deliberate database action
+  today. A resend path for the bootstrap invite would be a separate owner decision.
+- **Operator log lines** are fixed text in `PLATFORM_ADMIN_BOOT_LOG` (no email, user id or database message), context
+  `PlatformAdminBootstrap`.
+- **Tests.** Unit: platform-admin-bootstrap-on-boot.spec (every outcome's line, password refused, no throw, one attempt per
+  process, failure labels), platform-admin-bootstrap.service.spec (ALREADY_BOOTSTRAPPED writes nothing; the one invite is
+  addressed to the configured email; authority refused before the function runs), never-in-runtime-env.spec,
+  compose-owner-login.test.cjs, run-prestart-shell-tests.cjs (cases 1d/1e/3/13b). PostgreSQL:
+  bootstrap-admin-at-boot.integration.spec (fresh, existing admin no-op, four concurrent boots, password refused,
+  crewflow_app refused, malformed email, CLOSED). The existing bootstrap-admin integration suites run the CLI unchanged.
+
+---
+
+## First platform administrator at API boot: independent security review of #264 fixed (2026-11-19)
+
+This entry supersedes these parts of the entry above: its MFA bullet ("unchanged ... the boot logs a warning"), trade-off
+BOOT-3, and the "Residual" bullet.
+
+- **F1 (HIGH), MFA at first sign-in is now required by the boot path.** `PlatformAdminBootstrapOnBoot.runOnce` refuses before
+  the bootstrap runs when `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` is not true. Nothing runs: no transaction, no write, no email. With
+  the switch on, `LoginSecondFactorPolicyService` answers `enroll` for a platform admin without a factor, so the
+  boot-created admin gets the enrolment challenge at its first sign-in and never a session. Proved through the HTTP app:
+  activate, then `POST /auth/login` returns 409 `SECOND_FACTOR_REQUIRED` with `requirement: 'enroll'`. The CLI is unchanged.
+- **F2 (MEDIUM), an existing account is granted at boot only when its email ownership was proven.** Boot policy
+  (`requireProvenExistingAccount`): GRANTED_EXISTING requires `status = 'active'`, `email_verified_at IS NOT NULL`, a
+  non-deleted row and a manager-tier profile. Anything else rolls the whole transaction back (the function's
+  `platform_admin` row included) and is reported as REFUSED_EXISTING_ACCOUNT_UNVERIFIED or REFUSED_EXISTING_ACCOUNT_NOT_MANAGER
+  (staff-only, F3). The check runs on the row the database function resolved, in the same transaction, under its advisory
+  lock and `FOR UPDATE`. That makes it atomic, unlike a separate pre-lookup. The migration and the function are unchanged.
+  The CLI keeps its rule.
+- **F2, defence in depth (all actors, all paths).** `assertPlatformAdminTargetAllowed` (engine/core-modules/platform-admin)
+  answers 404 when the target holds an active platform-admin claim and the actor does not. It is wired into
+  `ManagerService.findPendingProfileOrFail` (resend, re-point and cancel of a pending invitation; before the CEO rule's 403),
+  `ManagerService.changeEmail`, `StaffService.findPendingProfileOrFail` and `StaffService.changeEmail`, and
+  `UserDeletionService.assertCanDelete` (a tenant actor now gets 404 instead of 409 `CANNOT_DELETE_PLATFORM_ADMIN`; another
+  platform admin still gets the 409). The Admin Panel's platform-admin resend keeps working (the actor is an admin).
+- **F5, an existing admin that never activated.** On every later boot, when the existing admin is still invited and holds no
+  unexpired, unused invite, the boot logs a distinct warning (`activationExpired`) and re-sends nothing. **Supported recovery:
+  none exists today.** No command re-sends the bootstrap invite. `grant-platform-admin` needs an existing account and does not
+  send invites. Forgot-password serves ACTIVE accounts only. The tenant resend paths are closed to this account by F2. Do not
+  improvise SQL. A supported path (for example an audited `resend-bootstrap-invite` command) is an owner decision.
+- **F4.** `BOOTSTRAP_ADMIN_PASSWORD` must not exist in any platform environment before this deploys. rab-api and rab-worker
+  refuse to start with it (exit 64 / runtime guard).
+- **I1.** The deploy-file lint (`bootstrapAdminComposeTextProblems`, in the owner-login gate) allows `BOOTSTRAP_ADMIN_*` only
+  under rab-api, only the five inputs, and only as `KEY: ${KEY:-}`. The two compose files themselves are not edited in this PR
+  (see the PR body).
+
+```
+SECURITY TRADE-OFF (BOOT-3, revised): boot grants an existing account only if active, verified and manager-tier
+Decision:   the boot path refuses (rolls back) any other existing account; the operator uses grant-platform-admin for those.
+Reason:     security review F2/F3: an INVITED manager's address can be re-pointed by a tenant manager before activation.
+Risk:       none new; a legitimate existing account that is not manager-tier must be granted with the CLI.
+Mitigation: named refusal lines; nothing is written.
+Reversal:   drop requireProvenExistingAccount from PlatformAdminBootstrapOnBoot.runOnce.
+```
+
+- **Tests added.** Unit: the F1 refusal (bootstrap.run never called), the F2/F3 refusals and rollback, F5 activation states,
+  `assertPlatformAdminTargetAllowed`. PostgreSQL: MFA off is refused with no rows; the INVITED-manager email is refused with no
+  `platform_admin` or outbox row; ambiguous email and ambiguous organisation; a boot racing the CLI gives one admin and one
+  email; the activation token is absent from every log line and from `audit_log.metadata`; F5. HTTP app: F1 activate gives
+  the enrol challenge; a tenant CEO resend or cancel on the pending bootstrap admin gives 404; resend or delete on a granted
+  account gives 404; staff-only email refused. `user-deletion-abuse-cases` expects 404 for a tenant actor.
+
+- **Re-review follow-up (N1, Low) and CF-04 wording (2026-11-19).** `assertPlatformAdminTargetAllowed` (404 unless the actor is
+  an active platform admin) now also guards `ManagerService.update` (PATCH /managers/:id) and `ManagerService.resetPassword`,
+  `StaffService.resetPassword` and the staff status change (deactivate / reactivate), and `MembersService`'s member lookup
+  (suspend, reinstate, role change). Each check runs after the tenant-scoped lookup and before any permission-specific 403.
+  **CF-04 wording, superseded:** "a platform administrator's email cannot be changed through this path (403
+  PROTECTED_ACCOUNT)" is no longer what a tenant actor sees. A tenant actor now gets **404**, and the email stays
+  unchanged. `EmailChangeService`'s 403 `PROTECTED_ACCOUNT` stays as the inner layer, and a platform-admin actor still
+  receives it (tested). In the same way, a tenant actor deleting a platform admin gets 404, while another platform admin
+  still gets 409 `CANNOT_DELETE_PLATFORM_ADMIN`.
+- **REFUSED_AMBIGUOUS_EMAIL test seeding.** The database now refuses a second account with an email that already exists
+  ("This email address is not available for a new account"). So the integration test plants that legacy state with
+  triggers off (`SET LOCAL session_replication_role = replica`, fixture superuser, its own transaction). The function's
+  refusal of the state is still exercised.
