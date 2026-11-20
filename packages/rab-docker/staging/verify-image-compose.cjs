@@ -49,7 +49,7 @@ const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
-const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems, dbSettingsProblems, DB_SETUP_DB_KEYS, ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS, HARDEN_TIMEOUT_KEY, hardenTimeoutOk } = require('../scripts/compose-owner-login.cjs');
+const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems, dbSettingsProblems, DB_SETUP_DB_KEYS, ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS, HARDEN_TIMEOUT_KEY, hardenTimeoutOk, AI_ENABLED_KEY, AI_ENABLED_EXPR, AI_ENABLED_DEFAULT } = require('../scripts/compose-owner-login.cjs');
 const { pgCaFileProblem } = require('../scripts/pg-ca-pem.cjs');
 const { dbSetupStartProblems, WAIT_SECONDS_KEY, WAIT_SECONDS_DEFAULT } = require('../scripts/db-setup-wait.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
@@ -72,7 +72,11 @@ const RUNTIME_KEYS = [
   // Security review L3: other ways to mount or shadow files (db-setup's password volume included).
   'volumes_from', 'secrets', 'configs',
 ];
-/** Committed environment keys that must keep the production file's value on rab-api / rab-worker. */
+/**
+ * Committed environment keys that must keep the production file's value on rab-api / rab-worker. AI_ENABLED (owner decision
+ * 2026-11-20) is compared in the reference render only (both files commit ${AI_ENABLED:-false}, so both render false there);
+ * in the deployed model it is the operator's compose.env value: exactly true or false, the same on both services.
+ */
 const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
   'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
   'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
@@ -569,6 +573,12 @@ function checkVariant(variant, production, variantFiles = variant) {
   const worker = envOf(services['rab-worker']);
   if (api.CREWFLOW_MIGRATE_ON_START !== 'true') fail('rab-api: CREWFLOW_MIGRATE_ON_START is not "true" (O3 C1)');
   if (!['none', 'token'].includes(String(api.CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token (compose.env; default none)');
+  // Owner decision 2026-11-20: AI is operator-set, default OFF. The reference render sets no AI_ENABLED, so a committed
+  // ${AI_ENABLED:-false} renders false; a literal "true" (or another default) does not.
+  for (const name of ['rab-api', 'rab-worker']) {
+    const v = envOf(services[name])[AI_ENABLED_KEY];
+    if (String(v ?? '') !== AI_ENABLED_DEFAULT) fail(`${name}: ${AI_ENABLED_KEY} is not "${AI_ENABLED_DEFAULT}" when compose.env does not set it (commit ${AI_ENABLED_EXPR}: operator-set, default off)`);
+  }
   if (api.DISABLE_DB_MIGRATIONS === 'true' || api.DISABLE_CRON_JOBS_REGISTRATION === 'true') fail('rab-api: must migrate and register the job schedulers (O3 C1/C2)');
   if (worker.DISABLE_DB_MIGRATIONS !== 'true' || worker.DISABLE_CRON_JOBS_REGISTRATION !== 'true') fail('rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION must be "true" (O3 C1/C2)');
   for (const name of ['rab-api', 'rab-worker']) {
@@ -863,10 +873,13 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
       if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
     // The approval mode is the operator's compose.env opt-in (BC-11/C4): validated, not compared with the reference render.
-    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX' && k !== 'CREWFLOW_MIGRATION_APPROVAL_MODE')) {
+    // AI_ENABLED (owner decision 2026-11-20) is the operator's compose.env switch: validated below, not compared.
+    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX' && k !== 'CREWFLOW_MIGRATION_APPROVAL_MODE' && k !== AI_ENABLED_KEY)) {
       if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} is overridden in the deployed model`);
     }
     if (name === 'rab-api' && !['none', 'token'].includes(String(envOf(a).CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model');
+    if (!SWITCH_VALUES.includes(String(envOf(a)[AI_ENABLED_KEY] ?? ''))) fail(`${name}: ${AI_ENABLED_KEY} is not exactly true or false in the deployed model (compose.env; unset = false)`);
+    if ((envFileKeys[name]?.names ?? []).includes(AI_ENABLED_KEY)) fail(`${name}: ${AI_ENABLED_KEY} is set in an env file (set it in compose.env; the committed ${AI_ENABLED_EXPR} would silently override it)`);
     for (const [key, want] of Object.entries(NOTIFICATION_DELIVERY)) {
       if (String(envOf(a)[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" in the deployed model (owner decision 2026-11-06)`);
     }
@@ -883,6 +896,8 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
       if (!p.host_ip || p.host_ip === '0.0.0.0' || p.host_ip === '::') fail(`${name}: port ${p.target} is published on every interface (CREWFLOW_API_BIND)`);
     }
   }
+  // Owner decision 2026-11-20: one AI switch for both services (the Worker refuses every queued turn while it is false).
+  if (services['rab-api'] && services['rab-worker'] && String(envOf(services['rab-api'])[AI_ENABLED_KEY] ?? '') !== String(envOf(services['rab-worker'])[AI_ENABLED_KEY] ?? '')) fail(`${AI_ENABLED_KEY} differs between rab-api and rab-worker in the deployed model (one compose.env value for both)`);
   // Phase X J2 (SJ-03): the switches come from the env files (or a compose value); the intervals must be committed.
   const switchesFromFiles = Object.fromEntries(['rab-api', 'rab-worker'].map((n) => [n, envFileKeys[n]?.switches ?? {}]));
   for (const pr of featureSweepProblems(envOf(services['rab-api']), envOf(services['rab-worker']), switchesFromFiles, ' in the deployed model')) fail(pr);
@@ -967,7 +982,7 @@ function renderModels(variantPath = VARIANT, productionPath = PRODUCTION) {
     fs.writeFileSync(path.join(dir, '.env.migrate'), `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.migrate']}=1\n`);
     fs.writeFileSync(path.join(dir, '.env.ops'), `CREWFLOW_OPS_RUN=one-off\nPG_OPS_APP_DATABASE_URL=postgresql://crewflow_app:${SENTINEL_OPS_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.ops']}=1\n`);
     // Only what the files require; nothing inherited from this machine's CREWFLOW_* / DATABASE_* / REDIS_URL.
-    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET)/.test(k)));
+    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET|AI_ENABLED$)/.test(k)));
     const env = {
       ...base,
       ...PRODUCTION_REQUIRED_DUMMIES,

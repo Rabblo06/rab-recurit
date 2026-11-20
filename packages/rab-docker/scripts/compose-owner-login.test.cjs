@@ -383,6 +383,42 @@ test('BC-11 opt-in: the deployment identity lives in database.env only; O3: the 
   }
 });
 
+// Owner decision 2026-11-20 (AI wanted in production, Anthropic only): AI_ENABLED is operator-set, default OFF. The compose
+// files commit exactly ${AI_ENABLED:-false}; compose.env alone may set it (exactly true or false); a committed literal, true
+// as much as the former 'false' pin, another default, `:?` or no default is refused.
+test('DENIAL AI switch: committed only as exactly ${AI_ENABLED:-false}; operator-set in compose.env, never database.env / runtime.env', () => {
+  const { AI_ENABLED_EXPR, aiEnabledExpressionProblems } = gate;
+  assert.equal(AI_ENABLED_EXPR, '${AI_ENABLED:-false}');
+  const svc = (line) => `services:\n  rab-api:\n    environment:\n      ${line}\n`;
+  assert.deepEqual(lintComposeText('x.yml', svc('AI_ENABLED: ${AI_ENABLED:-false}')), []);
+  for (const line of [
+    "AI_ENABLED: 'true'", 'AI_ENABLED: "true"', 'AI_ENABLED: true', "AI_ENABLED: 'false'", 'AI_ENABLED: "false"', 'AI_ENABLED: false',
+    'AI_ENABLED: ${AI_ENABLED:-true}', 'AI_ENABLED: ${AI_ENABLED-false}', 'AI_ENABLED: ${AI_ENABLED}', 'AI_ENABLED: ${AI_ENABLED:?set it}',
+    'AI_ENABLED: "${AI_ENABLED:-false}"', 'AI_ENABLED: ${AI_ENABLED:-false} # on', 'AI_ENABLED:', '- AI_ENABLED=${AI_ENABLED:-false}', '- AI_ENABLED=true',
+  ]) assertRefused(lintComposeText('x.yml', svc(line)), /AI_ENABLED must be committed as exactly AI_ENABLED: \$\{AI_ENABLED:-false\}/);
+  // A comment naming it is not a commitment.
+  assert.deepEqual(lintComposeText('x.yml', svc("# AI_ENABLED: 'true' was the old idea")), []);
+  // docker-compose.production.yml must carry it (the shared optional list both services merge).
+  assertRefused(aiEnabledExpressionProblems('docker-compose.production.yml', 'services: {}\n', { required: true }), /AI_ENABLED is missing/);
+  // The committed files: production carries it exactly once (shared by rab-api and rab-worker), image.yml on each service.
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const count = (f) => (read(f).match(/^\s*AI_ENABLED: \$\{AI_ENABLED:-false\}$/gm) ?? []).length;
+  assert.deepEqual(aiEnabledExpressionProblems('docker-compose.production.yml', read('docker-compose.production.yml'), { required: true }), []);
+  assert.equal(count('docker-compose.production.yml'), 1);
+  assert.deepEqual(aiEnabledExpressionProblems('docker-compose.image.yml', read('docker-compose.image.yml'), { required: true }), []);
+  assert.equal(count('docker-compose.image.yml'), 2);
+  // compose.env: exactly true or false (empty = the default, false); anything else is refused (X3.1 strict switch).
+  assert.ok(gate.STRICT_SWITCHES.includes('AI_ENABLED'));
+  for (const v of ['true', 'false', '']) assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nAI_ENABLED=${v}`), [], v);
+  for (const v of ['True', 'yes', '1', 'on']) assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nAI_ENABLED=${v}`), /AI_ENABLED: must be exactly true or false/);
+  // database.env / runtime.env: the committed expression would silently override it, so refused, naming compose.env.
+  for (const kind of ['database', 'runtime']) {
+    for (const v of ['true', 'false']) assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : ''}AI_ENABLED=${v}`), /AI_ENABLED: set it in compose\.env/);
+  }
+  // The development-only real-provider switch is never an operator value in production.
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nAI_DEV_ALLOW_REAL_PROVIDERS=true`), /AI_DEV_ALLOW_REAL_PROVIDERS: compose\.env holds only/);
+});
+
 test('BC-07: CREWFLOW_AUDIT_SINK is required in runtime.env, with a production-accepted value only', () => {
   const ok = 'CREWFLOW_AUDIT_SINK=stdout';
   assert.deepEqual(lintEnvText('runtime', ok), []);

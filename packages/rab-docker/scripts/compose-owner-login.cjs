@@ -60,6 +60,11 @@
  *     wait for the schema itself (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0), starts after a healthy API and Redis, runs
  *     main.js as 1000:1000 with tmpfs and a jobs-only health check, stop grace >= 45 s; WORKER_SCHEDULER is never
  *     committed (production defaults to bullmq); Redis AOF + noeviction + ACL, never published;
+ *   - the platform AI switch (owner decision 2026-11-20: AI wanted in production, Anthropic only; it replaced the former
+ *     AI_ENABLED: 'false' pin): rab-api AND rab-worker commit exactly ${AI_ENABLED:-false} (AI_ENABLED_EXPR; every
+ *     AI_ENABLED line of a compose file, docker-compose.production.yml's included, and that file must carry it), so with no
+ *     value it renders "false" on both; the operator turns it on with AI_ENABLED=true in compose.env only (exactly true or
+ *     false), never in database.env / runtime.env (the committed line would override it), and never as a committed literal;
  *   - notification delivery (owner decision 2026-11-06): WORKER_FAST_PUBLISH_NOTIFY=true and
  *     WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30 committed, byte-identical, on rab-api AND rab-worker (the API registers the
  *     email scheduler with its own value; notify() runs in both processes), and never re-entered in an env file;
@@ -310,7 +315,7 @@ const URL_KEY = 'PG_DATABASE_URL';
 /** Keys the compose files commit; an env file must not re-enter them. */
 const COMMITTED_KEYS = Object.freeze([
   'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START', 'DISABLE_DB_MIGRATIONS',
-  'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'CREWFLOW_RUNTIME_ISOLATION', 'AI_ENABLED',
+  'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'CREWFLOW_RUNTIME_ISOLATION',
   'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION',
   'WORKER_SCHEDULER', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
   'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
@@ -516,6 +521,18 @@ const DATABASE_ENV_ONLY = Object.freeze([...DATABASE_OPT_INS, 'PG_SSL_CA_CERT', 
 const APPROVAL_MODE_KEY = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
 const APPROVAL_MODE_EXPR = '${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}';
 const APPROVAL_MODES = Object.freeze(['none', 'token']);
+/**
+ * Owner decision 2026-11-20 (AI wanted in production, Anthropic only), replacing the former AI_ENABLED: 'false' pin: the
+ * platform AI switch is an INTERPOLATION value, committed on rab-api AND rab-worker as exactly this expression (in
+ * docker-compose.production.yml once, in the shared optional list both services merge), so unset or blank renders false
+ * and the two services always agree (the Worker refuses every queued turn while it is false). compose.env may set it to
+ * exactly true or false (STRICT_SWITCHES); database.env / runtime.env are refused (the committed line would silently
+ * override them). Any other committed form is refused: a literal (true OR false), another default, `:?`, no default.
+ */
+const AI_ENABLED_KEY = 'AI_ENABLED';
+const AI_ENABLED_EXPR = '${AI_ENABLED:-false}';
+/** The value AI_ENABLED renders when compose.env does not set it: off. */
+const AI_ENABLED_DEFAULT = 'false';
 /**
  * BC-07: the external security audit sink, required in production by security-audit-sink.ts (securityAuditSinkConfig).
  * The values are the code's own: CREWFLOW_AUDIT_SINK none | stdout | file, of which production accepts only stdout;
@@ -1308,6 +1325,8 @@ function checkModel(model, combo) {
     // The long-running services refuse to start when a declared isolation control is missing (H6 enforce).
     if (e.CREWFLOW_RUNTIME_ISOLATION !== 'enforce') p(`${name}: CREWFLOW_RUNTIME_ISOLATION is "${e.CREWFLOW_RUNTIME_ISOLATION ?? ''}", expected "enforce"`);
     if (e.RAB_RUNTIME_ENV !== 'production') p(`${name}: RAB_RUNTIME_ENV is not production`);
+    // Owner decision 2026-11-20: the operator's AI switch reaches both services as exactly true or false.
+    if (!SWITCH_VALUES.includes(String(e[AI_ENABLED_KEY] ?? ''))) p(`${name}: ${AI_ENABLED_KEY} is "${e[AI_ENABLED_KEY] ?? ''}", expected exactly true or false (commit ${AI_ENABLED_EXPR}; compose.env sets it)`);
     if (!String(e.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${name}: does not read runtime.env (APP_SECRET missing)`);
     // BC-07: the sink must reach both services, as a production-accepted value.
     if (!AUDIT_SINK_PRODUCTION_MODES.includes(String(e[AUDIT_SINK_KEY] ?? ''))) p(`${name}: ${AUDIT_SINK_KEY} is "${e[AUDIT_SINK_KEY] ?? ''}", expected stdout (BC-07, from runtime.env)`);
@@ -1327,6 +1346,8 @@ function checkModel(model, combo) {
       if (String(e[key] ?? '') !== want) p(`${name}: ${key} is "${e[key] ?? ''}", expected "${want}" (owner decision 2026-11-11, pay-statement sweep, committed on rab-api and rab-worker)`);
     }
   }
+  // Owner decision 2026-11-20: ONE AI switch for both services (the Worker refuses every queued turn while it is false).
+  if (services['rab-api'] && services['rab-worker'] && String(envOf(api)[AI_ENABLED_KEY] ?? '') !== String(envOf(worker)[AI_ENABLED_KEY] ?? '')) p(`${AI_ENABLED_KEY} differs between rab-api and rab-worker (one compose.env value for both)`);
   // The rule is "identical on both"; the per-service pin above implies it, and this names the drift directly.
   for (const key of Object.keys(STATEMENT_DISPATCH)) {
     const a = envOf(services['rab-api'])[key];
@@ -1487,13 +1508,18 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FILE') problems.push(`${key}: the file sink is development-only (production refuses CREWFLOW_AUDIT_SINK=file)`);
     if (key === APPROVAL_MODE_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): rab-api's committed ${APPROVAL_MODE_EXPR} would silently override a value here`);
     if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
+    // Owner decision 2026-11-20: the AI switch is compose.env's (exactly true or false: the STRICT_SWITCHES check above).
+    if (key === AI_ENABLED_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): the committed ${AI_ENABLED_EXPR} on rab-api and rab-worker would silently override a value here`);
     if (kind === 'compose') {
       // DB-SETUP (T-1 / T-2): the two database values are the only secrets compose.env holds; everything else stays
       // CREWFLOW_* and secret-free.
       const dbKey = COMPOSE_DATABASE_KEYS.includes(key);
       // First platform administrator at boot: rab-api's BOOTSTRAP_ADMIN_* inputs are interpolation values too (no secret).
       const bootstrapKey = RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key);
-      if (!key.startsWith('CREWFLOW_') && !dbKey && !bootstrapKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')}, and rab-api's ${RAB_API_BOOTSTRAP_ADMIN_KEYS.join(', ')})`);
+      // The platform AI switch (owner decision 2026-11-20): an interpolation value of rab-api's and rab-worker's committed
+      // ${AI_ENABLED:-false} (no secret).
+      const aiKey = key === AI_ENABLED_KEY;
+      if (!key.startsWith('CREWFLOW_') && !dbKey && !bootstrapKey && !aiKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')}, rab-api's ${RAB_API_BOOTSTRAP_ADMIN_KEYS.join(', ')}, and ${AI_ENABLED_KEY})`);
       // CREWFLOW_SECRETS_DIR names a directory, not a secret.
       // CREWFLOW_ROTATE_APP_PASSWORD is a switch (1 or empty, checked above), not a password.
       if (key !== 'CREWFLOW_SECRETS_DIR' && key !== ROTATE_KEY && !dbKey && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
@@ -1623,6 +1649,39 @@ function bootstrapAdminComposeTextProblems(rel, text) {
   return problems;
 }
 
+/**
+ * The platform AI switch in raw compose text (owner decision 2026-11-20): every uncommented AI_ENABLED line is exactly
+ * `AI_ENABLED: ${AI_ENABLED:-false}` (AI_ENABLED_EXPR; a list or quoted form, a literal, another default or `:?` is
+ * refused). `required`: the file must carry it (docker-compose.production.yml: once, in the shared optional list).
+ */
+function aiEnabledExpressionProblems(rel, text, { required = false } = {}) {
+  const problems = [];
+  let found = 0;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/^\s*#/.test(line)) continue;
+    const m = /^\s*(-\s*)?(["']?)AI_ENABLED\2\s*[:=]\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    found += 1;
+    if (m[1] || m[2] || !/^\s*AI_ENABLED:/.test(line) || m[3] !== AI_ENABLED_EXPR) problems.push(`${rel}: ${AI_ENABLED_KEY} must be committed as exactly ${AI_ENABLED_KEY}: ${AI_ENABLED_EXPR} (owner decision 2026-11-20: operator-set in compose.env, default off; never a literal)`);
+  }
+  if (required && found === 0) problems.push(`${rel}: ${AI_ENABLED_KEY} is missing (commit ${AI_ENABLED_KEY}: ${AI_ENABLED_EXPR}, so it renders false unless the operator sets it)`);
+  return problems;
+}
+
+/**
+ * Owner decision 2026-11-20, default OFF: problems of a model rendered from the gate's own sentinel compose.env, which sets
+ * no AI_ENABLED, so rab-api and rab-worker must render the default, "false" (a committed literal true, another default, or
+ * a missing key does not). Only for those renders: an operator's compose.env may set true (checkModel accepts it).
+ */
+function aiDefaultOffProblems(model) {
+  const problems = [];
+  for (const name of ['rab-api', 'rab-worker']) {
+    const v = model?.services?.[name]?.environment?.[AI_ENABLED_KEY];
+    if (String(v ?? '') !== AI_ENABLED_DEFAULT) problems.push(`${name}: ${AI_ENABLED_KEY} is "${v ?? ''}" with no ${AI_ENABLED_KEY} in compose.env, expected "${AI_ENABLED_DEFAULT}" (owner decision 2026-11-20: commit ${AI_ENABLED_EXPR}, default off)`);
+  }
+  return problems;
+}
+
 /** Problems in raw compose text that rendering cannot show. */
 function lintComposeText(rel, text) {
   const problems = [];
@@ -1645,6 +1704,7 @@ function lintComposeText(rel, text) {
   for (const m of text.matchAll(/^\s*-?\s*CREWFLOW_MIGRATION_APPROVAL_MODE\s*[:=]\s*(.*?)\s*$/gm)) {
     if (m[1] !== APPROVAL_MODE_EXPR) problems.push(`${rel}: ${APPROVAL_MODE_KEY} must be exactly ${APPROVAL_MODE_EXPR} (an opt-in of compose.env)`);
   }
+  problems.push(...aiEnabledExpressionProblems(rel, text));
   if (/^\s*privileged\s*:\s*true/m.test(text)) problems.push(`${rel}: privileged: true`);
   return problems;
 }
@@ -1705,7 +1765,7 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
       const withoutPassword = fs.readFileSync(envFor[k], 'utf8').split('\n').filter((l) => !l.startsWith(`${DB_PASSWORD_KEY}=`) && !l.startsWith(`${APP_PASSWORD_KEY}=`)).join('\n');
       fs.writeFileSync(envFor[`${k}-no-db`], `${withoutPassword}${BUNDLED_DB_KEY}=0\n`, { mode: 0o600 });
     }
-    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_|PG_ADMIN_)/i.test(k)));
+    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_|PG_ADMIN_|AI_ENABLED$)/i.test(k)));
     const models = {};
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
@@ -1739,6 +1799,7 @@ function staticProblems() {
   // compose-one-image.cjs's and compose-credential-isolation.cjs's).
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...databaseExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...bootstrapAdminComposeTextProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
+  if (fs.existsSync(PRODUCTION_FILE)) problems.push(...aiEnabledExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8'), { required: true }));
   // ADMIN_URL_PLACEMENT, every compose file of the repository (dev, QA, test overlays included), not only the deploy files.
   for (const file of composeFilesInRepo()) {
     problems.push(...adminUrlPlacementProblems(path.relative(path.resolve(DOCKER_DIR, '../..'), file).split(path.sep).join('/'), fs.readFileSync(file, 'utf8')));
@@ -1799,7 +1860,7 @@ function main(argv) {
   }
   for (const combo of combos) {
     const label = `${combo.name} (${combo.files.map((f) => path.relative(DOCKER_DIR, FILES[f]).split(path.sep).join('/')).join(' + ')})`;
-    report(label, staticOnly ? checkStaticModel(models[combo.name]) : checkModel(models[combo.name], combo));
+    report(label, staticOnly ? checkStaticModel(models[combo.name]) : [...checkModel(models[combo.name], combo), ...aiDefaultOffProblems(models[combo.name]).map((m) => `${combo.name}: ${m}`)]);
   }
   return failures === 0 ? 0 : 1;
 }
@@ -1811,6 +1872,7 @@ module.exports = {
   APP_PASSWORD_KEY, APP_URL_EXPR, APP_PASSWORD_SHAPE, SENTINEL_APP_PW, BUNDLED_APP_URL, OWNER_PASSWORD_SENTINELS,
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   ROTATE_KEY, ROTATE_EXPR, ROTATE_VALUES,
+  AI_ENABLED_KEY, AI_ENABLED_EXPR, AI_ENABLED_DEFAULT, aiEnabledExpressionProblems, aiDefaultOffProblems,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,

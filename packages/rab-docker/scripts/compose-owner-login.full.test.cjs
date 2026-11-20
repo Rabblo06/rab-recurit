@@ -376,6 +376,33 @@ test('approval mode (BC-11/C4): unset in compose.env renders none; token renders
   assertRefused(gate.lintEnvText('runtime', 'CREWFLOW_MIGRATION_APPROVAL_MODE=token'), /set it in compose\.env/);
 });
 
+test('AI switch (owner decision 2026-11-20): unset in compose.env renders false on both; true renders true on both; a literal pin is refused', { skip }, () => {
+  // unset -> false: the sentinel compose.env does not set it (and the child environment drops any AI_ENABLED of this machine).
+  for (const c of COMBOS) {
+    for (const svc of APP) assert.equal(fresh(c.name).services[svc].environment.AI_ENABLED, 'false', `${c.name} ${svc}`);
+    assert.deepEqual(gate.aiDefaultOffProblems(fresh(c.name)), [], c.name);
+  }
+  // true -> true on rab-api AND rab-worker (one variable), and the model passes every check.
+  const on = renderModels(COMBOS, ['AI_ENABLED=true']);
+  for (const c of COMBOS) {
+    for (const svc of APP) assert.equal(on[c.name].services[svc].environment.AI_ENABLED, 'true', `${c.name} ${svc}`);
+    assert.deepEqual(checkModel(on[c.name], c), [], c.name);
+  }
+  // A blank compose.env value still renders the default, false (`:-`), never the code default.
+  const blank = renderModels([combo(DEF)], ['AI_ENABLED='])[DEF];
+  for (const svc of APP) assert.equal(blank.services[svc].environment.AI_ENABLED, 'false', svc);
+  // A committed 'true' (or no AI_ENABLED at all) renders something other than the default with no compose.env value.
+  for (const svc of APP) {
+    const pinned = fresh(DEF);
+    pinned.services[svc].environment.AI_ENABLED = 'true';
+    assertRefused(gate.aiDefaultOffProblems(pinned), new RegExp(`${svc}: AI_ENABLED is "true" with no AI_ENABLED in compose\\.env, expected "false"`));
+    // ... and only one service switched on is a drift checkModel refuses in any render.
+    assertRefused(checkModel(pinned, combo(DEF)), /AI_ENABLED differs between rab-api and rab-worker/);
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.AI_ENABLED; }), new RegExp(`${svc}: AI_ENABLED is "", expected exactly true or false`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.AI_ENABLED = 'yes'; }), new RegExp(`${svc}: AI_ENABLED is "yes", expected exactly true or false`));
+  }
+});
+
 test('BC-07: the audit sink reaches rab-api and rab-worker from runtime.env as stdout; missing or invalid is refused', { skip }, () => {
   for (const svc of APP) {
     assert.equal(fresh(DEF).services[svc].environment.CREWFLOW_AUDIT_SINK, 'stdout', svc);

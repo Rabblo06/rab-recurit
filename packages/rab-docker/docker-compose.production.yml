@@ -323,7 +323,17 @@ x-crewflow-optional-env: &optional-env
   # -- Runtime isolation report: warn (default) logs each missing control. `enforce` REFUSES to start when a platform drops
   # the H6 keys, which OpenShip does: never set enforce on OpenShip. --
   CREWFLOW_RUNTIME_ISOLATION: ${CREWFLOW_RUNTIME_ISOLATION:-warn}
-  # -- AI: INERT while AI_ENABLED is pinned 'false' below (every AI route answers 404, the Worker refuses every turn) --
+  # -- AI (owner decision 2026-11-20: AI wanted in production, Anthropic only; it replaces the former 'false' pin). OFF unless
+  # the operator sets AI_ENABLED=true (exactly true or false; unset or blank = false, so every AI route answers 404 and the
+  # Worker refuses every queued turn). ONE variable in this shared list, so rab-api and rab-worker always agree; the gates
+  # accept exactly ${AI_ENABLED:-false} and never a committed literal. Turned on, AI also needs ANTHROPIC_API_KEY (below) and a
+  # platform admin switching the organisation on in Settings -> AI (every organisation starts OFF), and a model the build
+  # approves for production (catalog.ts; until one is, AI answers "not configured"). Spend stops at the budgets below:
+  # AI_DAILY_BUDGET_USD per organisation per UTC day, AI_USER_DAILY_BUDGET_USD per user (effective min of the two) and
+  # AI_ORG_DAILY_TOKEN_BUDGET tokens per organisation per day. AI_DEV_ALLOW_REAL_PROVIDERS stays unlisted (boot refuses it
+  # outside development). Never enter AI_ENABLED as a blank service-scoped platform value: the app reads blank as its code
+  # default, which is ON (THREAT-MODEL EX-2). --
+  AI_ENABLED: ${AI_ENABLED:-false}
   ANTHROPIC_API_KEY:
   AI_AGENTS_ENABLED: ${AI_AGENTS_ENABLED:-false}
   AI_MODELS_DEFAULT_DISABLED:
@@ -852,7 +862,6 @@ services:
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
@@ -953,7 +962,6 @@ services:
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       HWS_RUNTIME_ENABLED: "false"
       # The owner's "feel instant" onboarding pin, read by the in-process provisioner (Agent 2 interface).

@@ -2838,7 +2838,8 @@ Provider-side spend limits remain the owner's backstop (checklist).
 
 ### EX-2: owner-approved deviation from rule 1.1 (`AI_ENABLED` default true, owner 2026-10-25)
 Actor→action→consequence: an operator deploys without setting `AI_ENABLED` → AI is platform-on by default.
-Controls: production compose pins `AI_ENABLED: 'false'` (rab-api, rab-worker); every organisation's AI switch defaults
+Controls: production compose commits `AI_ENABLED: ${AI_ENABLED:-false}` on rab-api and rab-worker (was the literal
+`'false'` pin until the owner decision of 2026-11-20, "AI: operator-set in production" below); every organisation's AI switch defaults
 OFF and only a platform admin with step-up can change it; with no approved, keyed model the AI subsystem is
 unavailable (fail closed, boot unaffected); `AI_ENABLED=false` still blocks every AI route and queued turn.
 Residual risk: a non-production deployment made from this code (e.g. QA) starts with AI platform-on; it still does
@@ -2932,7 +2933,7 @@ platform admins the reasons, names only, and the key status as configured boolea
 | T1–T3, AI-F1 | AI | Open for veto before release |
 | TP-1 … TP-7 | AI Part A | TP-1 = owner decision 4; TP-2 confirmed by the owner 2026-10-25 (deviation from spec 4.3); the rest open for veto |
 | EX-1 (rule 3.7 exception) | AI Part A | Owner-approved 2026-10-25 for dev + synthetic data only; expires at the first of §3.7 recorded / real-data or production use / 2026-12-31 |
-| EX-2 (rule 1.1 deviation) | AI | Owner-approved 2026-10-25: `AI_ENABLED` code default true; production compose pins `AI_ENABLED: 'false'`; org switches stay default OFF; no ready model ⇒ AI unavailable |
+| EX-2 (rule 1.1 deviation) | AI | Owner-approved 2026-10-25: `AI_ENABLED` code default true; production compose commits `${AI_ENABLED:-false}` (operator-set, default off, owner decision 2026-11-20; was the `'false'` pin); org switches stay default OFF; no ready model ⇒ AI unavailable |
 | TP-8 (four inert Twenty key names) | AI Phase 1 real models | Owner-approved 2026-10-25 (D4); inert until an SDK + approval |
 | TP-9 (production legacy key = warning) | AI Phase 1 real models | Open until the owner confirms the production env (D2); release-checklist item |
 | TP-10 (env default lists not tier-checked) | AI Phase 1 real models | Open for veto |
@@ -3503,7 +3504,8 @@ names, shift notes); an insider with a narrower role; an operator editing permis
 - **Prompt caching:** request-level `cacheControl {type: ephemeral}` only when the catalogue fact is `anthropic-auto`
   AND (a real provider in NODE_ENV=development on the EX-1 path — synthetic organisation, non-test database — or an
   in-process test model under NODE_ENV=test). Never production, never a lifetime key (static test). Production compose
-  stays `AI_ENABLED: 'false'`.
+  stays `AI_ENABLED: 'false'` (since 2026-11-20: `${AI_ENABLED:-false}`, operator-set, default off; this caching rule is
+  unchanged).
 - **Residual / open:** the per-user ceiling default (PROVISIONAL); OpenAI `promptCacheKey` is not wired (no catalogue
   entry uses it); the front's text for the two new codes and the Usage tab belong to the front lane.
 
@@ -10009,3 +10011,52 @@ Reversal:   drop requireProvenExistingAccount from PlatformAdminBootstrapOnBoot.
   ("This email address is not available for a new account"). So the integration test plants that legacy state with
   triggers off (`SET LOCAL session_replication_role = replica`, fixture superuser, its own transaction). The function's
   refusal of the state is still exercised.
+
+## AI: operator-set in production, default off (branch chore/ai-enabled-operator-set, owner decision 2026-11-20; compose and gates only, no SQL, no server code)
+
+The owner wants AI usable in production, Anthropic only. This reverses the "AI pinned off in production" decision: the
+production compose files (`docker-compose.production.yml`, `docker-compose.image.yml`; `docker-compose.local-build.yml` kept
+in step) no longer pin `AI_ENABLED: 'false'` on rab-api and rab-worker. They commit `AI_ENABLED: ${AI_ENABLED:-false}`
+(production: once, in the shared optional list both services merge), so AI is off unless the operator sets
+`AI_ENABLED=true`. No `OPENAI_API_KEY` or other provider key is added (owner: Anthropic only).
+
+- **Who can turn it on?** The operator who controls the deployment's interpolation values: `compose.env` (image compose) or
+  the platform's `AI_ENABLED` variable (OpenShip). The compose-owner-login lint refuses it in `database.env` / `runtime.env`
+  (the committed expression would silently override it there) and accepts exactly `true` or `false` (X3.1 strict switch).
+- **What else is needed (unchanged controls, all fail closed).** `ANTHROPIC_API_KEY` (already passed through, a secret, never
+  committed); each organisation's AI switch, default OFF, which only a platform admin with step-up can change (Settings →
+  AI); and a model the build marks `productionApproved` (catalog.ts). **Today no model is production-approved and
+  `realProviderEnvironment` refuses every real provider under NODE_ENV=production**, so `AI_ENABLED=true` alone gives "AI not
+  configured" (503 to eligible users) until a separate, reviewed code change records release checklist §3.7 (DPA, zero
+  retention, no training, region, sub-processors, DPIA, privacy notice). That change is not in this PR.
+- **Spend ceilings (unchanged, committed defaults).** `AI_DAILY_BUDGET_USD` (per organisation per UTC day, default 2),
+  `AI_USER_DAILY_BUDGET_USD` (per user, effective min with the organisation's, default 1), `AI_ORG_DAILY_TOKEN_BUDGET` (tokens
+  per organisation per day, default 200000), plus the rate and turn limits already in the shared list. A meter failure refuses
+  the step.
+- **Still refused.** `AI_DEV_ALLOW_REAL_PROVIDERS=true` outside development (boot refusal, `aiBootProblems`); it is not
+  listed in any production compose file and compose.env refuses it.
+- **Gates (fail closed).** `scripts/compose-owner-login.cjs`: every uncommented `AI_ENABLED` line of a compose file must be
+  exactly `AI_ENABLED: ${AI_ENABLED:-false}` (a literal `'true'` as much as the old `'false'`, another default, `:?`, no
+  default, a quoted or list form are refused), and `docker-compose.production.yml` must carry it; every rendered combination
+  gives both services a true/false value, the same on both; the gate's own renders (no `AI_ENABLED` in compose.env) must give
+  `"false"` on both (`aiDefaultOffProblems`); the child environment drops a stray `AI_ENABLED` of the machine running the
+  gate. `staging/verify-image-compose.cjs`: the reference render must give `"false"` on both services in both files; in the
+  operator's deployed model `AI_ENABLED` is exactly true or false, identical on rab-api and rab-worker, and never from an env
+  file.
+- **Abuse cases (tests).** A committed literal `'true'` → refused (raw text and rendered default). AI on for the API only, or
+  the Worker only → refused. `AI_ENABLED=yes` / `True` / `1` in compose.env → refused. `AI_ENABLED` in database.env /
+  runtime.env → refused. A blank compose.env value → renders `false`, never the code default.
+
+```
+SECURITY TRADE-OFF: AI_ENABLED is operator-set in production instead of pinned 'false'
+Decision:   a pinned-off control becomes an operator-controlled interpolation value, default off.
+Reason:     owner decision 2026-11-20: AI wanted in production (Anthropic only).
+Risk:       an operator (or anyone who can edit compose.env / the platform variables) can enable the platform AI switch
+            without a code change. Residual: the code default of AI_ENABLED is true (EX-2), so a BLANK service-scoped
+            platform override (OpenShip lets a service value win over the compose expression; no gate can see it)
+            would enable it; the compose expression itself maps blank to false.
+Mitigation: default off; exactly true/false; one value for both services; still needs ANTHROPIC_API_KEY, a per-organisation
+            switch (default OFF, platform admin + step-up) and a production-approved model (none today); budgets and rate
+            limits cap spend; AI_DEV_ALLOW_REAL_PROVIDERS stays refused outside development.
+Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and revert the two gates' AI_ENABLED rules.
+```
