@@ -744,7 +744,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       expect((await ownerPasswordState(clusters.SIM)) === 'scram', 'N3 ROTATE=1: the password is not stored as SCRAM');
       assertClean(run3);
       const run4 = await runChild({ ...simEnv(f, other), CREWFLOW_ROTATE_APP_PASSWORD: '1' });
-      expect(run4.code === 0 && run4.out.includes(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo), `N3 ROTATE=1 again: exit ${run4.code}, expected rotateNothingToDo`);
+      expect(run4.code === 64 && run4.out.includes(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo), `N3 ROTATE=1 again: exit ${run4.code}, expected rotateNothingToDo`);
       expect(!run4.out.includes(OWNER_BOOTSTRAP_MESSAGES.rotateDone), 'N3 ROTATE=1 again: reported a change');
       expect(await canLogin(clusters.SIM, 'crewflow_owner', other, f.db), 'N3 ROTATE=1 again: the password no longer logs in');
       assertClean(run4);

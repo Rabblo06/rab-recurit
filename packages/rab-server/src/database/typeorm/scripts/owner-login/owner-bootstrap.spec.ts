@@ -39,9 +39,11 @@ import {
   HardenIo,
   hardenOwnerWithIo,
   hardenTimeoutSeconds,
+  failureResult,
   imageMigrationNames,
   isSchemaComplete,
   isVerifiedTlsConfig,
+  plainLoggingRisks,
   rotateAppPasswordSetting,
   ROTATE_APP_PASSWORD_LABEL,
   OWNER_BOOTSTRAP_APPLICATION_NAME,
@@ -76,6 +78,7 @@ import {
   OWNER_BOOTSTRAP_Q4C_DO_PLAIN,
   OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS,
   OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
+  OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS,
   OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION,
   OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
   OWNER_BOOTSTRAP_PLAIN_STATEMENTS,
@@ -329,6 +332,19 @@ describe('owner bootstrap: error mapping', () => {
   });
 });
 
+/** W1 on a server with PostgreSQL's default logging and no logging extension loaded (nothing logs the value). */
+const QUIET_LOGGING: Record<string, string | null> = {
+  log_statement: 'none',
+  log_min_duration_statement: '-1',
+  log_min_duration_sample: '-1',
+  log_transaction_sample_rate: '0',
+  log_parameter_max_length: '-1',
+  auto_explain_log_min_duration: null,
+  auto_explain_log_parameter_max_length: null,
+  pg_stat_statements_track: null,
+  pgaudit_log_parameter: null,
+};
+
 /** The last statement of a run, ignoring the migration-lock release that follows a removal's COMMIT / ROLLBACK. */
 const lastTx = (t: readonly string[]): string | undefined => t.filter((x) => x !== OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK).slice(-1)[0];
 
@@ -360,6 +376,8 @@ function fakeIo(
     tls?: 'verified' | 'client-only' | 'none';
     /** The server's deadlock_timeout in ms as P0 reports it (default 1000). */
     deadlockMs?: number;
+    /** W1's row, over QUIET_LOGGING (owner decision F1 a). */
+    loggingSettings?: Record<string, string | null>;
   } = {},
 ) {
   const sent: Array<{ text: string; values?: unknown[] }> = [];
@@ -390,6 +408,7 @@ function fakeIo(
       if (text.startsWith('ALTER ROLE crewflow') && text.includes('NOLOGIN PASSWORD NULL')) legacyLeft = legacyLeft.filter((n) => !text.includes(`ROLE ${n} `));
       if (text === OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK) return { rows: [{ released: true }] };
       if (text === OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL) return { rows: [{ ssl: opts.tls === 'verified' }] };
+      if (text === OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS) return { rows: [{ ...QUIET_LOGGING, ...(opts.loggingSettings ?? {}) }] };
       if (text === OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS) return { rows: [{ done: true, deadlock_timeout_ms: String(opts.deadlockMs ?? 1000) }] };
       return { rows: [] };
     },
@@ -2331,7 +2350,9 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     expect(OWNER_BOOTSTRAP_MESSAGES.passwordMismatch).toBe(
       "PG_DATABASE_URL password doesn't match crewflow_owner. db-setup never changes it by itself: put crewflow_owner's real password in PG_DATABASE_URL, or set CREWFLOW_ROTATE_APP_PASSWORD=1 on db-setup for one deploy to change it to the one in PG_DATABASE_URL.",
     );
-    expect(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo).toContain('nothing to rotate; remove CREWFLOW_ROTATE_APP_PASSWORD');
+    expect(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo).toBe(
+      'CREWFLOW_ROTATE_APP_PASSWORD=1 is set, but the password inside PG_DATABASE_URL already logs in: nothing to rotate. Remove CREWFLOW_ROTATE_APP_PASSWORD from db-setup, then deploy again.',
+    );
     expect(OWNER_BOOTSTRAP_MESSAGES.rotateDone).toContain('remove CREWFLOW_ROTATE_APP_PASSWORD');
     // The reason, never a provider.
     for (const text of Object.values(OWNER_BOOTSTRAP_MESSAGES)) if (typeof text === 'string') expect(text).not.toMatch(/neon|supabase|digitalocean/i);
@@ -2350,6 +2371,7 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     expect(plainBlock(t)).toEqual([
       OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
       OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
+      OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS,
       OWNER_BOOTSTRAP_BEGIN,
       OWNER_BOOTSTRAP_Q4A_LOCK,
       OWNER_BOOTSTRAP_Q2_FACTS,
@@ -2578,11 +2600,16 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     }
   });
 
-  it('the opt-in with a password that already logs in: nothing written, "nothing to rotate; remove CREWFLOW_ROTATE_APP_PASSWORD"', async () => {
-    const { io, texts, lines } = fakeIo([existing], [{ ok: true }], { rotate: true });
-    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'unchanged', exitCode: 0, passwordSet: false });
+  it('DENIAL owner decision F6 a: the opt-in with a password that already logs in is a REFUSAL (64, the opt-in cannot stay on); nothing written', async () => {
+    const { io, texts, lines } = fakeIo([existing], [{ ok: true }], { rotate: true, schemaComplete: false });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo);
+    expect(failureResult(error).exitCode).toBe(64);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
-    expect(lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo]);
+    expect(lines).toEqual([]);
+    // Without the opt-in the same database is a normal 0.
+    expect(await bootstrapOwnerWithIo(fakeIo([existing], [{ ok: true }]).io)).toMatchObject({ outcome: 'unchanged', exitCode: 0 });
     const created = fakeIo([base, base, existing], [{ ok: true }], { rotate: true });
     expect(await bootstrapOwnerWithIo(created.io)).toMatchObject({ outcome: 'created' });
     expect(created.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.rotateNothingCreated]);
@@ -2731,7 +2758,8 @@ describe('independent security review of #266: F1 (part 3), F2, F3, F5', () => {
     const t = texts();
     const p0 = t.indexOf(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS);
     expect(p0).toBeGreaterThan(t.indexOf(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL));
-    expect(t[p0 + 1]).toBe(OWNER_BOOTSTRAP_BEGIN);
+    expect(t[p0 + 1]).toBe(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS);
+    expect(t[p0 + 2]).toBe(OWNER_BOOTSTRAP_BEGIN);
     expect(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS).toContain("pg_catalog.set_config('client_connection_check_interval', '0', false)");
     expect(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS).toContain(
       "CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 170000\n                THEN pg_catalog.set_config('transaction_timeout', '0', false) IS NOT NULL\n                ELSE true END",
@@ -2818,5 +2846,94 @@ describe('independent security review of #266: F1 (part 3), F2, F3, F5', () => {
     expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
     for (const l of lines) expect(l).not.toContain('permission denied');
+  });
+});
+
+describe('owner decision 2026-11-20, F1 a: send anyway, but warn by name', () => {
+  const risks = (over: Record<string, string | null>) => plainLoggingRisks({ ...QUIET_LOGGING, ...over });
+
+  it.each<[string, Record<string, string | null>, string[]]>([
+    ['PostgreSQL defaults, no extension loaded', {}, []],
+    ['log_statement = all (parameters logged)', { log_statement: 'all' }, ['log_statement']],
+    ['log_statement = ddl / mod (a DO block and a SELECT are neither)', { log_statement: 'mod' }, []],
+    ['log_statement = all but log_parameter_max_length = 0 (no parameter logged)', { log_statement: 'all', log_parameter_max_length: '0' }, []],
+    ['log_parameter_max_length = 0B (unit form)', { log_statement: 'all', log_parameter_max_length: '0B' }, []],
+    ['log_parameter_max_length = 64B (a prefix of the value)', { log_statement: 'all', log_parameter_max_length: '64B' }, ['log_statement']],
+    ['log_min_duration_statement = 0', { log_min_duration_statement: '0' }, ['log_min_duration_statement']],
+    ['log_min_duration_statement = 250ms', { log_min_duration_statement: '250ms' }, ['log_min_duration_statement']],
+    ['log_min_duration_sample = 0', { log_min_duration_sample: '0' }, ['log_min_duration_sample']],
+    ['log_transaction_sample_rate = 0.01', { log_transaction_sample_rate: '0.01' }, ['log_transaction_sample_rate']],
+    ['auto_explain on, parameter length at its default (unset)', { auto_explain_log_min_duration: '0' }, ['auto_explain.log_min_duration']],
+    ['auto_explain on, parameters off', { auto_explain_log_min_duration: '0', auto_explain_log_parameter_max_length: '0' }, []],
+    ['auto_explain loaded but off', { auto_explain_log_min_duration: '-1', auto_explain_log_parameter_max_length: '-1' }, []],
+    ['pg_stat_statements.track = all (the nested role statement)', { pg_stat_statements_track: 'all' }, ['pg_stat_statements.track']],
+    ['pg_stat_statements.track = top', { pg_stat_statements_track: 'top' }, []],
+    ['pgaudit.log_parameter = on', { pgaudit_log_parameter: 'on' }, ['pgaudit.log_parameter']],
+    ['pgaudit.log_parameter = off', { pgaudit_log_parameter: 'off' }, []],
+    [
+      'everything at once, in a fixed order',
+      { log_statement: 'all', log_min_duration_statement: '0', log_min_duration_sample: '0', log_transaction_sample_rate: '1', auto_explain_log_min_duration: '0', pg_stat_statements_track: 'all', pgaudit_log_parameter: 'on' },
+      ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'auto_explain.log_min_duration', 'pg_stat_statements.track', 'pgaudit.log_parameter'],
+    ],
+  ])('%s', (_label, over, want) => {
+    expect(risks(over)).toEqual(want);
+  });
+
+  it('the warning names the settings, never a value, and the plain form is STILL sent (never a refusal)', async () => {
+    const settings = { log_statement: 'all', pg_stat_statements_track: 'all', log_min_duration_statement: '1234ms' };
+    const { io, texts, lines, sent } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified', loggingSettings: settings });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    const warning = OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsWarning(['log_statement', 'log_min_duration_statement', 'pg_stat_statements.track']);
+    expect(warning).toBe(
+      "Warning: this server's settings log or store the password that is about to be sent (log_statement, log_min_duration_statement, pg_stat_statements.track). It is sent anyway (owner decision F1 a); rotate it afterwards if those logs are readable by others.",
+    );
+    expect(lines).toContain(warning);
+    for (const l of lines) for (const v of ['1234ms', OWNER_PW]) expect(l).not.toContain(v);
+    // W1 is read before the plain transaction (after T1 and P0), outside any transaction.
+    const t = texts();
+    expect(t.indexOf(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)).toBeLessThan(t.lastIndexOf(OWNER_BOOTSTRAP_BEGIN));
+    expect(t.indexOf(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)).toBeGreaterThan(t.indexOf(OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS));
+    for (const s of sent.filter((x) => x.text === OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)) expect(s.values).toBeUndefined();
+  });
+
+  it('quiet settings: no warning at all', async () => {
+    const { io, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+    await bootstrapOwnerWithIo(io);
+    expect(lines.filter((l) => l.startsWith('Warning:'))).toEqual([]);
+  });
+
+  it('never a refusal: an unreadable or failing W1 warns that it is unknown, and the plain form is still sent', async () => {
+    for (const mode of ['empty', 'throws'] as const) {
+      const { io, texts, lines } = fakeIo([base, base, base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 2, tls: 'verified' });
+      const realOpen = io.openAdmin.bind(io);
+      io.openAdmin = async () => {
+        const s = await realOpen();
+        return {
+          query: async (text: string, values?: unknown[]) => {
+            if (text === OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS) {
+              if (mode === 'throws') throw Object.assign(new Error('unrecognized configuration parameter'), { code: '42704' });
+              return { rows: [] };
+            }
+            return s.query(text, values);
+          },
+          end: () => s.end(),
+        };
+      };
+      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+      expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+      expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsUnread);
+    }
+  });
+
+  it('W1 is one read-only SELECT of fixed names (extension settings with missing_ok), no parameter', () => {
+    expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS.startsWith('SELECT ')).toBe(true);
+    expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).not.toMatch(/\$\d|set_config|FROM/);
+    for (const ext of ['auto_explain.log_min_duration', 'auto_explain.log_parameter_max_length', 'pg_stat_statements.track', 'pgaudit.log_parameter']) {
+      expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).toContain(`pg_catalog.current_setting('${ext}', true)`);
+    }
+    for (const core of ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'log_parameter_max_length']) {
+      expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).toContain(`pg_catalog.current_setting('${core}') AS ${core}`);
+    }
   });
 });

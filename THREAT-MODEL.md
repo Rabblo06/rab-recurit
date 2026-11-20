@@ -9805,8 +9805,19 @@ re-implemented).
   (`pg_terminate_backend`, a server shutdown) or a logging extension hook (`emit_log_hook`, auditing extensions) acting while
   the role statement runs can still emit the CONTEXT with the value. F1 part 3: a superuser admin's Q1 also turns off
   duration / sampling logging, sets `log_min_messages = warning`, and, where loaded, `pg_stat_statements.track = top` and
-  `auto_explain.log_min_duration = -1` (best effort; no refusal based on logging settings: owner decision pending, as is the
-  F6 "sticky opt-in" finding). F4: the notice says the provider receives the password itself and may log or store it.
+  `auto_explain.log_min_duration = -1` (best effort). F4: the notice says the provider receives the password itself and may
+  log or store it.
+- **Owner decision 2026-11-20, F1 a (send anyway, warn by name).** Before the plain transaction (after Q1) the admin session
+  reads, in one read-only SELECT (W1), `log_statement`, `log_min_duration_statement`, `log_min_duration_sample`,
+  `log_transaction_sample_rate`, `log_parameter_max_length`, and, where loaded, `auto_explain.log_min_duration`,
+  `auto_explain.log_parameter_max_length`, `pg_stat_statements.track`, `pgaudit.log_parameter`. When they prove the bound
+  value or the nested role statement will be logged or stored, one fixed warning names those settings (never a value). It
+  is NEVER a refusal: the plain form is sent anyway; an unreadable answer warns that it is unknown.
+- **Owner decision 2026-11-20, F6 a (the opt-in cannot stay on).** `CREWFLOW_ROTATE_APP_PASSWORD=1` with a password that
+  already logs in is a refusal (64, "nothing to rotate. Remove CREWFLOW_ROTATE_APP_PASSWORD from db-setup, then deploy
+  again."), so a forgotten opt-in stops the next deploy instead of silently allowing a later automatic password change. A
+  run that rotates exits 0 with the remove-it line; a run that creates crewflow_owner (nothing existed to rotate) exits 0
+  with one line.
 - **Last resort (unchanged).** No verified TLS, or the plain form refused too: the passwordless NOLOGIN role + printed step
   (option 1), or the printed manual-role SQL (option 2), exactly as in the section above.
 - **No automatic change of an existing password (Twenty / ZITADEL).** A LOGIN crewflow_owner whose password does not match
@@ -9814,8 +9825,8 @@ re-implemented).
   before Q2b. Before this change db-setup SET it with the admin login (an operator typo in `PG_DATABASE_APP_PASSWORD` silently
   re-keyed the role). Opt-in, one deploy: `CREWFLOW_ROTATE_APP_PASSWORD=1` (exactly `1`; any other non-empty value is
   refused 64 before connecting, fail closed); then pre-hashed first, plain second, same rules; the ADMIN OPTION / CREATEROLE
-  and other-database (Q2b) guards still apply; a matching password prints "nothing to rotate; remove
-  CREWFLOW_ROTATE_APP_PASSWORD", a rotation prints the remove-it line. Placement: db-setup only, exactly
+  and other-database (Q2b) guards still apply; a matching password is refused 64 ("nothing to rotate", F6 a below), a
+  rotation prints the remove-it line. Placement: db-setup only, exactly
   `${CREWFLOW_ROTATE_APP_PASSWORD:-}` (compose-owner-login.cjs: raw text, rendered models, compose.env `1` or empty, refused
   in database.env / runtime.env and on rab-api, rab-worker, db-harden). Mode c (no admin) ignores it with one line.
 - **ASSUMPTION flagged to the owner.** A NOLOGIN crewflow_owner that db-setup itself created without a password, with a valid

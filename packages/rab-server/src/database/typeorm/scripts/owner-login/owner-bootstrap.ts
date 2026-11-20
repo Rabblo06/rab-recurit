@@ -121,6 +121,7 @@ import {
   OWNER_BOOTSTRAP_Q4C_DO_PLAIN,
   OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS,
   OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
+  OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS,
   OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION,
   OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
   PLAIN_MIN_DEADLOCK_TIMEOUT_MS,
@@ -266,6 +267,11 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     "Your database provider received crewflow_owner's password itself and may log or store it (some providers can show stored role passwords to their users). Turn off provider-side password storage where it is offered, use a different password in every environment, and to replace this one follow \"Rotate the crewflow_owner password\" in packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md.",
   plainFallbackDeadlockTimeout:
     'db-setup does not set the password in plain text: the server\'s deadlock_timeout is below 2 ms, so the lock timeout that keeps the statement out of the lock-wait log cannot stay below it. Falling back to the manual step.',
+  // Owner decision 2026-11-20 (F1 a): the plain form is sent anyway; the settings that will log or store it are named.
+  plainFallbackSettingsWarning: (names: readonly string[]) =>
+    `Warning: this server's settings log or store the password that is about to be sent (${names.join(', ')}). It is sent anyway (owner decision F1 a); rotate it afterwards if those logs are readable by others.`,
+  plainFallbackSettingsUnread:
+    "Warning: this server's logging settings could not be read, so whether it logs or stores the password that is about to be sent is unknown. It is sent anyway (owner decision F1 a); rotate it afterwards if the server's logs are readable by others.",
   verifierRetry: 'Trying the pre-hashed password once more, in a new transaction (a passing error must not lead to a plain-text password).',
   plainFallbackNoVerifiedTls:
     'db-setup does not set the password in plain text: the PG_ADMIN_URL session is not TLS with a verified certificate (sslmode=require, verify-ca or verify-full, each verified fully: the certificate chain and the host name). Falling back to the manual step.',
@@ -280,7 +286,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     "PG_DATABASE_URL password doesn't match crewflow_owner. db-setup never changes it by itself: put crewflow_owner's real password in PG_DATABASE_URL, or set CREWFLOW_ROTATE_APP_PASSWORD=1 on db-setup for one deploy to change it to the one in PG_DATABASE_URL.",
   rotateInvalidValue:
     'CREWFLOW_ROTATE_APP_PASSWORD must be unset, empty, or exactly 1 (change the crewflow_owner password to the one inside PG_DATABASE_URL, for one deploy). Value not shown. Refusing before connecting.',
-  rotateNothingToDo: 'crewflow_owner already logs in with the password inside PG_DATABASE_URL: nothing to rotate; remove CREWFLOW_ROTATE_APP_PASSWORD.',
+  // Owner decision 2026-11-20 (F6 a): the opt-in cannot stay on. With nothing to rotate it is a refusal (64), not a note.
+  rotateNothingToDo:
+    'CREWFLOW_ROTATE_APP_PASSWORD=1 is set, but the password inside PG_DATABASE_URL already logs in: nothing to rotate. Remove CREWFLOW_ROTATE_APP_PASSWORD from db-setup, then deploy again.',
   rotateNothingCreated: 'crewflow_owner did not exist and was created with the password inside PG_DATABASE_URL: nothing to rotate; remove CREWFLOW_ROTATE_APP_PASSWORD.',
   rotateDone: "crewflow_owner's password is now the one inside PG_DATABASE_URL: remove CREWFLOW_ROTATE_APP_PASSWORD before the next deploy.",
   rotateWithoutAdmin:
@@ -1006,6 +1014,43 @@ async function adminTlsVerified(session: SqlSession, io: OwnerBootstrapIo): Prom
   return true;
 }
 
+/** A duration setting as current_setting shows it: '-1' (or missing) is off; anything else (0, 250ms, 1s, ...) is on. */
+function durationOn(v: unknown): boolean {
+  return typeof v === 'string' && v.trim() !== '' && v.trim() !== '-1';
+}
+
+/** A parameter-length setting: '0' (or missing) logs no parameter; -1 (all) or any positive length logs it (or a prefix). */
+function parametersOn(v: unknown): boolean {
+  return typeof v === 'string' && v.trim() !== '' && v.trim() !== '0' && !/^0[A-Za-z]*$/.test(v.trim());
+}
+
+/**
+ * Owner decision 2026-11-20 (F1 a): which of the W1 settings prove that the server logs or stores the password the plain
+ * form is about to send (as the logged bind parameter $1, or the nested CREATE / ALTER ROLE). Pure. Returns setting NAMES
+ * (fixed code strings), never a value; [] when none does. The caller warns, and never refuses.
+ *   log_statement = all, log_min_duration_statement >= 0, log_min_duration_sample >= 0, log_transaction_sample_rate > 0:
+ *     the bind parameters are logged unless log_parameter_max_length = 0;
+ *   auto_explain.log_min_duration >= 0: its parameters are logged unless auto_explain.log_parameter_max_length = 0;
+ *   pg_stat_statements.track = all: the nested role statement is stored with the value;
+ *   pgaudit.log_parameter = on: pgaudit logs the parameters.
+ */
+export function plainLoggingRisks(row: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const params = parametersOn(row.log_parameter_max_length);
+  const str = (k: string) => (typeof row[k] === 'string' ? String(row[k]).trim().toLowerCase() : '');
+  if (params && str('log_statement') === 'all') out.push('log_statement');
+  if (params && durationOn(row.log_min_duration_statement)) out.push('log_min_duration_statement');
+  if (params && durationOn(row.log_min_duration_sample)) out.push('log_min_duration_sample');
+  const rate = Number(str('log_transaction_sample_rate'));
+  if (params && Number.isFinite(rate) && rate > 0) out.push('log_transaction_sample_rate');
+  // auto_explain logs query parameters by default (PostgreSQL 16+); a missing length setting is that default.
+  const aeParams = row.auto_explain_log_parameter_max_length === null || row.auto_explain_log_parameter_max_length === undefined || parametersOn(row.auto_explain_log_parameter_max_length);
+  if (durationOn(row.auto_explain_log_min_duration) && aeParams) out.push('auto_explain.log_min_duration');
+  if (str('pg_stat_statements_track') === 'all') out.push('pg_stat_statements.track');
+  if (['on', 'true', 'yes', '1'].includes(str('pgaudit_log_parameter'))) out.push('pgaudit.log_parameter');
+  return out;
+}
+
 /**
  * The plain-text fallback (owner decision 2026-11-20), after the server refused the verifier (`refused`). Over verified TLS
  * only: the same password in plain text, in a new transaction (writeTransaction, plain form), race retries as in the
@@ -1024,6 +1069,15 @@ async function plainFallback(session: SqlSession, io: OwnerBootstrapIo, refused:
   if (!(Number.isInteger(deadlockMs) && deadlockMs >= PLAIN_MIN_DEADLOCK_TIMEOUT_MS)) {
     io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackDeadlockTimeout);
     return 'last-resort';
+  }
+  // Owner decision 2026-11-20 (F1 a): read the logging settings (after Q1) and warn by NAME; never a refusal, never a value.
+  try {
+    const settings = (await session.query(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS)).rows;
+    const risks = settings.length === 1 ? plainLoggingRisks(settings[0]!) : null;
+    if (risks === null) io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsUnread);
+    else if (risks.length > 0) io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsWarning(risks));
+  } catch {
+    io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackSettingsUnread);
   }
   let lastRace: WriteFailureInfo | null = null;
   for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
@@ -1334,7 +1388,9 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     // CREWFLOW_ROTATE_APP_PASSWORD=1 is for one deploy: say so, whether it changed the password or had nothing to do.
     if (io.rotateAppPassword === true) {
       if (result.passwordSet && !result.created) io.log(OWNER_BOOTSTRAP_MESSAGES.rotateDone);
-      else io.log(result.created ? OWNER_BOOTSTRAP_MESSAGES.rotateNothingCreated : OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo);
+      else if (result.created) io.log(OWNER_BOOTSTRAP_MESSAGES.rotateNothingCreated);
+      // Owner decision 2026-11-20 (F6 a): the opt-in cannot stay on: with nothing to rotate, a refusal (64).
+      else throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo);
     }
     if (!io.schemaComplete) return result;
     const complete = await io.schemaComplete();

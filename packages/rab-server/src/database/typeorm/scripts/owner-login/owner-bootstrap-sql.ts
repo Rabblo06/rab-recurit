@@ -478,6 +478,24 @@ export const OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS = `SELECT pg_catalog.set_co
                 ELSE true END AS done,
        (SELECT s.setting::bigint FROM pg_catalog.pg_settings s WHERE s.name = 'deadlock_timeout') AS deadlock_timeout_ms;`;
 
+/**
+ * W1 (plain-text fallback; admin session, read-only, BEFORE its transaction and AFTER Q1, so a superuser admin's own resets
+ * count; owner decision 2026-11-20, F1 a "send anyway, but warn by name"): the settings that decide whether the server logs
+ * or stores the bound value or the nested role statement. Extension settings through current_setting(name, true) (NULL when
+ * the module is not loaded). owner-bootstrap.ts plainLoggingRisks names the risky ones in one fixed line (never a value) and
+ * never refuses. Fixed text, no input.
+ */
+// sql-injection-reviewed: fixed text, no interpolation and no parameter; read-only current_setting calls on code-constant names.
+export const OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS = `SELECT pg_catalog.current_setting('log_statement') AS log_statement,
+       pg_catalog.current_setting('log_min_duration_statement') AS log_min_duration_statement,
+       pg_catalog.current_setting('log_min_duration_sample') AS log_min_duration_sample,
+       pg_catalog.current_setting('log_transaction_sample_rate') AS log_transaction_sample_rate,
+       pg_catalog.current_setting('log_parameter_max_length') AS log_parameter_max_length,
+       pg_catalog.current_setting('auto_explain.log_min_duration', true) AS auto_explain_log_min_duration,
+       pg_catalog.current_setting('auto_explain.log_parameter_max_length', true) AS auto_explain_log_parameter_max_length,
+       pg_catalog.current_setting('pg_stat_statements.track', true) AS pg_stat_statements_track,
+       pg_catalog.current_setting('pgaudit.log_parameter', true) AS pgaudit_log_parameter;`;
+
 /** Below this deadlock_timeout (ms) the plain path is refused (review F2): L1 could not stay strictly below it. */
 export const PLAIN_MIN_DEADLOCK_TIMEOUT_MS = 2;
 
@@ -731,6 +749,7 @@ export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
 export const OWNER_BOOTSTRAP_PLAIN_STATEMENTS = [
   OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL,
   OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS,
+  OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS,
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q2_FACTS,
