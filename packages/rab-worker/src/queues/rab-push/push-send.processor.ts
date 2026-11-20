@@ -51,7 +51,9 @@ function sanitizeErrorMessage(error: unknown): string {
 export function createPushSendProcessor(deps: PushSendProcessorDeps) {
   return async function processPushSendJob(job: Job<PushQueueJobData>): Promise<void> {
     const { pushDeliveryId, organisationId } = job.data;
-    const ctx: AuthContext = { organisationId, workspaceId: null, userId: '', role: '' };
+    // SF-5: the worker marker is what lets this system job read the notification row it delivers (core.notification is
+    // recipient-only for every human context). Server-set, never from the queue payload.
+    const ctx: AuthContext = { organisationId, workspaceId: null, userId: '', role: '', actorType: 'worker' };
     const processingToken = randomUUID();
 
     const outcome = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {

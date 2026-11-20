@@ -26,7 +26,6 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { Organisation, Role, User, UserRole } from '@rab/server/modules/identity/entities/index';
 import { ManagerProfile } from '@rab/server/modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '@rab/server/modules/manager-workspace/entities/manager-workspace.entity';
-import { Notification } from '@rab/server/modules/notification/entities/notification.entity';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
@@ -223,8 +222,10 @@ describeIfDb('shift monitor — clock-in reminder push fan-out (integration, PUS
 
     await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 15);
 
-    const [reminder] = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-      m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.CLOCK_IN_WINDOW_OPEN } }),
+    // SF-5: the reminder is the STAFF member's (recipient-only RLS), so it is read as the owner role, not the manager.
+    const [reminder] = await adminDataSource.query<Array<{ id: string }>>(
+      `SELECT id FROM core.notification WHERE related_entity_type = 'shift_assignment' AND related_entity_id = $1 AND type = $2`,
+      [assignmentId, NotificationType.CLOCK_IN_WINDOW_OPEN],
     );
     expect(reminder).toBeDefined();
     const deliveries = await adminDataSource.manager.query(`SELECT status FROM core.push_delivery WHERE notification_id = $1`, [reminder!.id]);
@@ -239,8 +240,10 @@ describeIfDb('shift monitor — clock-in reminder push fan-out (integration, PUS
 
     await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 15);
 
-    const [reminder] = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-      m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.CLOCK_IN_WINDOW_OPEN } }),
+    // SF-5: the reminder is the STAFF member's (recipient-only RLS), so it is read as the owner role, not the manager.
+    const [reminder] = await adminDataSource.query<Array<{ id: string }>>(
+      `SELECT id FROM core.notification WHERE related_entity_type = 'shift_assignment' AND related_entity_id = $1 AND type = $2`,
+      [assignmentId, NotificationType.CLOCK_IN_WINDOW_OPEN],
     );
     expect(reminder).toBeDefined();
     const deliveries = await adminDataSource.manager.query(`SELECT 1 FROM core.push_delivery WHERE notification_id = $1`, [reminder!.id]);

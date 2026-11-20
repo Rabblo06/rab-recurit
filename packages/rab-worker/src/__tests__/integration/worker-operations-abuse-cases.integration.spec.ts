@@ -98,6 +98,15 @@ describeIfDb('worker operations abuse cases (integration)', () => {
     return tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId: ctx.userId, role: '' }, fn);
   }
 
+  /**
+   * SF-5: core.notification is recipient-only for every human context, so a manager context no longer sees a staff member's
+   * notification. Notification assertions read through the server-set worker marker instead: every recipient's rows in the
+   * given organisation (never another organisation's), so "exactly one" and "none" checks keep their meaning.
+   */
+  function withNotificationReader<T>(ctx: { organisationId: string; workspaceId: string | null }, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId: '', role: '', actorType: 'worker' }, fn);
+  }
+
   async function seedOrgFixture(label: string): Promise<OrgFixture> {
     const orgInsert = await adminDataSource.manager.insert(Organisation, { name: `${label}-${randomUUID()}`, slug: `${label}-${randomUUID()}` });
     const organisationId = orgInsert.identifiers[0]!.id as string;
@@ -343,13 +352,13 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       const { assignmentId } = await seedConfirmedAssignment(fx, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
 
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
-      const afterFirst = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const afterFirst = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
       expect(afterFirst).toHaveLength(1);
 
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
-      const afterSecond = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const afterSecond = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
       expect(afterSecond).toHaveLength(1); // still exactly one — no duplicate reminder
@@ -362,7 +371,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) => m.update(Shift, shiftId, { status: 'cancelled' as never }));
 
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
-      const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }),
       );
       expect(notifications).toHaveLength(0);
@@ -382,7 +391,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       );
       expect(assignment.status).toBe(ShiftAssignmentStatus.NO_SHOW);
 
-      const notified = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notified = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { userId: fx.managerUserId, type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW, relatedEntityId: assignmentId } }),
       );
       expect(notified).toHaveLength(1);
@@ -485,14 +494,14 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       expect(attendanceAfter.workedMinutes).toBeFalsy();
       expect(attendanceAfter.earnedPence).toBeFalsy();
 
-      const notified = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notified = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'attendance', relatedEntityId: attendanceId, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),
       );
       expect(notified).toHaveLength(1);
 
       // Re-run: must not duplicate the flag.
       await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
-      const notifiedAgain = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notifiedAgain = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'attendance', relatedEntityId: attendanceId, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),
       );
       expect(notifiedAgain).toHaveLength(1);
@@ -640,7 +649,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       );
       expect(offerAfter.status).toBe(OfferStatus.EXPIRED);
 
-      const notified = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notified = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
         m.find(Notification, { where: { userId: fx.managerUserId, type: NotificationType.OFFER_EXPIRED, relatedEntityId: offerId } }),
       );
       expect(notified).toHaveLength(1);
@@ -697,7 +706,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       expect(assignmentBAfter.status).toBe(ShiftAssignmentStatus.NO_SHOW);
 
       // Org A's manager can never see org B's no-show notification, and vice versa (real RLS, not just a filtered query).
-      const orgAVisibleToOrgB = await withContext({ organisationId: fxB.organisationId, workspaceId: fxB.workspaceId, userId: fxB.managerUserId }, (m) =>
+      const orgAVisibleToOrgB = await withNotificationReader({ organisationId: fxB.organisationId, workspaceId: fxB.workspaceId }, (m) =>
         m.find(Notification, { where: { relatedEntityId: assignmentA } }),
       );
       expect(orgAVisibleToOrgB).toHaveLength(0);

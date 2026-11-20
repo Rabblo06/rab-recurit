@@ -928,8 +928,20 @@ describeIfDb('venue manager scoping (integration)', () => {
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.vmToken}`).expect(403);
       const other=await seedOrg();const otherToken=await login(other.manager.email);
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${otherToken}`).expect(404);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query('UPDATE core.notification SET read_at=now() WHERE related_entity_id=$1 AND type=\'offer_sent\'',[offers[0].offerId]));
+      // SF-5: only the recipient may mark a notification read, so the staff member does it through the real staff-app endpoint.
+      // createStaff/activateStaff never set a password (no invite/activation flow here), so the fixture gives this one staff account
+      // the suite's password under the same manager context activateStaff uses, then signs in exactly as the staff app does.
+      const staffHash=await passwordHashing.hash(password);
+      const [staffUser]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE core."user" SET password_hash=$2 WHERE id=(SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1) RETURNING email`,[offers[0].staffProfileId,staffHash]));
+      expect(staffUser).toHaveLength(1);
+      const staffLogin=await request(app.getHttpServer()).post('/rest/v1/auth/login').set('x-client-platform','mobile').send({email:staffUser[0].email,password}).expect(200);
+      const staffAuth={Authorization:`Bearer ${staffLogin.body.accessToken}`};
+      const inbox=(await request(app.getHttpServer()).get('/rest/v1/notifications').set(staffAuth).expect(200)).body;
+      const offerNotification=inbox.find((n:any)=>n.type==='offer_sent'&&n.relatedEntityId===offers[0].offerId);
+      expect(offerNotification).toBeDefined();expect(offerNotification.readAt).toBeNull();
+      await request(app.getHttpServer()).post(`/rest/v1/notifications/${offerNotification.id}/read`).set(staffAuth).expect(204);
       const read=await readPipeline(seed);expect(read.staff.find((r:any)=>r.offerId===offers[0].offerId).stage).toBe('waiting');
+      expect(read.staff.find((r:any)=>r.offerId===offers[1].offerId).stage).toBe('offered'); // the other staff member never read theirs
       const reloaded=await readPipeline(seed);expect(reloaded.staff.map((r:any)=>r.stage)).toEqual(read.staff.map((r:any)=>r.stage));
     });
     it('pipeline preserves same-workspace private ownership for read, cancel, replace and table rows',async()=>{

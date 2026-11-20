@@ -1,5 +1,6 @@
 import { EmailOutboxJobType, NotificationTypeType } from '@rab/shared';
 import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
@@ -109,16 +110,16 @@ export class NotificationService {
     const emailEnabled = preference?.emailEnabled ?? (params.forceEmail ?? false);
 
     if (inAppEnabled) {
-      const entry = manager.create(Notification, {
-        organisationId: params.organisationId,
-        userId: params.userId,
-        type: params.type,
-        title: params.title,
-        message: params.message,
-        relatedEntityType: params.relatedEntityType,
-        relatedEntityId: params.relatedEntityId,
-      });
-      await manager.save(entry);
+      // SF-5 (NotificationRecipientRls1786721590000): only the RECIPIENT (or the worker) may SELECT a notification, and an
+      // INSERT ... RETURNING must pass the SELECT policy for the new row. This row is usually for someone else (a manager's
+      // action notifying staff, a worker job with no uid), so it is written WITHOUT RETURNING and with a server-generated id
+      // (TypeORM's save() would read the defaults back through RETURNING and be refused).
+      const entry = { id: randomUUID() };
+      await manager.query(
+        `INSERT INTO core.notification (id, organisation_id, user_id, type, title, message, related_entity_type, related_entity_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [entry.id, params.organisationId, params.userId, params.type, params.title, params.message, params.relatedEntityType ?? null, params.relatedEntityId ?? null],
+      );
       // Stage 6 — same transaction as the Notification row above, same atomic-outbox pattern
       // every other durable row in this method already uses. A no-op (0 rows) when PUSH_ENABLED
       // is false or the user has no active registered device — never a second notification path.

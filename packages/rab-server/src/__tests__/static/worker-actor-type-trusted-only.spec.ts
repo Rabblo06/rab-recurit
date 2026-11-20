@@ -98,6 +98,13 @@ const WORKER_ACTOR_TYPE_ALLOWLIST: Allowlist = {
     sites: 1,
     why: 'pay statement generation (`workerCtx`): scope from the claimed payroll row / discovery, never from the payload alone',
   },
+  'queues/rab-push/push-send.processor.ts': {
+    sites: 1,
+    why:
+      'push send (SF-5, NotificationRecipientRls1786721590000): reads the notification it delivers, which core.notification ' +
+      'shows only to its recipient or the worker marker; no human actor behind the job, the marker is a literal, never ' +
+      'taken from the queue payload; it reads only the notification its push_delivery row (visible under that organisation) names',
+  },
 };
 
 /** The single binding point every runtime context goes through (`bindGucsSql`, $5 = ctx.actorType). */
