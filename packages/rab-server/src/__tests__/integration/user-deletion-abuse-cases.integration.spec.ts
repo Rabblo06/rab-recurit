@@ -427,7 +427,9 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       expect(del.body.code).toBe('CANNOT_DELETE_SELF');
     });
 
-    it('deleting the platform administrator is blocked with CANNOT_DELETE_PLATFORM_ADMIN', async () => {
+    // Security review of #264, F2: to a tenant-side actor the platform administrator's account does not exist (404, CLAUDE.md).
+    // Another platform admin still gets 409 CANNOT_DELETE_PLATFORM_ADMIN (UserDeletionService.assertCanDelete).
+    it('a tenant manager deleting the platform administrator gets 404 (the claim is never disclosed), nothing is deleted', async () => {
       const { organisation, email } = await seedOrgWithManager('pa-a');
       const token = (await login(email)).accessToken;
 
@@ -440,8 +442,10 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [eUserId]);
 
       const del = await request(app.getHttpServer()).delete(`/rest/v1/managers/${createE.body.id}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
-      expect(del.status).toBe(409);
-      expect(del.body.code).toBe('CANNOT_DELETE_PLATFORM_ADMIN');
+      expect(del.status).toBe(404);
+      expect(del.body.code).not.toBe('CANNOT_DELETE_PLATFORM_ADMIN');
+      const [still] = await adminDataSource.query(`SELECT deleted_at FROM core."user" WHERE id = $1`, [eUserId]);
+      expect(still.deleted_at).toBeNull();
     });
   });
 

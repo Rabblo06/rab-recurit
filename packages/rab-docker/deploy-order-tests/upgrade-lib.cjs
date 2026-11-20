@@ -7,18 +7,16 @@
  * (outside the repository), reach the containers only through env files, and every captured output is redacted before it
  * is written or printed.
  *
- * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. The
- * pass-through scenarios (an existing crewflow_owner, as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the
- * shipped hand-made fallback 01-crewflow-owner.sql at the db's first start, and give the crewflow_owner URL as the compose
- * interpolation value PG_DATABASE_URL. PR #125, the Twenty Helm way (OWNER-DB-FINAL.md Part A, 2026-11-13):
- * PG_DATABASE_URL is the ONE database setting (an admin URL, an existing crewflow_owner URL, or unset = the bundled db) and
- * is interpolated into the one-shot db-setup ONLY. db-setup keeps crewflow_owner's password in a file on its setup volume
- * (OWNER_PASSWORD_FILE, 0400 1000:1000; random for the bundled db / an admin URL, the URL's own password for a crewflow_owner
- * URL, which is never changed); rab-api / rab-worker pin `PG_DATABASE_URL: ""` and build the crewflow_owner URL from the
- * credential-free target file + that password file, both mounted read-only. Project.readPasswordFile() reads it into
- * memory only (registered for redaction, never printed); Project.ownerPasswordNow() finds the password that logs in. An
- * image older than DB-SETUP has no worker-start.sh: its deploys add PREV_OVERLAY, the previous release's own start-up,
- * which also gives its rab-api / rab-worker the PG_DATABASE_URL interpolation value back, as that release's compose files did.
+ * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. Owner decision
+ * 2026-11-18 (Twenty's way): rab-api, rab-worker and db-setup all receive PG_DATABASE_URL, the crewflow_owner URL; for the
+ * bundled db compose builds it from PG_DATABASE_APP_PASSWORD (writeComposeEnv writes it: by default the run's hand-made
+ * crewflow_owner password, secrets.owner). db-setup creates crewflow_owner with that password as the bundled superuser
+ * (mode a), or with PG_ADMIN_URL (mode b), sets it when it does not log in, and removes CREATEROLE once the schema is
+ * complete. There is no setup volume, no target file and no password file any more: the password that logs in is always
+ * the one the test put in compose.env (Project.ownerPasswordNow()). The pass-through scenarios (an existing crewflow_owner,
+ * as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the shipped hand-made fallback 01-crewflow-owner.sql at
+ * the db's first start with secrets.owner, the same password compose.env then carries. An image older than DB-SETUP has no
+ * worker-start.sh: its deploys add PREV_OVERLAY, the previous release's own start-up (it reads the same PG_DATABASE_URL).
  *
  * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers.)
  */
@@ -37,15 +35,6 @@ const DB_SERVICE = 'db';
 const MIGRATION_LOCK_KEY_SQL = "x'637265776d696772'::bigint";
 /** application_name of the test's own psql sessions, so the admin-connection audit can tell them apart. */
 const TEST_APP_NAME = 'dot-test';
-/**
- * The setup volume (crewflow-db-target): db-setup writes the credential-free target and crewflow_owner's password file
- * there; rab-api / rab-worker mount it read-only. DOT_OWNER_PASSWORD_FILE overrides the file's path (interface of the
- * CODE agent's owner-password-file.ts).
- */
-const TARGET_DIR = '/run/crewflow/db-target';
-const TARGET_FILE = `${TARGET_DIR}/target.json`;
-const OWNER_PASSWORD_FILE = process.env.DOT_OWNER_PASSWORD_FILE || `${TARGET_DIR}/owner-password`;
-
 const secrets = {};
 const hex = (n) => crypto.randomBytes(n).toString('hex');
 const b64 = (n) => crypto.randomBytes(n).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, Math.ceil((n * 4) / 3) - 2);
@@ -165,8 +154,10 @@ class Project {
     this.extra = extra;
     this.prev = false;
     this.shortHealth = shortHealth;
-    /** The crewflow_owner password the test logs in with (psqlOwner); the manual one until a DB-SETUP reset. */
+    /** The crewflow_owner password the test logs in with (psqlOwner), when a case set one explicitly. */
     this.ownerPassword = undefined;
+    /** The crewflow_owner password compose.env carries (PG_DATABASE_APP_PASSWORD or the one in PG_DATABASE_URL). */
+    this.appPassword = undefined;
     this.refreshFiles();
   }
   refreshFiles() {
@@ -263,49 +254,15 @@ class Project {
     }
   }
   /**
-   * crewflow_owner's password file on the setup volume, as rab-api sees it (uid 1000, read-only mount): `null` when it is
-   * not there, else { password, mode: '<octal> <uid>:<gid>' }. Read in memory only: the value is registered for redaction
-   * and never written or printed. Uses the running rab-api when there is one, else a one-off rab-api container (no deps).
-   */
-  readPasswordFile() {
-    const script = `f=${OWNER_PASSWORD_FILE}; [ -f "$f" ] || { echo ABSENT; exit 0; }; stat -c '%a %u:%g' "$f"; cat "$f"`;
-    const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
-    const r = running
-      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 240_000 })
-      : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
-    if (r.code !== 0) throw new Error(`reading the password file failed (${r.code}): ${redact(r.out).slice(0, 300)}`);
-    const lines = r.stdout.split('\n');
-    if (lines[0].trim() === 'ABSENT') return null;
-    const mode = lines[0].trim();
-    const password = rememberSecret(lines.slice(1).join('\n').replace(/\n$/, ''));
-    return { password, mode };
-  }
-  /** Whether a path exists on the setup volume (as rab-api sees it; the running one, else a one-off). */
-  setupPathExists(file) {
-    const script = `[ -e '${file}' ] && echo YES || echo NO`;
-    const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
-    const r = running
-      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 240_000 })
-      : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
-    if (r.code !== 0) throw new Error(`checking ${file} failed (${r.code})`);
-    return r.stdout.trim() === 'YES';
-  }
-  /**
-   * The crewflow_owner password that logs in NOW. Tried in order: the one the test last set, the password file's, the
-   * hand-made one (01-crewflow-owner.sql). With the db not running: the one the test last set, else the hand-made one.
+   * The crewflow_owner password that logs in NOW (owner decision 2026-11-18: always an environment value, never a file).
+   * Tried in order: the one a case set, the one compose.env carries, the hand-made one (01-crewflow-owner.sql). With the db
+   * not running: the first of those that is set.
    */
   ownerPasswordNow() {
-    if (this.inspect(DB_SERVICE, '{{.State.Running}}') !== 'true') return this.ownerPassword ?? secrets.owner;
-    let filePw = null;
-    try {
-      const f = this.readPasswordFile();
-      filePw = f && f.password;
-    } catch {
-      filePw = null;
-    }
-    const candidates = [...new Set([this.ownerPassword, filePw, secrets.owner].filter(Boolean))];
+    const candidates = [...new Set([this.ownerPassword, this.appPassword, secrets.owner].filter(Boolean))];
+    if (this.inspect(DB_SERVICE, '{{.State.Running}}') !== 'true') return candidates[0];
     for (const c of candidates) if (this.ownerLoginWorks(c)) return c;
-    return this.ownerPassword ?? secrets.owner;
+    return candidates[0];
   }
   /** An idle superuser transaction holding `lockSql` until release() (stdin kept open; no statement keeps a snapshot). */
   async holdLock(lockSql) {
@@ -404,62 +361,6 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
   }
 }
 
-/**
- * The documented "print the crewflow_owner URL" command (OWNER-LOGIN-DEPLOYMENT.md §3.6 / DB-SETUP-LEAD.md operator
- * command 1; CREWFLOW_RUNTIME_URL_FD=4 since f11bfb54), preceded by its `docker volume inspect` check, run exactly as
- * documented plus `--name` (every container of these suites is named): the CURRENT image, the project's setup volume
- * read-only, no network, read-only root, uid 1000, `--log-driver none`. stdout (the URL, SENSITIVE) stays in memory; the
- * documented `2>/dev/null` is stderr, which is captured here only to prove it carries no URL. Returns { code, url, stderr,
- * parsed } (parsed: user/host/port/db/password, password registered for redaction).
- */
-function printOwnerUrl(project, imageRef) {
-  const name = `${project.name}-print-url`;
-  const volume = `${project.name}_crewflow-db-target`;
-  // The runbook's first line: the volume must exist (a typo in -v silently creates a new, EMPTY volume).
-  const vi = run('docker', ['volume', 'inspect', volume], { timeout: 60_000 });
-  if (vi.code !== 0) return { code: -2, url: '', lines: 0, stderr: `docker volume inspect ${volume} failed`, parsed: null, name, command: `docker volume inspect ${volume}` };
-  const r = spawnSync(
-    'docker',
-    [
-      'run', '--rm', '--pull', 'never', '--name', name, '--log-driver', 'none', '--network', 'none', '--read-only',
-      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000',
-      '-v', `${volume}:${TARGET_DIR}:ro`,
-      '-e', `CREWFLOW_DB_TARGET_FILE=${TARGET_FILE}`,
-      '--entrypoint', 'sh', imageRef,
-      // Exactly the runbook (OWNER-LOGIN-DEPLOYMENT.md §3.6): CREWFLOW_RUNTIME_URL_FD=4 states that fd 4 is the caller's
-      // pipe; no -t (derive never writes the URL to a terminal). spawnSync's stdout is a pipe.
-      '-c', 'CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2',
-    ],
-    { cwd: RD, env: { ...process.env, MSYS_NO_PATHCONV: '1' }, encoding: 'utf8', timeout: 180_000 },
-  );
-  const url = (r.stdout || '').trim();
-  let parsed = null;
-  try {
-    const u = new URL(url);
-    parsed = { protocol: u.protocol, user: decodeURIComponent(u.username), password: rememberSecret(decodeURIComponent(u.password)), host: u.hostname, port: u.port || '5432', db: u.pathname.slice(1), params: [...u.searchParams.keys()] };
-  } catch {
-    parsed = null;
-  }
-  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --pull never --name ${name} --log-driver none --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 -v ${volume}:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
-}
-
-/**
- * The documented "change the password on purpose" removal (DB-SETUP-LEAD.md, Helm model, operator command 2; env-free):
- * `docker run --rm --pull never --network none --log-driver none --read-only --cap-drop ALL --security-opt no-new-privileges
- * --user 1000:1000 -v <project>_crewflow-db-target:/v <IMAGE> rm -f /v/owner-password /v/owner-password.next`, plus `--name`. `script` replaces the rm (test-only file states, e.g. an empty file). No env, no
- * database connection, no secret in the command.
- */
-function onSetupVolume(project, imageRef, args, label = 'setup-volume') {
-  const name = `${project.name}-${label}`;
-  const cmd = ['run', '--rm', '--pull', 'never', '--name', name, '--network', 'none', '--log-driver', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000', '-v', `${project.name}_crewflow-db-target:/v`, imageRef, ...args];
-  const r = run('docker', cmd, { timeout: 180_000 });
-  return { ...r, command: `docker ${cmd.join(' ').replace(imageRef, '<IMAGE>')}` };
-}
-function removePasswordFile(project, imageRef) {
-  const base = path.posix.basename(OWNER_PASSWORD_FILE);
-  return onSetupVolume(project, imageRef, ['rm', '-f', `/v/${base}`, `/v/${base}.next`], 'rm-password-file');
-}
-
 /** A URL of the bundled db for `user` (verify-full). Built here only, so no caller spells a credential into a URL literal. */
 function dbUrl(user, password, database = 'crewflow') {
   return `postgresql://${user}:${encodeURIComponent(password)}@db:5432/${database}?sslmode=verify-full`;
@@ -470,13 +371,6 @@ function ownerUrl(password = secrets.owner) {
   return dbUrl('crewflow_owner', password);
 }
 
-/**
- * compose.env. `databaseUrl`: the database URL of the case (default: the pass-through crewflow_owner URL); `null` leaves it
- * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PG_ADMIN_URL (owner
- * decision 2026-11-17): a crewflow_owner URL is written as PG_DATABASE_URL (always the app login), any other login as
- * PG_ADMIN_URL (db-setup only). The compose files interpolate both into the one-shot db-setup only. The bundled db keeps
- * running in these suites (CREWFLOW_BUNDLED_DB unset), so PG_DATABASE_PASSWORD stays set.
- */
 /** The login of a database URL ('' when it is not a URL). */
 function urlLogin(url) {
   try {
@@ -486,8 +380,30 @@ function urlLogin(url) {
   }
 }
 
-function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
+/**
+ * compose.env (owner decision 2026-11-18, Twenty's way). The bundled db keeps running in these suites (CREWFLOW_BUNDLED_DB
+ * unset), so PG_DATABASE_PASSWORD (its superuser) is always set.
+ *   appPassword  PG_DATABASE_APP_PASSWORD (default secrets.owner): compose builds the bundled crewflow_owner URL from it for
+ *                db-setup, rab-api and rab-worker (mode a). `null` leaves it out (a case that must fail on its absence).
+ *   databaseUrl  a database URL of the case, routed by its login: a crewflow_owner URL is written as PG_DATABASE_URL (it then
+ *                wins over the bundled one), any other login as PG_ADMIN_URL (db-setup only: mode b). `null` = neither.
+ *   adminUrl     PG_ADMIN_URL explicitly (mode b), beside databaseUrl / appPassword.
+ *   extra        more compose.env lines (e.g. CREWFLOW_BUNDLED_DB) for a case.
+ */
+function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = null, adminUrl = null, appPassword = secrets.owner, extra = {} }) {
   const S = project.secretsDir.replace(/\\/g, '/');
+  const ownerLogin = databaseUrl && urlLogin(databaseUrl) === 'crewflow_owner';
+  const admin = adminUrl ?? (databaseUrl && !ownerLogin ? databaseUrl : null);
+  let urlPassword = null;
+  if (ownerLogin) {
+    try {
+      urlPassword = rememberSecret(decodeURIComponent(new URL(databaseUrl).password));
+    } catch {
+      urlPassword = null;
+    }
+  }
+  if (appPassword) rememberSecret(appPassword);
+  project.appPassword = urlPassword ?? appPassword ?? undefined;
   const lines = {
     CREWFLOW_IMAGE_REPOSITORY: repository,
     CREWFLOW_IMAGE_TAG: digest,
@@ -495,7 +411,10 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage, dat
     CREWFLOW_POSTGRES_IMAGE: pgImage,
     CREWFLOW_SECRETS_DIR: S,
     PG_DATABASE_PASSWORD: secrets.dbPassword,
-    ...(databaseUrl ? { [urlLogin(databaseUrl) === 'crewflow_owner' ? 'PG_DATABASE_URL' : 'PG_ADMIN_URL']: databaseUrl } : {}),
+    ...(appPassword ? { PG_DATABASE_APP_PASSWORD: appPassword } : {}),
+    ...(ownerLogin ? { PG_DATABASE_URL: databaseUrl } : {}),
+    ...(admin ? { PG_ADMIN_URL: admin } : {}),
+    ...extra,
     CREWFLOW_API_MEM_LIMIT: '1024m',
     CREWFLOW_API_CPUS: '2',
     CREWFLOW_WORKER_MEM_LIMIT: '1536m',
@@ -574,15 +493,10 @@ module.exports = {
   SEEDED_TABLES,
   TEST_APP_NAME,
   b64,
-  OWNER_PASSWORD_FILE,
-  TARGET_DIR,
-  TARGET_FILE,
   compareFacts,
   dbUrl,
-  onSetupVolume,
-  printOwnerUrl,
   rememberSecret,
-  removePasswordFile,
+  urlLogin,
   facts,
   fmtEvents,
   hex,

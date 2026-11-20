@@ -80,6 +80,14 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
     name: 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
     why: 'It is honoured only by production database commands. Remove it.',
   },
+  // First platform administrator at boot (2026-11-19): rab-api reads BOOTSTRAP_ADMIN_EMAIL and the optional
+  // BOOTSTRAP_ADMIN_FIRST_NAME / _LAST_NAME / _ORG_SLUG / _ORG_NAME (PlatformAdminBootstrapOnBoot), so those are NOT listed.
+  // There is no bootstrap password: the administrator is created with none and activates through the emailed, expiring
+  // link. A password variable is refused in every runtime process, so one can never sit in a long-lived environment.
+  {
+    name: 'BOOTSTRAP_ADMIN_PASSWORD',
+    why: 'The first platform administrator is created without a password and activates through an emailed, expiring link; no bootstrap password is ever read. Remove it.',
+  },
   { name: 'CREWFLOW_OPS_RUN', why: RETIRED_OPS },
   { name: 'PG_OPS_APP_DATABASE_URL', why: RETIRED_OPS },
   { name: 'CREWFLOW_OPS_ACTOR_SOURCE', why: RETIRED_OPS },
@@ -103,7 +111,14 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   // before any runtime process starts. Refused in the API and the Worker (the provisioner is left as it was).
   {
     name: 'PG_DATABASE_PASSWORD',
-    why: 'It is the bundled database admin password: only docker compose reads it, to build the admin URL; api-prestart.sh / worker-start.sh unset it, and a runtime process connects only as crewflow_owner. Remove it.',
+    why: 'It is the bundled database admin password: only docker compose reads it, to build the admin URL; a runtime process connects only as crewflow_owner. Remove it.',
+    ...OWNER_LOGIN,
+  },
+  // Owner decision 2026-11-18 (Twenty's way): the bundled crewflow_owner password. Only docker compose reads it, to build
+  // PG_DATABASE_URL for the bundled db (mode a); it never reaches a container as a variable of its own.
+  {
+    name: 'PG_DATABASE_APP_PASSWORD',
+    why: 'It is the bundled crewflow_owner password: only docker compose reads it, to build PG_DATABASE_URL. A runtime process reads only PG_DATABASE_URL. Remove it.',
     ...OWNER_LOGIN,
   },
   // PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database ADMIN URL, read ONLY by the one-shot db-setup
@@ -112,7 +127,13 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   // dumps, error reporters). The compose gates keep it off rab-api / rab-worker; this is the process-level refusal.
   {
     name: 'PG_ADMIN_URL',
-    why: 'It is the database admin URL: only the one-shot db-setup service reads it, to create crewflow_owner. A runtime process connects only as crewflow_owner (PG_DATABASE_URL, built from the files db-setup writes). Remove it.',
+    why: 'It is the database admin URL: only the one-shot db-setup service reads it, to create crewflow_owner. A runtime process connects only as crewflow_owner (PG_DATABASE_URL). Remove it.',
+  },
+  // Owner decision 2026-11-19 (security review F2 of PR #259): the direct address of the same admin login, db-setup and
+  // db-harden only; the same refusal as PG_ADMIN_URL.
+  {
+    name: 'PG_ADMIN_DIRECT_URL',
+    why: 'It is the direct address of the database admin URL (PG_ADMIN_URL): only the one-shot db-setup and db-harden services read it. A runtime process connects only as crewflow_owner (PG_DATABASE_URL). Remove it.',
   },
   // Security review of PR #230, L-1: the admin URL under its other names. PG_DATABASE_ADMIN_URL is the retired name (db-setup
   // refuses it too); CREWFLOW_BUNDLED_DB_ADMIN_URL is db-setup's compose-built bundled superuser URL.
