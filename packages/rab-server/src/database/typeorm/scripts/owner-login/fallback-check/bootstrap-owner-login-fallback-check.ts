@@ -37,7 +37,7 @@
  *       runs it (refuse_plain off, as in N2a); the next run continues, 0.
  *   N3  an existing crewflow_owner whose password is not the one in PG_DATABASE_URL: without the opt-in 64 passwordMismatch,
  *       unchanged; CREWFLOW_ROTATE_APP_PASSWORD=yes 64 rotateInvalidValue, unchanged; =1 set (through the plain fallback on
- *       this server) with rotateDone, 0; =1 again rotateNothingToDo, 0.
+ *       this server) with rotateDone, 0; =1 again rotateNothingToDo, 64 (owner decision F6 a: the opt-in cannot stay on).
  *   N4  logging leak check: a successful plain set (as N1), then a plain set that FAILS inside its role statement (the
  *       verifier refused at the statement, refuse_at_statement; another session holds the crewflow_owner row, so the
  *       plain ALTER ROLE waits and lock_timeout fires, 55P03, before log_lock_waits at deadlock_timeout could quote it). The
@@ -139,15 +139,19 @@ function urlFor(base: URL, user: string, password: string, db: string, query = '
   return remember(u.toString());
 }
 
+/**
+ * The harness's ONLY raw database client (no-unapproved-db-access.spec.ts baseline): verify-full against the per-run CA,
+ * to a loopback disposable cluster. Not connected yet (a caller may attach an error listener first).
+ */
+function rawClient(base: URL, user: string, password: string, db: string): Client {
+  return new Client({ host: base.hostname, port: Number(base.port), user, password, database: db, ssl: { ca: CA, rejectUnauthorized: true } });
+}
+
+/** rawClient as the cluster's superuser (the URL's own credentials). */
+const superuserClient = (base: URL, db: string): Client => rawClient(base, decodeURIComponent(base.username), decodeURIComponent(base.password), db);
+
 async function sql(base: URL, db: string, text: string, values: unknown[] = []): Promise<Record<string, unknown>[]> {
-  const c = new Client({
-    host: base.hostname,
-    port: Number(base.port),
-    user: decodeURIComponent(base.username),
-    password: decodeURIComponent(base.password),
-    database: db,
-    ssl: { ca: CA, rejectUnauthorized: true },
-  });
+  const c = superuserClient(base, db);
   await c.connect();
   try {
     return (await c.query(text, values)).rows as Record<string, unknown>[];
@@ -157,7 +161,7 @@ async function sql(base: URL, db: string, text: string, values: unknown[] = []):
 }
 
 async function canLogin(base: URL, user: string, password: string, db: string): Promise<boolean> {
-  const c = new Client({ host: base.hostname, port: Number(base.port), user, password, database: db, ssl: { ca: CA, rejectUnauthorized: true } });
+  const c = rawClient(base, user, password, db);
   c.on('error', () => undefined);
   try {
     await c.connect();
@@ -213,14 +217,7 @@ async function fixture(base: URL, tag: string): Promise<Fixture> {
  * session: how the harness plays the operator's one SQL-editor step without writing the secret to the server log.
  */
 async function superuserSecret(base: URL, statement: string, secret: string, db = 'postgres'): Promise<void> {
-  const c = new Client({
-    host: base.hostname,
-    port: Number(base.port),
-    user: decodeURIComponent(base.username),
-    password: decodeURIComponent(base.password),
-    database: db,
-    ssl: { ca: CA, rejectUnauthorized: true },
-  });
+  const c = superuserClient(base, db);
   await c.connect();
   try {
     await c.query(`SET log_statement = 'none'`);
@@ -242,7 +239,7 @@ async function superuserSecret(base: URL, statement: string, secret: string, db 
  * Returns the error message of the first failing statement (after a ROLLBACK), or null.
  */
 async function runTyped(base: URL, user: string, password: string, db: string, statements: readonly string[], value: string, quiet: boolean): Promise<string | null> {
-  const c = new Client({ host: base.hostname, port: Number(base.port), user, password, database: db, ssl: { ca: CA, rejectUnauthorized: true } });
+  const c = rawClient(base, user, password, db);
   await c.connect();
   try {
     if (quiet) {
@@ -269,7 +266,7 @@ async function runTyped(base: URL, user: string, password: string, db: string, s
  * pg_stat_statements.track = all). Matching rows are printed with every secret replaced by <value> (the value never).
  */
 async function pgssHits(base: URL, secrets: string[]): Promise<{ top: number; nested: number } | null> {
-  const c = new Client({ host: base.hostname, port: Number(base.port), user: decodeURIComponent(base.username), password: decodeURIComponent(base.password), database: 'postgres', ssl: { ca: CA, rejectUnauthorized: true } });
+  const c = superuserClient(base, 'postgres');
   await c.connect();
   try {
     await c.query(`SET log_statement = 'none'`);
@@ -424,14 +421,7 @@ function simEnv(f: Fixture, ownerPassword: string): Record<string, string> {
 async function plainSetUnderHeldLock(f: Fixture, next: string, what: string): Promise<string> {
   const container = process.env.FBC_SIM_CONTAINER;
   const before = serverLog(container).length;
-  const blocker = new Client({
-    host: clusters.SIM.hostname,
-    port: Number(clusters.SIM.port),
-    user: decodeURIComponent(clusters.SIM.username),
-    password: decodeURIComponent(clusters.SIM.password),
-    database: 'postgres',
-    ssl: { ca: CA, rejectUnauthorized: true },
-  });
+  const blocker = superuserClient(clusters.SIM, 'postgres');
   await blocker.connect();
   let failed: ChildRun | null = null;
   try {
@@ -701,7 +691,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'N3 existing crewflow_owner with another password: 64 mismatch; ROTATE=yes 64; ROTATE=1 set (plain fallback); ROTATE=1 again nothing to do',
+    'N3 existing crewflow_owner with another password: 64 mismatch; ROTATE=yes 64; ROTATE=1 set (plain fallback); ROTATE=1 again 64 nothing to do',
     async () => {
       await simDefaults();
       const f = await fixture(clusters.SIM, 'n3');
