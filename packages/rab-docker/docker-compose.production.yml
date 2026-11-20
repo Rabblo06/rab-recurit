@@ -555,7 +555,7 @@ services:
   # needs crewflow_owner created (PG_ADMIN_URL) or checked (PG_DATABASE_URL only).
   # ---------------------------------------------------------------------------
   db-setup:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:9f7e83c858829060754e21a3bf4fd6afa40769e0f44313f5f1c8c7f9761adb92}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # Twenty's Helm wait-for-db init container (owner instruction 2026-11-18): no `depends_on: db` (with CREWFLOW_BUNDLED_DB=0
     # that dependency has no container, and OpenShip then skips db-setup instead of starting it). This wrapper waits, bounded
     # (CREWFLOW_DB_WAIT_SECONDS, default 170 s), until the database db-setup uses accepts connections (PG_ADMIN_URL's host when
@@ -782,7 +782,7 @@ services:
   # The only other service besides db-setup that receives the admin login (compose-owner-login.cjs enforces the shape).
   # ---------------------------------------------------------------------------
   db-harden:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:9f7e83c858829060754e21a3bf4fd6afa40769e0f44313f5f1c8c7f9761adb92}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     entrypoint: ["./db-setup.sh", "harden"]
     environment:
       # db-setup's database settings, exactly (the same modes and refusals): PG_ADMIN_URL (b), the crewflow_owner URL,
@@ -818,7 +818,7 @@ services:
 
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:9f7e83c858829060754e21a3bf4fd6afa40769e0f44313f5f1c8c7f9761adb92}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
     # no compose init). It runs the refusals (this service never receives a PG_ADMIN_URL value, pinned ""), the
     # runtime-isolation check, takes PG_DATABASE_URL (the crewflow_owner URL) from the environment, runs the migrate child and
@@ -912,7 +912,7 @@ services:
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:9f7e83c858829060754e21a3bf4fd6afa40769e0f44313f5f1c8c7f9761adb92}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:e0558bf31274be070d8392a4017a5399500eacef4af6b44c9543bd35fe20b4df}
     # worker-start.sh is the ENTRYPOINT (PID 1): the refusals (this service never receives a PG_ADMIN_URL value, pinned
     # ""), PG_DATABASE_URL (the crewflow_owner URL) from the environment, then `exec /sbin/tini -s -- node
     # packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog SIGKILL, ignored by the kernel for PID 1, still
