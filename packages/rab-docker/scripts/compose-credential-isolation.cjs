@@ -31,24 +31,31 @@
  * opsRefusalChecks() is the pure part; compose-credential-isolation.ops.test.cjs proves each refusal.
  *
  * DB-SETUP (owner decisions D1 a / D4, T-2): the bundled database's superuser password, PG_DATABASE_PASSWORD, is a compose
- * interpolation value only. Rendered with a sentinel value (and PG_DATABASE_URL unset, so the bundled default is rendered),
+ * interpolation value only. Rendered with a sentinel value (and PG_DATABASE_URL unset, so the bundled defaults are rendered),
  * in every file: no service has a PG_DATABASE_PASSWORD key, and the sentinel appears only in the bundled `db` service's
- * POSTGRES_PASSWORD and, inside the default admin URL, in the one-shot `db-setup` service's PG_DATABASE_URL (PR #125 option
- * A: rab-api and rab-worker never carry it, nor any database URL). dbPasswordChecks() is the pure part.
+ * POSTGRES_PASSWORD and in db-setup's bundled superuser URL. dbPasswordChecks() is the pure part.
+ * Owner decision 2026-11-18 (Twenty's way): the bundled crewflow_owner password, PG_DATABASE_APP_PASSWORD (dev / QA:
+ * CREWFLOW_DEV_DB_APP_PASSWORD / CREWFLOW_QA_DB_APP_PASSWORD), is a compose interpolation value only too: rendered with its
+ * own sentinel, it appears ONLY inside PG_DATABASE_URL of db-setup, the API and the Worker, and no service has the key itself
+ * (appPasswordChecks, pure).
  *
- * Part F2 (X2.3, dev and QA on Part A's setup): the files with a bundled `db` (production, dev, QA) are checked for the
- * Part A contract itself (dbSetupContractChecks, pure): a one-shot db-setup (entrypoint ./db-setup.sh, restart "no", no
- * port, the target volume writable and the CA read-only, after a healthy db, no APP_SECRET); the API and the Worker on
- * ./api-prestart.sh / ./worker-start.sh (no compose init), with no database URL anywhere in their environment (an empty
- * PG_DATABASE_URL only) and db-setup's target volume mounted read-only; the API waits for db-setup to complete. And the dev
- * and QA `db` services must render EXACTLY as production's `db` (bundledDbParityChecks, pure): they are verbatim copies,
- * so a drift in either direction (TLS, authentication, hardening, image) fails here. db-setup, the API and the Worker run
- * one image.
- * Security review of F2 (pure parts, each with denial tests): the crewflow-db network and the three db volumes match
+ * The files with a bundled `db` (production, dev, QA) are checked for the database-setup contract (dbSetupContractChecks,
+ * pure; owner decision 2026-11-18, Twenty's way): a one-shot db-setup (entrypoint ./db-setup.sh after a healthy db, or in
+ * production the wait-for-db wrapper with no depends_on (db-setup-wait.cjs, owner instruction 2026-11-18), restart "no", no
+ * port, the CA read-only, no APP_SECRET) with PG_DATABASE_URL = a crewflow_owner URL (sslmode=verify-full); the
+ * API and the Worker on ./api-prestart.sh / ./worker-start.sh (no compose init) with EXACTLY db-setup's PG_DATABASE_URL, no
+ * other database URL in any variable, PG_ADMIN_URL pinned to "" and the CA read-only; the API waits for db-setup to
+ * complete. No file carries a credential any more: the retired crewflow-db-target volume (db-setup's target + password
+ * files) is refused in EVERY file, as a volume or as any mount at /run/crewflow/db-target (retiredTargetVolumeChecks). The
+ * dev and QA `db` services must render EXACTLY as production's `db` (bundledDbParityChecks, pure): they are verbatim
+ * copies, so a drift in either direction (TLS, authentication, hardening, image) fails here. db-setup, the API and the
+ * Worker run one image.
+ * Security review of F2 (pure parts, each with denial tests): the crewflow-db network and the two db volumes match
  * production's (internal; never external or custom-named); the committed db TEXT matches production's (rawDbTextParityChecks);
- * only db mounts the data volume and only db-setup + the API/Worker the setup volume (dbVolumeMountChecks); in dev and QA
- * db-setup's URL is pinned to host `db` and the file never names PG_DATABASE_PASSWORD (nonProductionDbSetupChecks); and the
- * db entrypoint takes the one-server-per-volume kernel lock before anything else (dbServerLockChecks, M1).
+ * only db mounts the data volume (dbVolumeMountChecks); in dev and QA db-setup's two URLs are pinned to host `db` (the
+ * crewflow_owner one also on server / worker) and the file never names production's PG_DATABASE_PASSWORD /
+ * PG_DATABASE_APP_PASSWORD (nonProductionDbSetupChecks); and the db entrypoint takes the one-server-per-volume kernel lock
+ * before anything else (dbServerLockChecks, M1).
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
  *
@@ -62,6 +69,7 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { dbSetupEntrypointForm, dbSetupStartProblems, WAIT_SECONDS_DEFAULT } = require('./db-setup-wait.cjs');
 
 const REPO = path.resolve(__dirname, '../../..');
 const SENTINEL_PASSWORD = 'SENTINEL-MIGRATOR-PW-0f3a9c'; // gitleaks:allow (synthetic marker the check plants, not a credential)
@@ -72,6 +80,8 @@ const OPS_SENTINEL_PASSWORD = 'SENTINEL-OPS-APP-PW-7c21de'; // gitleaks:allow (s
 const OPS_SENTINEL_APP_URL = `postgresql://crewflow_app:${OPS_SENTINEL_PASSWORD}@db-direct.example:5432/rab?sslmode=verify-full`;
 // DB-SETUP: the bundled db's superuser password (synthetic marker, not a credential).
 const DB_SENTINEL_PASSWORD = 'SENTINELDBPW0b7e41c9d2a8f3561e'; // gitleaks:allow (synthetic marker, not a credential)
+// Owner decision 2026-11-18: the bundled crewflow_owner password (synthetic marker, not a credential; URL-safe hex-like).
+const APP_SENTINEL_PASSWORD = 'SENTINELAPPPW7d2c90e1b4a6f8c35'; // gitleaks:allow (synthetic marker, not a credential)
 const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 
 const PRODUCTION_FILE = 'packages/rab-docker/docker-compose.production.yml';
@@ -113,6 +123,10 @@ const DUMMY_ENV = {
   PG_DATABASE_PASSWORD: DB_SENTINEL_PASSWORD,
   CREWFLOW_DEV_DB_PASSWORD: DB_SENTINEL_PASSWORD,
   CREWFLOW_QA_DB_PASSWORD: DB_SENTINEL_PASSWORD,
+  // Owner decision 2026-11-18: the bundled crewflow_owner password (production's name and dev / QA's own), one sentinel.
+  PG_DATABASE_APP_PASSWORD: APP_SENTINEL_PASSWORD,
+  CREWFLOW_DEV_DB_APP_PASSWORD: APP_SENTINEL_PASSWORD,
+  CREWFLOW_QA_DB_APP_PASSWORD: APP_SENTINEL_PASSWORD,
 };
 
 let failures = 0;
@@ -181,9 +195,10 @@ function opsRefusalChecks(rel, services, raw, { production = false } = {}) {
 }
 
 /**
- * DB-SETUP: where the bundled db's password may appear in one rendered model. Pure: [ok, label] pairs. Only the `db`
- * service's POSTGRES_PASSWORD and (option A) the `db-setup` service's PG_DATABASE_URL may hold it; no service may have a
- * PG_DATABASE_PASSWORD key; nothing else in any other service's definition (health check, command, labels) holds it.
+ * DB-SETUP: where the bundled db's superuser password may appear in one rendered model. Pure: [ok, label] pairs. Only the
+ * `db` service's POSTGRES_PASSWORD and db-setup's superuser URL (production: CREWFLOW_BUNDLED_DB_ADMIN_URL; dev / QA: the
+ * pinned PG_ADMIN_URL) may hold it; no service may have a PG_DATABASE_PASSWORD key; nothing else in any other service's
+ * definition (health check, command, labels) holds it.
  */
 function dbPasswordChecks(rel, services) {
   const out = [];
@@ -192,9 +207,10 @@ function dbPasswordChecks(rel, services) {
     out.push([!Object.prototype.hasOwnProperty.call(env, 'PG_DATABASE_PASSWORD'), `${rel}: ${name} has no PG_DATABASE_PASSWORD variable (a compose interpolation value only)`]);
     // db-setup: production's bundled URL (CREWFLOW_BUNDLED_DB_ADMIN_URL), or dev / QA's pinned PG_ADMIN_URL (owner decision
     // 2026-11-17: the admin URL is PG_ADMIN_URL; PG_DATABASE_URL is only ever crewflow_owner).
-    const allowedKeys = name === 'db' ? ['POSTGRES_PASSWORD'] : name === 'db-setup' ? ['CREWFLOW_BUNDLED_DB_ADMIN_URL', 'PG_ADMIN_URL'] : [];
+    // db-harden (owner decision 2026-11-18, M1) holds exactly db-setup's database settings.
+    const allowedKeys = name === 'db' ? ['POSTGRES_PASSWORD'] : ADMIN_SERVICES.includes(name) ? ['CREWFLOW_BUNDLED_DB_ADMIN_URL', 'PG_ADMIN_URL'] : [];
     const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && !allowedKeys.includes(k)).map(([k]) => k);
-    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's bundled admin URL${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or the bundled admin URL of db-setup / db-harden${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
     // Outside the environment (health check, command, entrypoint, labels): never, in any service.
     const rest = { ...(svc ?? {}) };
     delete rest.environment;
@@ -203,30 +219,105 @@ function dbPasswordChecks(rel, services) {
   return out;
 }
 
-const DB_SETUP_TARGET_DIR = '/run/crewflow/db-target';
+/**
+ * The services that may hold the admin login: the one-shot db-setup, and the one-shot CREATEROLE hardening db-harden (owner
+ * decision 2026-11-18, security review of PR #246, M1: the same image, entrypoint `./db-setup.sh harden`, db-setup's database
+ * settings, NO depends_on, and nothing depends on it).
+ */
+const ADMIN_SERVICES = Object.freeze(['db-setup', 'db-harden']);
+const HARDEN_ENTRYPOINT = Object.freeze(['./db-setup.sh', 'harden']);
+
+/** The retired setup volume (PR #125 option 2): db-setup's target file and crewflow_owner password file. Never again. */
+const RETIRED_TARGET_VOLUME = 'crewflow-db-target';
+const RETIRED_TARGET_DIR = '/run/crewflow/db-target';
 const DB_CA_DIR = '/run/crewflow/db-ca';
 const DB_URL_VALUE = /postgres(ql)?:\/\//i;
+const OWNER_LOGIN = 'crewflow_owner';
 const mountAt = (svc, target) => (svc?.volumes ?? []).find((v) => v && typeof v === 'object' && v.target === target);
+const underTargetDir = (t) => {
+  const n = String(t ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return n === RETIRED_TARGET_DIR || n.startsWith(`${RETIRED_TARGET_DIR}/`);
+};
+/** The login and sslmode of a rendered URL value, or null when it is not a URL. Never returns the password. */
+function urlFacts(value) {
+  try {
+    const u = new URL(String(value ?? ''));
+    return { login: decodeURIComponent(u.username), host: u.hostname, sslmode: u.searchParams.get('sslmode'), password: u.password !== '' };
+  } catch {
+    return null;
+  }
+}
 
 /**
- * Part F2 (X2.3): Part A's database-setup contract in one rendered model (Twenty Helm model, twentyhq/twenty@eedb0a73
- * helm/twenty/templates/deployment-server.yaml:81-130, deployment-worker.yaml:76-90). Pure: [ok, label] pairs.
+ * Owner decision 2026-11-18: where the bundled crewflow_owner password may appear in one rendered model (rendered with
+ * APP_SENTINEL_PASSWORD). Pure: [ok, label] pairs. Only PG_DATABASE_URL of db-setup and of `runtimeNames` (the API and the
+ * Worker) may hold it; no service has a PG_DATABASE_APP_PASSWORD (or dev / QA app-password) key; nothing outside a
+ * service's environment holds it.
+ */
+function appPasswordChecks(rel, services, runtimeNames) {
+  const out = [];
+  const holdersAllowed = [...ADMIN_SERVICES, ...runtimeNames];
+  for (const [name, svc] of Object.entries(services)) {
+    const env = envOf(svc ?? {});
+    const keys = ['PG_DATABASE_APP_PASSWORD', 'CREWFLOW_DEV_DB_APP_PASSWORD', 'CREWFLOW_QA_DB_APP_PASSWORD'].filter((k) => Object.prototype.hasOwnProperty.call(env, k));
+    out.push([keys.length === 0, `${rel}: ${name} has no crewflow_owner password variable (a compose interpolation value only)${keys.length ? ` (found ${keys.join(', ')})` : ''}`]);
+    const allowedKeys = holdersAllowed.includes(name) ? ['PG_DATABASE_URL'] : [];
+    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(APP_SENTINEL_PASSWORD) && !allowedKeys.includes(k)).map(([k]) => k);
+    out.push([holders.length === 0, `${rel}: ${name} carries the crewflow_owner password only inside PG_DATABASE_URL of db-setup, db-harden, ${runtimeNames.join(', ')}${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    const rest = { ...(svc ?? {}) };
+    delete rest.environment;
+    out.push([!JSON.stringify(rest).includes(APP_SENTINEL_PASSWORD), `${rel}: ${name} carries the crewflow_owner password nowhere outside its environment (health check, command, labels)`]);
+  }
+  return out;
+}
+
+/**
+ * Owner decision 2026-11-18 (Twenty's way): the retired setup volume never comes back, in ANY file. Pure: [ok, label] pairs
+ * over a rendered model: no top-level volume named (or keyed) crewflow-db-target, and no service mounts it or anything at
+ * /run/crewflow/db-target (a volume, a bind or a tmpfs).
+ */
+function retiredTargetVolumeChecks(rel, model) {
+  const vols = model?.volumes && typeof model.volumes === 'object' ? model.volumes : {};
+  const named = Object.entries(vols).filter(([k, v]) => k === RETIRED_TARGET_VOLUME || String(v?.name ?? '').endsWith(RETIRED_TARGET_VOLUME)).map(([k]) => k);
+  const mounts = [];
+  for (const [name, svc] of Object.entries(model?.services ?? {})) {
+    for (const v of svc?.volumes ?? []) {
+      if (v && typeof v === 'object' && (v.source === RETIRED_TARGET_VOLUME || underTargetDir(v.target))) mounts.push(`${name} mounts ${v.source ?? '?'} at ${v.target ?? '?'}`);
+    }
+    const tmpfs = svc?.tmpfs === undefined || svc?.tmpfs === null ? [] : Array.isArray(svc.tmpfs) ? svc.tmpfs : [svc.tmpfs];
+    for (const t of tmpfs) if (underTargetDir(String(t).split(':')[0])) mounts.push(`${name} has a tmpfs at ${String(t).split(':')[0]}`);
+  }
+  return [
+    [named.length === 0, `${rel}: declares no ${RETIRED_TARGET_VOLUME} volume (retired: no file carries a credential)${named.length ? ` (found ${named.join(', ')})` : ''}`],
+    [mounts.length === 0, `${rel}: no service mounts anything at ${RETIRED_TARGET_DIR} (retired setup volume)${mounts.length ? ` (${mounts.join('; ')})` : ''}`],
+  ];
+}
+
+/**
+ * The database-setup contract in one rendered model (owner decision 2026-11-18, Twenty's way: twentyhq/twenty@eedb0a73
+ * helm/twenty/templates/deployment-server.yaml:82-155, deployment-worker.yaml:81-88). Pure: [ok, label] pairs.
  * `runtimeNames` = [api, worker]. Labels name services and variables only, never a value.
  */
-function dbSetupContractChecks(rel, services, [apiName, workerName]) {
+function dbSetupContractChecks(rel, services, [apiName, workerName], { requireHarden = false } = {}) {
   const out = [];
   const setup = services['db-setup'];
   out.push([Boolean(setup), `${rel}: has the one-shot db-setup service`]);
+  let setupUrl = null;
   if (setup) {
-    out.push([JSON.stringify(setup.entrypoint ?? null) === JSON.stringify(['./db-setup.sh']) && !setup.command, `${rel}: db-setup runs exactly ./db-setup.sh (entrypoint, no command)`]);
+    // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): ./db-setup.sh directly (dev, QA: depends_on a healthy db), or
+    // the wait-for-db wrapper (the block of rab/db-setup.sh, then exec ./db-setup.sh) with NO depends_on (production: with
+    // CREWFLOW_BUNDLED_DB=0 there is no db container to depend on). Never anything else.
+    out.push([dbSetupEntrypointForm(setup.entrypoint) !== null && !setup.command, `${rel}: db-setup runs exactly ./db-setup.sh or exactly the wait-for-db wrapper (entrypoint, no command)`]);
     out.push([String(setup.restart ?? 'no') === 'no', `${rel}: db-setup restart is "no" (one-shot)`]);
     out.push([!(setup.ports ?? []).length, `${rel}: db-setup publishes no port`]);
-    out.push([setup.depends_on?.db?.condition === 'service_healthy', `${rel}: db-setup starts after a healthy db`]);
-    const target = mountAt(setup, DB_SETUP_TARGET_DIR);
-    out.push([Boolean(target) && target.read_only !== true, `${rel}: db-setup mounts the target volume writable at ${DB_SETUP_TARGET_DIR}`]);
+    const start = dbSetupStartProblems(services, { requireWait: rel === PRODUCTION_FILE, renderedWait: WAIT_SECONDS_DEFAULT });
+    out.push([start.length === 0, `${rel}: db-setup waits for the database itself (wrapper, no depends_on${rel === PRODUCTION_FILE ? ', required here' : ''}) or starts after a healthy db${start.length ? ` (${start.join('; ')})` : ''}`]);
     out.push([mountAt(setup, DB_CA_DIR)?.read_only === true, `${rel}: db-setup mounts the db CA read-only`]);
     out.push([!Object.prototype.hasOwnProperty.call(setup.environment ?? {}, 'APP_SECRET'), `${rel}: db-setup has no APP_SECRET (never part of a database credential)`]);
     out.push([String(setup.user ?? '') === '1000:1000' && setup.read_only === true, `${rel}: db-setup runs as 1000:1000 with a read-only root`]);
+    setupUrl = envOf(setup).PG_DATABASE_URL;
+    const f = urlFacts(setupUrl);
+    out.push([Boolean(f) && f.login === OWNER_LOGIN && f.password && f.sslmode === 'verify-full', `${rel}: db-setup's PG_DATABASE_URL is a crewflow_owner URL with a password and sslmode=verify-full (the app login, never an admin URL)`]);
   }
   for (const [name, entrypoint] of [[apiName, './api-prestart.sh'], [workerName, './worker-start.sh']]) {
     const svc = services[name];
@@ -234,14 +325,19 @@ function dbSetupContractChecks(rel, services, [apiName, workerName]) {
     out.push([JSON.stringify(svc.entrypoint ?? null) === JSON.stringify([entrypoint]) && !svc.command, `${rel}: ${name} runs ${entrypoint} as PID 1 (entrypoint, no command)`]);
     out.push([svc.init !== true, `${rel}: ${name} has no compose init (${entrypoint} execs tini itself)`]);
     const env = envOf(svc);
-    out.push([String(env.PG_DATABASE_URL ?? '') === '', `${rel}: ${name} has no PG_DATABASE_URL value (it builds the crewflow_owner URL from db-setup's files)`]);
-    const urls = Object.entries(env).filter(([, v]) => DB_URL_VALUE.test(String(v ?? ''))).map(([k]) => k);
-    out.push([urls.length === 0, `${rel}: ${name} carries no database URL in any variable${urls.length ? ` (found in ${urls.join(', ')})` : ''}`]);
-    out.push([mountAt(svc, DB_SETUP_TARGET_DIR)?.read_only === true, `${rel}: ${name} mounts db-setup's target volume read-only`]);
+    out.push([setupUrl !== null && setupUrl !== undefined && String(setupUrl) !== '' && String(env.PG_DATABASE_URL ?? '') === String(setupUrl), `${rel}: ${name}'s PG_DATABASE_URL is exactly db-setup's (the crewflow_owner URL db-setup created or checked)`]);
+    const urls = Object.entries(env).filter(([k, v]) => k !== 'PG_DATABASE_URL' && DB_URL_VALUE.test(String(v ?? ''))).map(([k]) => k);
+    out.push([urls.length === 0, `${rel}: ${name} carries no other database URL in any variable${urls.length ? ` (found in ${urls.join(', ')})` : ''}`]);
+    out.push([Object.prototype.hasOwnProperty.call(env, 'PG_ADMIN_URL') && String(env.PG_ADMIN_URL ?? '') === '', `${rel}: ${name} pins PG_ADMIN_URL to "" (the admin login reaches db-setup only)`]);
+    out.push([mountAt(svc, DB_CA_DIR)?.read_only === true, `${rel}: ${name} mounts the db CA read-only`]);
   }
   if (services[apiName]) {
     out.push([services[apiName].depends_on?.['db-setup']?.condition === 'service_completed_successfully', `${rel}: ${apiName} starts only after db-setup completed successfully`]);
   }
+  // PG_ADMIN_URL with a value: db-setup and db-harden only.
+  const admins = Object.entries(services).filter(([n, svc]) => !ADMIN_SERVICES.includes(n) && String(envOf(svc ?? {}).PG_ADMIN_URL ?? '') !== '').map(([n]) => n);
+  out.push([admins.length === 0, `${rel}: only db-setup / db-harden have a PG_ADMIN_URL value${admins.length ? ` (found on ${admins.join(', ')})` : ''}`]);
+  out.push(...dbHardenContractChecks(rel, services, apiName, { required: requireHarden }));
   // Security review I6: db-setup, the API and the Worker run ONE image (they cannot drift apart).
   const images = [setup, services[apiName], services[workerName]].map((s) => String(s?.image ?? ''));
   out.push([images[0] !== '' && images.every((i) => i === images[0]), `${rel}: db-setup, ${apiName} and ${workerName} run the same image`]);
@@ -249,10 +345,47 @@ function dbSetupContractChecks(rel, services, [apiName, workerName]) {
 }
 
 /**
+ * Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot db-harden service in one rendered model. Pure:
+ * [ok, label] pairs. `required`: the production file must have it; the dev / QA files may omit it (when present, the same
+ * rules). It runs `./db-setup.sh harden` on db-setup's image, with EXACTLY db-setup's database settings (PG_ADMIN_URL,
+ * PG_DATABASE_URL, CREWFLOW_BUNDLED_DB_ADMIN_URL), restart "no", no port, the CA read-only, no APP_SECRET, 1000:1000 with a
+ * read-only root, and NO depends_on (it polls by itself; OpenShip drops conditions). No service may depend on it.
+ */
+function dbHardenContractChecks(rel, services, apiName, { required = false } = {}) {
+  const out = [];
+  const waiters = Object.entries(services).filter(([, svc]) => {
+    const deps = svc?.depends_on;
+    return (Array.isArray(deps) ? deps : Object.keys(deps ?? {})).includes('db-harden');
+  }).map(([n]) => n);
+  out.push([waiters.length === 0, `${rel}: no service depends on db-harden (it never blocks ${apiName} or the Worker)${waiters.length ? ` (found on ${waiters.join(', ')})` : ''}`]);
+  const h = services['db-harden'];
+  if (!h) {
+    if (required) out.push([false, `${rel}: has the one-shot db-harden service (owner decision 2026-11-18, M1)`]);
+    return out;
+  }
+  const setup = services['db-setup'] ?? {};
+  const env = envOf(h);
+  const setupEnv = envOf(setup);
+  out.push([JSON.stringify(h.entrypoint ?? null) === JSON.stringify(HARDEN_ENTRYPOINT) && !h.command, `${rel}: db-harden runs exactly ./db-setup.sh harden (entrypoint, no command)`]);
+  out.push([String(h.image ?? '') !== '' && String(h.image) === String(setup.image ?? ''), `${rel}: db-harden runs db-setup's image`]);
+  out.push([String(h.restart ?? 'no') === 'no', `${rel}: db-harden restart is "no" (one-shot)`]);
+  out.push([!(h.ports ?? []).length, `${rel}: db-harden publishes no port`]);
+  const deps = h.depends_on;
+  out.push([!deps || (Array.isArray(deps) ? deps.length === 0 : Object.keys(deps).length === 0), `${rel}: db-harden has no depends_on (it waits for the database and the ledger by itself)`]);
+  out.push([mountAt(h, DB_CA_DIR)?.read_only === true, `${rel}: db-harden mounts the db CA read-only`]);
+  out.push([!Object.prototype.hasOwnProperty.call(env, 'APP_SECRET'), `${rel}: db-harden has no APP_SECRET`]);
+  out.push([String(h.user ?? '') === '1000:1000' && h.read_only === true, `${rel}: db-harden runs as 1000:1000 with a read-only root`]);
+  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+    out.push([Object.prototype.hasOwnProperty.call(env, key) === Object.prototype.hasOwnProperty.call(setupEnv, key) && String(env[key] ?? '') === String(setupEnv[key] ?? ''), `${rel}: db-harden's ${key} is exactly db-setup's`]);
+  }
+  return out;
+}
+
+/**
  * Owner decision 2026-11-14 (#136 b): the dev database survives `docker compose down -v`. ONLY the dev file's db DATA volume
  * is external, with this exact dev-only name (never rab_devdb_data, the previous dev database). QA (throwaway) and the
- * production files keep project-scoped volumes; the CA and setup volumes stay project-scoped everywhere (a lost CA or
- * password file is recovered by the next `up`).
+ * production files keep project-scoped volumes; the CA volume stays project-scoped everywhere (a lost CA is recovered by
+ * the next `up`).
  */
 const DEV_DB_DATA_VOLUME = 'crewflow_dev_db_data';
 const EXTERNAL_DB_VOLUMES = Object.freeze({ 'packages/rab-docker/docker-compose.yml': Object.freeze({ 'crewflow-db-data': DEV_DB_DATA_VOLUME }) });
@@ -261,7 +394,7 @@ const EXTERNAL_DB_VOLUMES = Object.freeze({ 'packages/rab-docker/docker-compose.
 const RENDER_PROJECT = 'compose-isolation-check';
 /** The bundled db's top-level resources, compared with production's (security review of F2, L2-1). */
 const DB_NETWORK = 'crewflow-db';
-const DB_VOLUME_KEYS = Object.freeze(['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target']);
+const DB_VOLUME_KEYS = Object.freeze(['crewflow-db-data', 'crewflow-db-ca']);
 /** Strips the throw-away project prefix from a rendered resource name, so a custom `name:` stands out. */
 const unprefixed = (resource) => {
   if (!resource || typeof resource !== 'object') return resource ?? null;
@@ -273,7 +406,7 @@ const unprefixed = (resource) => {
 /**
  * Part F2 (X2.3): the dev and QA `db` services are verbatim copies of production's. Pure: [ok, label] pairs comparing the
  * two rendered models (same throw-away project, dummy values and password sentinel, so identical text renders
- * identically): the `db` service; the crewflow-db network (internal, no custom name); and the three db volumes (never
+ * identically): the `db` service; the crewflow-db network (internal, no custom name); and the two db volumes (never
  * external, no custom name), EXCEPT the volumes `externalVolumes` names ({key: exact external name}): those must be
  * external with exactly that name (owner decision 2026-11-14: the dev data volume, DEV_EXTERNAL_DB_VOLUMES). Names the
  * differing keys only, never a value.
@@ -339,11 +472,11 @@ function rawDbTextParityChecks(rel, text, productionText) {
 }
 
 /**
- * Part F2 security review, L2-2: only db mounts the data volume; only db-setup and the API/Worker mount the setup (target)
- * volume. Pure: [ok, label] pairs over a rendered model's services.
+ * Part F2 security review, L2-2: only db mounts the data volume (the retired setup volume is refused in every file by
+ * retiredTargetVolumeChecks). Pure: [ok, label] pairs over a rendered model's services.
  */
-function dbVolumeMountChecks(rel, services, runtimeNames) {
-  const allowed = { 'crewflow-db-data': ['db'], 'crewflow-db-target': ['db-setup', ...runtimeNames] };
+function dbVolumeMountChecks(rel, services) {
+  const allowed = { 'crewflow-db-data': ['db'] };
   const violations = [];
   for (const [name, svc] of Object.entries(services)) {
     for (const [source, who] of Object.entries(allowed)) {
@@ -351,30 +484,37 @@ function dbVolumeMountChecks(rel, services, runtimeNames) {
       if (mounts && !who.includes(name)) violations.push(`${name} mounts ${source}`);
     }
   }
-  return [[violations.length === 0, `${rel}: only db mounts crewflow-db-data and only db-setup, ${runtimeNames.join(', ')} mount crewflow-db-target${violations.length ? ` (${violations.join('; ')})` : ''}`]];
+  return [[violations.length === 0, `${rel}: only db mounts crewflow-db-data${violations.length ? ` (${violations.join('; ')})` : ''}`]];
 }
 
 /**
- * Part F2 security review, L2-3 and L4: in a NON-production file db-setup's admin URL (PG_ADMIN_URL) is pinned to the
- * bundled db (never the `${PG_ADMIN_URL...}` / `${PG_DATABASE_URL...}` interpolation production offers for your own
- * database; rendered host exactly `db`; no PG_DATABASE_URL on db-setup), and the file never interpolates
- * PG_DATABASE_PASSWORD (dev and QA have their own hex-only variable; the db entrypoint's refusal text names it). `rawDoc` is the parsed, uninterpolated
- * YAML (comments are not part of it). Pure; labels never print a value.
+ * Part F2 security review, L2-3 and L4 (and owner decision 2026-11-18): in a NON-production file db-setup's two URLs are
+ * PINNED to the bundled db: PG_ADMIN_URL (the superuser) and PG_DATABASE_URL (crewflow_owner), never the `${PG_ADMIN_URL...}`
+ * / `${PG_DATABASE_URL...}` interpolation production offers for your own database; both render with host exactly `db`, and
+ * PG_DATABASE_URL's login is crewflow_owner. The API and the Worker (`runtimeNames`) carry the same pinned PG_DATABASE_URL
+ * text. The file never interpolates production's PG_DATABASE_PASSWORD / PG_DATABASE_APP_PASSWORD (dev and QA have their own
+ * hex-only variables). `rawDoc` is the parsed, uninterpolated YAML (comments are not part of it). Pure; labels never print a
+ * value.
  */
-function nonProductionDbSetupChecks(rel, services, rawDoc) {
+function nonProductionDbSetupChecks(rel, services, rawDoc, runtimeNames = []) {
   const out = [];
   const rawEnv = rawDoc?.services?.['db-setup']?.environment ?? {};
-  const rawUrl = String(rawEnv.PG_ADMIN_URL ?? '');
-  out.push([rawUrl !== '' && !rawUrl.includes('${PG_ADMIN_URL') && !rawUrl.includes('${PG_DATABASE_URL'), `${rel}: db-setup's PG_ADMIN_URL is pinned (no \${PG_ADMIN_URL} / \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
-  out.push([!Object.prototype.hasOwnProperty.call(rawEnv, 'PG_DATABASE_URL'), `${rel}: db-setup has no PG_DATABASE_URL (no pass-through mode outside production)`]);
-  let host = null;
-  try {
-    host = new URL(String(services['db-setup']?.environment?.PG_ADMIN_URL ?? '')).hostname;
-  } catch {
-    host = null;
+  const pinned = (raw) => raw !== '' && !raw.includes('${PG_ADMIN_URL') && !raw.includes('${PG_DATABASE_URL');
+  const rawAdmin = String(rawEnv.PG_ADMIN_URL ?? '');
+  const rawApp = String(rawEnv.PG_DATABASE_URL ?? '');
+  out.push([pinned(rawAdmin), `${rel}: db-setup's PG_ADMIN_URL is pinned (no \${PG_ADMIN_URL} / \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
+  out.push([pinned(rawApp), `${rel}: db-setup's PG_DATABASE_URL is pinned (no \${PG_ADMIN_URL} / \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
+  const admin = urlFacts(services['db-setup']?.environment?.PG_ADMIN_URL);
+  out.push([admin?.host === 'db', `${rel}: db-setup's rendered PG_ADMIN_URL host is exactly db (the bundled database)`]);
+  const app = urlFacts(services['db-setup']?.environment?.PG_DATABASE_URL);
+  out.push([app?.host === 'db' && app?.login === OWNER_LOGIN, `${rel}: db-setup's rendered PG_DATABASE_URL is crewflow_owner at host db (the bundled database)`]);
+  for (const name of runtimeNames) {
+    const raw = String(rawDoc?.services?.[name]?.environment?.PG_DATABASE_URL ?? '');
+    out.push([raw !== '' && raw === rawApp, `${rel}: ${name}'s committed PG_DATABASE_URL is db-setup's pinned crewflow_owner URL, word for word`]);
   }
-  out.push([host === 'db', `${rel}: db-setup's rendered PG_ADMIN_URL host is exactly db (the bundled database)`]);
-  out.push([!JSON.stringify(rawDoc ?? {}).includes('${PG_DATABASE_PASSWORD'), `${rel}: never interpolates PG_DATABASE_PASSWORD (production's variable; this file has its own)`]);
+  const text = JSON.stringify(rawDoc ?? {});
+  out.push([!text.includes('${PG_DATABASE_PASSWORD'), `${rel}: never interpolates PG_DATABASE_PASSWORD (production's variable; this file has its own)`]);
+  out.push([!text.includes('${PG_DATABASE_APP_PASSWORD'), `${rel}: never interpolates PG_DATABASE_APP_PASSWORD (production's variable; this file has its own)`]);
   return out;
 }
 
@@ -460,9 +600,11 @@ function main(options = {}) {
     // rab-ops removal (PR 2): no service (runtime, migrate, or the dev/QA files) carries anything of the ops environment.
     for (const [ok, label] of opsRefusalChecks(rel, services, raw, { production })) check(ok, label);
     for (const [ok, label] of dbPasswordChecks(rel, services)) check(ok, label);
+    for (const [ok, label] of appPasswordChecks(rel, services, runtimeNames)) check(ok, label);
+    for (const [ok, label] of retiredTargetVolumeChecks(rel, model)) check(ok, label);
     if (dbSetup) {
-      for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames)) check(ok, label);
-      for (const [ok, label] of dbVolumeMountChecks(rel, services, runtimeNames)) check(ok, label);
+      for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames, { requireHarden: rel === PRODUCTION_FILE })) check(ok, label);
+      for (const [ok, label] of dbVolumeMountChecks(rel, services)) check(ok, label);
       for (const [ok, label] of dbServerLockChecks(rel, services)) check(ok, label);
       const text = fs.readFileSync(path.join(REPO, rel), 'utf8');
       if (rel === PRODUCTION_FILE) {
@@ -473,7 +615,7 @@ function main(options = {}) {
       } else {
         for (const [ok, label] of bundledDbParityChecks(rel, model, productionModel, EXTERNAL_DB_VOLUMES[rel] ?? {})) check(ok, label);
         for (const [ok, label] of rawDbTextParityChecks(rel, text, productionText ?? '')) check(ok, label);
-        for (const [ok, label] of nonProductionDbSetupChecks(rel, services, YAML.parse(text, { merge: true }))) check(ok, label);
+        for (const [ok, label] of nonProductionDbSetupChecks(rel, services, YAML.parse(text, { merge: true }), runtimeNames)) check(ok, label);
       }
     }
     const migrate = migrateName ? services[migrateName] : undefined;
@@ -540,7 +682,11 @@ module.exports = {
   FILES,
   opsRefusalChecks,
   dbPasswordChecks,
+  appPasswordChecks,
+  retiredTargetVolumeChecks,
   dbSetupContractChecks,
+  dbHardenContractChecks,
+  ADMIN_SERVICES,
   bundledDbParityChecks,
   DEV_DB_DATA_VOLUME,
   EXTERNAL_DB_VOLUMES,
@@ -551,6 +697,7 @@ module.exports = {
   dbServerLockChecks,
   PRODUCTION_FILE,
   DB_SENTINEL_PASSWORD,
+  APP_SENTINEL_PASSWORD,
   render,
   OPS_ONLY_NAMES,
   OPS_SENTINEL_PASSWORD,

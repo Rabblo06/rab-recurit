@@ -1,19 +1,19 @@
 name: rab-qa
 
-# Isolated manual-QA stack on production's database setup (OWNER-DB-ULTIMATE.md Part F2, X2.3; Part A = PR #125, the
-# Twenty Helm model, twentyhq/twenty@eedb0a73 packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:81-130,
-# secret-db-url.yaml:3-30, deployment-worker.yaml:76-90). A separate Compose project with its own containers, named volumes
+# Isolated manual-QA stack on production's database setup (OWNER-DB-ULTIMATE.md Part F2, X2.3; owner decision 2026-11-18,
+# Twenty's way: twentyhq/twenty@eedb0a73 packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:82-155,
+# deployment-worker.yaml:81-88). A separate Compose project with its own containers, named volumes
 # and loopback-only host ports. It shares nothing at runtime with the dev stack (docker-compose.yml, project `rab`) and
 # never touches Neon, OpenShip, rab-devdb or any remote database.
 #
 # TOPOLOGY: mirrors docker-compose.production.yml, built from source:
 #   - db: the bundled PostgreSQL, a VERBATIM copy of production's `db` (own CA, TLS-only SCRAM logins, non-root, internal
 #     network only, never published). compose-credential-isolation.cjs fails if the two renders ever differ.
-#   - db-setup: the one-shot setup (./db-setup.sh). The ONLY service with a database URL, PG_ADMIN_URL = the bundled db's
-#     superuser, PINNED (QA has no external-database mode). It creates crewflow_owner with a random password stored in the
-#     crewflow-db-target volume and reused on every later start, and writes the credential-free target.json.
-#   - server (rab-api): ./api-prestart.sh (PID 1) builds the crewflow_owner URL from db-setup's two files (read-only),
-#     migrates on start under the migration lock (approval mode none), registers the BullMQ job schedulers, then serves.
+#   - db-setup: the one-shot setup (./db-setup.sh). The ONLY service with an admin login, PG_ADMIN_URL = the bundled db's
+#     superuser, PINNED (QA has no external-database mode). It creates crewflow_owner with the password inside its
+#     PG_DATABASE_URL (the pinned bundled crewflow_owner URL, from CREWFLOW_QA_DB_APP_PASSWORD) and writes no file.
+#   - server (rab-api): ./api-prestart.sh (PID 1) takes PG_DATABASE_URL, the SAME pinned crewflow_owner URL, migrates on
+#     start under the migration lock (approval mode none), registers the BullMQ job schedulers, then serves.
 #   - worker (rab-worker): ./worker-start.sh (PID 1), the same URL; never migrates, only consumes the schedulers, starts
 #     after a healthy server, provisions workspaces in-process at production's pinned 5 s.
 #   - Redis (AOF + noeviction), and object storage through the S3 driver (MinIO stands in for R2, SSE header NONE as on
@@ -33,8 +33,11 @@ name: rab-qa
 #   CREWFLOW_QA_DB_PASSWORD   the bundled db's superuser (read by `db` on its volume's first start, and by db-setup's URL
 #                             only). HEX ONLY: it is interpolated unencoded into db-setup's admin URL. Not production's
 #                             variable name, so a value meant for one never configures the other.
+#   CREWFLOW_QA_DB_APP_PASSWORD  crewflow_owner's password (openssl rand -hex 32; HEX ONLY): interpolated into the
+#                             crewflow_owner URL db-setup, server and worker receive as PG_DATABASE_URL. Not production's
+#                             PG_DATABASE_APP_PASSWORD either.
 #   QA_APP_SECRET          QA-only application secret (32+ characters)
-# Both are required (`:?`), so the stack fails closed without them. Passing `--env-file` also stops Compose from reading the
+# All are required (`:?`), so the stack fails closed without them. Passing `--env-file` also stops Compose from reading the
 # dev stack's packages/rab-docker/.env.
 #
 # RUN (C is shorthand for the compose prefix). The server applies the whole migration chain on its first start:
@@ -172,10 +175,13 @@ services:
       retries: 30
       start_period: 60s
     # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
-    # database in PG_ADMIN_URL or PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency
-    # that has 0 replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup refuses
-    # (exit 64: neither URL set) and rab-api never starts. The compose.env lint and the --environment preflight accept only
-    # 0 or 1, and 0 only with exactly one of PG_ADMIN_URL / PG_DATABASE_URL whose host is not `db`.
+    # database in PG_DATABASE_URL (+ PG_ADMIN_URL): no db container is created. In docker-compose.production.yml and
+    # docker-compose.image.yml nothing depends on db (owner instruction 2026-11-18, Twenty's Helm wait-for-db): db-setup waits
+    # for the database itself (OpenShip skips a dependent of a service without a container). OpenShip ignores
+    # deploy.replicas: there, switch the db service off in OpenShip itself. 0 without your own database fails closed: db-setup
+    # refuses (exit 64: PG_DATABASE_URL still names the bundled host db) and rab-api never starts. The compose.env lint and the
+    # --environment preflight accept only 0 or 1, and 0 only with a PG_DATABASE_URL (and any PG_ADMIN_URL) whose host is
+    # not `db`.
     # Development and QA never set it (they have no external database).
     deploy:
       replicas: ${CREWFLOW_BUNDLED_DB:-1}
@@ -247,8 +253,9 @@ services:
       echo bucket-ready"
 
   # ---------------------------------------------------------------------------
-  # db-setup — the one-shot database setup (Part A), as production's `db-setup`, built from source. The ONLY service with a
-  # database URL, PINNED to the bundled db. Runs on every `up`, then exits; server starts only after it completed.
+  # db-setup — the one-shot database setup, as production's `db-setup` (mode a), built from source. The ONLY service with an
+  # admin login; both URLs PINNED to the bundled db. Runs on every `up`, writes no file, then exits; server starts only
+  # after it completed.
   # ---------------------------------------------------------------------------
   db-setup:
     build:
@@ -261,12 +268,14 @@ services:
     environment:
       # The bundled db's superuser: db-setup's admin URL (PG_ADMIN_URL, this service only; mode a of production, pinned).
       PG_ADMIN_URL: postgresql://postgres:${CREWFLOW_QA_DB_PASSWORD:?set CREWFLOW_QA_DB_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
+      # The crewflow_owner URL (pinned to the bundled db): db-setup creates crewflow_owner with its password; server and
+      # worker receive exactly this value.
+      PG_DATABASE_URL: postgresql://crewflow_owner:${CREWFLOW_QA_DB_APP_PASSWORD:?set CREWFLOW_QA_DB_APP_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
     networks: [default, crewflow-db]
     volumes:
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-      - crewflow-db-target:/run/crewflow/db-target
     depends_on:
       db:
         condition: service_healthy
@@ -281,8 +290,8 @@ services:
     cpus: 1
     stop_grace_period: 40s
 
-  # rab-api equivalent: migrates on start, registers the job schedulers, then serves. It holds no database URL (pinned
-  # empty; api-prestart.sh refuses any value) and no migration or command authority.
+  # rab-api equivalent: migrates on start, registers the job schedulers, then serves. Its one database URL is the pinned
+  # crewflow_owner URL (db-setup's own value); no admin URL, no migration or command authority.
   server:
     build:
       context: ../..
@@ -294,7 +303,7 @@ services:
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      PG_DATABASE_URL: ''
+      PG_DATABASE_URL: postgresql://crewflow_owner:${CREWFLOW_QA_DB_APP_PASSWORD:?set CREWFLOW_QA_DB_APP_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
       # PG_ADMIN_URL pinned "" as on production's rab-api / rab-worker (owner decision L-2, review of PR #230).
       PG_ADMIN_URL: ''
       PG_EXPECTED_DATABASE_NAME: crewflow
@@ -326,7 +335,6 @@ services:
       S3_SERVER_SIDE_ENCRYPTION: NONE
     volumes:
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-      - crewflow-db-target:/run/crewflow/db-target:ro
     networks: [default, crewflow-db]
     ports:
       - '127.0.0.1:3101:3000'
@@ -382,7 +390,7 @@ services:
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      PG_DATABASE_URL: ''
+      PG_DATABASE_URL: postgresql://crewflow_owner:${CREWFLOW_QA_DB_APP_PASSWORD:?set CREWFLOW_QA_DB_APP_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
       # PG_ADMIN_URL pinned "" as on production's rab-api / rab-worker (owner decision L-2, review of PR #230).
       PG_ADMIN_URL: ''
       PG_EXPECTED_DATABASE_NAME: crewflow
@@ -423,7 +431,6 @@ services:
       CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
     volumes:
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-      - crewflow-db-target:/run/crewflow/db-target:ro
     networks: [default, crewflow-db]
     healthcheck:
       # Jobs-only per-instance health (the provisioner role is off for this check only), as in production.
@@ -468,12 +475,10 @@ networks:
     internal: true
 
 volumes:
-  # The bundled db (cluster + server TLS key; CA) and db-setup's target + password files: same keys as production, new
-  # project-scoped names (rab-qa_crewflow-db-*). The previous QA volumes (rab-qa-postgres-data, rab-qa-redis-data,
+  # The bundled db (cluster + server TLS key; CA): same keys as production, project-scoped names (rab-qa_crewflow-db-*). The previous QA volumes (rab-qa-postgres-data, rab-qa-redis-data,
   # rab-qa-minio-data) are no longer named.
   crewflow-db-data:
   crewflow-db-ca:
-  crewflow-db-target:
   crewflow-qa-redis-data:
   crewflow-qa-minio-data:
   rab-qa-front-node-modules:

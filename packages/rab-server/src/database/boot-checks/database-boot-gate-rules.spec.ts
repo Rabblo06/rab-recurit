@@ -1,6 +1,7 @@
 import { healthyOwnerLoginPosture, OwnerLoginPostureFixture, ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import {
+  assertCreateRoleGate,
   assertVersionGate,
   BOOT_FACTS_SQL,
   DISPATCH_NOTIFY_SESSION_SQL,
@@ -20,10 +21,13 @@ import {
   ROUTINE_GRANTS_SQL,
   withDatabaseRetry,
 } from './database-boot-gate-rules';
+import { OWNER_CREATEROLE_MARK_PREFIX, OWNER_CREATEROLE_MARK_SQL_RE } from './owner-login-posture';
 import { assertSchemaCompatible, assessSchemaCompatibility } from './schema-compatibility';
 
 const PROD_ID = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
 const PROD_ENV = { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: PROD_ID };
+/** Gate 6's client-side evidence of a verify-full session (what runDatabaseBootGates reads from the pg socket). */
+const VERIFIED_TLS = { encrypted: true, authorized: true, verifyFullConfigured: true };
 
 interface FakeDb {
   facts: Record<string, unknown>;
@@ -45,6 +49,10 @@ function healthy(overrides: Partial<FakeDb> = {}, factOverrides: Record<string, 
       bypassrls: false,
       login_privileged: false,
       login_repl_createdb: false,
+      owns_database: false,
+      member_of_database_owner: false,
+      database_owner_role: false,
+      database_owner: 'postgres',
       owner_roles: 'crewflow,rab_owner,rab_secure_owner',
       server_version_num: 160015,
       database: 'crewflow',
@@ -224,11 +232,11 @@ describe('database boot gates (fake connection)', () => {
     await refusedAt(evaluateBootGates(input(healthy(), { env: PROD_ENV })), 'identity', /production api process refuses to run: the database has no deployment identity marker/);
     // BC-11 (owner decision 2026-11-05): production with NO declaration skips the marker check (warning) and reaches the
     // next gate; with a declaration the exact match above still refuses.
-    await refusedAt(evaluateBootGates(input(healthy(), { env: { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } })), 'tls', /not using TLS/);
+    await refusedAt(evaluateBootGates(input(healthy(), { env: { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } })), 'tls', /does not verify the server certificate and host name/);
     // Production with the right marker but no TLS: the identity gate passes, the TLS gate refuses.
-    await refusedAt(evaluateBootGates(input(prodBound, { env: PROD_ENV })), 'tls', /not using TLS/);
+    await refusedAt(evaluateBootGates(input(prodBound, { env: PROD_ENV })), 'tls', /does not verify the server certificate and host name/);
     const tls = healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] }, { ssl: true });
-    await expect(evaluateBootGates(input(tls, { env: PROD_ENV }))).resolves.toMatchObject({ identity: `production/${PROD_ID}`, tls: true, warnings: [] });
+    await expect(evaluateBootGates(input(tls, { env: PROD_ENV, clientTls: VERIFIED_TLS }))).resolves.toMatchObject({ identity: `production/${PROD_ID}`, tls: true, warnings: [] });
   });
 
   it('identity: a marker bound in another database or at another host (restore / clone / fork) is refused, production or not', async () => {
@@ -239,6 +247,75 @@ describe('database boot gates (fake connection)', () => {
     const ci = { environment: 'ci', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] };
     await refusedAt(evaluateBootGates(input(tls(ci), { connectionHost: 'copy.gate.internal' })), 'identity', /bound at host/);
     await expect(evaluateBootGates(input(tls(ci)))).resolves.toMatchObject({ identity: `ci/${PROD_ID}` });
+  });
+
+  // Owner decision 2026-11-19: in production the login must not own the database it serves (directly, through a role, or
+  // as pg_database_owner). Each refusal on its own; outside production a rab_owner-owned dev/test database still boots.
+  it.each([
+    [{ owns_database: true, member_of_database_owner: true, database_owner_role: true, database_owner: 'crewflow_owner' }, /"crewflow_owner" owns the current database/],
+    [{ member_of_database_owner: true, database_owner: 'rab_owner' }, /"crewflow_owner" is a member of "rab_owner", the owner of the current database/],
+    [{ database_owner_role: true }, /"crewflow_owner" is a member of pg_database_owner/],
+    // Fail closed: a facts row without the ownership columns is refused in production, never passed.
+    [{ owns_database: undefined, member_of_database_owner: undefined, database_owner_role: undefined }, /owns the current database/],
+  ])('role: production refuses a login that owns the database (%p)', async (over, pattern) => {
+    const bound = { environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] };
+    const db = healthy({ markerPresent: true, markerRows: [bound] }, { ssl: true, ...over });
+    await refusedAt(evaluateBootGates(input(db, { env: PROD_ENV })), 'role', pattern);
+    // The same database outside production boots (dev and test databases are owned by rab_owner, a role the login is in).
+    await expect(evaluateBootGates(input(healthy({}, { ...over })))).resolves.toMatchObject({ role: 'crewflow_owner' });
+  });
+
+  // Gate 6 (owner instruction 2026-11-19, provider-neutral): "trust our side of the connection". Verified client TLS (chain +
+  // host name, under a verify-full config) satisfies it whatever pg_stat_ssl says; otherwise the backend must report TLS.
+  describe('tls: verified client-side TLS satisfies gate 6 whatever pg_stat_ssl says; nothing provider-specific', () => {
+    const bound = { environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] };
+    const db = (ssl: boolean | null) => healthy({ markerPresent: true, markerRows: [bound] }, { ssl });
+    const VERIFIED = { encrypted: true, authorized: true, verifyFullConfigured: true };
+    it('backend ssl=false (a TLS-terminating proxy) + verified client TLS -> boots, with one warning', async () => {
+      const report = await evaluateBootGates(input(db(false), { env: PROD_ENV, clientTls: VERIFIED }));
+      expect(report.tls).toBe(false);
+      expect(report.warnings.join(' ')).toMatch(/verified TLS on the client side \(certificate chain and host name\), which is what gate 6 trusts/);
+    });
+    it('backend ssl=true + verified client TLS -> boots, no warning; backend ssl=null (no row) + verified -> boots', async () => {
+      expect((await evaluateBootGates(input(db(true), { env: PROD_ENV, clientTls: VERIFIED }))).warnings).toEqual([]);
+      await expect(evaluateBootGates(input(db(null), { env: PROD_ENV, clientTls: VERIFIED }))).resolves.toMatchObject({ tls: null });
+    });
+    it.each([
+      ['no client TLS state', undefined],
+      ['client TLS not authorized (chain or host name not verified)', { ...VERIFIED, authorized: false }],
+      ['authorized, but the config did not demand verification (rejectUnauthorized false / a foreign identity check)', { ...VERIFIED, verifyFullConfigured: false }],
+      ['no client TLS at all', { encrypted: false, authorized: false, verifyFullConfigured: true }],
+    ])('DENIAL: backend ssl=false and %s -> refused', async (_label, clientTls) => {
+      await refusedAt(evaluateBootGates(input(db(false), { env: PROD_ENV, clientTls })), 'tls', /does not verify the server certificate and host name|not using verified TLS/);
+    });
+    // Security review L-1 (PR #257): pg_stat_ssl.ssl=true alone no longer passes; the client config must have verified.
+    it.each([
+      ['no client TLS state', undefined],
+      ['an unverified config (rejectUnauthorized false: PG_SSL_ALLOW_SELF_SIGNED / no-verify)', { encrypted: true, authorized: false, verifyFullConfigured: false }],
+      ['an unverified config whose socket still says authorized', { encrypted: true, authorized: true, verifyFullConfigured: false }],
+    ])('DENIAL: backend ssl=TRUE but %s -> refused', async (_label, clientTls) => {
+      await refusedAt(evaluateBootGates(input(db(true), { env: PROD_ENV, clientTls })), 'tls', /does not verify the server certificate and host name/);
+    });
+    it("DENIAL: the two production classifiers disagree (RAB_RUNTIME_ENV=' production'): the process says production, the factory did not, and allowed self-signed; gate 6 refuses", async () => {
+      const env = { ...PROD_ENV, NODE_ENV: 'development', RAB_RUNTIME_ENV: ' production', PG_SSL_ALLOW_SELF_SIGNED: 'true' };
+      await refusedAt(evaluateBootGates(input(db(true), { env, clientTls: { encrypted: true, authorized: false, verifyFullConfigured: false } })), 'tls', /does not verify the server certificate and host name/);
+    });
+    it('the factory classification alone (connectionProduction) makes gate 6 production for a process that does not say so', async () => {
+      await expect(evaluateBootGates(input(healthy({}, { ssl: false })))).resolves.toMatchObject({ tls: false });
+      await refusedAt(evaluateBootGates(input(healthy({}, { ssl: false }), { connectionProduction: true })), 'tls', /does not verify the server certificate and host name/);
+      await expect(evaluateBootGates(input(healthy({}, { ssl: false }), { connectionProduction: true, clientTls: VERIFIED_TLS }))).resolves.toMatchObject({ tls: false });
+    });
+    it('review I-4: NODE_TLS_REJECT_UNAUTHORIZED=0 is refused in production, even with a verified session', async () => {
+      await refusedAt(evaluateBootGates(input(db(true), { env: { ...PROD_ENV, NODE_TLS_REJECT_UNAUTHORIZED: '0' }, clientTls: VERIFIED_TLS })), 'tls', /NODE_TLS_REJECT_UNAUTHORIZED=0/);
+      await expect(evaluateBootGates(input(db(true), { env: { ...PROD_ENV, NODE_TLS_REJECT_UNAUTHORIZED: '1' }, clientTls: VERIFIED_TLS }))).resolves.toMatchObject({ tls: true });
+      await expect(evaluateBootGates(input(healthy({}, { ssl: true }), { env: { NODE_ENV: 'development', NODE_TLS_REJECT_UNAUTHORIZED: '0' } }))).resolves.toMatchObject({ tls: true });
+    });
+    it('the decision never reads the host (a Neon host gets no special treatment either way)', async () => {
+      const neon = 'ep-cool-darkness-123456.eu-west-2.aws.neon.tech';
+      const neonDb = healthy({ markerPresent: true, markerRows: [{ ...bound, bound_hosts: [neon] }] }, { ssl: false });
+      await refusedAt(evaluateBootGates(input(neonDb, { env: PROD_ENV, connectionHost: neon })), 'tls', /does not verify the server certificate and host name/);
+      await expect(evaluateBootGates(input(neonDb, { env: PROD_ENV, connectionHost: neon, clientTls: VERIFIED }))).resolves.toMatchObject({ tls: false });
+    });
   });
 
   it('identity: the runtime never honours the production bootstrap flag', async () => {
@@ -339,6 +416,107 @@ describe('database boot gates (fake connection)', () => {
   it('cliCommandFromArgv returns the first non-option argument after the script', () => {
     expect(cliCommandFromArgv(['node', 'main.js', 'bootstrap-admin', '--x'])).toBe('bootstrap-admin');
     expect(cliCommandFromArgv(['node', 'main.js', '--help'])).toBeUndefined();
+  });
+});
+
+describe('gate 1, CREATEROLE after the schema bootstrap (owner decisions 2026-11-18, incl. M1 the 24 h grace period)', () => {
+  const prodDb = (facts: Record<string, unknown>) =>
+    healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] }, { ssl: true, ...facts });
+
+  it('BOOT_FACTS_SQL reads the login CREATEROLE, matches its COMMENT against the mark regex, and compares the expiry with the SERVER clock', () => {
+    expect(BOOT_FACTS_SQL).toContain('s.rolcreaterole FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_createrole');
+    const comment = "(SELECT pg_catalog.shobj_description(s.oid, 'pg_authid') FROM pg_catalog.pg_roles s WHERE s.rolname = session_user)";
+    expect(BOOT_FACTS_SQL).toContain(`COALESCE(${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}', false) AS login_createrole_pending`);
+    expect(BOOT_FACTS_SQL).toContain(`pg_catalog.split_part(${comment}, ':', 3)::bigint <= pg_catalog.date_part('epoch', pg_catalog.now())::bigint`);
+    expect(BOOT_FACTS_SQL).toContain('AS login_createrole_mark_expired');
+    expect(OWNER_CREATEROLE_MARK_SQL_RE).toBe(`^${OWNER_CREATEROLE_MARK_PREFIX}[0-9]{1,12}$`);
+    for (const constant of [OWNER_CREATEROLE_MARK_PREFIX, OWNER_CREATEROLE_MARK_SQL_RE]) expect(constant).not.toMatch(/['\\]/); // interpolated into SQL text
+    expect(
+      parseBootFacts({ who: 'crewflow_owner', login: 'crewflow_owner', login_createrole: true, login_createrole_pending: true, login_createrole_mark_expired: true }),
+    ).toMatchObject({ loginCreateRole: true, loginCreateRolePending: true, loginCreateRoleMarkExpired: true });
+    // Fail closed on a missing column: absent = not CREATEROLE, not marked, not expired (a valid mark is never invented).
+    expect(parseBootFacts({ who: 'crewflow_owner', login: 'crewflow_owner' })).toMatchObject({
+      loginCreateRole: false,
+      loginCreateRolePending: false,
+      loginCreateRoleMarkExpired: false,
+    });
+    // Only a real boolean counts (a string 'true' is not an expired mark, so it can never turn a refusal into a warning).
+    expect(parseBootFacts({ who: 'crewflow_owner', login: 'crewflow_owner', login_createrole_mark_expired: 'true' }).loginCreateRoleMarkExpired).toBe(false);
+  });
+
+  const facts = (loginCreateRole: boolean, loginCreateRolePending: boolean, loginCreateRoleMarkExpired = false) => ({
+    who: 'crewflow_owner',
+    loginCreateRole,
+    loginCreateRolePending,
+    loginCreateRoleMarkExpired,
+  });
+  const refusalOf = (f: ReturnType<typeof facts>, production = true): DatabaseBootGateError => {
+    try {
+      assertCreateRoleGate(f, production, 'api process');
+    } catch (error) {
+      if (error instanceof DatabaseBootGateError) return error;
+      throw error;
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('assertCreateRoleGate (pure), production: UNMARKED CREATEROLE -> refused, naming the two statements', () => {
+    const e = refusalOf(facts(true, false));
+    expect(e.gate).toBe('role');
+    expect(e.message).toMatch(/the api process login "crewflow_owner" has CREATEROLE after the schema bootstrap, and no admin marked it/);
+    expect(e.message).toContain('ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;');
+  });
+
+  it('assertCreateRoleGate (pure), production: a marked CREATEROLE whose mark has EXPIRED -> refused with the NOCREATEROLE + COMMENT ... IS NULL text', () => {
+    const e = refusalOf(facts(true, true, true));
+    expect(e.gate).toBe('role');
+    expect(e.message).toMatch(/still has CREATEROLE and its grace period \(the admin's mark\) has expired/);
+    expect(e.message).toContain('ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;');
+  });
+
+  it('assertCreateRoleGate (pure): an unexpired mark -> exactly one warning; NOCREATEROLE (marked or not, expired or not) -> nothing; outside production -> nothing', () => {
+    const warnings = assertCreateRoleGate(facts(true, true, false), true, 'worker process');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/still has CREATEROLE, marked by an admin for the schema bootstrap; db-harden removes it/);
+    expect(warnings[0]).toContain('ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;');
+    for (const f of [facts(false, false), facts(false, true), facts(false, true, true)]) expect(assertCreateRoleGate(f, true, 'api process')).toEqual([]);
+    for (const f of [facts(true, false), facts(true, true, true), facts(true, true)]) expect(assertCreateRoleGate(f, false, 'api process')).toEqual([]);
+  });
+
+  it.each([
+    ['api', undefined],
+    ['worker', undefined],
+    ['cli', 'bootstrap-admin'],
+  ] as const)('production %s: an unmarked CREATEROLE crewflow_owner is REFUSED at gate 1', async (processName, cliCommand) => {
+    const env = processName === 'cli' ? { ...PROD_ENV, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' } : PROD_ENV;
+    await refusedAt(
+      evaluateBootGates(input(prodDb({ login_createrole: true, login_createrole_pending: false }), { processName, cliCommand, env })),
+      'role',
+      /has CREATEROLE after the schema bootstrap, and no admin marked it/,
+    );
+  });
+
+  it.each(['api', 'worker'] as const)('production %s: an EXPIRED mark is REFUSED at gate 1 (the Worker gets the same rule as the API)', async (processName) => {
+    await refusedAt(
+      evaluateBootGates(input(prodDb({ login_createrole: true, login_createrole_pending: true, login_createrole_mark_expired: true }), { processName, env: PROD_ENV })),
+      'role',
+      /grace period \(the admin's mark\) has expired/,
+    );
+  });
+
+  it('production: an unexpired mark (the first start) passes with exactly one warning; a NOCREATEROLE login with none', async () => {
+    const marked = await evaluateBootGates(input(prodDb({ login_createrole: true, login_createrole_pending: true, login_createrole_mark_expired: false }), { env: PROD_ENV, clientTls: VERIFIED_TLS }));
+    expect(marked.warnings).toEqual([expect.stringMatching(/still has CREATEROLE, marked by an admin/)]);
+    const hardened = await evaluateBootGates(input(prodDb({ login_createrole: false, login_createrole_pending: false }), { env: PROD_ENV, clientTls: VERIFIED_TLS }));
+    expect(hardened.warnings).toEqual([]);
+  });
+
+  it('outside production a CREATEROLE crewflow_owner (unmarked or expired) is neither refused nor reported (the existing warning count is unchanged)', async () => {
+    for (const f of [{ login_createrole: true }, { login_createrole: true, login_createrole_pending: true, login_createrole_mark_expired: true }]) {
+      const report = await evaluateBootGates(input(healthy({}, f)));
+      expect(report.warnings).toHaveLength(1);
+      expect(report.warnings.join(' ')).not.toMatch(/CREATEROLE/);
+    }
   });
 });
 
