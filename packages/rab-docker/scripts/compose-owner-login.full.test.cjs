@@ -48,59 +48,96 @@ test('every committed combination passes every check', { skip }, () => {
 
 const PT = 'pass-through';
 const SETUP = gate.DB_SETUP_SERVICE;
+const HARDEN = gate.DB_HARDEN_SERVICE;
 
-test('DENIAL option 2: rab-api / rab-worker with ANY database URL (admin, crewflow_owner, anything non-empty) are refused; the key stays pinned empty', { skip }, () => {
-  for (const c of [REL, EXT, PT, 'staging']) {
+// Owner decision 2026-11-18 (Twenty's way): rab-api and rab-worker receive PG_DATABASE_URL = the crewflow_owner URL, the
+// SAME rendered value as db-setup's, from the one committed expression.
+const appUrlOf = (c) => (combo(c).external ? gate.SENTINEL_URL : gate.BUNDLED_APP_URL);
+test('rab-api / rab-worker receive exactly the committed crewflow_owner PG_DATABASE_URL, the same as db-setup\'s, in every combination', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    for (const svc of [...APP, SETUP]) assert.equal(m.services[svc].environment.PG_DATABASE_URL, appUrlOf(c.name), `${c.name} ${svc}`);
+  }
+  // The bundled default (mode a) is built from PG_DATABASE_APP_PASSWORD; the URL of compose.env wins in every other mode.
+  assert.equal(gate.BUNDLED_APP_URL, `postgresql://crewflow_owner:${gate.SENTINEL_APP_PW}@db:5432/crewflow?sslmode=verify-full`);
+});
+
+test('DENIAL Twenty way: rab-api / rab-worker with no URL, an empty one, an admin URL, another database or another login are refused', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging', 'external-no-db', 'pass-through-no-db']) {
     for (const svc of APP) {
-      // The admin URL (bundled or external), the crewflow_owner URL (pass-through included), or any other value: refused.
-      for (const url of [gate.BUNDLED_URL, gate.SENTINEL_ADMIN_URL, gate.SENTINEL_URL, gate.SENTINEL_URL.replace('db-direct', 'db-other'), 'x']) {
-        assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is not empty`));
+      for (const url of ['', ' '.trim()]) assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is missing or empty`));
+      assertRefused(problemsAfter(c, (s) => { delete s[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is missing or empty`));
+      // An admin login (the bundled superuser, your admin), a crewflow_owner URL of another database, or garbage.
+      for (const url of [gate.BUNDLED_URL, gate.SENTINEL_ADMIN_URL, appUrlOf(c).replace('@db', '@other'), 'x']) {
+        const problems = problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = url; });
+        assertRefused(problems, new RegExp(`${svc}: PG_DATABASE_URL is not the committed crewflow_owner URL`));
+        assertRefused(problems, new RegExp(`${svc}: PG_DATABASE_URL differs from db-setup's`));
       }
-      // No key at all: an env-file value would reach it.
-      assertRefused(problemsAfter(c, (s) => { delete s[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not pinned to ""`));
+      assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }), new RegExp(`${svc}: PG_DATABASE_URL does not log in as crewflow_owner`));
+      assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), new RegExp(`${svc}: PG_DATABASE_URL carries the bundled db's or the admin's password`));
+      // Changed on BOTH db-setup and the service: still not the committed value.
+      assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; s[SETUP].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not the committed`));
+      // The bundled passwords by name never reach a container.
+      for (const key of ['PG_DATABASE_APP_PASSWORD', 'PG_DATABASE_PASSWORD']) {
+        assertRefused(problemsAfter(c, (s) => { s[svc].environment[key] = gate.SENTINEL_APP_PW; }), new RegExp(`${svc}: (environment has|has) ${key}`));
+      }
     }
+    // Any other service with PG_DATABASE_URL.
+    assertRefused(problemsAfter(c, (s) => { s['rab-redis'].environment = { PG_DATABASE_URL: appUrlOf(c) }; }), /rab-redis: has PG_DATABASE_URL \(only db-setup, db-harden, rab-api and rab-worker/);
   }
 });
 
-test('DENIAL option A: a database credential anywhere in rab-api / rab-worker (healthcheck, command, labels, another key) is refused', { skip }, () => {
+test('DENIAL Twenty way: a database credential anywhere in rab-api / rab-worker OUTSIDE PG_DATABASE_URL (healthcheck, command, labels, another key) is refused', { skip }, () => {
   for (const c of [REL, EXT, PT, 'staging']) {
     for (const svc of APP) {
-      for (const secret of [gate.SENTINEL_DB_PW, gate.SENTINEL_ADMIN_PW, gate.SENTINEL_OWNER_PW]) {
-        assertRefused(problemsAfter(c, (s) => { s[svc].healthcheck.test = ['CMD', 'env', `X=${secret}`, 'true']; }), new RegExp(`${svc}: carries a database credential`));
-        assertRefused(problemsAfter(c, (s) => { s[svc].labels = { note: secret }; }), new RegExp(`${svc}: carries a database credential`));
-        assertRefused(problemsAfter(c, (s) => { s[svc].command = ['node', secret]; }), new RegExp(`${svc}: carries a database credential`));
+      for (const secret of [gate.SENTINEL_DB_PW, gate.SENTINEL_ADMIN_PW, gate.SENTINEL_OWNER_PW, gate.SENTINEL_APP_PW]) {
+        assertRefused(problemsAfter(c, (s) => { s[svc].healthcheck.test = ['CMD', 'env', `X=${secret}`, 'true']; }), new RegExp(`${svc}: carries a database credential outside PG_DATABASE_URL`));
+        assertRefused(problemsAfter(c, (s) => { s[svc].labels = { note: secret }; }), new RegExp(`${svc}: carries a database credential outside PG_DATABASE_URL`));
+        assertRefused(problemsAfter(c, (s) => { s[svc].command = ['node', secret]; }), new RegExp(`${svc}: carries a database credential outside PG_DATABASE_URL`));
       }
-      assertRefused(problemsAfter(c, (s) => { s[svc].healthcheck.test = ['CMD', 'psql', 'postgresql://h/db']; }), new RegExp(`${svc}: holds a postgres:// value`));
+      assertRefused(problemsAfter(c, (s) => { s[svc].healthcheck.test = ['CMD', 'psql', 'postgresql://h/db']; }), new RegExp(`${svc}: holds a postgres:// value outside PG_DATABASE_URL`));
+      // The crewflow_owner URL under ANOTHER key is a second database identity.
+      assertRefused(problemsAfter(c, (s) => { s[svc].environment.OTHER = appUrlOf(c); }), new RegExp(`${svc}: (environment OTHER holds a PostgreSQL URL|received the database credential \\(OTHER\\))`));
     }
   }
+
 });
 
-test('option 2: db-setup alone receives the database URLs: the bundled admin URL by default, compose.env\'s PG_ADMIN_URL, or the crewflow_owner PG_DATABASE_URL (pass-through)', { skip }, () => {
+test('the admin login reaches db-setup alone: the bundled superuser URL by default, compose.env\'s PG_ADMIN_URL in mode b', { skip }, () => {
   const env = (c) => fresh(c).services[SETUP].environment;
   for (const c of [REL, 'staging']) {
     assert.equal(env(c).CREWFLOW_BUNDLED_DB_ADMIN_URL, gate.BUNDLED_URL, c);
     assert.equal(env(c).PG_ADMIN_URL, '', c);
-    assert.equal(env(c).PG_DATABASE_URL, '', c);
+    assert.equal(env(c).PG_DATABASE_URL, gate.BUNDLED_APP_URL, c);
     assert.equal(env(c).CREWFLOW_BUNDLED_DB, '1', c);
   }
   assert.equal(env(EXT).PG_ADMIN_URL, gate.SENTINEL_ADMIN_URL);
-  assert.equal(env(EXT).PG_DATABASE_URL, '');
+  assert.equal(env(EXT).PG_DATABASE_URL, gate.SENTINEL_URL);
   assert.equal(env(PT).PG_DATABASE_URL, gate.SENTINEL_URL);
   assert.equal(env(PT).PG_ADMIN_URL, '');
-  // Option 2: rab-api / rab-worker render the literal empty pin in every combination, pass-through included.
-  for (const c of [REL, EXT, PT, 'staging']) for (const svc of APP) assert.equal(fresh(c).services[svc].environment.PG_DATABASE_URL, '', `${c} ${svc}`);
   // The bundled default with TLS below verify-full, another host, or a URL that is not the compose.env value: each refused.
   for (const url of [gate.BUNDLED_URL.replace('verify-full', 'disable'), gate.BUNDLED_URL.replace('@db:', '@db.evil.example:'), gate.BUNDLED_URL.replace('postgres:', 'crewflow_owner:')]) {
     assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL = url; }), /db-setup: CREWFLOW_BUNDLED_DB_ADMIN_URL is not the committed/);
   }
   assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
+  assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
   assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.PG_ADMIN_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: PG_ADMIN_URL is not the committed/);
   for (const key of gate.DB_SETUP_DB_KEYS) assertRefused(problemsAfter(REL, (s) => { delete s[SETUP].environment[key]; }), new RegExp(`db-setup: ${key} is missing`));
   assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.PG_DATABASE_ADMIN_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: (has PG_DATABASE_ADMIN_URL|environment has PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL)/);
-  // Another service with a database URL, or the admin password under another key of db-setup: refused.
+  // Another service with a database URL, or the admin / owner password under another key of db-setup: refused.
   assertRefused(problemsAfter(REL, (s) => { s['rab-redis'].environment = { PG_DATABASE_URL: gate.BUNDLED_URL }; }), /rab-redis: has PG_DATABASE_URL/);
   assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_ADMIN_PW; }), /db-setup: received the database admin credential \(OTHER\)/);
   assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_OWNER_PW; }), /db-setup: received the database credential \(OTHER\)/);
+  assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_APP_PW; }), /db-setup: received the database credential \(OTHER\)/);
+  // The bundled crewflow_owner password reaches nothing but the three PG_DATABASE_URL values (not db, not rab-redis).
+  const m = fresh(REL);
+  for (const [name, svc] of Object.entries(m.services)) {
+    for (const [key, value] of Object.entries(svc.environment ?? {})) {
+      if (String(value).includes(gate.SENTINEL_APP_PW)) assert.ok([...APP, SETUP, HARDEN].includes(name) && key === 'PG_DATABASE_URL', `${name} ${key}`);
+    }
+  }
+  // With your own database's URL the bundled crewflow_owner password is used nowhere at all.
+  for (const c of [EXT, PT]) assert.ok(!JSON.stringify(fresh(c)).includes(gate.SENTINEL_APP_PW), c);
 });
 
 test('DENIAL Twenty Helm model: db-setup never receives APP_SECRET; nothing but db-setup\'s volume is mounted at the password-file path', { skip }, () => {
@@ -127,7 +164,14 @@ test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip },
       [(s) => { s[SETUP].restart = 'unless-stopped'; }, /db-setup: restart is "unless-stopped", expected "no"/],
       [(s) => { s[SETUP].profiles = ['setup']; }, /db-setup: has profiles/],
       [(s) => { s[SETUP].ports = [{ target: 5432, published: '5432', host_ip: '127.0.0.1' }]; }, /db-setup: publishes a port/],
-      [(s) => { s[SETUP].entrypoint = ['./api-prestart.sh']; }, /db-setup: entrypoint is not exactly \.\/db-setup\.sh/],
+      [(s) => { s[SETUP].entrypoint = ['./api-prestart.sh']; }, /db-setup: entrypoint is neither exactly \.\/db-setup\.sh nor exactly the wait-for-db wrapper/],
+      // Owner instruction 2026-11-18: the wait-for-db wrapper is required here (the plain start would need depends_on: db).
+      [(s) => { s[SETUP].entrypoint = ['./db-setup.sh']; }, /db-setup: must start through the wait-for-db wrapper/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace('exec ./db-setup.sh', 'exec ./api-prestart.sh')); }, /db-setup: entrypoint is neither/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace(/\ncrewflow_wait_for_db\n/, '\n')); }, /db-setup: entrypoint is neither/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace('"57P03"', '"57P04"')); }, /db-setup: entrypoint is neither/],
+      [(s) => { delete s[SETUP].environment.CREWFLOW_DB_WAIT_SECONDS; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is missing/],
+      [(s) => { s[SETUP].environment.CREWFLOW_DB_WAIT_SECONDS = '0'; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed/],
       [(s) => { s[SETUP].command = ['sh']; }, /db-setup: has a command/],
       [(s) => { s[SETUP].init = true; }, /db-setup: init: true/],
       [(s) => { s[SETUP].image = s[SETUP].image.replace(/sha256:0/, 'sha256:1'); }, /db-setup: image differs from rab-api/],
@@ -137,34 +181,87 @@ test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip },
       [(s) => { s[SETUP].security_opt = []; }, /db-setup: security_opt no-new-privileges:true is missing/],
       [(s) => { delete s[SETUP].pids_limit; }, /db-setup: pids_limit is missing/],
       [(s) => { delete s[SETUP].mem_limit; }, /db-setup: mem_limit is missing/],
-      [(s) => { delete s[SETUP].depends_on; }, /db-setup: depends_on must be exactly a healthy db/],
-      [(s) => { s[SETUP].depends_on.db.condition = 'service_started'; }, /db-setup: depends_on must be exactly a healthy db/],
-      [(s) => { s[SETUP].depends_on['rab-redis'] = { condition: 'service_healthy' }; }, /db-setup: depends_on must be exactly a healthy db/],
-      [(s) => { s[SETUP].volumes = s[SETUP].volumes.filter((v) => v.source !== gate.DB_TARGET_VOLUME); }, /db-setup: does not mount the target volume writable/],
-      [(s) => { for (const v of s[SETUP].volumes) if (v.source === gate.DB_TARGET_VOLUME) v.read_only = true; }, /db-setup: the target volume must be writable here/],
+      [(s) => { s[SETUP].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(db\)/],
+      [(s) => { s[SETUP].depends_on = { db: { condition: 'service_started', required: true } }; }, /db-setup: has depends_on \(db\)/],
+      [(s) => { s[SETUP].depends_on = { 'rab-redis': { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(rab-redis\)/],
       [(s) => { delete s['rab-api'].depends_on[SETUP]; }, /rab-api: does not wait for db-setup/],
       [(s) => { s['rab-api'].depends_on[SETUP].condition = 'service_started'; }, /rab-api: does not wait for db-setup/],
-      [(s) => { for (const svc of APP) s[svc].volumes = s[svc].volumes.filter((v) => v.source !== gate.DB_TARGET_VOLUME); }, /rab-api: does not mount db-setup's target volume read-only/],
-      [(s) => { for (const v of s['rab-worker'].volumes) if (v.source === gate.DB_TARGET_VOLUME) v.read_only = false; }, /rab-worker: db-setup's target volume must be mounted read-only/],
-      [(s) => { s['rab-redis'].volumes.push({ type: 'volume', source: gate.DB_TARGET_VOLUME, target: gate.DB_TARGET_DIR, read_only: true }); }, /rab-redis: (unexpected named volume|mounts db-setup's target volume)/],
+      [(s) => { s[SETUP].volumes = s[SETUP].volumes.filter((v) => v.source !== 'crewflow-db-ca'); }, /db-setup: does not mount the bundled db's CA read-only/],
     ];
     for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c, mutate), pattern);
   }
 });
 
-test('DENIAL DB-SETUP: the bundled db password reaches no container except db (POSTGRES_PASSWORD) and, inside the default URL, the app', { skip }, () => {
+// Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot db-harden service, rendered.
+test('db-harden renders with exactly db-setup\'s database settings, its own entrypoint and timeout, no depends_on; nothing depends on it', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    const h = m.services[HARDEN];
+    assert.ok(h, `${c.name}: db-harden`);
+    assert.deepEqual(h.entrypoint, ['./db-setup.sh', 'harden'], c.name);
+    for (const key of gate.DB_SETUP_DB_KEYS) assert.equal(h.environment[key], m.services[SETUP].environment[key], `${c.name} ${key}`);
+    assert.equal(h.environment[gate.HARDEN_TIMEOUT_KEY], '1200', c.name);
+    assert.equal(h.depends_on, undefined, `${c.name}: db-harden has no depends_on`);
+    for (const [name, svc] of Object.entries(m.services)) assert.ok(!Object.keys(svc.depends_on ?? {}).includes(HARDEN), `${c.name}: ${name} depends on db-harden`);
+  }
+  // compose.env's value reaches it (bounded by the lint and the child).
+  const custom = renderModels([combo(DEF)], [`${gate.HARDEN_TIMEOUT_KEY}=600`]);
+  assert.equal(custom[DEF].services[HARDEN].environment[gate.HARDEN_TIMEOUT_KEY], '600');
+});
+
+test('DENIAL db-harden (rendered): its shape, its database settings, any depends_on, and any service that waits for it', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging']) {
+    const cases = [
+      [(s) => { delete s[HARDEN]; }, /services are .*expected/],
+      [(s) => { s[HARDEN].depends_on = { db: { condition: 'service_healthy' } }; }, /db-harden: has depends_on/],
+      [(s) => { s['rab-api'].depends_on[HARDEN] = { condition: 'service_completed_successfully', required: true }; }, /rab-api: depends on db-harden/],
+      [(s) => { s['rab-worker'].depends_on[HARDEN] = { condition: 'service_started', required: true }; }, /rab-worker: depends on db-harden/],
+      [(s) => { s[HARDEN].entrypoint = ['./db-setup.sh']; }, /db-harden: entrypoint is not exactly \.\/db-setup\.sh harden/],
+      [(s) => { s[HARDEN].image = s[HARDEN].image.replace(/sha256:0/, 'sha256:1'); }, /db-harden: image differs from rab-api/],
+      [(s) => { s[HARDEN].restart = 'unless-stopped'; }, /db-harden: restart is "unless-stopped", expected "no"/],
+      [(s) => { s[HARDEN].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }, /db-harden: PG_DATABASE_URL is not db-setup's committed value/],
+      [(s) => { s[HARDEN].environment[gate.HARDEN_TIMEOUT_KEY] = '30'; }, /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is "30"/],
+      [(s) => { s[HARDEN].environment.APP_SECRET = gate.SENTINEL_APP_SECRET; }, /db-harden: has APP_SECRET/],
+      [(s) => { s[HARDEN].user = '0:0'; }, /db-harden: user "0:0" is root/],
+      [(s) => { s[HARDEN].cap_drop = []; }, /db-harden: cap_drop ALL is missing/],
+      [(s) => { s[HARDEN].volumes = s[HARDEN].volumes.filter((v) => v.source !== 'crewflow-db-ca'); }, /db-harden: does not mount the bundled db's CA read-only/],
+      // The timeout belongs to db-harden only.
+      [(s) => { s['rab-api'].environment[gate.HARDEN_TIMEOUT_KEY] = '1200'; }, /rab-api: has CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS/],
+    ];
+    for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c, mutate), pattern);
+  }
+  // The admin password reaches db-harden only in its PG_ADMIN_URL (mode b), the bundled db's only in its superuser URL.
+  assertRefused(problemsAfter(EXT, (s) => { s[HARDEN].environment.OTHER = gate.SENTINEL_ADMIN_PW; }), /db-harden: received the database admin credential \(OTHER\)/);
+  assertRefused(problemsAfter(REL, (s) => { s[HARDEN].environment.OTHER = gate.SENTINEL_DB_PW; }), /db-harden: OTHER carries the bundled db's password/);
+});
+
+test('DENIAL DB-SETUP: the bundled db password reaches no container except db (POSTGRES_PASSWORD) and db-setup\'s bundled superuser URL', { skip }, () => {
   for (const c of [REL, EXT, 'staging']) {
     assertRefused(problemsAfter(c, (s) => { s['rab-redis'].environment = { X: gate.SENTINEL_DB_PW }; }), /rab-redis: X carries the bundled db's password/);
     for (const svc of APP) {
       assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_PASSWORD = gate.SENTINEL_DB_PW; }), new RegExp(`${svc}: environment has PG_DATABASE_PASSWORD`));
       assertRefused(problemsAfter(c, (s) => { s[svc].environment.OTHER = gate.SENTINEL_DB_PW; }), new RegExp(`${svc}: OTHER carries the bundled db's password`));
+      // Never inside PG_DATABASE_URL either: the app login is always crewflow_owner (the superuser URL is db-setup's alone).
+      assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), new RegExp(`${svc}: PG_DATABASE_URL carries the bundled db's password`));
     }
     assertRefused(problemsAfter(c, (s) => { s.db.environment.OTHER = gate.SENTINEL_DB_PW; }), /db: OTHER carries the bundled db's password/);
+    // The crewflow_owner password: only inside the three PG_DATABASE_URL values.
+    assertRefused(problemsAfter(c, (s) => { s.db.environment.OTHER = appUrlOf(c); }), /db: (environment has OTHER|has OTHER|environment OTHER holds a PostgreSQL URL|received the database credential)/);
   }
-  // External database: the app URL must not embed the bundled db's password at all.
-  assertRefused(problemsAfter(EXT, (s) => { for (const svc of APP) s[svc].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /PG_DATABASE_URL carries the bundled db's password/);
-  // Option 2, pass-through: the crewflow_owner password never reaches rab-api / rab-worker either.
-  for (const svc of APP) assertRefused(problemsAfter(PT, (s) => { s[svc].environment.PG_DATABASE_URL = gate.SENTINEL_URL; }), new RegExp(`${svc}: received the database credential \\(PG_DATABASE_URL\\)`));
+});
+
+// Owner decision 2026-11-18: no file carries a credential. The retired setup volume (and anything at its path) is refused
+// wherever it reappears.
+test('DENIAL Twenty way: the retired crewflow-db-target volume, or any mount at /run/crewflow/db-target, is refused on every service', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    assert.ok(!JSON.stringify(m).includes('crewflow-db-target') && !JSON.stringify(m).includes('/run/crewflow/db-target'), `${c.name}: the committed model still names the retired volume`);
+    for (const svc of [SETUP, ...APP, 'rab-redis']) {
+      assertRefused(problemsAfter(c.name, (s) => { (s[svc].volumes ??= []).push({ type: 'volume', source: gate.DB_TARGET_VOLUME, target: gate.DB_TARGET_DIR, read_only: svc !== SETUP }); }), new RegExp(`${svc}: mounts (something at /run/crewflow/db-target|the retired crewflow-db-target volume)`));
+    }
+    assertRefused(problemsAfter(c.name, (s, model) => { model.volumes[gate.DB_TARGET_VOLUME] = {}; }), /volume crewflow-db-target: declares the retired crewflow-db-target volume/);
+    assertRefused(problemsAfter(c.name, (s, model) => { model.volumes.other = { name: `x_${gate.DB_TARGET_VOLUME}`, external: true }; }), /volume other: declares the retired crewflow-db-target volume/);
+  }
 });
 
 test('DENIAL DB-SETUP T-5 / PID 1: rab-worker\'s entrypoint is exactly ./worker-start.sh, no command, no compose init', { skip }, () => {
@@ -277,6 +374,33 @@ test('approval mode (BC-11/C4): unset in compose.env renders none; token renders
   assertRefused(gate.lintEnvText('compose', 'CREWFLOW_MIGRATION_APPROVAL_MODE=off'), /must be exactly none or token/);
   // In runtime.env it would be overridden by rab-api's committed expression: refused, naming compose.env.
   assertRefused(gate.lintEnvText('runtime', 'CREWFLOW_MIGRATION_APPROVAL_MODE=token'), /set it in compose\.env/);
+});
+
+test('AI switch (owner decision 2026-11-20): unset in compose.env renders false on both; true renders true on both; a literal pin is refused', { skip }, () => {
+  // unset -> false: the sentinel compose.env does not set it (and the child environment drops any AI_ENABLED of this machine).
+  for (const c of COMBOS) {
+    for (const svc of APP) assert.equal(fresh(c.name).services[svc].environment.AI_ENABLED, 'false', `${c.name} ${svc}`);
+    assert.deepEqual(gate.aiDefaultOffProblems(fresh(c.name)), [], c.name);
+  }
+  // true -> true on rab-api AND rab-worker (one variable), and the model passes every check.
+  const on = renderModels(COMBOS, ['AI_ENABLED=true']);
+  for (const c of COMBOS) {
+    for (const svc of APP) assert.equal(on[c.name].services[svc].environment.AI_ENABLED, 'true', `${c.name} ${svc}`);
+    assert.deepEqual(checkModel(on[c.name], c), [], c.name);
+  }
+  // A blank compose.env value still renders the default, false (`:-`), never the code default.
+  const blank = renderModels([combo(DEF)], ['AI_ENABLED='])[DEF];
+  for (const svc of APP) assert.equal(blank.services[svc].environment.AI_ENABLED, 'false', svc);
+  // A committed 'true' (or no AI_ENABLED at all) renders something other than the default with no compose.env value.
+  for (const svc of APP) {
+    const pinned = fresh(DEF);
+    pinned.services[svc].environment.AI_ENABLED = 'true';
+    assertRefused(gate.aiDefaultOffProblems(pinned), new RegExp(`${svc}: AI_ENABLED is "true" with no AI_ENABLED in compose\\.env, expected "false"`));
+    // ... and only one service switched on is a drift checkModel refuses in any render.
+    assertRefused(checkModel(pinned, combo(DEF)), /AI_ENABLED differs between rab-api and rab-worker/);
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.AI_ENABLED; }), new RegExp(`${svc}: AI_ENABLED is "", expected exactly true or false`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.AI_ENABLED = 'yes'; }), new RegExp(`${svc}: AI_ENABLED is "yes", expected exactly true or false`));
+  }
 });
 
 test('BC-07: the audit sink reaches rab-api and rab-worker from runtime.env as stdout; missing or invalid is refused', { skip }, () => {
@@ -408,23 +532,24 @@ test('staging: own project name and storage prefix', { skip }, () => {
   assertRefused(problemsAfter('staging', (s) => { s['rab-api'].environment.STORAGE_KEY_PREFIX = 'production'; }), /STORAGE_KEY_PREFIX is not staging/);
 });
 
-test('bundled database under the full contract: every combination has db; rab-api waits for it healthy', { skip }, () => {
+test('bundled database under the full contract: every combination has db; nothing depends on it', { skip }, () => {
   for (const c of [REL, EXT, 'staging']) {
     assertRefused(problemsAfter(c, (s) => { delete s.db; }), /services are .*expected/);
-    assertRefused(problemsAfter(c, (s) => { s['rab-api'].depends_on.db.condition = 'service_started'; }), /rab-api: does not wait for a healthy db/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-api'].depends_on.db = { condition: 'service_healthy', required: true }; }), /rab-api: depends on db/);
     assertRefused(problemsAfter(c, (s) => { s['rab-postgres'] = structuredClone(s.db); }), /services are .*expected/);
   }
 });
 
 // Twenty's Helm db.enabled: CREWFLOW_BUNDLED_DB (compose.env) is db's replica count, 1 by default, 0 only with your own
-// database. The dependency edges stay committed (Compose skips the wait on a 0-replica service).
-test('bundled db switch: one replica by default; 0 only with CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL; the edges stay', { skip }, () => {
+// database. No service depends on db (owner instruction 2026-11-18: OpenShip does not skip a 0-replica dependency, it
+// skips the dependent); db-setup waits for the database itself, rab-api waits for db-setup.
+test('bundled db switch: one replica by default; 0 only with CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL; no edge to db', { skip }, () => {
   for (const c of [DEF, EXT, PT, 'staging']) assert.equal(fresh(c).services.db.deploy.replicas, 1, c);
   for (const c of ['external-no-db', 'pass-through-no-db']) {
     const m = fresh(c);
     assert.equal(m.services.db.deploy.replicas, 0, c);
-    assert.equal(m.services[SETUP].depends_on.db.condition, 'service_healthy', c);
-    assert.equal(m.services['rab-api'].depends_on.db.condition, 'service_healthy', c);
+    assert.equal(m.services[SETUP].depends_on, undefined, c);
+    assert.deepEqual(Object.keys(m.services['rab-api'].depends_on).sort(), [SETUP, 'rab-redis'], c);
     assert.equal(m.services['rab-api'].depends_on[SETUP].condition, 'service_completed_successfully', c);
     const key = c === 'external-no-db' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL';
     assert.equal(m.services[SETUP].environment[key], c === 'external-no-db' ? gate.SENTINEL_ADMIN_URL : gate.SENTINEL_URL, c);
@@ -626,7 +751,7 @@ test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service
     fs.writeFileSync(copy, weakened);
     const c = { name: 'maint', files: [copy], localDb: false, staging: false };
     const problems = checkModel(renderModels([c])[c.name], c);
-    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[db, db-setup, rab-api, rab-redis, rab-worker\]/);
+    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[db, db-harden, db-setup, rab-api, rab-redis, rab-worker\]/);
     assertRefused(problems, /rab-maint: has profiles/);
     assertRefused(problems, /rab-maint: received a value from a separated-mode env file/);
   } finally {
@@ -655,5 +780,24 @@ test('DENIAL security review L3: volumes_from, secrets/configs under /run/crewfl
       assertRefused(problemsAfter(c.name, mutate), pattern);
       assert.ok(label);
     }
+  }
+});
+
+// Owner decision 2026-11-20: the one-deploy password rotation opt-in, rendered.
+test('CREWFLOW_ROTATE_APP_PASSWORD renders on db-setup only (empty by default); missing there, a value other than 1 / empty, or on another service is refused', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    assert.equal(m.services['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD, '', `${c.name}: db-setup renders it empty`);
+    for (const [name, svc] of Object.entries(m.services)) {
+      if (name !== 'db-setup') assert.ok(!('CREWFLOW_ROTATE_APP_PASSWORD' in (svc.environment ?? {})), `${c.name}: ${name} has it`);
+    }
+    const cases = [
+      [(s) => { delete s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD; }, /db-setup: CREWFLOW_ROTATE_APP_PASSWORD is missing/],
+      [(s) => { s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD = 'yes'; }, /db-setup: CREWFLOW_ROTATE_APP_PASSWORD must render to exactly 1 or empty/],
+      ...['rab-api', 'rab-worker', 'db-harden'].map((svc) => [(s) => { s[svc].environment.CREWFLOW_ROTATE_APP_PASSWORD = ''; }, new RegExp(`${svc}: has CREWFLOW_ROTATE_APP_PASSWORD`)]),
+    ];
+    for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c.name, mutate), pattern);
+    // 1 (the operator's one-deploy opt-in) passes.
+    assert.ok(!problemsAfter(c.name, (s) => { s['db-setup'].environment.CREWFLOW_ROTATE_APP_PASSWORD = '1'; }).some((p) => /ROTATE/.test(p)), `${c.name}: 1 passes`);
   }
 });

@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { checkModel, checkRedisPrivate, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS } = require('./compose-one-image.cjs');
+const { waitWrapperScript, WAIT_SECONDS_EXPR } = require('./db-setup-wait.cjs');
 
 const IMG = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be a digest}';
 
@@ -20,13 +21,19 @@ function good() {
         image: IMG,
         entrypoint: ['./api-prestart.sh'],
         environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
-        depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
+        depends_on: { 'rab-redis': { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
         stop_grace_period: '40s',
       },
       'db-setup': {
         image: IMG,
-        entrypoint: ['./db-setup.sh'],
-        depends_on: { db: { condition: 'service_healthy' } },
+        // Owner instruction 2026-11-18: the wait-for-db wrapper, no depends_on (as `config --no-interpolate` renders it).
+        entrypoint: ['/bin/sh', '-c', waitWrapperScript().split('$').join('$$'), 'db-setup'],
+        environment: { CREWFLOW_DB_WAIT_SECONDS: WAIT_SECONDS_EXPR },
+      },
+      // Owner decision 2026-11-18 (M1): the one-shot CREATEROLE hardening; no depends_on.
+      'db-harden': {
+        image: IMG,
+        entrypoint: ['./db-setup.sh', 'harden'],
       },
       'rab-worker': {
         image: IMG,
@@ -429,7 +436,7 @@ const { allowsDefaultDigest, PINNED_DIGEST_IMAGE_REF } = require('./compose-one-
 const DIGEST = `sha256:${'d7'.repeat(32)}`;
 const withDefault = (value) => `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG:-${value}}`;
 const allImages = (m, image) => {
-  for (const n of ['rab-api', 'rab-worker', 'db-setup']) m.services[n].image = image;
+  for (const n of ['rab-api', 'rab-worker', 'db-setup', 'db-harden']) m.services[n].image = image;
   return m;
 };
 const PROD = { allowDefaultDigest: true };
@@ -497,7 +504,7 @@ test('committed files: production.yml pins one full digest on every app service;
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   const imageLines = (text) => [...text.matchAll(/^\s+image:\s*(\S+@\$\{CREWFLOW_IMAGE_TAG[^}]*\})\s*$/gm)].map((m) => m[1]);
   const prod = imageLines(read('docker-compose.production.yml'));
-  assert.equal(prod.length, 3, 'rab-api, rab-worker and db-setup (rab-ops was removed)');
+  assert.equal(prod.length, 4, 'rab-api, rab-worker, db-setup and db-harden (rab-ops was removed)');
   assert.equal(new Set(prod).size, 1, 'the same expression on every app service');
   assert.ok(PINNED_DIGEST_IMAGE_REF.test(prod[0]), prod[0]);
   const image = imageLines(read('docker-compose.image.yml'));
@@ -524,13 +531,13 @@ test('DENIAL DB-SETUP: no bundled db, a db image by tag / from another repositor
   refused(m, /db: has a build section/);
 });
 
-test('DENIAL DB-SETUP: rab-api not waiting for a healthy db; the Worker started without worker-start.sh', () => {
+test('DENIAL DB-SETUP: a service depending on db; the Worker started without worker-start.sh', () => {
   let m = good();
-  delete m.services['rab-api'].depends_on.db;
-  refused(m, /rab-api: must depend on db with condition service_healthy/);
-  m = good();
-  m.services['rab-api'].depends_on.db.condition = 'service_started';
-  refused(m, /rab-api: must depend on db/);
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {
+    m = good();
+    m.services[svc].depends_on = { ...(m.services[svc].depends_on ?? {}), db: { condition: 'service_healthy' } };
+    refused(m, new RegExp(`${svc}: must not depend on db`));
+  }
   // DB-SETUP PID 1: the cleaning scripts are the entrypoint; no command; no compose init.
   for (const [svc, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh']]) {
     for (const ep of [undefined, ['/sbin/tini', '-s', '--'], ['/sbin/tini', '-s', '--', script], ['sh', '-c', script], ['node', 'x.js']]) {
@@ -630,7 +637,20 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   refused(m, /db-setup: image/);
   m = good();
   m.services['db-setup'].entrypoint = ['./api-prestart.sh'];
-  refused(m, /db-setup: entrypoint must be exactly \["\.\/db-setup\.sh"\]/);
+  refused(m, /db-setup: entrypoint is neither exactly \.\/db-setup\.sh nor exactly the wait-for-db wrapper/);
+  // Owner instruction 2026-11-18: the deploy files must start db-setup through the wait (no depends_on: db any more).
+  m = good();
+  m.services['db-setup'].entrypoint = ['./db-setup.sh'];
+  refused(m, /db-setup: must start through the wait-for-db wrapper/);
+  m = good();
+  m.services['db-setup'].entrypoint[2] = m.services['db-setup'].entrypoint[2].replace('exec ./db-setup.sh', 'exec ./api-prestart.sh');
+  refused(m, /db-setup: entrypoint is neither/);
+  m = good();
+  m.services['db-setup'].entrypoint[2] = waitWrapperScript();
+  refused(m, /db-setup: entrypoint is neither/); // security review L3: a single `$` would be interpolated by Compose
+  m = good();
+  m.services['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '${CREWFLOW_DB_WAIT_SECONDS:-5}';
+  refused(m, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed/);
   m = good();
   m.services['db-setup'].init = true;
   refused(m, /db-setup: init: true is refused/);
@@ -641,6 +661,75 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   m.services['rab-api'].depends_on['db-setup'].condition = 'service_started';
   refused(m, /rab-api: must depend on db-setup/);
   m = good();
-  delete m.services['db-setup'].depends_on;
-  refused(m, /db-setup: must depend on db with condition service_healthy/);
+  m.services['db-setup'].depends_on = { 'rab-redis': { condition: 'service_healthy' } };
+  refused(m, /db-setup: has depends_on \(rab-redis\)/);
+});
+
+// Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot db-harden runs the one image, never waits and is
+// never waited for.
+test('DENIAL M1: db-harden missing, on another image, with another entrypoint, with depends_on, or waited for', () => {
+  let m = good();
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+  delete m.services['db-harden'];
+  refused(m, /db-harden is missing/);
+  m = good();
+  m.services['db-harden'].image = IMG.replace('CREWFLOW_IMAGE_TAG', 'CREWFLOW_HARDEN_TAG');
+  refused(m, /db-harden: image/);
+  m = good();
+  m.services['db-harden'].image = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?x}';
+  refused(m, /db-harden: image differs from rab-api/);
+  m = good();
+  m.services['db-harden'].build = { context: '.' };
+  refused(m, /db-harden: has a build section/);
+  for (const ep of [['./db-setup.sh'], ['./db-setup.sh', 'setup'], ['./api-prestart.sh']]) {
+    m = good();
+    m.services['db-harden'].entrypoint = ep;
+    refused(m, /db-harden: entrypoint must be exactly \["\.\/db-setup\.sh","harden"\]/);
+  }
+  m = good();
+  m.services['db-harden'].command = ['harden'];
+  refused(m, /db-harden: must have no command/);
+  m = good();
+  m.services['db-harden'].init = true;
+  refused(m, /db-harden: init: true is refused/);
+  m = good();
+  m.services['db-harden'].depends_on = { db: { condition: 'service_healthy' } };
+  refused(m, /db-harden: must have no depends_on/);
+  m = good();
+  m.services['db-harden'].depends_on = ['db'];
+  refused(m, /db-harden: must have no depends_on/);
+  m = good();
+  m.services['rab-api'].depends_on['db-harden'] = { condition: 'service_completed_successfully' };
+  refused(m, /rab-api: must not depend on db-harden/);
+  m = good();
+  m.services['rab-worker'].depends_on['db-harden'] = { condition: 'service_started' };
+  refused(m, /rab-worker: must not depend on db-harden/);
+  m = good();
+  m.services['rab-redis'].depends_on = ['db-harden'];
+  refused(m, /rab-redis: must not depend on db-harden/);
+});
+
+// Owner decision 2026-11-18 (Twenty's way): the PR #125 option 2 setup volume is retired in every rendered combination.
+test('DENIAL owner decision 2026-11-18: the retired crewflow-db-target volume, or anything at /run/crewflow/db-target, is refused', () => {
+  const { retiredTargetVolumeProblems } = require('./compose-one-image.cjs');
+  assert.deepEqual(retiredTargetVolumeProblems(good(), 'fixture'), []);
+  for (const [edit, re] of [
+    [(m) => { m.volumes = { 'crewflow-db-target': {} }; }, /volume crewflow-db-target: the retired crewflow-db-target volume must not exist/],
+    [(m) => { m.volumes = { bk: { name: 'rab-production_crewflow-db-target', external: true } }; }, /volume bk: the retired crewflow-db-target volume must not exist/],
+    [(m) => { m.services['rab-api'].volumes = [{ type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true }]; }, /rab-api: mounts crewflow-db-target at \/run\/crewflow\/db-target/],
+    [(m) => { m.services['db-setup'].volumes = ['crewflow-db-target:/run/crewflow/db-target']; }, /db-setup: mounts crewflow-db-target at \/run\/crewflow\/db-target/],
+    [(m) => { m.services['rab-redis'].volumes = [{ type: 'bind', source: '/srv/x', target: '/run/crewflow/db-target/owner-password' }]; }, /rab-redis: mounts something at \/run\/crewflow\/db-target\/owner-password/],
+    [(m) => { m.services['rab-worker'].tmpfs = ['/run/crewflow/db-target:size=1m']; }, /rab-worker: a tmpfs at \/run\/crewflow\/db-target/],
+  ]) {
+    const m = good();
+    edit(m);
+    refused(m, re);
+  }
+});
+
+test('owner decision 2026-11-18 (static): no committed compose file declares or mounts the retired crewflow-db-target volume', () => {
+  for (const f of ['docker-compose.production.yml', 'docker-compose.image.yml', 'docker-compose.local-build.yml', 'docker-compose.yml', 'docker-compose.qa.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/^\s*#.*$/gm, '');
+    assert.ok(!/crewflow-db-target|\/run\/crewflow\/db-target/.test(text), `${f}: names the retired setup volume outside a comment`);
+  }
 });

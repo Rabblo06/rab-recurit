@@ -236,6 +236,23 @@ export function semanticDriftFromSnapshot(baseline: SemanticPosture, now: Semant
   return out;
 }
 
+/**
+ * Owner decision M1 (docs point a): the ONE expected role change while the API / Worker run: db-harden (or db-setup) removes
+ * CREATEROLE from crewflow_owner after the first migrate. True only when the drift is exactly that: one `roles` difference,
+ * one crewflow_owner line missing and one unexpected, identical except `createrole=true` -> `createrole=false`, and nothing
+ * else in any section. (The mark is a COMMENT, which the posture does not hold, so clearing it is no difference at all.) The
+ * monitor then re-baselines instead of reporting drift. Any other change, or CREATEROLE coming BACK, is still drift. Pure.
+ */
+export function isCreateRoleHardeningOnly(drifts: readonly SemanticDrift[]): boolean {
+  if (drifts.length !== 1) return false;
+  const [d] = drifts;
+  if (d.section !== 'roles' || d.missing.length !== 1 || d.unexpected.length !== 1) return false;
+  const [before] = d.missing;
+  const [after] = d.unexpected;
+  if (!before.startsWith('role|crewflow_owner|') || !before.includes('|createrole=true|')) return false;
+  return after === before.replace('|createrole=true|', '|createrole=false|');
+}
+
 /** One sanitised line per drift (no row data: catalog names and hashes only). */
 export function describeSemanticDrift(drifts: readonly SemanticDrift[], limit = 20): string {
   const parts: string[] = [];
