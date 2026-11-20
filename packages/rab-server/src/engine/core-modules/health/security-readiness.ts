@@ -1,5 +1,6 @@
 import type { DataSource } from 'typeorm';
 
+import { isPgProductionEnvironment } from '../../../database/postgres/pg-config';
 import { SemanticPostureMonitor } from '../../../database/posture-drift/semantic-posture-monitor';
 import type { SemanticPosture } from '../../../database/posture-drift/semantic-posture';
 import { createSecurityAuditSink, securityAuditSinkConfig, SecurityAuditSink } from '../audit-sink/security-audit-sink';
@@ -62,6 +63,8 @@ export function startSecurityPostureMonitoring(input: {
     sink,
     log,
     intervalMs: input.intervalMs,
+    // Production (the connection factory's own rule): a later ALTER DATABASE ... OWNER TO the login is a role problem too.
+    production: isPgProductionEnvironment(input.env ?? process.env),
     session: async () => {
       const runner = input.dataSource.createQueryRunner();
       await runner.connect();

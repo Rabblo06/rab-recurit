@@ -41,15 +41,17 @@ const member = (role: string, admin: boolean, inherit: boolean, set: boolean, wh
 export function healthyOwnerLoginPosture(): OwnerLoginPostureFixture {
   const ownerRoles = ['rab_owner', 'rab_app', 'rab_secure_owner', 'crewflow'];
   return {
-    login: { who: 'crewflow_owner', login: 'crewflow_owner', super: false, bypassrls: false, replication: false, createdb: false, createrole: true, canlogin: true, inherit: true },
+    login: { who: 'crewflow_owner', login: 'crewflow_owner', super: false, bypassrls: false, replication: false, createdb: false, createrole: true, canlogin: true, inherit: true,
+      owns_database: false, member_of_database_owner: false, database_owner_role: false, database_owner: 'postgres' },
     reach: [
-      { role: 'crewflow_owner', path: 'crewflow_owner', super: false, bypassrls: false, createdb: false, replication: false, canlogin: true, is_login: true },
+      { role: 'crewflow_owner', path: 'crewflow_owner', super: false, bypassrls: false, createdb: false, createrole: true, replication: false, canlogin: true, is_login: true },
       ...[...ownerRoles, 'crewflow_app'].map((role) => ({
         role,
         path: `crewflow_owner>${role}`,
         super: false,
         bypassrls: false,
         createdb: false,
+        createrole: false,
         replication: false,
         canlogin: role === 'crewflow' || role === 'crewflow_app',
         is_login: false,

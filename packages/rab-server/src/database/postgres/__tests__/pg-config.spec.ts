@@ -13,6 +13,7 @@ import {
   selectMigrationEndpoint,
 } from '../pg-config';
 import { pgClientConfig } from '../create-pg-pool';
+import { PG_SSLMODE_PRODUCTION_REFUSAL } from '../pg-tls';
 import { NEVER_IN_RUNTIME_ENV } from '../../typeorm/core/never-in-runtime-env';
 import { TEST_CA_A } from './fixtures/pg-test-ca';
 
@@ -141,8 +142,46 @@ describe('pg-config: production', () => {
     expect(refusal({ ...prod, [name]: 'x' })).toMatch(new RegExp(`libpq environment variable\\(s\\) ${name}`));
   });
 
-  it.each(['disable', 'allow', 'prefer', 'no-verify', 'verify-ca'])('refuses sslmode=%s', (mode) => {
-    expect(refusal({ ...prod, PG_DATABASE_URL: PROD.replace('verify-full', mode) })).toMatch(new RegExp(`sslmode=${mode}, which production refuses`));
+  // Owner decision 2026-11-19 ("SSL like Twenty"): exactly require, verify-ca and verify-full, all three the SAME verify-full.
+  it.each(['require', 'verify-ca', 'verify-full'])('accepts sslmode=%s as full verification (CA chain + host name)', (mode) => {
+    const r = resolvePgEnvironment({ ...prod, PG_DATABASE_URL: PROD.replace('verify-full', mode) });
+    expect(r.primary.ssl).toEqual({ rejectUnauthorized: true });
+    // With a configured CA: the same object, that CA as the only trusted root; host-name verification is never switched off.
+    const withCa = resolvePgEnvironment({ ...prod, PG_DATABASE_URL: PROD.replace('verify-full', mode), PG_SSL_CA_CERT: PEM });
+    expect(withCa.primary.ssl).toEqual({ rejectUnauthorized: true, ca: PEM });
+    expect((withCa.primary.ssl as { checkServerIdentity?: unknown }).checkServerIdentity).toBeUndefined();
+  });
+
+  it('the three accepted modes produce the identical ssl object for an IP host too (bound to the IP)', () => {
+    const ip = (mode: string) => resolvePgEnvironment({ ...prod, PG_DATABASE_URL: `postgresql://crewflow_app:${SECRET}@10.0.0.5:5432/rab?sslmode=${mode}` }).primary.ssl as { rejectUnauthorized: boolean; checkServerIdentity?: unknown };
+    for (const mode of ['require', 'verify-ca', 'verify-full']) {
+      expect(ip(mode).rejectUnauthorized).toBe(true);
+      expect(typeof ip(mode).checkServerIdentity).toBe('function');
+    }
+  });
+
+  it.each(['disable', 'allow', 'prefer', 'no-verify'])('refuses sslmode=%s with the one fixed message', (mode) => {
+    const message = refusal({ ...prod, PG_DATABASE_URL: PROD.replace('verify-full', mode) });
+    expect(message).toBe(PG_SSLMODE_PRODUCTION_REFUSAL('PG_DATABASE_URL'));
+  });
+
+  it('refuses a production URL with NO sslmode, with the same fixed message (it used to mean verify-full)', () => {
+    expect(refusal({ ...prod, PG_DATABASE_URL: PROD.replace('?sslmode=verify-full', '') })).toBe(PG_SSLMODE_PRODUCTION_REFUSAL('PG_DATABASE_URL'));
+    // Other query parameters do not stand in for it.
+    expect(refusal({ ...prod, PG_DATABASE_URL: PROD.replace('sslmode=verify-full', 'application_name=x') })).toBe(PG_SSLMODE_PRODUCTION_REFUSAL('PG_DATABASE_URL'));
+  });
+
+  it('channel_binding=require is accepted with every accepted sslmode and switches pg channel binding on (the Neon string as pasted)', () => {
+    for (const mode of ['require', 'verify-ca', 'verify-full']) {
+      const r = resolvePgEnvironment({ ...prod, PG_DATABASE_URL: PROD.replace('sslmode=verify-full', `sslmode=${mode}&channel_binding=require`) });
+      expect(r.primary.ssl).toEqual({ rejectUnauthorized: true });
+      expect(r.primary.target.channelBindingMode).toBe('require');
+      expect(pgClientConfig(r, { purpose: 'cb-check' }).enableChannelBinding).toBe(true);
+    }
+    // channel_binding does not rescue a refused sslmode.
+    expect(refusal({ ...prod, PG_DATABASE_URL: PROD.replace('sslmode=verify-full', 'sslmode=disable&channel_binding=require') })).toBe(
+      PG_SSLMODE_PRODUCTION_REFUSAL('PG_DATABASE_URL'),
+    );
   });
 
   it('refuses PG_SSL_ALLOW_SELF_SIGNED=true', () => {
@@ -362,9 +401,13 @@ describe('pg-config: optional read replica (PG_DATABASE_REPLICA_URL)', () => {
   it('production: verify-full TLS on the replica too; weaker modes and legacy names stay refused', () => {
     const r = resolvePgEnvironment({ NODE_ENV: 'production', PG_DATABASE_URL: PROD, PG_DATABASE_REPLICA_URL: PROD_REPLICA });
     expect(r.replica?.ssl).toEqual({ rejectUnauthorized: true });
-    expect(refusal({ NODE_ENV: 'production', PG_DATABASE_URL: PROD, PG_DATABASE_REPLICA_URL: PROD_REPLICA.replace('verify-full', 'disable') })).toMatch(
-      /sslmode=disable, which production refuses/,
+    expect(refusal({ NODE_ENV: 'production', PG_DATABASE_URL: PROD, PG_DATABASE_REPLICA_URL: PROD_REPLICA.replace('verify-full', 'disable') })).toBe(
+      PG_SSLMODE_PRODUCTION_REFUSAL('PG_DATABASE_REPLICA_URL'),
     );
+    expect(refusal({ NODE_ENV: 'production', PG_DATABASE_URL: PROD, PG_DATABASE_REPLICA_URL: PROD_REPLICA.replace('?sslmode=verify-full', '') })).toBe(
+      PG_SSLMODE_PRODUCTION_REFUSAL('PG_DATABASE_REPLICA_URL'),
+    );
+    expect(resolvePgEnvironment({ NODE_ENV: 'production', PG_DATABASE_URL: PROD, PG_DATABASE_REPLICA_URL: PROD_REPLICA.replace('verify-full', 'verify-ca') }).replica?.ssl).toEqual({ rejectUnauthorized: true });
     expect(refusal({ NODE_ENV: 'production', PG_DATABASE_URL: PROD, PG_DATABASE_REPLICA_URL: PROD_REPLICA, DATABASE_URL: PROD })).toMatch(/legacy database variable/);
   });
 

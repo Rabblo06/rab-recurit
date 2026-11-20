@@ -135,6 +135,22 @@ $preflight$;
 --     NO-CR  NO. Without CREATEROLE nothing can create a role. On a provider that does not allow CREATEROLE at all,
 --            Crewflow can not be installed (see the runbook, section 4a).
 CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
+-- (5b) Owner decision 2026-11-18: the CREATEROLE mark, the same statement db-setup sends (OWNER_HARDEN_H3_MARK_PENDING). In
+--     production rab-api, rab-worker and the CLI refuse a CREATEROLE crewflow_owner at boot UNLESS it carries exactly this
+--     comment, which says "CREATEROLE until the schema is current" until an expiry 24 h from now, by the SERVER clock
+--     (owner decision M1; database-boot-gate-rules.ts assertCreateRoleGate), and
+--     db-setup (without PG_ADMIN_URL) refuses an unmarked CREATEROLE crewflow_owner before the first start for the same
+--     reason. Step 10 removes the attribute and the mark together.
+--     NEEDS  SUPERUSER, or CREATEROLE plus the ADMIN option on crewflow_owner (step 5 gave the creating admin that).
+--     WHY    crewflow_owner itself can not set or clear it (it has no ADMIN option on itself), so the mark records the
+--            admin's intent: an admin who later re-grants CREATEROLE without it is refused at the next boot.
+--     NO-CR  NO.
+DO $mark$
+BEGIN
+  EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+    'crewflow:createrole-until-schema-current:' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + 86400)::text);
+END
+$mark$;
 
 -- (6) Its database rights, on THIS database only (the one psql is connected to; the name comes from the server, never
 --     typed by you). The same statement as db-setup's.
@@ -227,9 +243,11 @@ SELECT r.rolname, r.rolcanlogin AS login, r.rolsuper AS superuser, r.rolbypassrl
 -- (10) REQUIRED, after the first start has completed: the rab-api log shows the migrate result with serve=true, or a
 --     restart reports state CURRENT (/healthz 200 alone is a loose signal). Not before: the first start needs
 --     CREATEROLE to create the schema roles. Not run by this script (runbook section 4a,
---     step 6; owner decision 2026-11-17: like Twenty, the app login never keeps CREATEROLE). The boot posture check
---     accepts it, db-setup logs one line about it, and restarts, upgrades and new workspaces run without it.
+--     step 6; owner decision 2026-11-17: like Twenty, the app login never keeps CREATEROLE). Since owner decision
+--     2026-11-18 it is ENFORCED: once the schema is complete, db-setup (without PG_ADMIN_URL) and, in production, the boot
+--     check refuse a CREATEROLE crewflow_owner until this step ran (the mark of step 5b only covers the first start).
 --       ALTER ROLE crewflow_owner NOCREATEROLE;
+--       COMMENT ON ROLE crewflow_owner IS NULL;
 --     NEEDS  SUPERUSER, or CREATEROLE plus the ADMIN option on crewflow_owner (the creating admin has it).
 --     WHY    afterwards a leaked crewflow_owner URL can no longer create roles or change the passwords of the schema roles.
 --            It still holds the ADMIN option on the schema roles it created, so it can still GRANT those roles to

@@ -45,11 +45,11 @@
  * DB-SETUP: the database is docker-compose.image.yml's bundled `db` (DOT_PG_IMAGE = a DEBIAN postgres image of the major:
  * the db service runs as 999:999 with the Debian volume layout; an alpine image does not fit it). Its first start runs the
  * shipped 01-crewflow-owner.sql (docker-compose.deploy-order-owner.yml), so every case starts from the hand-made
- * crewflow_owner every R254 deployment has, and compose.env holds that crewflow_owner URL as PG_DATABASE_URL: the
- * PASS-THROUGH path (D5). PR #125 (the Twenty Helm way): only db-setup reads it, checks it read-only and copies its password
- * into the setup volume's password file (never changing it); rab-api / rab-worker build their URL from the target file +
- * that password file. PREV and the red control have no worker-start.sh: their deploys add docker-compose.deploy-order-prev.yml
- * (the previous release's own start-up and its PG_DATABASE_URL), with the crewflow_owner URL whose password logs in now.
+ * crewflow_owner every R254 deployment has, and compose.env holds that crewflow_owner URL as PG_DATABASE_URL (and its
+ * password as PG_DATABASE_APP_PASSWORD). Owner decision 2026-11-18 (Twenty's way): db-setup, rab-api and rab-worker all
+ * receive that crewflow_owner URL; db-setup finds the password logs in and changes nothing (it only marks, then removes,
+ * CREATEROLE). There is no setup volume, target file or password file. PREV and the red control have no worker-start.sh:
+ * their deploys add docker-compose.deploy-order-prev.yml (the previous release's own start-up), with the same URL.
  *
  * Limits kept: at most five running containers of this run (db, rab-redis, rab-api, rab-worker + the operator's
  * registry; U7: two one-off migrate containers instead of rab-api/rab-worker); redis on a tmpfs, the db in the project's own
@@ -146,8 +146,8 @@ function project(kind, opts) {
 }
 /**
  * Points the project at `digest`; PREV (R254) and the red control predate DB-SETUP: their own start-up (prev overlay) and
- * the crewflow_owner URL with the password that logs in now (the hand-made one: PR #125 never changes it). The NEW images
- * keep the hand-made URL in compose.env (unchanged operator file): db-setup reads it and rab-api / rab-worker never do.
+ * the crewflow_owner URL with the password that logs in now (the hand-made one). The NEW images keep the hand-made URL in
+ * compose.env (unchanged operator file): db-setup checks it and rab-api / rab-worker read it (owner decision 2026-11-18).
  */
 function use(p, digest) {
   const prev = digest === IMG.prev || digest === IMG.control;
@@ -494,11 +494,11 @@ async function main() {
     use(u7, IMG.next);
     const pull = u7.compose(['pull', 'rab-api', 'db-setup'], { timeout: 600_000 });
     check(pull.code === 0, 'NEW pulled');
-    // PR #125: rab-api never receives a database URL; the documented one-off form (the production entrypoint with a
-    // command) builds the crewflow_owner URL from db-setup's target file, so NEW's db-setup runs once first.
+    // Owner decision 2026-11-18: the one-off rab-api reads PG_DATABASE_URL from compose.env directly; NEW's db-setup runs
+    // once first, as a deploy would (it finds crewflow_owner's password logs in and changes nothing but CREATEROLE's mark).
     const setup = u7.compose(['run', '--rm', '-T', '--no-deps', 'db-setup'], { timeout: 300_000 });
     evidence('U7-db-setup.log', setup.out);
-    check(setup.code === 0, `NEW's db-setup (one-off): exit ${setup.code} (target and password files written; crewflow_owner unchanged)`);
+    check(setup.code === 0, `NEW's db-setup (one-off): exit ${setup.code} (crewflow_owner's password unchanged; no file written)`);
     const holder = await u7.holdLock(`SELECT pg_advisory_lock(${L.MIGRATION_LOCK_KEY_SQL})`);
     const child = () => u7.composeAsync(['run', '--rm', '-T', '--no-deps', 'rab-api', 'node', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
     const c1 = child();
