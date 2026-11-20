@@ -621,6 +621,8 @@ for (const [label, env, entry, pattern] of [
   ['a PG_DATABASE_URL without userinfo', { ...MODE_C, PG_DATABASE_URL: 'postgresql://db-direct.example:25060/d?sslmode=verify-full' }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
   ['a PG_ADMIN_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_URL logs in as crewflow_owner, the app login/],
   ['an admin login in PG_DATABASE_URL (db-harden)', { ...MODE_B, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh harden', /db-harden: REFUSED - PG_DATABASE_URL does not log in as crewflow_owner/],
+  // Owner decision 2026-11-20: the password rotation opt-in reaches db-setup only; db-harden refuses it.
+  ['the rotation opt-in on db-harden', { ...MODE_B, CREWFLOW_ROTATE_APP_PASSWORD: '1' }, 'db-setup.sh harden', /db-harden: REFUSED - CREWFLOW_ROTATE_APP_PASSWORD must never reach db-harden/],
   // Owner decision M1: db-harden's bounded wait, validated in shell.
   ['a non-numeric harden timeout', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '20m' }, 'db-setup.sh harden', /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be a whole number of seconds from 60 to 7200/],
   ['a harden timeout below 60 in production', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '59' }, 'db-setup.sh harden', /from 60 to 7200/],

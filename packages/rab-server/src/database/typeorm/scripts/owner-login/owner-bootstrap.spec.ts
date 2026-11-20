@@ -349,9 +349,10 @@ function fakeIo(
     /** CREWFLOW_ROTATE_APP_PASSWORD=1 (owner decision 2026-11-20). */
     rotate?: boolean;
     /**
-     * The plain-text fallback's inputs (owner decision 2026-11-20): 'verified' = the client config is verify-full AND the
-     * server reports TLS for the backend (T1); 'client-only' = the config is verified but T1 says no TLS; 'none' = neither.
-     * Absent = the io has no plain value and no TLS check at all (the pre-2026-11-20 shape: last resort only).
+     * The plain-text fallback's inputs (owner decision 2026-11-20): 'verified' = the client config is verify-full and the
+     * server reports TLS for the backend (T1); 'client-only' = the config is verified but T1 says no TLS (TLS ends at a
+     * proxy: still verified, one more line); 'none' = the client config is not verified. Absent = the io has no plain value
+     * and no TLS check at all (the pre-2026-11-20 shape: last resort only).
      */
     tls?: 'verified' | 'client-only' | 'none';
   } = {},
@@ -2373,17 +2374,14 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     await expect(bootstrapOwnerWithIo(failedLogin.io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
   });
 
-  it.each([
-    ['the client config is not verify-full (no TLS, or no-verify)', 'none' as const],
-    ['the config is verified but the server reports no TLS for this backend (pg_stat_ssl)', 'client-only' as const],
-  ])('DENIAL no verified TLS (%s): no plain fallback; the fixed reason line; the last resort (passwordless + printed step, 64)', async (_label, tls) => {
-    const { io, sent, texts, lines } = fakeIo([base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls });
+  it('DENIAL the client config is not verified (no TLS, no-verify, a self-signed allowance): no plain fallback; the fixed reason line; the last resort (passwordless + printed step, 64)', async () => {
+    const { io, sent, texts, lines } = fakeIo([base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'none' });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64, created: true });
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4B_PLAIN_SET_INPUTS);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_P1_SCRAM_ENCRYPTION);
-    // The server half is asked only when the client half holds.
-    expect(texts().includes(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL)).toBe(tls === 'client-only');
+    // The server's view is never even read when the client side is not verified.
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL);
     expect(lines.slice(0, 3)).toEqual([OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'), OWNER_BOOTSTRAP_MESSAGES.plainFallbackNoVerifiedTls, OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated]);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.awaitingPassword);
@@ -2391,17 +2389,35 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     for (const s of sent) for (const v of s.values ?? []) expect(String(v)).not.toContain(OWNER_PW);
   });
 
-  it('DENIAL fail closed: a T1 answer that is not exactly one true row is "not verified"', async () => {
-    for (const rows of [[], [{ ssl: 'true' }], [{ ssl: true }, { ssl: true }], [{ ssl: null }]]) {
-      const { io, texts } = fakeIo([base, base, base, existing], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'verified' });
+  it('lead decision 2026-11-20: client verified + the database reports a non-TLS session (pg_stat_ssl false: TLS ends at a proxy): the fallback RUNS, with the fixed proxy line', async () => {
+    const { io, sent, texts, lines } = fakeIo([base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'client-only' });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+    expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy,
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackUsed('commit', 'XX000'),
+      OWNER_BOOTSTRAP_MESSAGES.plainFallbackLogsNotice,
+    ]);
+    expect(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy.startsWith('TLS was verified to the database endpoint, but the database reports a non-TLS session: TLS ends at a proxy in front of it.')).toBe(true);
+    assertNoPlainValue(lines, sent);
+  });
+
+  it('any T1 answer but exactly one true row prints the proxy line (never silently); the client side alone decides', async () => {
+    for (const rows of [[], [{ ssl: 'true' }], [{ ssl: true }, { ssl: true }], [{ ssl: null }], [{ ssl: false }]]) {
+      const { io, texts, lines } = fakeIo([base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'verified' });
       const realOpen = io.openAdmin.bind(io);
       io.openAdmin = async () => {
         const s = await realOpen();
         return { query: async (text: string, values?: unknown[]) => (text === OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL ? { rows } : s.query(text, values)), end: () => s.end() };
       };
-      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'awaiting-password', exitCode: 64 });
-      expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'created', exitCode: 0, plainText: true });
+      expect(texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+      expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
     }
+    const tlsAll = fakeIo([base, base, base, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000', failTimes: 1, tls: 'verified' });
+    await bootstrapOwnerWithIo(tlsAll.io);
+    expect(tlsAll.lines).not.toContain(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
   });
 
   it('the plain form refused too (XX000 at its COMMIT): the fixed line, then the last resort unchanged (passwordless NOLOGIN + the printed step, 64)', async () => {

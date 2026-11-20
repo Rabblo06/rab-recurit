@@ -420,7 +420,7 @@ export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
  * The plain-text fallback (owner decision 2026-11-20, "make the first deploy work in one go", like Twenty's Helm
  * ensure-database-exists job, which runs CREATE USER ... WITH PASSWORD %L). ONLY after the server refused the pre-hashed
  * SCRAM verifier (owner-bootstrap.ts isPasswordFormRefusal) and ONLY when the admin session is TLS with a verified
- * certificate (the client's verify-full config AND OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL), db-setup sets the password inside
+ * certificate (the client's verify-full config; OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL is read for a log line only), db-setup sets the password inside
  * PG_DATABASE_URL itself, in plain text, in a NEW transaction:
  *   BEGIN; Q4A lock; facts; P1 (SCRAM storage); Q4B_PLAIN (the value as bind parameter $1 into a transaction-local
  *   setting); Q4B2 (no self-grant); L1 (lock_timeout below deadlock_timeout); Q4C_DO_PLAIN; Q4D_REVERIFY; COMMIT.
@@ -435,9 +435,10 @@ export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
  */
 
 /**
- * T1 (the plain-text fallback's TLS check, admin session, read-only): the SERVER's view that THIS backend's connection is
- * TLS (pg_stat_ssl, own pid). False when the row is missing. The client side (verify-full: certificate chain and host name)
- * is checked from the driver config by owner-bootstrap.ts; both must hold. Fixed text, no input.
+ * T1 (the plain-text fallback, admin session, read-only): the SERVER's view that THIS backend's connection is TLS
+ * (pg_stat_ssl, own pid; false when the row is missing). Informational only (lead decision 2026-11-20): the gate is the
+ * client side (verify-full: certificate chain and host name, from the driver config, owner-bootstrap.ts); a false here
+ * means TLS ends at a proxy in front of the database, and one fixed line says so. Fixed text, no input.
  */
 export const OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL = `SELECT COALESCE((SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()), false) AS ssl;`;
 

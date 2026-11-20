@@ -56,7 +56,7 @@
  *     SQLSTATE of the CREATE / ALTER ROLE step, or of the COMMIT, which is where some managed servers check a password):
  *       1. owner decision 2026-11-20 ("make the first deploy work in one go", like Twenty's ensure-database-exists job,
  *          `CREATE USER ... WITH PASSWORD %L`): when the admin session is TLS with a verified certificate (the driver's
- *          verify-full config AND pg_stat_ssl for this backend), db-setup sets the SAME password in plain text in a new
+ *          verify-full config; pg_stat_ssl only adds a line when TLS ends at a proxy), db-setup sets the SAME password in plain text in a new
  *          transaction (OWNER_BOOTSTRAP_Q4C_DO_PLAIN: bind parameter, SCRAM storage, short lock_timeout, CONTEXT stripped),
  *          then the same login and wrong-password probes; it logs the method by its reason, never a provider, and one line
  *          that the value may be in the provider's own logs (the "server logging off" expectation is dropped for this
@@ -263,7 +263,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   plainFallbackLogsNotice:
     "The password may appear in your database provider's own logs (db-setup cannot switch server logging off there). To replace it, follow \"Rotate the crewflow_owner password\" in packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md.",
   plainFallbackNoVerifiedTls:
-    'db-setup does not set the password in plain text: the PG_ADMIN_URL session is not TLS with a verified certificate (sslmode=require, verify-ca or verify-full, each verified fully, and the server reporting TLS for this session). Falling back to the manual step.',
+    'db-setup does not set the password in plain text: the PG_ADMIN_URL session is not TLS with a verified certificate (sslmode=require, verify-ca or verify-full, each verified fully: the certificate chain and the host name). Falling back to the manual step.',
+  plainFallbackTlsEndsAtProxy:
+    'TLS was verified to the database endpoint, but the database reports a non-TLS session: TLS ends at a proxy in front of it. The password is still sent only over the verified connection to that endpoint.',
   plainFallbackRefused: (stage: WriteStage, sqlstate: string) =>
     `The server also refused the password in plain text (SQLSTATE ${sqlstate} ${stageText(stage)}). Nothing was committed. Falling back to the manual step.`,
   awaitingPasswordSet:
@@ -764,7 +766,7 @@ export interface OwnerBootstrapIo {
   /**
    * The client half of "verified TLS": the admin session's driver config demands the certificate chain AND the host name
    * (isVerifyFullSsl; sslmode require / verify-ca / verify-full are all built that way). Absent = not verified (fail closed).
-   * The server half is OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL on the admin session.
+   * This is the gate; OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL (the server's view) only adds a line when TLS ends at a proxy.
    */
   adminTlsVerified?(): boolean;
   /** CREWFLOW_ROTATE_APP_PASSWORD=1 (one deploy): change an existing crewflow_owner's password to the one in PG_DATABASE_URL. */
@@ -978,14 +980,19 @@ async function writeTransaction(session: SqlSession, io: OwnerBootstrapIo, form:
 }
 
 /**
- * Verified TLS on the admin session (owner decision 2026-11-20), both halves: the driver config demands the certificate
- * chain and the host name (io.adminTlsVerified), AND the server reports TLS for this very backend (T1). Anything else,
- * including a missing answer, is "not verified" (fail closed).
+ * Verified TLS on the admin session (owner decision 2026-11-20, lead decision of the same day): the CLIENT side only. The
+ * driver config must demand the certificate chain and the host name (io.adminTlsVerified; no-verify, a self-signed
+ * allowance or no TLS are "not verified": fail closed). That is the hop over the internet. The server's own view (T1,
+ * pg_stat_ssl for this backend) does NOT gate the fallback: a managed database can sit behind a proxy that ends TLS, and the
+ * proxy-to-database hop is the provider's internal network, which the operator already trusts with the value typed in its
+ * SQL editor. T1 is read only when the client side is verified, and a non-TLS answer (anything but one true row) prints
+ * one fixed line by its reason.
  */
 async function adminTlsVerified(session: SqlSession, io: OwnerBootstrapIo): Promise<boolean> {
   if (!io.adminTlsVerified || io.adminTlsVerified() !== true) return false;
   const { rows } = await session.query(OWNER_BOOTSTRAP_T1_OWN_BACKEND_SSL);
-  return rows.length === 1 && rows[0]?.ssl === true;
+  if (!(rows.length === 1 && rows[0]?.ssl === true)) io.log(OWNER_BOOTSTRAP_MESSAGES.plainFallbackTlsEndsAtProxy);
+  return true;
 }
 
 /**
