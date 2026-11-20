@@ -9654,7 +9654,8 @@ Trigger: the published 0.6.0 db-setup, against a managed PostgreSQL that refuses
 was being created by another start" three times and exited 70. The server refused the SCRAM verifier at COMMIT with SQLSTATE
 XX000, and XX000 was in the race set. Owner rules: no provider-specific code (no host matching, no provider flag), decide by
 capability at run time, the same code everywhere; and (option 1, "Create login, you set password") Crewflow never sends a
-plain-text password.
+plain-text password. **Superseded for the password form by owner decision 2026-11-20 (PR #266, next section): a plain-text
+fallback over verified TLS; this option-1 path is now the last resort.**
 
 - **Who can call this?** Only the one-shot db-setup / db-harden services. They alone hold `PG_ADMIN_URL` and
   `PG_ADMIN_DIRECT_URL`. rab-api / rab-worker refuse both by name (`never-in-runtime-env.ts`, `api-prestart.sh`,
@@ -9746,6 +9747,74 @@ plain-text password.
   independent review I4; nothing after the database name but `?sslmode=verify-full`, re-review N3).
 
 ---
+
+## db-setup: crewflow_owner's password in plain text over verified TLS when the server refuses pre-hashed; no automatic change of an existing password (PR #266, owner decision 2026-11-20)
+
+Supersedes, for the password FORM only, "Crewflow never sends a plain-text password" in the section above (owner decision
+2026-11-19, option 1). Owner's reason: on a provider that refuses pre-hashed passwords, the plain password reaches the server
+anyway when the operator types it into the SQL editor; db-setup sending it is no worse and removes the typo risk and the
+manual step. Reference: Twenty's Helm `ensure-database-exists` job (`CREATE USER ... WITH PASSWORD %L`; reference only,
+re-implemented).
+
+- **Who can call this?** Only the one-shot db-setup service (it alone holds `PG_ADMIN_URL`; unchanged). db-harden never sets a
+  password and refuses `CREWFLOW_ROTATE_APP_PASSWORD` (db-setup.sh); rab-api / rab-worker never receive it (compose gate).
+- **Whose data?** The crewflow_owner credential: the schema owner of every tenant's data.
+- **When the plain form is sent (all must hold).**
+  1. The pre-hashed SCRAM verifier was sent first and the server refused its FORM (the unchanged `isPasswordFormRefusal`:
+     22023 / 28P01 / 0A000 / XX000, not the race, from the role step or the COMMIT of a password transaction).
+  2. The admin connection is verified TLS on the CLIENT side: the driver config demands the certificate chain and the host
+     name (`isVerifyFullSsl`; `sslmode` require / verify-ca / verify-full are all built that way since #257). `no-verify`,
+     `PG_SSL_ALLOW_SELF_SIGNED`, `disable` are "not verified": no plain form, the last resort runs with a fixed line.
+     `pg_stat_ssl.ssl` for the own backend is read but does NOT gate (lead decision 2026-11-20): a managed database behind a
+     TLS-terminating proxy reports a non-TLS session; db-setup logs that by reason and continues. The internet hop is the
+     verified one; the proxy-to-database hop is the provider's internal network (residual below).
+  3. A NEW transaction, under the same advisory lock, with the facts and refusals re-read under it.
+- **How the value travels.** Only as bind parameter `$1` of `set_config('crewflow_bootstrap.plain_password', $1, true)`
+  (its own setting, never the verifier's): never in any statement text, `pg_stat_activity.query` or a top-level
+  `pg_stat_statements` row. `SET LOCAL password_encryption = 'scram-sha-256'` first, so the server stores SCRAM, never md5.
+  The short `lock_timeout` (below `deadlock_timeout`) before the role statement, so `log_lock_waits` can never quote it. The
+  DO block (`OWNER_BOOTSTRAP_Q4C_DO_PLAIN`) mirrors the pre-hashed block exactly from the role step on (same attributes,
+  awaiting handling, grant; unit-tested), reads the value from the setting, checks its shape (32+ of `[A-Za-z0-9_-]`, never
+  an md5-hash shape, SCRAM storage in force), runs `format('... PASSWORD %L')` through EXECUTE, and re-raises any error by
+  SQLSTATE with a fixed message and the `crewflow-stage` hint, so no CONTEXT carries the formatted statement. Then the same
+  login probe and wrong-password probe (a trust / peer / cert server is still refused, 64).
+- **Never in Crewflow's own output.** Every log line is fixed text plus a SQLSTATE; unit tests spy on every `io.log` call on
+  the plain path (success, refusal, lock timeout, race) and assert the value is in none, and in no statement text.
+- **Server logging.** The strict "server logging must be off" expectation is dropped for this fallback only (Q1 still turns
+  statement and parameter logging off for a superuser admin; every other path is unchanged). One fixed line says the value
+  may be in the provider's own logs and points to the rotation steps.
+- **Residual (owner-accepted).** The value can remain in: the server log at `log_statement = all` or
+  `log_min_duration_statement` >= 0 when the admin is not a superuser (`log_parameter_max_length` is superuser-only), as the
+  logged bind parameter; `pg_stat_statements` with `track = all` (the nested CREATE / ALTER ROLE; the default `top` does not
+  record it); the provider's own logs; and, behind a TLS-terminating proxy, the provider's internal hop. Not at
+  `log_statement = none / ddl / mod`, and not on error (`log_parameter_max_length_on_error = 0`, Q0). Mitigation: rotate
+  (OWNER-LOGIN-DEPLOYMENT.md, "Rotate the crewflow_owner password").
+- **Tampering / a hostile server.** A server (or a MITM, which the verified TLS excludes) that falsely refuses the verifier
+  now receives the plain password: the plain form goes only to the endpoint whose certificate and host name were verified,
+  the same endpoint the admin password already goes to. A server the operator does not trust with the app password should
+  not hold the app's data either.
+- **Last resort (unchanged).** No verified TLS, or the plain form refused too: the passwordless NOLOGIN role + printed step
+  (option 1), or the printed manual-role SQL (option 2), exactly as in the section above.
+- **No automatic change of an existing password (Twenty / ZITADEL).** A LOGIN crewflow_owner whose password does not match
+  `PG_DATABASE_URL` is refused (64) with `PG_DATABASE_URL password doesn't match crewflow_owner`, before any transaction and
+  before Q2b. Before this change db-setup SET it with the admin login (an operator typo in `PG_DATABASE_APP_PASSWORD` silently
+  re-keyed the role). Opt-in, one deploy: `CREWFLOW_ROTATE_APP_PASSWORD=1` (exactly `1`; any other non-empty value is
+  refused 64 before connecting, fail closed); then pre-hashed first, plain second, same rules; the ADMIN OPTION / CREATEROLE
+  and other-database (Q2b) guards still apply; a matching password prints "nothing to rotate; remove
+  CREWFLOW_ROTATE_APP_PASSWORD", a rotation prints the remove-it line. Placement: db-setup only, exactly
+  `${CREWFLOW_ROTATE_APP_PASSWORD:-}` (compose-owner-login.cjs: raw text, rendered models, compose.env `1` or empty, refused
+  in database.env / runtime.env and on rab-api, rab-worker, db-harden). Mode c (no admin) ignores it with one line.
+- **ASSUMPTION flagged to the owner.** A NOLOGIN crewflow_owner that db-setup itself created without a password, with a valid
+  (unexpired) awaiting-password mark, is a first deploy in progress: its password is set without the opt-in (LOGIN, mark
+  cleared). An expired mark keeps the refusal (never re-enabled).
+- **Tests.** Unit (owner-bootstrap.spec.ts): no verified client TLS means no plain form; client verified + `pg_stat_ssl` false
+  runs it with the proxy line; a mismatch without the opt-in exits 64 with the exact line before any transaction; a bad
+  opt-in value exits 64 before connecting; the plain value in no log line and only in `$1`; pre-hashed first, then the plain
+  transaction in its exact statement order; a plain refusal falls to the last resort; 55P03 is 70; races retried; the
+  awaiting assumption; the opt-in obeys ADMIN OPTION and Q2b. Live (bootstrap-owner-login-check.ts, CI migration-security):
+  mismatch 64 then set with the opt-in; L4 and no-ADMIN-OPTION still refused with it. Capability harness (fallback-check,
+  N1-N4: refusing PG16 extension with a per-run TLS CA, one-run success with SCRAM stored, no-verified-TLS last resort,
+  refuse-plain last resort, rotation, server-log grep at `log_statement = ddl`). Compose gate self-tests.
 
 ## First platform administrator at API boot from `BOOTSTRAP_ADMIN_EMAIL` (2026-11-19)
 

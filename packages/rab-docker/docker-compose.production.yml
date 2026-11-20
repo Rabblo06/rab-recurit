@@ -43,12 +43,16 @@
 #       + PG_ADMIN_URL (its admin URL pasted as-is; db-setup ONLY) + PG_DATABASE_APP_PASSWORD (`openssl rand -hex 32`) +
 #       PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (the database's DIRECT address, copied from the admin URL):
 #       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
-#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
-#       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
-#       run the printed SQL once, all lines together, then redeploy; Crewflow never sends a plain-text password; the
-#       typed value can stay in server logs, pg_stat_statements (track = all), pg_stat_activity and provider logs).
-#       PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only
-#       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
+#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password, in one run
+#       (owner decision 2026-11-20): pre-hashed first; a server that refuses pre-hashed passwords gets the same password in
+#       plain text, only over a verified-TLS admin connection (it may then be in the provider's own logs). Only when that
+#       is refused too, or the TLS is not verified, the last resort: crewflow_owner WITHOUT a password, NOLOGIN, and
+#       db-setup stops with fixed steps (run the printed SQL once, all lines together, then redeploy).
+#       PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only.
+#       An existing crewflow_owner whose password does not log in is NEVER changed by itself: db-setup exits 64
+#       ("PG_DATABASE_URL password doesn't match crewflow_owner"). To rotate: the new value in PG_DATABASE_URL on every
+#       service, plus CREWFLOW_ROTATE_APP_PASSWORD=1 in compose.env for ONE deploy, then remove it (db-setup only;
+#       OWNER-LOGIN-DEPLOYMENT.md "Rotate the crewflow_owner password"). A pooled PG_ADMIN_URL is refused by what it does; then
 #       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
 #       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.
 #   (c) YOUR OWN database, where you created crewflow_owner yourself: CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL only:
