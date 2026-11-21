@@ -60,6 +60,8 @@ export const NotificationType = {
   PAYSLIP_AVAILABLE: 'payslip_available',
   // ...and a calendar period ended with records still waiting for a timesheet or approval (workspace owner).
   PAYROLL_PERIOD_ATTENTION: 'payroll_period_attention',
+  // ReportExport1786723200000 (owner decision 29, widens the preference CHECK): the Worker built a requested report export.
+  REPORT_EXPORT_READY: 'report_export_ready',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

@@ -453,6 +453,8 @@ execute|released_host_label_guard()|crewflow_app|false
 execute|released_host_label_guard()|crewflow|false
 execute|replay_failed_email(uuid,boolean)|crewflow_app|true
 execute|replay_failed_email(uuid,boolean)|crewflow|true
+execute|report_export_guard()|crewflow_app|false
+execute|report_export_guard()|crewflow|true
 execute|reset_attendance_post_shift()|crewflow_app|true
 execute|reset_attendance_post_shift()|crewflow|true
 execute|resolve_membership_for_session(uuid)|PUBLIC|false
@@ -694,6 +696,7 @@ owner|function|register_workspace_schema(uuid)|rab_secure_owner|definer=true|sea
 owner|function|reinstate_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|released_host_label_guard()|rab_secure_owner|definer=false
 owner|function|replay_failed_email(uuid,boolean)|crewflow|definer=false
+owner|function|report_export_guard()|crewflow|definer=false
 owner|function|reset_attendance_post_shift()|crewflow|definer=false
 owner|function|resolve_membership_for_session(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|resolve_membership_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -804,6 +807,7 @@ owner|table|realtime_event|crewflow
 owner|table|refresh_token|rab_secure_owner
 owner|table|released_host_label|rab_secure_owner
 owner|table|replacement_request|crewflow
+owner|table|report_export|crewflow
 owner|table|reserved_host_label|crewflow
 owner|table|role_field_permission|crewflow
 owner|table|role_object_permission|crewflow
@@ -901,6 +905,7 @@ rls|realtime_event|enable=true|force=true
 rls|refresh_token|enable=true|force=true
 rls|released_host_label|enable=true|force=true
 rls|replacement_request|enable=true|force=true
+rls|report_export|enable=true|force=true
 rls|reserved_host_label|enable=true|force=true
 rls|role_field_permission|enable=true|force=true
 rls|role_object_permission|enable=true|force=true
@@ -1072,6 +1077,8 @@ table|released_host_label|crewflow_app|
 table|released_host_label|crewflow|
 table|replacement_request|crewflow_app|S,I,U,D
 table|replacement_request|crewflow|S,I,U,D,T,R,G
+table|report_export|crewflow_app|S
+table|report_export|crewflow|S,I,U,D,T,R,G
 table|reserved_host_label|crewflow_app|
 table|reserved_host_label|crewflow|S,I,U,D,T,R,G
 table|role_field_permission|crewflow_app|S,I,U,D

@@ -134,6 +134,9 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'payroll_run.finalised': c('payroll_approval', 'warning'),
   'payroll_run.late_carried_forward': c('payroll_approval'),
   'payroll_run.exported': c('payroll_approval', 'warning'),
+  // Owner decision 29: a report export can carry pay; asking for one and downloading it are shipped like the payroll CSV.
+  'report_export.requested': c('payroll_approval'),
+  'report_export.downloaded': c('payroll_approval', 'warning'),
   'payslip.net_recorded': c('payroll_approval', 'warning'),
   'payslip.marked_paid': c('payroll_approval', 'warning'),
   // ── account deletion ────────────────────────────────────────────────────────────────────────────────────────────
@@ -198,6 +201,10 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   'payroll_record.shift_statement_retry_requested',
   'payroll_calendar.imported',
   'payslip.uploaded',
+  'report_export.ready',
+  'report_export.failed',
+  'report_export.link_issued',
+  'report_export.file_deleted',
   'shift_review.saved',
   'venue.archived',
   'venue.restored',

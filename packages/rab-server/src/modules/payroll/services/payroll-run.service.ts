@@ -416,44 +416,54 @@ export class PayrollRunService {
   }
 
   private async view(m: EntityManager, ctx: AuthContext, runId: string): Promise<RunView> {
-    const t = businessTables(m);
-    const [run] = await m.query(
-      `SELECT r.id, r.status, r.period_id, r.prepared_at, r.finalised_at,
-              (SELECT u.first_name || ' ' || u.last_name FROM core."user" u WHERE u.id = r.prepared_by) AS prepared_by_name,
-              (SELECT u.first_name || ' ' || u.last_name FROM core."user" u WHERE u.id = r.finalised_by) AS finalised_by_name
-         FROM ${t.payroll_run} r WHERE r.id = $1 AND r.workspace_id = $2`, [runId, ctx.workspaceId]);
-    const period = (await periodsById(m, ctx.organisationId!, [run.period_id])).get(run.period_id) ?? null;
-    const staff: Array<Record<string, unknown>> = await m.query(
-      `SELECT l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, count(*)::int AS records, sum(l.worked_minutes)::int AS minutes,
-              sum(l.amount_pence) AS gross, count(*) FILTER (WHERE l.late_approval)::int AS late,
-              ps.id AS payslip_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, ps.payment_reference, d.file_id, d.uploaded_at,
-              (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id) AS filename
-         FROM ${t.payroll_run_line} l JOIN ${t.staff_profile} sp ON sp.id = l.staff_profile_id JOIN core."user" u ON u.id = sp.user_id
-         LEFT JOIN ${t.payslip} ps ON ps.run_id = l.run_id AND ps.staff_profile_id = l.staff_profile_id
-         LEFT JOIN ${t.payslip_document} d ON d.payslip_id = ps.id AND d.version = ps.version
-        WHERE l.run_id = $1
-        GROUP BY l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, ps.id, d.file_id, d.uploaded_at
-        ORDER BY u.first_name, u.last_name`, [runId]);
-    const rows: RunStaffRow[] = staff.map((s) => {
-      const document = s.file_id ? { fileId: s.file_id as string, filename: (s.filename as string) ?? null, version: Number(s.version), uploadedAt: iso(s.uploaded_at)! } : null;
-      return {
-        staffProfileId: s.staff_profile_id as string, staffName: `${s.first_name} ${s.last_name}`, staffRef: (s.staff_ref as string) ?? null,
-        records: Number(s.records), minutes: Number(s.minutes), grossPence: assertSafePence(Number(s.gross), 'run staff gross'), lateCount: Number(s.late),
-        payslip: s.payslip_id ? {
-          id: s.payslip_id as string, status: s.paid_at ? 'paid' : document ? 'available' : 'processing', version: Number(s.version), document,
-          netPence: s.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s.net_source as 'provider_document') ?? null,
-          paidAt: iso(s.paid_at), paymentReference: (s.payment_reference as string) ?? null,
-        } : null,
-      };
-    });
-    return {
-      id: run.id, status: run.status, period, preparedAt: iso(run.prepared_at)!, preparedByName: run.prepared_by_name ?? null,
-      finalisedAt: iso(run.finalised_at), finalisedByName: run.finalised_by_name ?? null,
-      totals: {
-        records: rows.reduce((n, r) => n + r.records, 0), staff: rows.length, minutes: rows.reduce((n, r) => n + r.minutes, 0),
-        grossPence: assertSafePence(rows.reduce((n, r) => n + r.grossPence, 0), 'run gross total'), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
-      },
-      staff: rows,
-    };
+    return loadPayrollRunView(m, ctx.organisationId!, ctx.workspaceId!, runId);
   }
+}
+
+/**
+ * The run's per-staff view from the immutable line snapshot. No permission check: every caller checks first
+ * (`PayrollRunService` per request; the reports Worker job re-reads the requester's checked, stored decision). Exported
+ * for the payroll run summary report (owner decision 29), which builds the same CSV in the background.
+ */
+export async function loadPayrollRunView(m: EntityManager, organisationId: string, workspaceId: string, runId: string): Promise<RunView> {
+  const t = businessTables(m);
+  const [run] = await m.query(
+    `SELECT r.id, r.status, r.period_id, r.prepared_at, r.finalised_at,
+            (SELECT u.first_name || ' ' || u.last_name FROM core."user" u WHERE u.id = r.prepared_by) AS prepared_by_name,
+            (SELECT u.first_name || ' ' || u.last_name FROM core."user" u WHERE u.id = r.finalised_by) AS finalised_by_name
+       FROM ${t.payroll_run} r WHERE r.id = $1 AND r.workspace_id = $2`, [runId, workspaceId]);
+  if (!run) throw new NotFoundException('Payroll run not found.');
+  const period = (await periodsById(m, organisationId, [run.period_id])).get(run.period_id) ?? null;
+  const staff: Array<Record<string, unknown>> = await m.query(
+    `SELECT l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, count(*)::int AS records, sum(l.worked_minutes)::int AS minutes,
+            sum(l.amount_pence) AS gross, count(*) FILTER (WHERE l.late_approval)::int AS late,
+            ps.id AS payslip_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, ps.payment_reference, d.file_id, d.uploaded_at,
+            (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id) AS filename
+       FROM ${t.payroll_run_line} l JOIN ${t.staff_profile} sp ON sp.id = l.staff_profile_id JOIN core."user" u ON u.id = sp.user_id
+       LEFT JOIN ${t.payslip} ps ON ps.run_id = l.run_id AND ps.staff_profile_id = l.staff_profile_id
+       LEFT JOIN ${t.payslip_document} d ON d.payslip_id = ps.id AND d.version = ps.version
+      WHERE l.run_id = $1
+      GROUP BY l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, ps.id, d.file_id, d.uploaded_at
+      ORDER BY u.first_name, u.last_name`, [runId]);
+  const rows: RunStaffRow[] = staff.map((s) => {
+    const document = s.file_id ? { fileId: s.file_id as string, filename: (s.filename as string) ?? null, version: Number(s.version), uploadedAt: iso(s.uploaded_at)! } : null;
+    return {
+      staffProfileId: s.staff_profile_id as string, staffName: `${s.first_name} ${s.last_name}`, staffRef: (s.staff_ref as string) ?? null,
+      records: Number(s.records), minutes: Number(s.minutes), grossPence: assertSafePence(Number(s.gross), 'run staff gross'), lateCount: Number(s.late),
+      payslip: s.payslip_id ? {
+        id: s.payslip_id as string, status: s.paid_at ? 'paid' : document ? 'available' : 'processing', version: Number(s.version), document,
+        netPence: s.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s.net_source as 'provider_document') ?? null,
+        paidAt: iso(s.paid_at), paymentReference: (s.payment_reference as string) ?? null,
+      } : null,
+    };
+  });
+  return {
+    id: run.id, status: run.status, period, preparedAt: iso(run.prepared_at)!, preparedByName: run.prepared_by_name ?? null,
+    finalisedAt: iso(run.finalised_at), finalisedByName: run.finalised_by_name ?? null,
+    totals: {
+      records: rows.reduce((n, r) => n + r.records, 0), staff: rows.length, minutes: rows.reduce((n, r) => n + r.minutes, 0),
+      grossPence: assertSafePence(rows.reduce((n, r) => n + r.grossPence, 0), 'run gross total'), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
+    },
+    staff: rows,
+  };
 }

@@ -6,6 +6,7 @@ import { CONSUMER_QUEUES, SCAN_QUEUES } from '../../core/scheduler/queue-registr
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runFinalTimesheetCycle } from './final-timesheet.job';
 import { runPayrollPeriodAttentionCycle } from './payroll-period-attention.job';
+import { runReportExportCycle } from './report-export.job';
 import { runShiftReportSchedulerCycle } from './shift-report-scheduler.job';
 import { enqueueShiftStatement } from './shift-statement-enqueue';
 import { processShiftStatementJob, runShiftStatementDispatchCycle } from './shift-statement.job';
@@ -65,6 +66,18 @@ export class ReportScanProcessor {
     const { runtimeDataSource, tenantContext, notificationService, logger } = this.deps.get();
     const result = await runPayrollPeriodAttentionCycle(runtimeDataSource, tenantContext, notificationService);
     if (result.notified) logger.log(`payroll period attention: notified=${result.notified}`);
+  }
+
+  // Owner decision 29: build pending report exports and delete files 24 h after they were ready.
+  @Process('report-export')
+  async reportExport(): Promise<boolean> {
+    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger } = this.deps.get();
+    const result = await runReportExportCycle(runtimeDataSource, tenantContext, notificationService, auditService, {
+      lateGraceMinutes: environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'),
+    });
+    const handled = result.built + result.failed + result.retried + result.deleted;
+    if (handled) logger.log(`report export: built=${result.built} failed=${result.failed} retried=${result.retried} deleted=${result.deleted}`);
+    return handled > 0;
   }
 }
 

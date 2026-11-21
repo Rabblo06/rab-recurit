@@ -41,6 +41,7 @@ import { ManagerWorkspaceModule } from './modules/manager-workspace/manager-work
 import { NotificationModule } from './modules/notification/notification.module';
 import { OfferModule } from './modules/offer/offer.module';
 import { PayrollModule } from './modules/payroll/payroll.module';
+import { ReportsModule } from './modules/reports/reports.module';
 import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { SearchModule } from './modules/search/search.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
@@ -92,6 +93,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     OfferModule,
     AttendanceModule,
     PayrollModule,
+    ReportsModule,
     DashboardModule,
     NavigationModule,
     SearchModule,

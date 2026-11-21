@@ -64,6 +64,8 @@ const PRE_DQ1_WORKER_OPTIONS: Record<PreDq4bQueueName, { concurrency: number; lo
 const EXPECTED_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
   ...PRE_DQ1_WORKER_OPTIONS,
   'crewflow-scan-maintenance': { ...PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'], concurrency: 8 },
+  // Owner decision 29: `report-export` is one more scan on crewflow-scan-reports (4 → 5, the same rule).
+  'crewflow-scan-reports': { ...PRE_DQ1_WORKER_OPTIONS['crewflow-scan-reports'], concurrency: 5 },
   // Phase D-Q4b (plan §4): a NEW consumer starts at concurrency 2; stall settings are BullMQ's defaults, written out.
   'crewflow-timer-triggers': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   // Phase X Part 2, X1.1: a NEW consumer, concurrency 2 like D-Q4b's; stall settings are BullMQ's defaults, written out.
@@ -128,10 +130,12 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(bullmqWorkerOptionsOf(name)).toEqual(EXPECTED_WORKER_OPTIONS[name]);
   });
 
-  it('Phase D-Q2: the only Worker-option change is one more crewflow-scan-maintenance slot for ai-stale-turn-sweep', () => {
+  it('Phase D-Q2 + decision 29: the only Worker-option changes are one more slot on crewflow-scan-maintenance (ai-stale-turn-sweep) and on crewflow-scan-reports (report-export)', () => {
     const changed = (Object.keys(PRE_DQ1_WORKER_OPTIONS) as PreDq4bQueueName[]).filter((n) => JSON.stringify(bullmqWorkerOptionsOf(n)) !== JSON.stringify(PRE_DQ1_WORKER_OPTIONS[n]));
     expect(QUEUE_NAMES.filter((n) => !(n in PRE_DQ1_WORKER_OPTIONS))).toEqual(['crewflow-timer-triggers', 'crewflow-audit-events']);
-    expect(changed).toEqual(['crewflow-scan-maintenance']);
+    expect(changed).toEqual(['crewflow-scan-reports', 'crewflow-scan-maintenance']);
+    expect(bullmqWorkerOptionsOf('crewflow-scan-reports').concurrency - PRE_DQ1_WORKER_OPTIONS['crewflow-scan-reports'].concurrency).toBe(1);
+    expect(acceptsJobName('crewflow-scan-reports', 'report-export')).toBe(true);
     expect(bullmqWorkerOptionsOf('crewflow-scan-maintenance').concurrency - PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'].concurrency).toBe(1);
     expect(acceptsJobName('crewflow-scan-maintenance', 'ai-stale-turn-sweep')).toBe(true);
     // A system scan, not a consumer: the sweep never enqueues or accepts an organisation-scoped job.
@@ -202,10 +206,10 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
   });
 
-  it('every scan job name is declared once, on one scan queue (23 scans: 21 pre-D-Q2 + ai-stale-turn-sweep + D-Q4a shift-scan-combined)', () => {
+  it('every scan job name is declared once, on one scan queue (24 scans: 21 pre-D-Q2 + ai-stale-turn-sweep + D-Q4a shift-scan-combined + decision 29 report-export)', () => {
     const names = SCAN_QUEUE_NAMES.flatMap((q) => [...QUEUE_SETTINGS[q].jobNames]);
-    expect(names).toHaveLength(23);
-    expect(new Set(names).size).toBe(23);
+    expect(names).toHaveLength(24);
+    expect(new Set(names).size).toBe(24);
   });
 
   it('an unknown queue name fails closed (UnknownQueueError), never a default', () => {

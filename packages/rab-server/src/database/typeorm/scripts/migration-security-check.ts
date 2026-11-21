@@ -235,6 +235,18 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // Owner decision 29, reports page v1 (DRAFT, owner SQL review pending; THREAT-MODEL "Reports page and async export"): the
+  // five RLS policies of the NEW table core.report_export, added only: the requester's own rows (select / insert as a fresh
+  // pending row / update) and the Worker's (rab.actor_type = 'worker') select / update within the bound organisation and
+  // workspace. Owner, FORCE RLS, grants and triggers are pinned by the golden posture snapshot and the migration's own
+  // post-condition; no runtime login gains a privilege on an existing object.
+  '1786723200000-ReportExport': [
+    "+ policy|report_export|report_export_insert|a|permissive=true|roles=public|using=|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (requested_by = core.current_uid()) AND (status = 'pending'::text) AND (attempts = 0) AND (csv_content IS NULL) AND (download_token_hash IS NULL))",
+    "+ policy|report_export|report_export_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (requested_by = core.current_uid()))|check=",
+    "+ policy|report_export|report_export_update|w|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (requested_by = core.current_uid()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (requested_by = core.current_uid()))",
+    "+ policy|report_export|report_export_worker_select|r|permissive=true|roles=public|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=",
+    "+ policy|report_export|report_export_worker_update|w|permissive=true|roles=public|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

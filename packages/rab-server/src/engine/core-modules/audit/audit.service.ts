@@ -115,6 +115,14 @@ export const AuditAction = {
   /** A late-approved record was carried into a later period's run (original work date + period in metadata). */
   PAYROLL_LATE_CARRIED_FORWARD: 'payroll_run.late_carried_forward',
   PAYROLL_RUN_EXPORTED: 'payroll_run.exported',
+  // Owner decision 29, reports page v1: a background CSV export. `entityId` = the core.report_export row. The record of
+  // who exported what stays here after the file itself is deleted (24 h). Metadata never carries the file or a token.
+  REPORT_EXPORT_REQUESTED: 'report_export.requested',
+  REPORT_EXPORT_READY: 'report_export.ready',
+  REPORT_EXPORT_FAILED: 'report_export.failed',
+  REPORT_EXPORT_LINK_ISSUED: 'report_export.link_issued',
+  REPORT_EXPORT_DOWNLOADED: 'report_export.downloaded',
+  REPORT_EXPORT_FILE_DELETED: 'report_export.file_deleted',
   PAYSLIP_UPLOADED: 'payslip.uploaded',
   PAYSLIP_NET_RECORDED: 'payslip.net_recorded',
   PAYSLIP_MARKED_PAID: 'payslip.marked_paid',

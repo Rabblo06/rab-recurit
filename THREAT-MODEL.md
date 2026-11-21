@@ -10354,3 +10354,53 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Reports page and async export — five CSV reports built by the Worker, single-use 60-second links, files deleted after 24 h (owner decision 29, branch feat/reports-async-export, 2026-11-21; NEW SQL, DRAFT for owner review)
+- **Assets:** hours, pay, attendance exceptions and payroll-run figures for many people at once, in one downloadable file.
+- **Actors and threats:** a manager reading another manager's (or organisation's) export; a Venue Manager reaching pay or
+  another venue; a staff member reaching any report; a leaked or replayed download link; a client widening its own scope
+  or adding pay columns through the request body; a CSV that runs a formula in Excel; an export kept forever; a flood of
+  exports; a person (not the Worker) writing a "ready" file; the Worker forging a link.
+- **Controls:**
+  - Layer 1/2: `PermissionGuard(report.view)` (list) / `PermissionGuard(report.export)` (request, link, download) on each
+    handler AND `ReportExportService` re-checks the same flags in the transaction. `@ManagerApplication()`: mobile
+    sessions refused. The existing flags `report.view` / `report.export` are reused (held by CEO, managers and Venue
+    Managers today; staff hold neither) — the decision text names "reports.view"; flagged for the owner.
+  - organisationId / workspaceId / requester / scope / pay and hours columns come only from the verified session and the
+    live field policy, never the body (`forbidNonWhitelisted`: `organisationId`, `includePay`, `status`, `scopeKind` → 400).
+  - Scope: a Venue Manager's export stores their venue ids (one venue if they chose one; 404 for any other venue), never
+    pay (CHECK) and never the payroll run summary (403). Everyone else is limited to the records of their resolved owner
+    (`created_by`, as the lists). Pay columns only with `payroll.view` AND the pay field visible; hours only while worked
+    time is visible. The decision is stored on the row and RE-CHECKED when a link is issued and at download: a lost
+    venue → 404, lost pay / hours access → 403 ("run the export again").
+  - Layer 3/4: every query pins organisation, workspace and requester; `core.report_export` has ENABLE + FORCE RLS in the
+    creating migration: the requester's own rows (select; insert only as a fresh pending row; update) and the Worker's
+    (`rab.actor_type = 'worker'`, organisation + workspace) select / update. No tenant context → zero rows; another user's
+    session → zero rows; another organisation / manager → 404 on list, link and download.
+  - Guard trigger `core.report_export_guard()`: identity, parameters and scope immutable; a person may only issue / burn
+    a link (only for a ready file; the database sets the 60-second lifetime and burns once, before expiry, counting one
+    download); only the Worker builds or deletes a file, with the transitions pending → ready | failed, ready → expired
+    (not before the 24 h are up), and never touches a link. No DELETE grant, owner-login parity triggers for UPDATE /
+    DELETE. A row (who exported what, when) is kept; the audit log keeps requested / ready / failed / link issued /
+    downloaded / file deleted (requested and downloaded are shipped off-host like the payroll CSV export).
+  - Link: 32 random bytes (base64url), returned once, stored only as SHA-256 (unique), sent back in a POST body (not the
+    URL, so not in access logs), single use, 60 s; an expired or used link → 404.
+  - File: built by the Worker in the export's own binding inside a savepoint (statement timeout 120 s, at most 10 MB,
+    otherwise `too_large`); kept in the row (no object-storage copy, no URL) and removed 24 h after it was ready.
+  - CSV: every cell through the payroll CSV's `csvCell` (leading `= + - @ tab CR` neutralised, quoting); money as integer
+    pence → decimal string (bigint arithmetic); hours from the stored worked minutes.
+  - Flood: 10 exports per user per rolling hour (transaction-scoped advisory lock + count, 429); the value is an assumption.
+- **Assumptions flagged (payroll / attendance figures):** report 1's gross pay is the clock-out earnings snapshot (before
+  approval / adjustments; report 5 is the approved run); "late" reuses LATE_CLOCK_IN_GRACE_MINUTES; "out of area" = a
+  clock-in fix outside the venue's geofence radius; the 48-hour column is per calendar week (WTR is a 17-week average),
+  a warning only; fill rate counts published shifts; dates are London work dates.
+- **Residual / follow-ups:** the import-boundary ratchet needs one owner-approved Worker edge
+  (`report-export.job.ts` → `modules/reports/services/report-builders.ts`); no API wake (an export waits for the next
+  15-second Worker scan); PDF later.
+- **Tests:** `report-builders.spec.ts` (formula neutralising, bigint pence, scope predicates in every query, Venue Manager
+  venue-only SQL, pay / hours columns only when stored, exceptions, 48 h edge, fill rate, unknown key builds nothing);
+  `report-exports.integration.spec.ts` (happy path; single use; expired link; mass assignment 400s; other organisation /
+  other manager / staff 404 / 403 with the link left unburnt; Venue Manager scope, 403 on the payroll summary and 404
+  after losing the venue; payroll.view lost → 403 at download; 429; zero rows without context; guard / grant / no-DELETE
+  refusals; database-fixed 60 s); `report-export.integration.spec.ts` (Worker: built once, scoped, notified, audited;
+  not_found fails at once; deleted after 24 h, no link afterwards); scheduler / registry specs.

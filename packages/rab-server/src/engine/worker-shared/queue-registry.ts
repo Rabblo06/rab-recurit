@@ -305,7 +305,8 @@ export const QUEUE_SETTINGS = Object.freeze({
   // (its two shifts-queue members, shift-monitor and attendance-monitor, are then not), so one slot is idle in either mode.
   [SCAN_QUEUES.shifts]: scanQueue(5, ['shift-monitor', 'attendance-monitor', 'late-clock-in', 'shift-cancellation-followup', 'shift-scan-combined']),
   [SCAN_QUEUES.offers]: scanQueue(3, ['offer-expiry', 'manager-confirmation-timeout', 'replacement-staff']),
-  [SCAN_QUEUES.reports]: scanQueue(4, ['shift-report-scheduler', 'final-timesheet', 'shift-statement-dispatch', 'payroll-period-attention']),
+  // Owner decision 29 adds `report-export` (one more slot: 4 → 5).
+  [SCAN_QUEUES.reports]: scanQueue(5, ['shift-report-scheduler', 'final-timesheet', 'shift-statement-dispatch', 'payroll-period-attention', 'report-export']),
   // Phase D-Q2 adds `ai-stale-turn-sweep` (one more slot: 7 → 8). Registered only when AI_STALE_TURN_SWEEP=true; the
   // slot exists either way so the registry equals SCAN_JOBS (assertScanQueueSettings counts every defined scan).
   [SCAN_QUEUES.maintenance]: scanQueue(8, [
