@@ -10300,3 +10300,50 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Staff documents with expiry (Lane D, branches feat/staff-documents-*, 2026-11-21; DRAFT, new SQL for owner review)
+- **Asset:** a staff member's identity and compliance evidence (passport, right-to-work, visa, DBS, licences): highly
+  sensitive personal data of ANOTHER person, plus the compliance decision built on it (an expired required document
+  blocks new offers).
+- **Threats:** a manager of another organisation or another workspace reads or changes a staff member's documents
+  (IDOR on a document / file id); a staff member reads a colleague's documents or self-verifies; a manager verifies their
+  own document; an uploaded file is malware or active content served back to a manager's browser; a revoked document
+  stays downloadable through an already-issued link; a client smuggles `organisationId` / `status` / `scanStatus`; the
+  runtime login rewrites a document's owner, file or dates, or truncates the history; the offer block is bypassed through
+  the bulk-offer path.
+- **Controls:** five layers. Guard: `PermissionGuard(staff_document.view | manage | configure | own)`, manager routes
+  `@ManagerApplication()`, staff routes `@MobileApplication('staff_app')`. Service (StaffDocumentService): the flag is
+  re-checked in the transaction; another person's documents need a NON-venue manager of the caller's own workspace and
+  the staff profile in it (404 otherwise, never 403); nobody decides on their own document (403, it exists and is
+  theirs); named actions only (verify / reject / revoke) through `assertTransition(STAFF_DOCUMENT_TRANSITIONS)` (409).
+  Query: every statement pinned to organisation + workspace + staff_user_id. RLS (StaffDocumentSchema1786722300000):
+  core.staff_document ENABLE + FORCE; tenant on every policy; SELECT = own row (`staff_user_id = core.current_uid()`),
+  non-venue workspace manager, or the Worker marker; INSERT = uploader, pending, never infected; UPDATE = non-venue
+  workspace manager and `staff_user_id <> current uid`; no DELETE policy or grant. Second predicate is real at the
+  database: the row is keyed by the staff USER id, not the workspace-schema profile id. Guard trigger
+  core.staff_document_guard(): owner, type, file and dates immutable, status machine and kept decisions enforced,
+  TRUNCATE refused for the runtime login. Files: magic-byte sniffing (PDF / PNG / JPEG only; extension and Content-Type
+  ignored), 10 MB (Multer fast-fail 413 and FileService re-check), server-built private object key of opaque ids,
+  SHA-256 verified on proxied reads, always `attachment` + `nosniff` + sandbox CSP. Virus scan before storing through a
+  pluggable `VirusScanner` (ClamAV clamd INSTREAM when CLAMAV_HOST is set); `infected` is refused and audited; with no
+  scanner or a scanner error the file stays `not_scanned`, and a file is HIDDEN (no fileId, no download, no
+  verification) until a real scanner said clean; the DB CHECK refuses `clean` without scanner evidence. Downloads only
+  through `/rest/v1/files/:id/download` with the registered StaffDocumentFilePolicy, re-checked on every request (a
+  revoked document is 404 on the next request). `forbidNonWhitelisted` multipart DTO (three named fields).
+- **Security trade-off (veto point):** on the S3 driver a presigned URL already handed out cannot be revoked; it lives
+  at most 60 s for this kind (FILE_KIND_RULES.STAFF_DOCUMENT.signedUrlTtlSeconds, below the 120 s default). Accepted
+  instead of streaming every document through the API. The LOCAL driver streams and has no such window.
+- **Owner decisions flagged, not decided:** default required types (owner recommends Right to Work only; code default
+  DEFAULT_REQUIRED_STAFF_DOCUMENT_TYPES), who holds the four permissions by default (proposed: manager = view / manage /
+  configure, staff = own; CEO and Venue Manager none), the document type list, retention (documents are never deleted;
+  workspace / organisation deletion cascades), files hidden until scanned clean (owner-recommended), which scanner and
+  where it runs (recommended ClamAV on our own server), whether a pending (unverified) document counts as held, and
+  that only an EXPIRED required document blocks offers (a missing one does not).
+- **Tests:** staff-document-sql.spec.ts (shape, frozen lists = @rab/shared, no delete, own-decision refused, source
+  rules); permission-catalogue.spec.ts (defaults); staff-document-rls.integration.spec.ts (zero rows without tenant
+  context on both tables; other organisation / workspace / staff; staff cannot write for others or pre-verify; manager
+  cannot verify own; guard immutability and transitions; DELETE no-op; TRUNCATE refused; clean without evidence refused);
+  later PRs add the HTTP abuse cases, the offer block (single and bulk) and the expiry job.
+- **Residual:** the expiry and offer rules use calendar dates in Europe/London; a manager with the flag inside the
+  workspace can upload a document for any user id the service resolves from a staff profile (RLS cannot see the
+  workspace-schema profile table); a scanner verdict is only as good as the scanner's signatures.
