@@ -1,0 +1,923 @@
+{
+  "//": "Index hygiene baseline (packages/rab-server/src/database/typeorm/core/index-hygiene.ts). Today's findings, each with a reason. Exact: a new finding fails, and so does an entry that matches nothing any more (remove it in the PR that fixed it). Regenerate deliberately with check-index-hygiene.ts --print-baseline and review the diff like code.",
+  "unindexedForeignKeys": [
+    {
+      "key": "WS.attendance(clock_in_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.attendance(clock_out_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.attendance(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.attendance_correction(corrected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.attendance_correction(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.attendance_correction(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.job_offer(confirmed_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.job_offer(rejected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.job_role(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.manager_venue(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.manager_venue(venue_id) -> WS.venue",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.manager_venue(venue_id,workspace_id) -> WS.venue",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_record(approved_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_record(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.payroll_record(rejected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_record(shift_id,workspace_id) -> WS.shift",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_record(statement_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_run(finalised_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_run(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.payroll_run(period_id) -> core.payroll_calendar_period",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_run(prepared_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_run_line(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.payroll_run_line(original_period_id) -> core.payroll_calendar_period",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payroll_run_line(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payslip(net_recorded_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payslip(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.payslip(paid_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payslip(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payslip_document(file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payslip_document(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.payslip_document(uploaded_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.payslip_document(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(approved_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(declined_offer_id) -> WS.job_offer",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(notified_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.replacement_request(rejected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(resulting_offer_id) -> WS.job_offer",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(selected_staff_profile_id) -> WS.staff_profile",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.replacement_request(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift(approved_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift(cancelled_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift(declined_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift(job_role_id) -> WS.job_role",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift(requested_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_assignment(assigned_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_assignment(attendance_reviewed_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_assignment(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.shift_report(final_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_report(finalised_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_report(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.shift_report(original_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_report(pre_shift_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_report(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.shift_request_staff(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.shift_staff_review(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.shift_staff_review(reviewer_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.staff_profile(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.user_note(author_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.user_note(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "WS.venue(photo_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.venue_manager_staff(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.venue_role_rate(job_role_id) -> WS.job_role",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "WS.venue_role_rate(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.account_invite(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.admin_inspect_session(admin_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.admin_inspect_session(legacy_organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.admin_inspect_session(target_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_action_proposal(conversation_id,organisation_id,workspace_id,user_id) -> core.ai_conversation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_agent(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.ai_agent(workspace_id,organisation_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_agent_event(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.ai_agent_event(trigger_id,workspace_id) -> core.ai_agent_trigger",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_agent_event(workspace_id,organisation_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_agent_trigger(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.ai_agent_trigger(run_as_user_id,organisation_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_agent_trigger(workspace_id,organisation_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_conversation(user_id,organisation_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_input_request(conversation_id,organisation_id,workspace_id,user_id) -> core.ai_conversation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_message(continues_turn_id,conversation_id) -> core.ai_message",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.ai_usage(user_id,organisation_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.attendance(clock_in_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.attendance(clock_out_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.attendance(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.attendance_correction(corrected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.attendance_correction(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.attendance_correction(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.email_change_request(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.email_change_request(requested_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.email_change_request(user_id,organisation_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.email_outbox(attachment_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.email_outbox(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.email_outbox(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.email_outbox(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.host_label_claim(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.job_offer(confirmed_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.job_offer(rejected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.job_role(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.login_handoff(source_session_id) -> core.user_session",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.login_handoff(user_id,organisation_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.login_handoff(workspace_id,organisation_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.login_history(user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.manager_venue(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.manager_venue(venue_id) -> core.venue",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.manager_venue(venue_id,workspace_id) -> core.venue",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.manager_workspace(logo_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.member_invitation(accepted_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.member_invitation(invited_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.member_invitation(revoked_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.navigation_layout(user_id,organisation_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.notification(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.notification_preference(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.oauth_transaction_state(reauth_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.oauth_transaction_state(resolved_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation(logo_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation(reactivated_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation(suspended_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation_invitation(accepted_organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation_invitation(accepted_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation_invitation(invited_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.organisation_invitation(inviter_organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.password_reset_token(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payroll_calendar(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_calendar_period(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payroll_record(approved_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_record(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payroll_record(rejected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_record(shift_id,workspace_id) -> core.shift",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_record(statement_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_run(finalised_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_run(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payroll_run(period_id) -> core.payroll_calendar_period",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_run(prepared_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_run_line(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payroll_run_line(original_period_id) -> core.payroll_calendar_period",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payroll_run_line(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payslip(net_recorded_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payslip(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payslip(paid_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payslip(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payslip_document(file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payslip_document(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.payslip_document(uploaded_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.payslip_document(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.platform_admin(granted_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.platform_admin(revoked_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.platform_config(updated_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.push_delivery(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.push_device(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.realtime_event(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.refresh_token(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.refresh_token(replaced_by) -> core.refresh_token",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(approved_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(declined_offer_id) -> core.job_offer",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(notified_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.replacement_request(rejected_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(resulting_offer_id) -> core.job_offer",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(selected_staff_profile_id) -> core.staff_profile",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.replacement_request(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.role_object_permission(updated_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.role_permission(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.role_permission(permission_id) -> core.permission",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift(approved_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift(cancelled_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift(declined_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift(job_role_id) -> core.job_role",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift(requested_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_assignment(assigned_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_assignment(attendance_reviewed_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_assignment(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.shift_report(final_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_report(finalised_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_report(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.shift_report(original_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_report(pre_shift_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_report(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.shift_request_staff(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.shift_staff_review(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.shift_staff_review(reviewer_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.staff_profile(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.stored_file(created_by) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.stored_file(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user(avatar_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user_note(author_user_id) -> core.user",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user_note(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.user_permission_override(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.user_permission_override(permission_id) -> core.permission",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user_preference(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.user_role(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.user_role(role_id) -> core.role",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user_role(role_id,role_is_agent) -> core.role",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user_session(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.user_session(workspace_id,organisation_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.venue(photo_file_id) -> core.stored_file",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.venue_manager_staff(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.venue_role_rate(job_role_id) -> core.job_role",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.venue_role_rate(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.worker_dispatch_pointer(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.worker_due_work(organisation_id) -> core.organisation",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
+    },
+    {
+      "key": "core.worker_due_work(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    },
+    {
+      "key": "core.worker_event(workspace_id) -> core.manager_workspace",
+      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
+    }
+  ],
+  "indexNames": [
+    {
+      "key": "WS.attendance.attendance_one_active_per_staff: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "WS.attendance.attendance_post_shift_due: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "WS.shift_assignment.shift_assignment_no_double_booking: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.ai_message.ai_message_one_continuation: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.ai_message.ai_message_one_input_continuation: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.ai_message.ai_message_one_queued_turn: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.ai_message.ai_message_one_reply: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.ai_message.ai_message_one_running_turn: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.attendance.attendance_one_active_per_staff: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.attendance.attendance_post_shift_due: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.email_change_request.email_change_request_one_open_per_user: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.host_label_claim.host_label_claim_one_organisation: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.manager_profile.manager_profile_one_current_initial_manager: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.member_invitation.member_invitation_one_live_per_email: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.migrations.PK_8c82d7f526340ab734260ea46be: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.navigation_layout.navigation_layout_one_per_user_workspace: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.organisation_invitation.organisation_invitation_one_live_per_email: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.payroll_calendar.payroll_calendar_one_active_per_year: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.payroll_calendar_period.payroll_calendar_period_lookup: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.payroll_calendar_period.payroll_calendar_period_no_overlap: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.role.role_member_name_per_workspace: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.shift_assignment.shift_assignment_no_double_booking: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.worker_due_work.worker_due_work_lease: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.worker_due_work.worker_due_work_pending_due: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    },
+    {
+      "key": "core.workspace_membership.workspace_membership_one_active_per_user: suffix",
+      "reason": "pre-existing on 2026-11-21: the name predates the naming lint; renaming an index is a migration and an owner decision"
+    }
+  ]
+}

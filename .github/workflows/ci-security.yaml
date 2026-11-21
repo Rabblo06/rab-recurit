@@ -133,6 +133,23 @@ jobs:
         run: |
           POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
             packages/rab-server/src/database/typeorm/scripts/check-semantic-posture.ts
+      # Index-fix tooling (docs/plans/index-fix/CREWFLOW_INDEX_FIX_PROMPT.md "Tooling"): a migration newer than the rule
+      # builds an index on an existing table CONCURRENTLY (transaction = false) and names it by the convention; the fresh
+      # install has no new unindexed foreign key, invalid index or index-name finding (core/index-hygiene.baseline.json
+      # holds today's findings with a reason each; exact both ways, so it only shrinks deliberately; the workspace-schema
+      # entries are held by index-hygiene.integration.spec.ts); the read-only usage report runs. Catalogue reads only.
+      - name: Index migration rules (CONCURRENTLY on existing tables, index names), self-tests and check
+        run: |
+          node --test tools/check-index-migrations.test.cjs
+          node tools/check-index-migrations.cjs
+      - name: Index hygiene on the fresh install (unindexed foreign keys, invalid indexes, index names) as crewflow_owner
+        run: |
+          INDEX_HYGIENE_DATABASE_URL="$RLS_OWNER_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/check-index-hygiene.ts
+      - name: Index usage report (read-only smoke on the fresh install)
+        run: |
+          INDEX_REPORT_DATABASE_URL="$RLS_OWNER_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/index-usage-report.ts
       - name: Owner-login guards and behaviour-change catalogue (real PostgreSQL, as crewflow_owner)
         run: |
           TEST_DATABASE_URL="$RLS_OWNER_URL" TEST_DATABASE_URL_UNPOOLED="$RLS_ADMIN_URL" DB_TARGET=local \
