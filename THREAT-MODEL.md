@@ -10300,3 +10300,18 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Shift-report lists — page first, aggregate the page (branch perf/shift-report-list-page-first, 2026-11-21; runtime SQL, no migration)
+- **Finding (M9 load test §4.4, availability):** `GET /attendance/report/shifts` aggregated every shift of the caller's
+  scope with its assignments and attendance (67,596 shifts, 119,346 joined rows, a 22 MB on-disk sort) before the bucket
+  filter and the page; the list was 41 % of database time at the 2x spike.
+- **Control:** the same scope (Venue Manager: assigned venues; Manager: shifts they created), status exclusion, bucket
+  predicate (REPORT_IN_HISTORY_SQL / REPORT_NEEDS_ATTENTION_SQL), order and window total select the page first; staff and
+  attendance counts are aggregated for the page's shifts only. Same rows, order and columns; every table is still read
+  under the caller's tenant context and RLS; no request value is interpolated (scope values and LIMIT / OFFSET are bound).
+  `report.view` is still asserted in the service before anything is read.
+- **Tests:** `shift-report-list-page-first.spec.ts` (scope, bucket, order and LIMIT / OFFSET precede every
+  shift_assignment / attendance read; total computed before LIMIT; final rows keep the page order); the bucket boundaries
+  and Venue Manager scoping run against real rows in `venue-manager-scoping` / `sf2-layer2-venue-reports-workspace`.
+- **Residual:** the final-timesheet delivery counts (email_outbox) are still read for every finalised report in scope
+  (index of #312); removing that needs the persisted delivery time proposed in LOAD-TEST.md §4.4 (migration, owner review).

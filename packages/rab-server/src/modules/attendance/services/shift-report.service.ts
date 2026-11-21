@@ -238,11 +238,7 @@ export class ShiftReportService {
       const bucketSql = dto.bucket === 'history' ? REPORT_IN_HISTORY_SQL : `(NOT ${REPORT_IN_HISTORY_SQL} OR ${REPORT_NEEDS_ATTENTION_SQL})`;
       const order = dto.bucket === 'history' ? 'r.ends_at DESC, r.shift_id' : `${REPORT_NEEDS_ATTENTION_SQL} DESC, r.starts_at ASC, r.shift_id`;
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${REPORT_ROWS_SQL(manager, scopeSql)}
-        SELECT r.*, now() AS db_now, count(*) OVER () AS total FROM rows r
-        WHERE ${bucketSql}
-        ORDER BY ${order}
-        LIMIT $${params.length - 1} OFFSET $${params.length}`, params);
+      const rows = await manager.query(REPORT_PAGE_SQL(manager, scopeSql, bucketSql, order, `$${params.length - 1}`, `$${params.length}`), params);
       const dbNow = rows[0]?.db_now ? new Date(rows[0].db_now) : new Date((await manager.query('SELECT now() AS n'))[0].n);
       return {
         data: rows.map((r: Record<string, any>) => toSummary(r, dbNow)),
@@ -608,35 +604,52 @@ export class ShiftReportService {
 const DELIVERY_AGG_SQL = `count(*) FILTER (WHERE eo.status IN ('PENDING','QUEUED','PROCESSING','RETRY')) AS d_pending,
   count(*) FILTER (WHERE eo.status = 'SENT') AS d_sent, count(*) FILTER (WHERE eo.status = 'FAILED') AS d_failed, max(eo.sent_at) AS d_last_sent_at`;
 
-/** Per-shift report rows for the lists (`rows` CTE). One attendance row per assignment (unique shift_assignment_id). */
-const REPORT_ROWS_SQL = (manager: EntityManager, scopeSql: string) => {
+/**
+ * One page of the report lists. M9 load test §4.4 (LOAD-TEST.md, Q2 / Q3 / Q10: 41 % of database time at the 2x spike):
+ * the list used to aggregate EVERY shift of the caller's scope with its assignments and attendance (67,596 shifts, 119,346
+ * joined rows, a 22 MB on-disk sort) before the bucket filter and the page. The bucket and the order need only the shift,
+ * its report and the final timesheet's delivery counts, so those are filtered, ordered and paged first (`keys` -> `rows`
+ * -> `page`, the same predicate, order and window total as before), and the staff / attendance counts are aggregated for
+ * the page's shifts only (`c`). Same row set, same order, same columns; RLS applies to every table read, as before.
+ * `rows` exposes the columns REPORT_IN_HISTORY_SQL / REPORT_NEEDS_ATTENTION_SQL expect on alias `r`.
+ */
+const REPORT_PAGE_SQL = (manager: EntityManager, scopeSql: string, bucketSql: string, order: string, limitRef: string, offsetRef: string) => {
   const t = businessTables(manager);
   // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-  return `WITH base AS (
+  return `WITH keys AS (
   SELECT s.id AS shift_id, s.status AS shift_status, s.starts_at, s.ends_at, s.required_count, s.filled_count,
     v.name AS venue_name, jr.name AS role_name,
-    COALESCE(sr.status, 'pending') AS report_status, sr.final_pdf_sent_at AS final_queued_at, sr.final_file_id,
-    count(sa.id) AS staff_count,
+    COALESCE(sr.status, 'pending') AS report_status, sr.final_pdf_sent_at AS final_queued_at, sr.final_file_id
+  FROM ${t.shift} s
+  JOIN ${t.venue} v ON v.id = s.venue_id
+  JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+  LEFT JOIN ${t.shift_report} sr ON sr.shift_id = s.id
+  WHERE s.organisation_id = $1 AND ${scopeSql}
+    AND s.status NOT IN ('draft','pending_manager_approval','declined')
+), rows AS (
+  SELECT k.*, d.* FROM keys k
+  LEFT JOIN LATERAL (SELECT ${DELIVERY_AGG_SQL} FROM core.email_outbox eo
+    WHERE k.final_file_id IS NOT NULL AND eo.attachment_file_id = k.final_file_id AND eo.status <> 'CANCELLED') d ON true
+), page AS (
+  SELECT r.*, count(*) OVER () AS total FROM rows r
+  WHERE ${bucketSql}
+  ORDER BY ${order}
+  LIMIT ${limitRef} OFFSET ${offsetRef}
+)
+SELECT r.*, c.*, now() AS db_now FROM page r
+CROSS JOIN LATERAL (
+  SELECT count(sa.id) AS staff_count,
     count(sa.id) FILTER (WHERE sa.status = 'no_show') AS no_shows,
     count(a.id) FILTER (WHERE a.status IN ('clocked_in','on_break')) AS open_attendance,
     count(a.id) AS any_attendance,
     count(a.id) FILTER (WHERE a.clock_out_at IS NOT NULL) AS clocked_out,
     count(sa.id) FILTER (WHERE sa.status <> 'no_show' AND a.clock_out_at IS NULL) AS unresolved,
     count(sa.id) FILTER (WHERE sa.attendance_reviewed_at IS NULL) AS unreviewed
-  FROM ${t.shift} s
-  JOIN ${t.venue} v ON v.id = s.venue_id
-  JOIN ${t.job_role} jr ON jr.id = s.job_role_id
-  LEFT JOIN ${t.shift_assignment} sa ON sa.shift_id = s.id AND sa.status IN ('confirmed','completed','no_show')
+  FROM ${t.shift_assignment} sa
   LEFT JOIN ${t.attendance} a ON a.shift_assignment_id = sa.id
-  LEFT JOIN ${t.shift_report} sr ON sr.shift_id = s.id
-  WHERE s.organisation_id = $1 AND ${scopeSql}
-    AND s.status NOT IN ('draft','pending_manager_approval','declined')
-  GROUP BY s.id, v.name, jr.name, sr.id
-), rows AS (
-  SELECT b.*, d.* FROM base b
-  LEFT JOIN LATERAL (SELECT ${DELIVERY_AGG_SQL} FROM core.email_outbox eo
-    WHERE b.final_file_id IS NOT NULL AND eo.attachment_file_id = b.final_file_id AND eo.status <> 'CANCELLED') d ON true
-)`;
+  WHERE sa.shift_id = r.shift_id AND sa.status IN ('confirmed','completed','no_show')
+) c
+ORDER BY ${order}`;
 };
 
 function toSummary(r: Record<string, any>, now: Date): ShiftReportSummary {
