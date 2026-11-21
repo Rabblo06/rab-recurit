@@ -50,3 +50,25 @@ export const SHIFT_ASSIGNMENT_TRANSITIONS: TransitionTable<ShiftAssignmentStatus
   [ShiftAssignmentStatus.NO_SHOW]: [ShiftAssignmentStatus.COMPLETED],
   [ShiftAssignmentStatus.COMPLETED]: [],
 };
+
+/**
+ * M4 offline sync ONLY (owner decision D6, 2026-11-21; DESIGN.md §8.2 / §9): an offline clock-in that reaches the server after
+ * the shift monitor marked the seat a PROVISIONAL no-show may supersede it, narrowly — only through `/attendance/me/sync`, only
+ * while the no-show is still provisional (`attendance_reviewed_at IS NULL`), only before the shift report is finalised, and
+ * only when the anchored punch time is before the moment the no-show was flagged. Those conditions are the sync service's
+ * job; this table only names the one extra edge so it goes through `assertTransition` like every other status change.
+ *
+ * Deliberately a SEPARATE table, not an edge in SHIFT_ASSIGNMENT_TRANSITIONS: no other caller (a manager action, a job) can
+ * use `no_show → confirmed` by accident. Every other transition is refused here.
+ */
+export const OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS: TransitionTable<ShiftAssignmentStatusType> = Object.freeze({
+  [ShiftAssignmentStatus.OFFERED]: [],
+  [ShiftAssignmentStatus.STAFF_ACCEPTED]: [],
+  [ShiftAssignmentStatus.CONFIRMED]: [],
+  [ShiftAssignmentStatus.DECLINED]: [],
+  [ShiftAssignmentStatus.REJECTED]: [],
+  [ShiftAssignmentStatus.WITHDRAWN]: [],
+  [ShiftAssignmentStatus.CANCELLED]: [],
+  [ShiftAssignmentStatus.NO_SHOW]: [ShiftAssignmentStatus.CONFIRMED],
+  [ShiftAssignmentStatus.COMPLETED]: [],
+});

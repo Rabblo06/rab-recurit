@@ -16,4 +16,8 @@ describe('ATTENDANCE_TRANSITIONS', () => {
       expect.arrayContaining([AttendanceStatus.CLOCKED_IN, AttendanceStatus.ABSENT]),
     );
   });
+
+  it('M4: an attendance left on a break past the grace is flagged missing_clock_out (the monitor never leaves it open)', () => {
+    expect(ATTENDANCE_TRANSITIONS[AttendanceStatus.ON_BREAK]).toEqual([AttendanceStatus.CLOCKED_IN, AttendanceStatus.CLOCKED_OUT, AttendanceStatus.MISSING_CLOCK_OUT]);
+  });
 });
