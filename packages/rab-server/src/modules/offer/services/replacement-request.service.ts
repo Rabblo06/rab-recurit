@@ -1,4 +1,4 @@
-import { PermissionFlag, ReplacementRequestStatus, ShiftStatus } from '@rab/shared';
+import { PermissionFlag, ReplacementRequestStatus, ShiftStatus, isEligibleReplacementCandidate, withoutCandidateScores } from '@rab/shared';
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { AvailabilityAcknowledgement } from '../../staff/services/staff-availability';
@@ -43,6 +43,15 @@ import { OfferService } from './offer.service';
  * shift IS the canonical owner once resolved, `declinedShiftAssignmentId`
  * is never itself consulted for ownership, only for eligibility elsewhere).
  */
+/**
+ * Owner decision 8: the API never shows a score. Rows written before the decision still carry one in their stored
+ * snapshot; it is dropped here (the stored row is pay-history-adjacent evidence and is left as written).
+ */
+function presentRequest(request: ReplacementRequest): ReplacementRequest {
+  request.candidatesSnapshot = withoutCandidateScores(request.candidatesSnapshot);
+  return request;
+}
+
 @Injectable()
 export class ReplacementRequestService {
   /** SF-2 layer 2 (each public method re-checks its route's flag). Property-injected so the constructor is unchanged. */
@@ -89,7 +98,7 @@ export class ReplacementRequestService {
       } else {
         qb.where('s.createdBy = :createdBy', { createdBy: ctx.userId });
       }
-      return qb.getMany();
+      return (await qb.getMany()).map(presentRequest);
     }, { useReplica: true });
   }
 
@@ -104,7 +113,7 @@ export class ReplacementRequestService {
       // below throws the identical NotFoundException either way.
       if (!request) throw new NotFoundException('Replacement request not found.');
       await this.assertRequestOwned(manager, ctx, request);
-      return request;
+      return presentRequest(request);
     });
   }
 
@@ -189,9 +198,14 @@ export class ReplacementRequestService {
       // is treated as retryable (throw -> rollback -> claim released):
       // this is a malformed/stale request from the caller, not evidence
       // the vacancy itself is gone.
-      const inSnapshot = request.candidatesSnapshot.some((c) => c.staffProfileId === dto.staffProfileId);
-      if (!inSnapshot) {
+      const listed = request.candidatesSnapshot.find((c) => c.staffProfileId === dto.staffProfileId);
+      if (!listed) {
         throw new ConflictException("That candidate is not part of this request's shortlist.");
+      }
+      // Owner decision 8: not-eligible people are listed with their reasons so the manager sees why, but they are
+      // never approvable from the list (retryable like any other stale pick: the claim rolls back).
+      if (!isEligibleReplacementCandidate(listed)) {
+        throw new ConflictException('That staff member is not eligible for this shift. Choose someone from the eligible list.');
       }
 
       // Row lock — serialises this transaction against a concurrent
@@ -250,7 +264,7 @@ export class ReplacementRequestService {
       // shapes THIS caller's HTTP response, it changes nothing in the DB.
       throw new ConflictException('This shift no longer needs a replacement — it has been cancelled, completed, or is already fully staffed.');
     }
-    return outcome.request;
+    return presentRequest(outcome.request);
   }
 
   /**
@@ -293,7 +307,7 @@ export class ReplacementRequestService {
         metadata: {},
       });
 
-      return manager.findOneByOrFail(ReplacementRequest, { id });
+      return presentRequest(await manager.findOneByOrFail(ReplacementRequest, { id }));
     });
   }
 

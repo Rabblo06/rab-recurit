@@ -52,7 +52,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
 /**
  * Phase 4 — replacement-staff workflow correctness. Real Postgres, RLS on,
  * no mocks. Covers: request-creation idempotency, eligibility (org/
- * workspace/active-status/overlap/availability), deterministic ranking,
+ * workspace/active-status/overlap/availability), name order with no score (owner decision 8),
  * canonical manager-recipient resolution, the atomic-claim approval flow
  * (double-approval, approve-vs-reject, approve-vs-cancellation, stale-
  * candidate revalidation), canonical `OfferService` integration, tenant/RLS
@@ -317,8 +317,13 @@ describeIfDb('replacement-staff workflow (integration)', () => {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) => m.findOne(ReplacementRequest, { where: { id } }));
   }
 
-  async function candidateSnapshot(staffProfileId: string, score = 10): Promise<ReplacementCandidateSnapshot> {
-    return { staffProfileId, firstName: 'Cand', lastName: staffProfileId.slice(0, 6), score, reasons: [] };
+  async function candidateSnapshot(staffProfileId: string, eligible = true): Promise<ReplacementCandidateSnapshot> {
+    return { staffProfileId, firstName: 'Cand', lastName: staffProfileId.slice(0, 6), eligible, reasons: eligible ? ['Has the role'] : ['Already offered this shift'] };
+  }
+
+  /** The entry for one person in a stored candidate list (decision 8: eligible and not-eligible people are both listed). */
+  function entryFor(row: ReplacementRequest, staffProfileId: string): ReplacementCandidateSnapshot | undefined {
+    return row.candidatesSnapshot.find((c) => c.staffProfileId === staffProfileId);
   }
 
   async function countAudit(fx: OrgFixture, action: string, entityId: string): Promise<number> {
@@ -500,7 +505,9 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
       );
       expect(row.status).toBe(ReplacementRequestStatus.NO_CANDIDATES);
-      expect(row.candidatesSnapshot).toHaveLength(0);
+      // Decision 8: listed, not eligible, with the reason (never approvable).
+      expect(entryFor(row, candidate.staffProfileId)).toMatchObject({ eligible: false, reasons: ['Already on a confirmed shift at this time'] });
+      expect(row.candidatesSnapshot.filter((c) => c.eligible !== false)).toHaveLength(0);
     });
 
     it('B5: a candidate already offered this exact shift is excluded', async () => {
@@ -524,7 +531,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const row = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
       );
-      expect(row.candidatesSnapshot.find((c) => c.staffProfileId === candidate.staffProfileId)).toBeUndefined();
+      expect(entryFor(row, candidate.staffProfileId)).toMatchObject({ eligible: false, reasons: ['Already offered this shift'] });
+      expect(row.status).toBe(ReplacementRequestStatus.NO_CANDIDATES);
     });
 
     it('B6 (timezone fix): a shift starting just after midnight UTC during BST is classified by its LONDON local weekday, not the UTC calendar day', async () => {
@@ -544,10 +552,10 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       );
       // Under the old `getUTCDay()` bug this shift would be classified as
       // Thursday and a Friday-only candidate would be wrongly excluded.
-      expect(row.candidatesSnapshot.find((c) => c.staffProfileId === candidate.staffProfileId)).toBeDefined();
+      expect(entryFor(row, candidate.staffProfileId)).toMatchObject({ eligible: true });
     });
 
-    it('B6b: the same Friday-only candidate is correctly EXCLUDED from a genuinely Thursday (UTC and London agree) shift', async () => {
+    it('B6b: the same Friday-only candidate is NOT ELIGIBLE (listed with the reason) for a genuinely Thursday (UTC and London agree) shift', async () => {
       const fx = await seedOrgFixture('eligB6b');
       const declining = await seedStaff(fx, 'declining');
       const startsAt = new Date('2026-07-16T10:00:00.000Z'); // 11:00 BST, still Thursday in both zones
@@ -557,10 +565,10 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const row = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
       );
-      expect(row.candidatesSnapshot.find((c) => c.staffProfileId === candidate.staffProfileId)).toBeUndefined();
+      expect(entryFor(row, candidate.staffProfileId)).toMatchObject({ eligible: false, reasons: ['Not available on Thursday'] });
     });
 
-    it('B7: no availableDays recorded at all — never penalised', async () => {
+    it('B7: no availableDays recorded at all — never held against anyone', async () => {
       const fx = await seedOrgFixture('eligB7');
       const declining = await seedStaff(fx, 'declining');
       const candidate = await seedStaff(fx, 'noPreference', { availableDays: null });
@@ -569,7 +577,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const row = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
       );
-      expect(row.candidatesSnapshot.find((c) => c.staffProfileId === candidate.staffProfileId)).toBeDefined();
+      expect(entryFor(row, candidate.staffProfileId)).toMatchObject({ eligible: true, reasons: expect.arrayContaining(['No unavailable days recorded']) });
     });
 
     it('B8: a candidate from a different organisation is never discovered', async () => {
@@ -587,10 +595,16 @@ describeIfDb('replacement-staff workflow (integration)', () => {
   });
 
   // ===================================================================
-  // C. Ranking
+  // C. Eligible staff with the reasons shown (owner decision 8): no score, no ranking, the manager chooses
   // ===================================================================
-  describe('C. ranking', () => {
-    it('C1: an exact job-role match ranks above a non-matching role', async () => {
+  describe('C. eligible staff with reasons, no ranking', () => {
+    async function requestFor(fx: OrgFixture, fixture: DeclinedOfferFixture): Promise<ReplacementRequest> {
+      return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+        m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
+      );
+    }
+
+    it('C1: staff without the shift role are listed as not eligible with the reason, and can never be approved from the list', async () => {
       const fx = await seedOrgFixture('rankC1');
       const declining = await seedStaff(fx, 'declining');
       const otherRole = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
@@ -600,33 +614,67 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const nonMatching = await seedStaff(fx, 'otherRole', { jobRoleId: otherRole.id });
       const fixture = await seedDeclinedOfferShift(fx, declining);
       await runReplacementStaffCycle(adminDataSource, tenantContext, notificationService, auditService);
-      const row = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
+      const row = await requestFor(fx, fixture);
+      expect(row.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
+      expect(entryFor(row, matching.staffProfileId)).toMatchObject({ eligible: true });
+      expect(entryFor(row, nonMatching.staffProfileId)).toMatchObject({ eligible: false, reasons: [expect.stringMatching(/^Does not have the .+ role$/)] });
+      // Denial: a not-eligible person is refused (409), the claim is released and no offer exists.
+      await expect(replacementRequestService.approve(authCtx(fx), row.id, { staffProfileId: nonMatching.staffProfileId })).rejects.toBeInstanceOf(ConflictException);
+      expect((await getRequest(fx, row.id))!.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
+      const offers = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+        m.count(JobOffer, { where: { staffProfileId: nonMatching.staffProfileId } }),
       );
-      const matchingIndex = row.candidatesSnapshot.findIndex((c) => c.staffProfileId === matching.staffProfileId);
-      const nonMatchingIndex = row.candidatesSnapshot.findIndex((c) => c.staffProfileId === nonMatching.staffProfileId);
-      expect(matchingIndex).toBeGreaterThanOrEqual(0);
-      expect(nonMatchingIndex).toBeGreaterThanOrEqual(0);
-      expect(matchingIndex).toBeLessThan(nonMatchingIndex);
+      expect(offers).toBe(0);
     });
 
-    it('C2: tied scores sort deterministically by staffProfileId ascending', async () => {
+    it('C2: no stored entry carries a score, and the list is in name order, not by any computed value', async () => {
       const fx = await seedOrgFixture('rankC2');
       const declining = await seedStaff(fx, 'declining');
-      // Two candidates with an identically-scoring profile (same job role, no other differentiating field).
-      const a = await seedStaff(fx, 'tieA');
-      const b = await seedStaff(fx, 'tieB');
+      // The alphabetically LAST person gets the fact the old score rewarded most after the role (+20, worked this venue
+      // before). Under a score they would come first; by name they come last.
+      const zed = await seedStaff(fx, 'zzzFavoured');
+      const amy = await seedStaff(fx, 'aaaPlain');
+      const mid = await seedStaff(fx, 'mmmPlain');
+      await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
+        const past = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+        const pastEnd = new Date(past.getTime() + 4 * 3600 * 1000);
+        const pastShift = await manager.save(Shift, {
+          organisationId: fx.organisationId,
+          venueId: fx.venueId,
+          jobRoleId: fx.jobRoleId,
+          startsAt: past,
+          endsAt: pastEnd,
+          breakMinutes: 0,
+          requiredCount: 1,
+          payRatePence: 1500,
+          status: ShiftStatus.CONFIRMED,
+          createdBy: fx.managerUserId,
+          workspaceId: fx.workspaceId,
+        });
+        await manager.save(ShiftAssignment, {
+          organisationId: fx.organisationId,
+          shiftId: pastShift.id,
+          staffProfileId: zed.staffProfileId,
+          status: ShiftAssignmentStatus.CONFIRMED,
+          payRateSnapshotPence: 1500,
+          assignedBy: fx.managerUserId,
+          confirmedAt: past,
+          period: toTstzRange(past, pastEnd),
+          workspaceId: fx.workspaceId,
+        });
+      });
       const fixture = await seedDeclinedOfferShift(fx, declining);
       await runReplacementStaffCycle(adminDataSource, tenantContext, notificationService, auditService);
-      const row = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
-      );
-      const ids = [a.staffProfileId, b.staffProfileId].sort();
-      const gotOrder = row.candidatesSnapshot.filter((c) => ids.includes(c.staffProfileId)).map((c) => c.staffProfileId);
-      expect(gotOrder).toEqual(ids);
+      const row = await requestFor(fx, fixture);
+      for (const c of row.candidatesSnapshot) expect(c).not.toHaveProperty('score');
+      const ours = [amy, mid, zed].map((x) => x.staffProfileId);
+      expect(row.candidatesSnapshot.filter((c) => ours.includes(c.staffProfileId)).map((c) => c.firstName)).toEqual(['aaaPlain', 'mmmPlain', 'zzzFavoured']);
+      // The API view never shows a score either.
+      const viaApi = await replacementRequestService.get(authCtx(fx), row.id);
+      for (const c of viaApi.candidatesSnapshot) expect(c).not.toHaveProperty('score');
     });
 
-    it('C3: the shortlist is bounded to 5 even with more eligible candidates', async () => {
+    it('C3: every eligible person is listed (no top-5 cut by rank)', async () => {
       const fx = await seedOrgFixture('rankC3');
       const declining = await seedStaff(fx, 'declining');
       for (let i = 0; i < 7; i += 1) {
@@ -634,10 +682,24 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       }
       const fixture = await seedDeclinedOfferShift(fx, declining);
       await runReplacementStaffCycle(adminDataSource, tenantContext, notificationService, auditService);
-      const row = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.findOneByOrFail(ReplacementRequest, { declinedShiftAssignmentId: fixture.declinedAssignmentId }),
-      );
-      expect(row.candidatesSnapshot.length).toBeLessThanOrEqual(5);
+      const row = await requestFor(fx, fixture);
+      expect(row.candidatesSnapshot.filter((c) => c.eligible === true)).toHaveLength(7);
+    });
+
+    it('C4: a legacy row with a stored score is shown without it, in its stored order, and stays approvable', async () => {
+      const fx = await seedOrgFixture('rankC4');
+      const declining = await seedStaff(fx, 'declining');
+      const candidate = await seedStaff(fx, 'legacy');
+      const fixture = await seedDeclinedOfferShift(fx, declining);
+      const requestId = await seedReplacementRequest(fx, fixture, [
+        { staffProfileId: candidate.staffProfileId, firstName: 'Leg', lastName: 'Acy', score: 80, reasons: ['Exact job-role match'] },
+      ]);
+      const listed = await replacementRequestService.list(authCtx(fx));
+      const shown = listed.find((r) => r.id === requestId)!;
+      expect(shown.candidatesSnapshot).toEqual([{ staffProfileId: candidate.staffProfileId, firstName: 'Leg', lastName: 'Acy', reasons: ['Exact job-role match'] }]);
+      const approved = await replacementRequestService.approve(authCtx(fx), requestId, { staffProfileId: candidate.staffProfileId });
+      expect(approved.status).toBe(ReplacementRequestStatus.OFFER_SENT);
+      expect(approved.candidatesSnapshot[0]).not.toHaveProperty('score');
     });
   });
 
