@@ -414,7 +414,8 @@ ORDER BY 1`;
 /** M-T1: each pre-auth table carries exactly its owner-only definer policy (name, PERMISSIVE, ALL, TO rab_secure_owner). */
 export const PREAUTH_DEFINER_POLICY_SQL = `
 SELECT t.name AS tbl, p.polname::text AS policy, p.polpermissive AS permissive, p.polcmd::text AS cmd,
-       (SELECT pg_catalog.array_agg(pg_catalog.pg_get_userbyid(x) ORDER BY 1) FROM pg_catalog.unnest(p.polroles) x)::text[] AS roles,
+       (SELECT pg_catalog.array_agg(pr.n ORDER BY pr.n COLLATE "C")
+          FROM (SELECT pg_catalog.pg_get_userbyid(x)::text AS n FROM pg_catalog.unnest(p.polroles) x) pr) AS roles,
        pg_catalog.pg_get_expr(p.polqual, p.polrelid) AS qual, pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) AS with_check
   FROM pg_catalog.unnest($1::text[]) AS t(name)
   LEFT JOIN pg_catalog.pg_policy p ON p.polrelid = pg_catalog.to_regclass('core.' || pg_catalog.quote_ident(t.name))

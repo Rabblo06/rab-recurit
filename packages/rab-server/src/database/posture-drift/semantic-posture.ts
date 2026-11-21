@@ -58,8 +58,11 @@ sch AS (SELECT 'core'::regnamespace::oid AS oid, 'core'::text AS nspname UNION A
 SELECT schema, line FROM (
   SELECT s.nspname AS schema,
          'policy|' || c.relname || '|' || p.polname || '|' || CASE WHEN p.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END
-         || '|' || coalesce((SELECT pg_catalog.string_agg(CASE WHEN x = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(x)::text END, ',' ORDER BY 1)
-                             FROM pg_catalog.unnest(p.polroles) x), '')
+         -- Roles sorted by NAME ("C" collation). Not "ORDER BY 1": inside an aggregate that orders by the constant 1, so the
+         -- list followed polroles (role OID) order, which a pg_dump / restore onto a new cluster changes (RESTORE-DRILL.md).
+         || '|' || coalesce((SELECT pg_catalog.string_agg(pr.n, ',' ORDER BY pr.n COLLATE "C")
+                               FROM (SELECT CASE WHEN x = 0 THEN 'public' ELSE pg_catalog.pg_get_userbyid(x)::text END AS n
+                                       FROM pg_catalog.unnest(p.polroles) x) pr), '')
          || '|' || p.polcmd::text
          || '|using=' || coalesce(pg_catalog.md5(pg_catalog.regexp_replace(pg_catalog.pg_get_expr(p.polqual, p.polrelid), '\\s+', ' ', 'g')), '-')
          || '|check=' || coalesce(pg_catalog.md5(pg_catalog.regexp_replace(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), '\\s+', ' ', 'g')), '-') AS line

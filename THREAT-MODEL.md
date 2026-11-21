@@ -10300,3 +10300,26 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Semantic posture — policy role lists sorted by name, so a restored database is not "drift" (branch fix/posture-policy-role-order, 2026-11-21; app-side catalog reads only, no migration, goldens unchanged)
+- **Finding (restore drill, M9 RESTORE-DRILL.md, MEDIUM, availability / recovery):** the semantic-posture renderer listed a
+  policy's roles with `string_agg(<role>, ',' ORDER BY 1)`. Inside an aggregate `ORDER BY 1` sorts by the constant 1, so the
+  list followed `pg_policy.polroles` storage order. A `pg_dump` / restore onto a new cluster (disaster recovery, provider
+  move) stores the roles in another order, the three multi-role core policies (`deployment_identity_runtime_deny`,
+  `deployment_identity_history_runtime_deny`, `worker_dispatch_pointer_runtime_deny`) rendered differently, and the
+  fail-closed boot gate refused to start the API and the Worker on a database that had not changed.
+- **Control:** both renderers that read policy roles at boot sort the names (`ORDER BY name COLLATE "C"`): the semantic
+  posture (`semantic-posture.ts`) and the owner-login pre-auth definer-policy check (`owner-login-posture.ts`, which only
+  affected the drift message). The rendered lines are byte-identical to the committed goldens (they were captured on fresh
+  installs where storage order happened to be alphabetical), so no golden changes and nothing is loosened: a role added to
+  or removed from a policy still changes the line. A static guard (`aggregate-order-by-constant.spec.ts`) fails on any new
+  aggregate `ORDER BY <integer>` in production SQL.
+- **Not changed (stated):** `core.workspace_schema_fingerprint_lines` has the same pattern but is frozen with its migration
+  and every workspace policy is `TO PUBLIC` (one role), so its output and every released structure-level fingerprint are
+  already independent of storage order; a multi-role workspace policy must fix it first (the guard lists it). Migrations
+  are frozen and run once, not at boot.
+- **Tests:** integration (real PostgreSQL, rolled back): the same policy created with its roles stored in opposite orders
+  renders identically in both renderers, and the stored orders really differ; unit: the detector, both SQL texts, a source
+  scan of `packages/rab-server/src`.
+- **Residual:** other restore-sensitive values (OIDs elsewhere) are not part of the posture lines; the restore drill's
+  round trip is the evidence that nothing else differs.
