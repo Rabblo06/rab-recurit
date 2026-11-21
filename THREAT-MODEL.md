@@ -10300,3 +10300,55 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Staff role rates — a staff member's own pay rate per job role, snapshotted at confirmation (branch feat/staff-role-rate, Lane C, DRAFT: new SQL, owner review first)
+
+New tenant table `core.staff_role_rate` (migration `StaffRoleRateSchema1786722210000`, SQL in
+`database/typeorm/core/staff-role-rate-sql.ts`), endpoints `GET|POST /rest/v1/staff/:staffProfileId/role-rates`,
+`PATCH|DELETE /rest/v1/staff/:staffProfileId/role-rates/:id` (`StaffRoleRateService`), and the staff-aware rate lookup
+`resolveSeatPayRate` used at confirmation (authoritative `shift_assignment.pay_rate_snapshot_pence`) and at send (seat
+snapshot + `job_offer.estimated_pay_pence`). Core-table shape (lead decision 2026-11-21, owner to confirm); the
+workspace-table shape (structure level 27) is the reviewed alternative.
+
+- **Assets:** pay rates of named people (personal, financial); the integrity of every confirmed seat's pay snapshot,
+  which attendance `earned_pence`, `payroll_record` (its insert policy requires `pay_rate_pence` = the snapshot) and
+  payroll runs copy.
+- **Threats and controls:**
+  - *Another tenant reads or writes rates* (other organisation, other workspace): RLS tenant predicate
+    (`organisation_id = core.current_org() AND workspace_id = core.current_workspace()`) on all four policies, ENABLE +
+    FORCE in the same migration; the service reads organisation/workspace from the bound session (`core.current_org()`,
+    `core.current_workspace()`), never from the client; staff profile and job role re-checked in scope on every call
+    (404, never 403).
+  - *A Venue Manager, staff member, custom workspace member or the Worker sees pay rates*: second RLS predicate — only a
+    non-venue, non-archived `manager_profile` of the bound workspace; routes need `payroll.view` (read) or `staff.edit` +
+    `payroll.view` (write), re-checked in the service before any read (403).
+  - *Mass assignment / forged author*: DTOs carry no `organisationId`, `workspaceId`, `createdBy`, `staffProfileId`
+    (`forbidNonWhitelisted` → 400); explicit field maps; INSERT `WITH CHECK created_by = core.current_uid()`; UPDATE
+    granted to `crewflow_app` only on `pay_rate_pence`, `effective_from`, `effective_to`, `updated_at`; the owner login is
+    held to the same columns and refused TRUNCATE by the existing `core.owner_login_grant_parity_guard()` (no new function).
+  - *Two rates in force at once (ambiguous pay)*: `EXCLUDE USING gist (workspace_id, staff_profile_id, job_role_id,
+    daterange(effective_from, effective_to, '[]') &&)` — the database decides under concurrency; the API answers 409.
+  - *Repricing history*: the rate is read only when a seat is priced (send, then confirmation); a confirmed seat's snapshot
+    is never recalculated; editing or deleting a rate changes no existing seat (integration test).
+  - *Orphans (no foreign key by design — the workspace rows live in another schema with HWS on)*: a rate is only read by
+    the (staff_profile_id, job_role_id) of a live seat or through the scope-checked service, so a row whose profile or role
+    is gone is never used; deactivated/archived staff cannot be offered; an archived job role takes no new rate (409).
+  - *Audit*: `staff_role_rate.created|updated|deleted` in the same transaction, with staff member, job role and dates —
+    never an amount; not shipped to the security sink (same class as `venue_role_rate.*`).
+- **Flagged assumptions (owner):** decision 39 — the £0 fallback of `resolvePayRate` is kept; decision 40 — the
+  rate period comparison is the venue rate's (calendar date of the start instant, UTC ISO string, both ends inclusive),
+  unchanged; decision 41 — a staff role rate in force wins at confirmation even over a manually typed shift rate (the
+  shift does not record whether its rate was typed); permission flags reused (no new flag): read `payroll.view`, write
+  `staff.edit` + `payroll.view`; the offer summary's `payRatePence` now shows the seat's rate (the rate the estimate was
+  computed from) instead of the shift's; `£1,000,000.00`/h CHECK ceiling is a sanity bound, not a business rule;
+  retention of rate rows follows the staff member's (no automatic purge).
+- **Residual:** no foreign key from `staff_role_rate` to `staff_profile` / `job_role`: integrity of those ids rests on the
+  service scope checks (layer 3) and RLS cannot verify them; a rate row of a hard-deleted profile stays until a manager
+  deletes it (never read). A confirming session that is not a non-venue manager would see no staff rate and snapshot the
+  shift rate — today only the offer's sender (offer.send holders: Manager, CEO) can confirm.
+- **Tests:** `staff-role-rate.integration.spec.ts` (zero rows without tenant context; staff rate wins at confirmation over
+  venue rate and default; latest / future / ended; send-time estimate; snapshot unchanged after edit/delete; other
+  workspace / other organisation 404; Venue Manager and staff read nothing and are refused at the route; flag revoked →
+  403 nothing written; body `organisationId` / `workspaceId` / `createdBy` / `staffProfileId` → 400; overlap → 409; RLS
+  WITH CHECK refuses another author / another workspace; immutable columns 42501; orphans never used),
+  `staff-role-rate.service.spec.ts`, `staff-role-rate-resolution.spec.ts`, `staff-role-rate-sql.spec.ts`.
