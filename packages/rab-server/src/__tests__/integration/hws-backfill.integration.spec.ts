@@ -110,7 +110,7 @@ describeIfDb('hws:backfill (integration)', () => {
       backfillWriter = proofWriter === 'owner' ? backfillOwnerDataSource : dataSource;
     }
 
-    backfill = new HwsBackfillService(dataSource, app.get(SchemaResolverService));
+    backfill = new HwsBackfillService(dataSource, app.get(SchemaResolverService), app.get(TenantContextService));
   });
 
   afterAll(async () => {
