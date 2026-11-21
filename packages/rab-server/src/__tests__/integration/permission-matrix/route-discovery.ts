@@ -46,6 +46,8 @@ export interface MatrixRoute {
   otherParams: string[];
   /** The handler validates its whole body against a class DTO (the global ValidationPipe rejects an undeclared property). */
   validatedBody: boolean;
+  /** The handler validates its whole query string against a class DTO (same pipe, same rule). */
+  validatedQuery: boolean;
   /** `@Sse()` stream. */
   sse: boolean;
 }
@@ -108,12 +110,12 @@ export function describeGuard(guard: Type<CanActivate> | CanActivate): MatrixGua
   return { kind: 'other', name: type.name, flags: [] };
 }
 
-/** Whether argument `index` of the handler is `@Body()` (whole body) typed with a class DTO. */
-function hasValidatedBody(controller: Type<unknown>, methodName: string): boolean {
+/** Whether the handler has a whole-`@Body()` (or whole-`@Query()`) argument typed with a class DTO. */
+function hasValidated(controller: Type<unknown>, methodName: string, paramtype: RouteParamtypes): boolean {
   const args = (Reflect.getMetadata(ROUTE_ARGS_METADATA, controller, methodName) ?? {}) as Record<string, { index: number; data?: unknown }>;
   const paramTypes = (Reflect.getMetadata('design:paramtypes', controller.prototype, methodName) ?? []) as unknown[];
   return Object.entries(args).some(([key, arg]) => {
-    if (key.split(':')[0] !== String(RouteParamtypes.BODY) || arg.data !== undefined) return false;
+    if (key.split(':')[0] !== String(paramtype) || arg.data !== undefined) return false;
     const type = paramTypes[arg.index];
     return typeof type === 'function' && !PRIMITIVES.has(type);
   });
@@ -155,7 +157,8 @@ export function discoverMatrixRoutes(controllers: Iterable<Type<unknown>>): Matr
             mobileTargets: [...(mobile ?? [])],
             recordParams: params.filter((p) => RECORD_PARAM_PATTERN.test(p)),
             otherParams: params.filter((p) => !RECORD_PARAM_PATTERN.test(p)),
-            validatedBody: hasValidatedBody(controller, methodName),
+            validatedBody: hasValidated(controller, methodName, RouteParamtypes.BODY),
+            validatedQuery: hasValidated(controller, methodName, RouteParamtypes.QUERY),
             sse: Reflect.getMetadata(SSE_METADATA, handler) === true,
           });
         }

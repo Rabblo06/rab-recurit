@@ -62,6 +62,15 @@ export const PROBE_EXECUTES_HANDLER: Readonly<Record<string, 'run' | 'run-last'>
 };
 
 /**
+ * Reads probed with one undeclared query parameter instead of being executed: the global ValidationPipe answers 400 once
+ * the guards have passed, before the handler runs. Only for a GET whose answer would otherwise depend on state outside
+ * the matrix fixtures (the spec fails if a listed route has no validated query DTO).
+ */
+export const READ_PROBED_BY_QUERY: Readonly<Record<string, string>> = {
+  'GET /rest/v1/admin/outbox/failed': 'scans every organisation and workspace of the database, so its answer depends on what other suites left behind',
+};
+
+/**
  * Values for path parameters that do not name a record (record ids get a malformed id, see the spec). `:queue` is the
  * real e-mail queue name (CONSUMER_QUEUES.email, filled in by the spec), so GET /admin/queues/:queue/* reads a real queue.
  */
@@ -411,7 +420,7 @@ export const PERMISSION_MATRIX: Readonly<Record<string, string>> = {
   'POST /rest/v1/shifts/request':                                                             'ok   ok   ok   ok   403',
   'GET /rest/v1/shifts/requests':                                                             'ok   ok   ok   403  403',
   'GET /rest/v1/shifts/requests/pending':                                                     'ok   ok   ok   403  403',
-  'GET /rest/v1/shifts/sent':                                                                 'ok   ok   ok   ok   403',
+  'GET /rest/v1/shifts/sent':                                                                 '403  403  403  ok   403', // SchedulingService: Venue Managers only, 403 "Venue manager required."
   'GET /rest/v1/shifts/sent/:id':                                                             'ok   ok   ok   ok   403',
   'POST /rest/v1/shifts/with-offers':                                                         'ok   ok   ok   403  403',
 
@@ -440,7 +449,7 @@ export const PERMISSION_MATRIX: Readonly<Record<string, string>> = {
   'GET /rest/v1/staff/:staffProfileId/reviews':                                               'ok   ok   ok   403  403',
   'GET /rest/v1/staff/:staffProfileId/reviews/:reviewId':                                     'ok   ok   ok   403  403',
   'POST /rest/v1/staff/bulk-email':                                                           'ok   ok   ok   403  403',
-  'GET /rest/v1/staff/venue-directory':                                                       'ok   ok   ok   ok   403',
+  'GET /rest/v1/staff/venue-directory':                                                       '404  404  404  ok   403', // StaffService: the venue directory exists only for a Venue Manager, 404 "Directory not found."
   'GET /rest/v1/staff/venue-directory/:staffId':                                              'ok   ok   ok   ok   403',
   'PATCH /rest/v1/staff/venue-directory/:staffId/tags':                                       'ok   ok   ok   ok   403',
 

@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { CONSUMER_QUEUES } from '../../engine/worker-shared/queue-registry';
@@ -24,6 +25,7 @@ import {
   PATH_PARAM_SAMPLES,
   PERMISSION_MATRIX,
   PROBE_EXECUTES_HANDLER,
+  READ_PROBED_BY_QUERY,
 } from './permission-matrix/permission-matrix.data';
 import { AI_OFF_GUARDS, MatrixRoleProfile, MatrixRoute, PASS_THROUGH_GUARDS, discoverMatrixRoutes, suggestCell } from './permission-matrix/route-discovery';
 
@@ -42,7 +44,8 @@ import { AI_OFF_GUARDS, MatrixRoleProfile, MatrixRoute, PASS_THROUGH_GUARDS, dis
  *     request that passes them is answered 404 by UuidPathParamsInterceptor before any pipe or handler runs;
  *   - a mutation with a validated body DTO gets a body with one undeclared property: a request that passes the guards is
  *     answered 400 by the global ValidationPipe (forbidNonWhitelisted) before the handler;
- *   - a GET without a record id runs for real (reads only);
+ *   - a GET without a record id runs for real (reads only), except the few listed in READ_PROBED_BY_QUERY, which get
+ *     an undeclared query parameter (400 from the ValidationPipe once the guards pass);
  *   - the few mutations that have neither are listed, each with a decision, in PROBE_EXECUTES_HANDLER.
  * So `ok` means "every guard layer let this identity through". Per-record scope (404 for another tenant's, venue's or
  * person's record) is proved by the abuse-case suites; this suite proves layer 1 for every route at once.
@@ -53,7 +56,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 const MALFORMED_RECORD_ID = 'matrix-probe-not-a-uuid';
 const UNDECLARED_BODY = { matrixProbeUndeclaredProperty: true };
 
-type Probe = 'record' | 'body' | 'read' | 'handler';
+type Probe = 'record' | 'body' | 'query' | 'read' | 'handler';
 
 interface Observation {
   status: number;
@@ -63,7 +66,7 @@ interface Observation {
 
 function probeOf(route: MatrixRoute): Probe {
   if (route.recordParams.length > 0) return 'record';
-  if (route.method === 'GET') return 'read';
+  if (route.method === 'GET') return route.key in READ_PROBED_BY_QUERY ? 'query' : 'read';
   if (route.validatedBody) return 'body';
   return 'handler';
 }
@@ -75,8 +78,9 @@ function cellOf(probe: Probe, observed: Observation): MatrixCell | null {
   if (status === 401 || status === 429 || status >= 500 || status === 0) return null;
   if (status === 404) {
     // A record probe that passes the guards is answered by UuidPathParamsInterceptor: a plain NotFoundException without a
-    // `code`. A guard that hides a route (AI off) answers 404 WITH a code, before the interceptor ever runs.
-    if (probe === 'record' && observed.code === undefined) return 'ok';
+    // `code`; a handler the probe really runs answers "nothing to act on" the same way. A guard that hides a route (AI
+    // off) answers 404 WITH a code, before the interceptor or handler ever runs.
+    if ((probe === 'record' || probe === 'handler') && observed.code === undefined) return 'ok';
     return '404';
   }
   return 'ok';
@@ -95,6 +99,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
   let app: INestApplication;
   let owner: DataSource;
   let baseUrl: URL;
+  let consoleOrigin: string;
   let routes: MatrixRoute[];
   let authenticated: MatrixRoute[];
   const tokens = {} as Record<MatrixRole, string>;
@@ -109,19 +114,26 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
   const SAMPLES: Record<string, string> = { ...PATH_PARAM_SAMPLES, queue: CONSUMER_QUEUES.email.name };
 
   function urlFor(route: MatrixRoute): string {
-    return route.path.replace(/:([A-Za-z0-9_]+)/g, (_, name: string) => {
+    const query = probeOf(route) === 'query' ? '?matrixProbeUndeclaredParameter=1' : '';
+    const path = route.path.replace(/:([A-Za-z0-9_]+)/g, (_, name: string) => {
       if (route.recordParams.includes(name)) return MALFORMED_RECORD_ID;
       const sample = SAMPLES[name];
       if (sample === undefined) throw new Error(`${route.key}: no PATH_PARAM_SAMPLES value for :${name}`);
       return encodeURIComponent(sample);
     });
+    return path + query;
   }
 
-  /** One request over a real socket; resolves at the response head for a stream, after the body otherwise. */
-  function send(route: MatrixRoute, token: string): Promise<Observation> {
+  /**
+   * One request over a real socket; resolves at the response head for a stream, after the body otherwise. A manager_web
+   * identity sends the console's own Origin, as its browser always does (a handler that checks Origin, like the login
+   * hand-off, then answers as it does for the real console); the mobile identities send none, as the apps do.
+   */
+  function send(route: MatrixRoute, role: MatrixRole): Promise<Observation> {
     const probe = probeOf(route);
     const payload = probe === 'body' ? JSON.stringify(UNDECLARED_BODY) : route.method === 'GET' || route.method === 'DELETE' ? undefined : '{}';
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: route.sse ? 'text/event-stream' : 'application/json' };
+    const headers: Record<string, string> = { Authorization: `Bearer ${tokens[role]}`, Accept: route.sse ? 'text/event-stream' : 'application/json' };
+    if (PROFILES[role].applicationTarget === 'manager_web') headers.Origin = consoleOrigin;
     if (payload !== undefined) {
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = String(Buffer.byteLength(payload));
@@ -169,6 +181,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
     await app.init();
     await app.listen(0, '127.0.0.1'); // a real socket: the event-stream route is read up to its response head
     baseUrl = new URL(await app.getUrl());
+    consoleOrigin = moduleRef.get(EnvironmentService).corsOrigins[0]!;
     owner = createAdminDataSource();
     await owner.initialize();
 
@@ -240,6 +253,15 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
     expect(bad).toEqual([]);
   });
 
+  it('every read probed by an undeclared query parameter is a GET with a validated query DTO (else the probe proves nothing)', () => {
+    const byKey = new Map(routes.map((r) => [r.key, r]));
+    const bad = Object.keys(READ_PROBED_BY_QUERY).filter((key) => {
+      const route = byKey.get(key);
+      return !route || route.method !== 'GET' || route.recordParams.length > 0 || !route.validatedQuery;
+    });
+    expect(bad).toEqual([]);
+  });
+
   it('the mutations a probe cannot stop before their handler are exactly the ones listed with a decision', () => {
     const actual = authenticated.filter((r) => probeOf(r) === 'handler').map((r) => r.key).sort();
     expect(actual).toEqual(Object.keys(PROBE_EXECUTES_HANDLER).sort());
@@ -297,7 +319,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
       MATRIX_ROLES.map(async (role) => {
         for (const route of plan) {
           const expected = parseRow(route.key, PERMISSION_MATRIX[route.key]!)[role];
-          const observed = await send(route, tokens[role]);
+          const observed = await send(route, role);
           const actual = cellOf(probeOf(route), observed);
           if (actual !== expected) {
             mismatches.push(
