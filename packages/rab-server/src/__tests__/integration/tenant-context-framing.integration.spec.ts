@@ -119,6 +119,18 @@ suite('T-1 tenant-context framing (real PostgreSQL, as crewflow_owner, pool max 
     expect(unset(afterRollback.org)).toBe(true);
   });
 
+  it('M9 §4.1: jit = off inside every tenant transaction (both binders, read-only too), transaction-local: the session value is back after COMMIT and ROLLBACK', async () => {
+    const jit = async (q: { query: (sql: string) => Promise<unknown> }) => ((await q.query(`SELECT current_setting('jit') AS jit`)) as Array<{ jit: string }>)[0]!.jit;
+    const before = await jit(dataSource);
+    expect(await tenant.runInTenantContext(CTX, (m) => jit(m))).toBe('off');
+    expect(await tenant.runInTenantContext(CTX, (m) => jit(m), { readOnly: true })).toBe('off');
+    expect(await tenant.runInWorkspaceContext(CTX, (m) => jit(m))).toBe('off');
+    expect(await jit(dataSource)).toBe(before);
+    const boom = new Error('roll back');
+    await expect(tenant.runInTenantContext(CTX, async () => Promise.reject(boom))).rejects.toBe(boom);
+    expect(await jit(dataSource)).toBe(before);
+  });
+
   describe('ST-02: a write after the folded read-only flag fails with 25006', () => {
     const update = (m: EntityManager) => m.query(`UPDATE core.user_session SET revoked_reason = revoked_reason WHERE false`);
     const insert = (m: EntityManager) =>

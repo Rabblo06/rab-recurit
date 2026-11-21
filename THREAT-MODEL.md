@@ -10300,3 +10300,18 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Tenant binder — jit = off in the same transaction-local binding SELECT (branch perf/tenant-binder-jit-off, 2026-11-21; runtime SQL, no migration; after #241)
+- **Finding (M9 load test §4.1, availability):** RLS sub-plans push the list queries past `jit_above_cost`, so PostgreSQL
+  JIT-compiled them on every execution (7.3 s of an 11 s attendance page); with 2 database CPUs the 10-connection API pool
+  filled and the expected peak collapsed in its first minute.
+- **Control:** `bindGucsSql` (the one binding statement of every API and Worker tenant transaction) also runs
+  `set_config('jit', 'off', true)`. Transaction-local like every GUC it binds, so nothing survives COMMIT / ROLLBACK on a
+  pooled connection, and it is a constant (no request value). Nothing about who sees what changes: JIT only changes how an
+  expression is evaluated, not the plan's rows. Not chosen: `ALTER ROLE … SET jit = off` (a stored role setting is
+  semantic-posture drift by design until the goldens record it) or a server flag on the bundled db only.
+- **Tests:** exact text of the four binding variants (`tenant-context.service.spec.ts`); real PostgreSQL
+  (`tenant-context-framing.integration.spec.ts`): `jit` is `off` inside both binders and read-only transactions, and back
+  to the session value after COMMIT and after ROLLBACK on the same backend.
+- **Residual:** maintenance binders outside TenantContextService (orphan check, account-invite cleanup) get it when #241
+  routes them through the same statement; one-off upgrade / backfill sessions keep JIT (not hot paths).
