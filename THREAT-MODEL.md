@@ -10354,3 +10354,27 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Payroll: a rejected record goes back to draft; the finaliser and the staff member are told (decision 6, part 1; branch feat/payroll-reject-to-draft, 2026-11-21; DRAFT, new SQL)
+
+- **What:** `PayrollService.reject` now, in one transaction: pending_approval → rejected (who / when / why, audited) →
+  draft (`payroll_record.returned_to_draft`, audited; both edges via assertTransition and the existing
+  `payroll_record_guard` trigger). The record keeps the rejection reason and shows as "rejected" in the payroll period
+  view until it is re-checked. A draft can only move to pending_approval: it can never be approved, put in a run or paid as
+  it is (tested through the API and the DB guard).
+- **Notices (same transaction as the decision):**
+  - the manager who finalised (approved) those hours, `shift_report.finalised_by`: in-app + email
+    (`payroll_record_rejected`), with the staff member's name, venue, date and the reason. Not sent when that is the
+    rejecting manager. Recipient comes from the record's own report row, never from the request.
+  - the staff member: in-app only by default (`payroll_hours_rechecked`), venue and date, "being re-checked", never the
+    reason (it may mention other people).
+- **SQL:** `PayrollRejectionNotificationTypes1786723010000` widens `notification_preference_notification_type_check` by the
+  two new types (the same mechanism as 1786719200000). `core.notification.type` has no CHECK. No grant / policy change.
+- **Not built (needs a database design + owner SQL review, and the 0.7.0 chain for the workspace copies):** re-opening the
+  finalised timesheet for that one seat and re-snapshotting the corrected figures (draft → pending_approval with new
+  minutes / amount). Today the runtime role cannot update `worked_minutes` / `pay_rate_pence` / `amount_pence` (immutable
+  money snapshot) and `approved` attendance is terminal in ATTENDANCE_TRANSITIONS. Until then the draft is a safe dead end
+  (never payable) and corrections go through adjustments (decision 3).
+- **Tests:** payroll-approval (12): draft + reason kept, both audit rows, finaliser (Venue Manager) notified in-app and by
+  email with the reason, staff notice neutral and not emailed, rejecter not notified, re-reject 409, DB guard refuses
+  draft → approved, staff History shows draft, period view stage "rejected"; (4) and (8) follow the new status.

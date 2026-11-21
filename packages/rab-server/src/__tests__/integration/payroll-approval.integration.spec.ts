@@ -298,9 +298,10 @@ describeIfDb('payroll approval (integration)', () => {
     expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: 'Hours disputed', organisationId: randomUUID() })).status).toBe(400);
     const res = await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: '  Hours disputed by venue  ' });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: 'rejected', rejectionReason: 'Hours disputed by venue', rejectedByName: 'Manager Test' });
+    // Decision 6: a rejected record goes straight back to draft, keeping who rejected it and why.
+    expect(res.body).toMatchObject({ status: 'draft', rejectionReason: 'Hours disputed by venue', rejectedByName: 'Manager Test' });
     const row = await historyRow(1, worked.s1.attendanceId);
-    expect(row).toMatchObject({ payrollStatus: 'rejected', payrollApprovedPence: null });
+    expect(row).toMatchObject({ payrollStatus: 'draft', payrollApprovedPence: null });
     expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenA))).status).toBe(409);
     expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: 'Again' })).status).toBe(409);
     const audit = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_record.rejected' AND entity_id = $1`, [id]);
@@ -350,7 +351,7 @@ describeIfDb('payroll approval (integration)', () => {
       { id: id1, reason: 'not_ready', message: NR },
       { id: attendanceIdNotARecord, reason: 'not_found', message: NF },
     ]);
-    expect((await recordFor(worked.s1!.attendanceId))!.status).toBe('rejected');
+    expect((await recordFor(worked.s1!.attendanceId))!.status).toBe('draft');
     const audits = await adminDataSource.query(
       `SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payroll_record.approved' AND entity_id::text = ANY($1::text[]) AND (metadata->>'bulk')::boolean`, [[id3, id4]]);
     expect(audits[0].n).toBe(2);
@@ -424,6 +425,48 @@ describeIfDb('payroll approval (integration)', () => {
     expect((await http().post(`/rest/v1/payroll/records/${extra.attendanceId}/approve`).set(auth(tokenA))).status).toBe(404);
   });
 
+  it('(12) decision 6: rejected goes back to draft; the finalising manager is told why (in-app + email), the staff member gets a neutral notice; never approvable or payable as it is', async () => {
+    const extra = await factory.createStaff({ id: orgId }, { owner: a, label: 'payroll-rejected' });
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [extra.profileId]);
+    staff.push(extra);
+    staffTokens.push(await factory.login(extra));
+    const i = staff.length - 1;
+    const w = await workShift(i);
+    await reviewAndFinalise(w, i, tokenVm); // the Venue Manager finalised (approved) these hours
+    const id = (await recordFor(w.attendanceId))!.id as string;
+    const REASON = 'Break of 45 minutes not deducted, per Ann at the venue';
+    const res = await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: REASON });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'draft', rejectionReason: REASON, rejectedByName: 'Manager Test' });
+    expect(await recordFor(w.attendanceId)).toMatchObject({ status: 'draft', rejected_by: a.userId, rejection_reason: REASON, approved_by: null });
+    const actions = await adminDataSource.query(`SELECT action FROM core.audit_log WHERE organisation_id = $1 AND entity_id::text = $2`, [orgId, id]);
+    expect(actions.map((r: { action: string }) => r.action).sort()).toEqual(['payroll_record.rejected', 'payroll_record.returned_to_draft']);
+    // The manager who approved the hours: in-app AND email, with the reason.
+    const vmNotes = await adminDataSource.query(`SELECT title, message FROM core.notification WHERE user_id = $1 AND type = 'payroll_record_rejected'`, [vm.userId]);
+    expect(vmNotes).toHaveLength(1);
+    expect(vmNotes[0]).toMatchObject({ title: 'Payroll record rejected', message: expect.stringContaining(REASON) });
+    const vmMail = await adminDataSource.query(`SELECT rendered_text FROM core.email_outbox WHERE target_user_id = $1 AND rendered_subject = 'Payroll record rejected'`, [vm.userId]);
+    expect(vmMail).toHaveLength(1);
+    expect(vmMail[0].rendered_text).toContain(REASON);
+    // The staff member: a neutral in-app notice, never the reason, and no email by default.
+    const staffNotes = await adminDataSource.query(`SELECT title, message FROM core.notification WHERE user_id = $1 AND type = 'payroll_hours_rechecked'`, [extra.userId]);
+    expect(staffNotes).toHaveLength(1);
+    expect(staffNotes[0]).toMatchObject({ title: 'Your hours are being re-checked', message: expect.stringContaining('are being re-checked') });
+    for (const word of ['Break', 'Ann', REASON]) expect(staffNotes[0].message).not.toContain(word);
+    expect(await adminDataSource.query(`SELECT 1 FROM core.email_outbox WHERE target_user_id = $1 AND rendered_subject = 'Your hours are being re-checked'`, [extra.userId])).toEqual([]);
+    // The rejecting manager is not notified about their own decision.
+    expect(await adminDataSource.query(`SELECT 1 FROM core.notification WHERE user_id = $1 AND type = 'payroll_record_rejected'`, [a.userId])).toEqual([]);
+    // As it is, the draft can be neither rejected again nor approved (state machine and the DB guard), never paid or put in a
+    // run (runs take approved records only), and staff History never shows it approved.
+    expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: 'Again please' })).status).toBe(409);
+    await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
+      `UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [id, a.userId]))).rejects.toMatchObject({ code: '23514' });
+    expect(await historyRow(i, w.attendanceId)).toMatchObject({ payrollStatus: 'draft', payrollApprovedPence: null });
+    const month = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
+    const period = await http().get(`/rest/v1/payroll/period?month=${month}`).set(auth(tokenA));
+    expect(period.body.rows.find((r: { attendanceId: string }) => r.attendanceId === w.attendanceId)).toMatchObject({ stage: 'rejected', payrollStatus: 'draft' });
+  });
+
   it('humans can never record a generated statement or a notification (RLS)', async () => {
     await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
       `UPDATE ${businessTables(m).payroll_record} SET statement_status = 'failed' WHERE attendance_id = $1`, [worked.s3!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
@@ -456,7 +499,7 @@ describeIfDb('payroll approval (integration)', () => {
       { organisationId: orgId, workspaceId: staff[1]!.workspaceId, userId: staff[1]!.userId, role: '' } as AuthContext,
       (m) => m.query(`UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE attendance_id = $1 RETURNING id`, [worked.s1!.attendanceId, a.userId]),
     )).resolves.toEqual([[], 0]);
-    expect((await recordFor(worked.s1!.attendanceId))!.status).toBe('rejected');
+    expect((await recordFor(worked.s1!.attendanceId))!.status).toBe('draft');
   });
 
   it('a correction after finalisation is refused (409) and leaves the payroll record untouched', async () => {

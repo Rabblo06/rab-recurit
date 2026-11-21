@@ -103,6 +103,8 @@ export const AuditAction = {
   PAYROLL_RECORD_APPROVED: 'payroll_record.approved',
   /** ...or rejected it, with the reason in metadata. */
   PAYROLL_RECORD_REJECTED: 'payroll_record.rejected',
+  // Owner decision 6: the rejected record goes straight back to draft (rejected → draft) for its hours to be re-checked.
+  PAYROLL_RECORD_RETURNED_TO_DRAFT: 'payroll_record.returned_to_draft',
   /** The worker stored the record's Approved Shift Statement PDF (metadata: file id, notified or not). Actor-less. */
   SHIFT_STATEMENT_GENERATED: 'payroll_record.shift_statement_generated',
   /** An Approved Shift Statement attempt failed (safe code only); retried up to the attempt limit. Actor-less. */
