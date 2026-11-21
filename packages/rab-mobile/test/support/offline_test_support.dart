@@ -65,7 +65,7 @@ OfflineEntry sampleEntry({
   punchBootId: punchBootId,
   punchBootMs: punchBootMs,
   deviceWallClockAt: deviceWallClockAt,
-  ticketDeviceWallClockAt: '2026-11-21T08:00:00+00:00',
+  integrity: const OfflineIntegrity(rootedSignal: false),
   qrToken: qrToken,
   location: location,
   appVersion: 'rab-mobile test',
