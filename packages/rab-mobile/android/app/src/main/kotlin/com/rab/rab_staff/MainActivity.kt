@@ -7,7 +7,9 @@ import android.content.ContentValues
 import android.os.Build
 import android.os.Environment
 import android.os.PersistableBundle
+import android.os.SystemClock
 import android.provider.MediaStore
+import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -54,6 +56,23 @@ class MainActivity : FlutterFragmentActivity() {
                     }
                 }
                 else -> result.notImplemented()
+            }
+        }
+        // M4 offline clock-in (docs/plans/m4-offline/DESIGN.md §3.3): the boot clock the offline queue measures elapsed
+        // time with. elapsedRealtime counts deep sleep (System.nanoTime / Dart's Stopwatch do not, which would make an
+        // offline punch look earlier than it was). BOOT_COUNT tells two boot sessions apart; when the device does not
+        // expose it the reading is refused and nothing can be queued (fail closed). No identifier or secret crosses this
+        // channel, and offline mode itself is off (owner HARD RULE).
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rab/boot_clock").setMethodCallHandler { call, result ->
+            if (call.method != "read") {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            try {
+                val bootCount = Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT)
+                result.success(mapOf("bootCount" to bootCount, "elapsedRealtimeMs" to SystemClock.elapsedRealtime()))
+            } catch (e: Exception) {
+                result.success(null)
             }
         }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rab/downloads").setMethodCallHandler { call, result ->

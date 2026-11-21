@@ -10300,3 +10300,47 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## M4 offline clock-in, staff phone (Flutter): punches stored on the device (branch feat/m4-mobile-offline-queue, 2026-11-21; no SQL; offline stays OFF, owner HARD RULE)
+- **What is new:** `packages/rab-mobile/lib/features/offline_sync/` can hold attendance punches (check-in, clock-in,
+  break start/end, clock-out) that could not reach the server, exactly as `docs/plans/m4-offline/DESIGN.md` §3 defines
+  them, until they are sent to `POST /rest/v1/attendance/me/sync` (not built yet). Whose data: the signed-in staff
+  member's own attendance evidence (shift id, the scanned QR text, an optional location fix, boot-clock readings and the
+  server-signed offline ticket).
+- **Threats and controls:**
+  - *Lost or stolen phone reads the queue.* The queue is one JSON value per user in the app's single secure storage
+    (`appSecureStorage`: Android AES-GCM data key wrapped by an Android Keystore RSA key; iOS Keychain
+    `AfterFirstUnlockThisDeviceOnly`, never synchronised), device-only and out of backups (`android:allowBackup="false"`),
+    wiped on a reinstall by `SecureStorageBootstrap`. It holds no name, no token, no money and no server-derived field.
+    It is capped at 30 entries / 48 KB per user (a 31st capture or a larger queue is refused and nothing is written),
+    acknowledged entries are deleted, and an empty queue deletes the stored value. No new dependency (no database, no
+    file store).
+  - *Editing the queue on the phone to change a time, a shift or the QR.* Entries are immutable and carry a signature
+    over the RFC 8785 canonical JSON of every other field (`canonical_json.dart`, tested against the RFC sample); the
+    server rejects any change (`SIGNATURE_INVALID`). The phone never decides a time: it records boot-clock readings and
+    a ticket; the server bounds the time (DESIGN §4, `@rab/shared` `offline-punch-time.ts`) and the phone never computes
+    worked minutes or pay (`duration.ts` stays the only place).
+  - *Another user on the same phone sends or sees someone else's punches.* The queue and ticket are keyed by user id
+    (`rab.offline.queue.<userId>`); a different user never reads or sends them (the server would also reject the ticket
+    subject).
+  - *Replaying or reordering entries.* `clientSeq` is a per-install counter written before use and never reused; an
+    unreadable counter fails closed (no capture) rather than restarting. Each entry has a UUID v4 idempotency key; the
+    store refuses a duplicate key or sequence number. Replay order is `clientSeq`.
+  - *A corrupted queue silently losing a punch.* An unreadable queue is reported (`unreadable`), never overwritten by a
+    new capture and never silently dropped; only an explicit dismissal deletes it.
+  - *Deep-sleep clock drift inflating pay.* Elapsed time comes from a `rab/boot_clock` channel
+    (`SystemClock.elapsedRealtime()`, counts deep sleep, + `Settings.Global.BOOT_COUNT`), never Dart's `Stopwatch`
+    (stops in deep sleep, which would make a punch look earlier). No reading = no capture.
+- **Still off, by construction:** nothing can be queued unless (1) the build was made with
+  `--dart-define=OFFLINE_ATTENDANCE=true` (default false), (2) the server's last `GET /attendance/me/active` said
+  `offline.enabled == true`, (3) a ticket from this boot, received under 16 h ago, is held, and (4) a registered device
+  key can sign. The device key and its registration route do not exist yet, so the signer is a placeholder that is never
+  available (`UnavailableEntrySigner`): on a real phone the queue stays empty.
+- **Residual:** a rooted phone can read secure storage and see its own queued punches (its own data); it still cannot
+  forge a valid signature once the Keystore key exists, and the server bounds every time to the schedule (D3). The
+  boot-clock channel's values are client-asserted; the server treats them as bounded evidence, not as truth.
+- **Tests:** `test/offline_queue_store_test.dart` (forbidden fields never written; signed payload = canonical JSON
+  minus `sig`; per-user keys; replay order; 31st entry and 48 KB refused with nothing written; duplicate key or
+  sequence refused; unreadable queue never overwritten; update cannot add entries; sequence never reused, corrupt
+  counter fails closed; concurrent appends; ticket capture window: same boot and <= 16 h only; boot clock channel fails
+  closed), `test/offline_canonical_json_test.dart` (RFC 8785 sample, key order, numbers, escapes, refusals).
