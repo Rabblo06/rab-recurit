@@ -1,7 +1,7 @@
 /**
  * CF-23: builds before the fix persisted notes about a person in localStorage under `user-notes-<userId>`. Browser storage
  * outlives logout and is shared by every account on the same browser profile, so those keys are deleted, never read.
- * Called once at app start-up (App.tsx) and when the user profile page mounts.
+ * Called once at app start-up (App.tsx). (The old User Profile page that wrote them was removed: owner decision 36.)
  */
 export const LEGACY_NOTES_KEY_PREFIX = 'user-notes-';
 

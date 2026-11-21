@@ -77,6 +77,19 @@ describe('App', () => {
     expect(window.localStorage.getItem('unrelated-key')).toBe('kept');
   });
 
+  it('decision 36: the old User Profile page is gone (no /users/:id route, no module, no shell button); the start-up purge stays', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require('node:fs') as typeof import('node:fs');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require('node:path') as typeof import('node:path');
+    const read = (rel: string) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+    expect(fs.existsSync(path.join(__dirname, 'features/users/UserProfile.tsx'))).toBe(false);
+    expect(read('App.tsx')).not.toMatch(/users\/:id|UserProfile/);
+    expect(read('shell/consolePages.ts')).not.toMatch(/UserProfile/);
+    expect(read('shell/Layout.tsx')).not.toMatch(/trigger-send-email|isUserProfile/);
+    expect(read('App.tsx')).toMatch(/purgeLegacyNotes\(\)/);
+  });
+
   it('redirects an unauthenticated visitor to the login form', async () => {
     render(<App />);
     expect(await screen.findByText('Welcome to your workspace')).toBeInTheDocument();

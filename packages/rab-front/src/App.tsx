@@ -27,7 +27,6 @@ import { isSilentError, notifyApiError } from './shared/lib/mutationFeedback';
 import {
   AiChatPage,
   Users,
-  UserProfile,
   Shifts,
   Offers,
   VenueOffers,
@@ -411,7 +410,6 @@ export default function App() {
             <Route index element={<Dashboard />} />
             <Route path="chat" element={<AiChatPage />} />
             <Route path="users" element={<Users />} />
-            <Route path="users/:id" element={<UserProfile />} />
             <Route path="shifts" element={<Shifts />} />
             <Route path="offers" element={<Offers />} />
             <Route path="venue-offers" element={<VenueOffers />} />

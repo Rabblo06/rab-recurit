@@ -10326,3 +10326,17 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   a seeded `user-notes-x` key removes it and keeps an unrelated key (fails without the start-up purge).
 - **Residual:** notes on this page are not saved at all until a server-side, RLS-scoped notes store backs it (a new
   table = owner SQL review).
+
+## Old User Profile page removed (owner decision 36, 2026-11-21; branch chore/front-remove-dead-user-profile, stacked on #275; no SQL, front only)
+- **Finding:** rab-front's `features/users/UserProfile.tsx` (`/users/:id`) called `GET/PATCH/DELETE /users/:id`, which no
+  server route serves, so it always showed "User not found". It was the page that kept notes about a person in browser
+  storage (CF-23, #275), and its shell "Send Email" button and `trigger-send-email` event existed only for it. Dead code
+  that touches another person's data is attack surface with no owner (a future server `/users/:id` route would have
+  silently brought it back to life with its old assumptions).
+- **Control:** the page, its spec, its lazy registry entry (`shell/consolePages.ts`), its route, and the Layout button and
+  event are deleted. `/users/<anything>` now falls through to the console's "Page not found". Staff details live in the
+  user detail panel. #275's App start-up purge of the old `user-notes-*` keys stays (owner decision 37), now the only
+  caller of `purgeLegacyNotes`.
+- **Tests:** `App.spec.tsx`: the start-up purge test (from #275) still passes; a new test asserts the module is gone, App.tsx
+  has no `users/:id` route or `UserProfile` reference, the registry and Layout no longer mention it, and App still calls
+  `purgeLegacyNotes()`.
