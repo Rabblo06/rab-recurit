@@ -29,7 +29,9 @@ export class ReportFilePolicy implements FileKindPolicy {
 
   async canRead(manager: EntityManager, ctx: AuthContext, file: StoredFile): Promise<boolean> {
     if (file.resourceType !== 'shift_report') return false;
-    if (!(await this.permissions.userHasPermission(ctx, PermissionFlag.REPORT_VIEW))) return false;
+    // On the caller's own transaction: `userHasPermission()` opens a second transaction on a second pool connection while
+    // FilesController's still holds one (load-test §4.3 pattern: pool deadlock under concurrency). Same answer, same ctx.
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.REPORT_VIEW))) return false;
     const report = await manager.findOne(ShiftReport, { where: { id: file.resourceId } });
     if (!report) return false;
     const shift = await manager.findOne(Shift, { where: { id: report.shiftId } });
