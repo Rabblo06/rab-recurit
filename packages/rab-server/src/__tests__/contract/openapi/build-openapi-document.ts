@@ -9,6 +9,7 @@ import { DocumentBuilder, OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
 import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
 
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { applyGlobalValidationPipe } from '../../../engine/utils/global-validation-pipe';
 import { CONTRACT_COMPONENTS, CONTRACT_RESPONSES } from './contract-responses';
 import { attachOpenApiMetadata, requestDtosOf } from './dto-openapi-metadata';
 
@@ -94,7 +95,8 @@ export async function buildOpenApiDocument(): Promise<OpenAPIObject> {
   for (const dto of requestDtosOf(controllers)) attachOpenApiMetadata(dto, done);
 
   const moduleRef = await Test.createTestingModule({ controllers }).useMocker(() => ({})).compile();
-  const app = moduleRef.createNestApplication({ logger: false });
+  // Same pipe as every Nest application the repository builds (XA-11); nothing is served, the scanner only reads metadata.
+  const app = applyGlobalValidationPipe(moduleRef.createNestApplication({ logger: false }));
   const config = new DocumentBuilder()
     .setTitle('Crewflow API')
     .setDescription(
@@ -121,7 +123,7 @@ export async function buildOpenApiDocument(): Promise<OpenAPIObject> {
       const contract = CONTRACT_RESPONSES[`${method.toUpperCase()} ${route}`];
       if (contract) {
         operation.responses = { ...operation.responses, [contract.status]: { description: contract.description, content: { 'application/json': { schema: contract.schema as SchemaObject } } } };
-        (operation as Record<string, unknown>)['x-crewflow-contract'] = true;
+        (operation as unknown as Record<string, unknown>)['x-crewflow-contract'] = true;
       }
     }
   }
