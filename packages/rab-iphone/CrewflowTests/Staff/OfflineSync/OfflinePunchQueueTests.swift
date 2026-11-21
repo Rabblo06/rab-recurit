@@ -205,9 +205,9 @@ final class OfflinePunchQueueTests: XCTestCase {
             XCTAssertEqual($0 as? OfflineCaptureRefusal, .notSaved)
         }
         XCTAssertEqual(store.string(for: OfflinePunchStorage.queueKey(OfflineFixtures.userId)), "{not json")
-        offline.queue.discardAll()
-        XCTAssertNil(store.string(for: OfflinePunchStorage.queueKey(OfflineFixtures.userId)))
-        XCTAssertEqual(offline.queue.unsentCount, 0)
+        XCTAssertFalse(offline.queue.discardAll(), "an unreadable queue is never wiped, not even by an explicit discard")
+        XCTAssertEqual(store.string(for: OfflinePunchStorage.queueKey(OfflineFixtures.userId)), "{not json")
+        XCTAssertEqual(offline.queue.unsentCount, 1, "the sign-out guard keeps showing")
     }
 
     // MARK: Limits (D5, §3.4)

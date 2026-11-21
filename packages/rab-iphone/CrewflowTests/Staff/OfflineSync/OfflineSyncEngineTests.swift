@@ -74,7 +74,7 @@ final class OfflineSyncEngineTests: XCTestCase {
     }
 
     @MainActor
-    private func makeEngine(_ offline: StaffOfflineAttendance, millis: Millis = Millis()) -> OfflineSyncEngine {
+    private func makeEngine(_ offline: StaffOfflineAttendance, millis: Millis = Millis(), owner: @escaping () -> Bool = { true }) -> OfflineSyncEngine {
         let (client, _) = makeClient()
         let repository = StaffRepository(api: client)
         return OfflineSyncEngine(
@@ -84,6 +84,7 @@ final class OfflineSyncEngineTests: XCTestCase {
             onTicket: { [weak offline] raw, serverNow, started in
                 offline?.renewTicket(raw, serverNow: serverNow, fetchStarted: started)
             },
+            isOwnerSignedIn: owner,
             send: { body in try await repository.syncOffline(body) }
         )
     }
@@ -113,10 +114,49 @@ final class OfflineSyncEngineTests: XCTestCase {
         XCTAssertEqual(offline.queue.items[0].rejectionCode, "REPORT_FINALISED")
         XCTAssertEqual(offline.queue.items[1].state, .pending, "no answer for it: still waiting, never assumed received")
         let calls = SyncStub.calls()
-        XCTAssertEqual(calls.count, 2, "the unanswered entry is tried once more, then the run stops (no tight loop)")
-        XCTAssertEqual(SyncStub.keys(calls[1]), [ids[3]])
+        XCTAssertEqual(calls.count, 1, "an unanswered entry ends the run: nothing later can overtake it")
         XCTAssertEqual(calls[0].httpMethod, "POST")
         XCTAssertEqual(calls[0].url?.path, "/rest/v1/attendance/me/sync")
+    }
+
+    @MainActor
+    func testNoLaterBatchIsSentWhileAnEarlierEntryIsUnanswered() async throws {
+        let clock = FakeBootClock()
+        let offline = try makeOffline(30, clock: clock)
+        let ids = offline.queue.items.map(\.id)
+        let unanswered = ids[3]
+        server.setHandler { request in
+            SyncStub.results(SyncStub.keys(request).filter { $0 != unanswered }.map { (key: $0, outcome: "applied", code: nil) })
+        }
+        let engine = makeEngine(offline)
+        let result = await engine.run(trigger: .automatic, trustedNow: nil)
+        XCTAssertEqual(result, .sent(received: 24, rejected: 0))
+        XCTAssertEqual(SyncStub.calls().count, 1, "entries 26-30 wait behind the unanswered entry 4")
+        XCTAssertEqual(offline.queue.pending.first?.id, unanswered)
+        XCTAssertEqual(offline.queue.pending.count, 6)
+    }
+
+    @MainActor
+    func testNothingIsSentWhenTheSignedInUserIsNotTheQueuesOwner() async throws {
+        let clock = FakeBootClock()
+        let offline = try makeOffline(2, clock: clock)
+        server.setHandler { request in SyncStub.applyAll(request) }
+        let engine = makeEngine(offline, owner: { false })
+        let result = await engine.run(trigger: .manual, trustedNow: nil)
+        XCTAssertEqual(result, .failed)
+        XCTAssertTrue(SyncStub.calls().isEmpty, "another account never sends this queue")
+        XCTAssertEqual(offline.queue.pending.count, 2)
+    }
+
+    @MainActor
+    func testRetryAfterIsCappedAtFifteenMinutes() async throws {
+        let clock = FakeBootClock()
+        let offline = try makeOffline(1, clock: clock)
+        let millis = Millis()
+        server.setHandler { _ in .json(429, "\"Too many requests\"", headers: ["Retry-After": "86400"]) }
+        let engine = makeEngine(offline, millis: millis)
+        _ = await engine.run(trigger: .automatic, trustedNow: nil)
+        XCTAssertEqual(engine.retryAfterUntilMs, millis.value + 900_000)
     }
 
     @MainActor
