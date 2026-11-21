@@ -13,6 +13,7 @@ import { ListMyOffersDto } from '../dto/list-my-offers.dto';
 import { ListOffersDto } from '../dto/list-offers.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
+import { SendOffersToShiftsDto } from '../dto/send-offers-to-shifts.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { OfferService } from '../services/offer.service';
 import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
@@ -66,6 +67,17 @@ export class OfferController {
    * Same permission as a single send — a manager who can send one offer can send N to the same shift. `mode:
    * 'replacement'` is the replacement form on the SAME shift (see OfferService.sendReplacementBulk).
    */
+  /**
+   * Many shifts at once, each with its own recipients, all or nothing (OfferService.sendOffersToShifts). Same permission
+   * as a single send: a manager who can send one offer can send this batch to their own shifts.
+   */
+  @Post('offers/send-to-shifts')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
+  sendOffersToShifts(@AuthUser() ctx: AuthContext, @Body() dto: SendOffersToShiftsDto) {
+    return this.offerService.sendOffersToShifts(ctx, dto);
+  }
+
   @Post('shifts/:shiftId/offers/bulk')
   @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))

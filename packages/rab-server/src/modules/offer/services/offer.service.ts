@@ -54,6 +54,8 @@ import { ListOffersDto } from '../dto/list-offers.dto';
 import { ListMyOffersDto } from '../dto/list-my-offers.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
+import { MULTI_SHIFT_SEND_MAX_OFFERS, MULTI_SHIFT_SEND_MAX_SHIFTS, SendOffersToShiftsDto } from '../dto/send-offers-to-shifts.dto';
+import { overlappingWithinBatch } from './multi-shift-send-plan';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { JobOffer } from '../entities/job-offer.entity';
 import { applyOfferConfirmation, ConfirmationDeadlinePassedException } from './apply-offer-confirmation';
@@ -148,6 +150,18 @@ export interface OfferSummary {
 export interface BulkOfferResult {
   batchId: string;
   results: Array<{ staffProfileId: string; ok: boolean; offerId?: string; message?: string }>;
+}
+
+/** The 409 code of a refused multi-shift send: nothing was sent; the body's `results` says why, row by row. */
+export const BULK_OFFER_REJECTED = 'BULK_OFFER_REJECTED';
+/** A row that would have been fine, rolled back because another row of the batch failed. */
+const NOT_SENT_BATCH_FAILED = 'Not sent: another offer in this batch failed.';
+
+/** `POST /offers/send-to-shifts` success: every row sent (otherwise the call is a 409 and nothing is sent). */
+export interface MultiShiftOfferResult {
+  /** shiftId -> the offer_batch_id of that shift's offers. */
+  batches: Record<string, string>;
+  results: Array<{ shiftId: string; staffProfileId: string; ok: boolean; offerId?: string; message?: string }>;
 }
 
 /** `GET /offers/mine` when any paging parameter is sent (Phase C1, contract §3). */
@@ -839,6 +853,102 @@ export class OfferService {
       }
 
       return { batchId, results };
+    });
+  }
+
+  /**
+   * Named action `sendOffersToShifts` (`POST /offers/send-to-shifts`): many shifts, each with its own recipients, in ONE
+   * all-or-nothing transaction. Every offer goes through the same `sendOne` as a single send (venue-team scope, the
+   * DOM-01 eligibility check incl. the confirmed-overlap read of the GiST double-booking rule, the confirmation deadline,
+   * availability, the pay rate snapshot from the shift, audit, notification and realtime outbox, all in this transaction).
+   *
+   * Layers: route PermissionGuard(OFFER_SEND) -> OFFER_SEND re-checked here first (403 before any row is read) -> each
+   * shift loaded under `loadSendableShift` (own shift only; anything else reads as "Shift not found."; published and
+   * not full; row-locked in id order so two batches never deadlock) -> workspace RLS.
+   *
+   * All or nothing: when any row fails, nothing is sent and the 409 body (`code: BULK_OFFER_REJECTED`) lists every row
+   * with `ok` and the reason, so the manager can fix the batch and resend. The whole-batch availability pre-check keeps
+   * the existing contract: one 409 `STAFF_AVAILABILITY_CONFLICT` listing every affected recipient, nothing sent.
+   * Each shift keeps its own `offer_batch_id` (one send action per shift, as the batch summary reads it).
+   */
+  async sendOffersToShifts(ctx: AuthContext, dto: SendOffersToShiftsDto): Promise<MultiShiftOfferResult> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND))) {
+        throw new ForbiddenException('Sending offers is not permitted.');
+      }
+      const items = Array.isArray(dto?.items) ? dto.items : [];
+      const shiftIds = items.map((item) => item?.shiftId);
+      const total = items.reduce((sum, item) => sum + (Array.isArray(item?.staffProfileIds) ? item.staffProfileIds.length : 0), 0);
+      if (items.length === 0 || items.length > MULTI_SHIFT_SEND_MAX_SHIFTS || new Set(shiftIds).size !== shiftIds.length) {
+        throw new BadRequestException(`Name 1 to ${MULTI_SHIFT_SEND_MAX_SHIFTS} different shifts.`);
+      }
+      if (total === 0 || total > MULTI_SHIFT_SEND_MAX_OFFERS || items.some((item) => new Set(item.staffProfileIds).size !== item.staffProfileIds.length)) {
+        throw new BadRequestException(`Send 1 to ${MULTI_SHIFT_SEND_MAX_OFFERS} offers, each staff member once per shift.`);
+      }
+
+      const rows = items.flatMap((item) => item.staffProfileIds.map((staffProfileId) => ({ shiftId: item.shiftId, staffProfileId })));
+      const report = new Map<string, MultiShiftOfferResult['results'][number]>();
+      const rowKey = (shiftId: string, staffProfileId: string) => `${shiftId}|${staffProfileId}`;
+      const fail = (shiftId: string, staffProfileId: string, message: string) => report.set(rowKey(shiftId, staffProfileId), { shiftId, staffProfileId, ok: false, message });
+      const rejectIfAnyFailed = () => {
+        if (![...report.values()].some((r) => !r.ok)) return;
+        const results = rows.map(({ shiftId, staffProfileId }) => {
+          const row = report.get(rowKey(shiftId, staffProfileId));
+          return { shiftId, staffProfileId, ok: false, message: row && !row.ok ? row.message! : NOT_SENT_BATCH_FAILED };
+        });
+        const failed = [...report.values()].filter((r) => !r.ok).length;
+        throw new ConflictException({ statusCode: 409, code: BULK_OFFER_REJECTED, message: `Nothing was sent: ${failed} of ${rows.length} offers could not be sent.`, results });
+      };
+
+      // Shifts, locked in id order (a deterministic lock order: two concurrent batches never deadlock).
+      const shifts = new Map<string, Shift>();
+      for (const shiftId of [...shiftIds].sort()) {
+        try {
+          shifts.set(shiftId, await this.loadSendableShift(manager, ctx, shiftId));
+        } catch (error) {
+          for (const row of rows.filter((r) => r.shiftId === shiftId)) fail(row.shiftId, row.staffProfileId, errorMessage(error));
+        }
+      }
+      rejectIfAnyFailed();
+
+      const planned = rows.map((row) => ({ ...row, ...defaultAssignmentTime(shifts.get(row.shiftId)!) }));
+      for (const clash of overlappingWithinBatch(planned)) fail(clash.shiftId, clash.staffProfileId, clash.message);
+      rejectIfAnyFailed();
+
+      const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
+      await assertStaffAvailabilityAcknowledged(
+        manager,
+        planned.map(({ staffProfileId, startsAt, endsAt }) => ({ staffProfileId, startsAt, endsAt })),
+        acknowledgements,
+      );
+
+      const batches: Record<string, string> = {};
+      for (const shiftId of shiftIds) {
+        const shift = shifts.get(shiftId)!;
+        const shiftLabel = await this.getShiftLabel(manager, shiftId);
+        const batchId = randomUUID();
+        batches[shiftId] = batchId;
+        for (const row of rows.filter((r) => r.shiftId === shiftId)) {
+          // A savepoint per row only so EVERY failure can be reported; any failure still rolls the whole batch back below.
+          await manager.query('SAVEPOINT sp_multi_shift_send');
+          try {
+            const offer = await this.sendOne(manager, ctx, shift, shiftLabel, row.staffProfileId, dto.expiresInHours, batchId, acknowledgements);
+            report.set(rowKey(shiftId, row.staffProfileId), { ...row, ok: true, offerId: offer.id });
+          } catch (error) {
+            await manager.query('ROLLBACK TO SAVEPOINT sp_multi_shift_send');
+            fail(shiftId, row.staffProfileId, errorMessage(error));
+          }
+        }
+      }
+      rejectIfAnyFailed();
+
+      for (const shift of shifts.values()) {
+        if (shift.status === ShiftStatus.OPEN) {
+          assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
+          await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED });
+        }
+      }
+      return { batches, results: rows.map((r) => report.get(rowKey(r.shiftId, r.staffProfileId))!) };
     });
   }
 

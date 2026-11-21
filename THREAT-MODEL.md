@@ -10300,3 +10300,30 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Multi-shift offer send — many shifts in one all-or-nothing transaction (branch feat/offers-multi-shift-send, 2026-11-21; no SQL)
+- **Feature:** `POST /rest/v1/offers/send-to-shifts` (`OfferService.sendOffersToShifts`): `{ items: [{ shiftId,
+  staffProfileIds[] }], expiresInHours?, acknowledgedAvailabilityConflicts? }`, up to 50 shifts and 200 offers. The
+  Shifts list gets an "Offer to staff" bulk action. Offers stay pending until the staff member accepts and a manager
+  confirms, as for a single send.
+- **Threats and controls:** (1) Sending without the right: PermissionGuard(OFFER_SEND) + ManagerApplication, and
+  OFFER_SEND re-checked first in the service (403 before any row is read). (2) Offering on someone else's shift: every
+  shift goes through `loadSendableShift` (own shift only; anything else reads "Shift not found.", identical for an
+  unknown id) under workspace RLS. (3) Bypassing eligibility, double-booking or the rate snapshot: every offer is
+  created by the same private `sendOne` a single send uses (team scope, DOM-01 eligibility incl. the confirmed-overlap
+  read of the GiST rule, confirmation deadline, availability, `pay_rate_snapshot_pence` from the shift, audit,
+  notification, realtime outbox), all in the one transaction. New here: the same person on two overlapping shifts of
+  the batch is refused before anything is sent. (4) Partial batches: all or nothing. Any failed row rolls back the
+  whole transaction (offers, seats, audit, notifications and outbox rows included; offer-expiry triggers arm only after
+  commit) and the 409 `BULK_OFFER_REJECTED` lists every row with its reason. (5) Mass assignment: no status, kind, time,
+  rate or organisation field exists in the DTO (400). (6) Deadlocks between concurrent batches: shift rows are locked in
+  id order.
+- **Flagged assumptions (owner):** pending offers for overlapping shifts to one person are refused inside one batch
+  (today two separate sends allow it, and the GiST exclusion only stops the second confirmation); each shift keeps
+  its own `offer_batch_id`; per-staff custom times are not offered in the multi-shift form (each offer uses its shift's
+  times).
+- **Tests:** `multi-shift-send-plan.spec.ts`; `multi-shift-offer-send.integration.spec.ts` (happy path with per-shift
+  batches and the shift's pay snapshot; one ineligible recipient → 409 and zero seats on every shift, statuses
+  unchanged; overlapping shifts for one person → 409, nothing sent; another manager's shift → "Shift not found.", nothing
+  sent; OFFER_SEND revoked → service 403; organisationId / status / pay / kind / times in the body → 400; duplicate
+  shifts → 400; a repeat send → 409); `MultiShiftOfferDialog.spec.tsx`.
