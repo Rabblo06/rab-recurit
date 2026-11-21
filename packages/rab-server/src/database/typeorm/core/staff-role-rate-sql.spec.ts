@@ -5,6 +5,7 @@ import {
   EXPECTED_STAFF_ROLE_RATE_STATE,
   STAFF_ROLE_RATE_MAX_PENCE,
   STAFF_ROLE_RATE_OWNERSHIP_SQL,
+  STAFF_ROLE_RATE_PARITY_TRIGGERS,
   STAFF_ROLE_RATE_SECURITY_SQL,
   STAFF_ROLE_RATE_TABLE_SQL,
   STAFF_ROLE_RATE_UPDATABLE_COLUMNS,
@@ -117,6 +118,15 @@ describe('core.staff_role_rate SQL', () => {
     expect(STAFF_ROLE_RATE_OWNERSHIP_SQL).toEqual([
       'ALTER TABLE core.staff_role_rate OWNER TO crewflow',
     ]);
+  });
+
+  it('the exported parity trigger list names exactly the triggers created (counted by owner-login-guards)', () => {
+    const created = security
+      .map((s) => /^CREATE TRIGGER (\S+) /.exec(s)?.[1])
+      .filter(Boolean);
+    expect([...created].sort()).toEqual(
+      [...STAFF_ROLE_RATE_PARITY_TRIGGERS].sort(),
+    );
   });
 
   it('the post-condition reports every difference and nothing when the state is as reviewed', () => {

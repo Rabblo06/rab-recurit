@@ -80,6 +80,18 @@ CREATE TABLE core.staff_role_rate (
 );
 CREATE INDEX staff_role_rate_lookup_idx ON core.staff_role_rate (workspace_id, staff_profile_id, job_role_id, effective_from DESC)`;
 
+/**
+ * The two grant-parity triggers this migration adds with the reviewed core.owner_login_grant_parity_guard() (outside
+ * GRANT_PARITY_TARGETS, whose list is consumed by the frozen OwnerLoginGrantParityGuards1786721420000). Counted by
+ * owner-login-guards.integration.spec.ts next to that list.
+ */
+export const STAFF_ROLE_RATE_PARITY_TRIGGERS: readonly string[] = Object.freeze(
+  [
+    '_staff_role_rate_grant_parity_update',
+    '_staff_role_rate_grant_parity_truncate',
+  ],
+);
+
 export const STAFF_ROLE_RATE_SECURITY_SQL: readonly string[] = Object.freeze([
   'ALTER TABLE core.staff_role_rate ENABLE ROW LEVEL SECURITY',
   'ALTER TABLE core.staff_role_rate FORCE ROW LEVEL SECURITY',
