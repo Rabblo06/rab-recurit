@@ -87,6 +87,8 @@ jobs:
           api-level: 34
           arch: x86_64
           target: google_apis
+          # A common phone size (the AVD default is a 320x640 dp screen, smaller than any device the app supports).
+          profile: pixel_6
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           working-directory: packages/rab-mobile

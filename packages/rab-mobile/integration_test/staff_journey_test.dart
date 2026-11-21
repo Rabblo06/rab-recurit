@@ -107,7 +107,10 @@ void main() {
 
     // Shift detail.
     // The "Today's Shift" panel (the first card on the home screen) opens the shift.
-    await tester.tap(find.text(FakeCrewflowApi.venueName).first);
+    final todaysShift = find.text(FakeCrewflowApi.venueName).first;
+    await tester.ensureVisible(todaysShift); // small screens: the card can sit below the fold
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(todaysShift);
     await pumpUntilFound(tester, find.text('Job Details'));
     expect(find.text(FakeCrewflowApi.roleName), findsWidgets);
     expect(find.text(FakeCrewflowApi.venueAddress), findsOneWidget);
