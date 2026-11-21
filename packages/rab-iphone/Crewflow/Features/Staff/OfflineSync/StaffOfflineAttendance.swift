@@ -138,6 +138,10 @@ final class StaffOfflineAttendance: ObservableObject {
         )
     }
 
+    /// The user id each sync request is bound to (the live app always; nil
+    /// only in tests built without a session).
+    var requestOwnerUserId: String? { currentUserId == nil ? nil : storage.userId }
+
     /// The signed-in user is this queue's owner (checked before every send).
     func isOwnerSignedIn() -> Bool {
         guard let currentUserId else { return true }

@@ -10358,8 +10358,10 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Controls:** (1) Online first; an action is saved only when the gate is open AND the online request got no HTTP
   answer (connection / DNS / TLS failure, connection lost, or the client's own timeout); any HTTP answer, a server or
   proxy 408 included (now `.http(408)`, distinct from the client timeout), is shown as today and never saved. While
-  saved actions wait, a new punch sends them first and is saved behind them or refused, never sent online ahead of
-  them. (2) `Idempotency-Key` only while the
+  saved actions wait, a new punch sends them first; only when that gets no HTTP answer is it saved behind them (or
+  refused with the gate shut). On any answer it goes online (server decides; out of order only pays less, D3), so a
+  server fault can never lock staff out of clocking (security review MEDIUM). The sync request is bound to the queue
+  owner where the bearer token is read; a failed Keychain read is never taken for an empty queue (review LOW). (2) `Idempotency-Key` only while the
   gate is open, shared by the online attempt and the saved copy (D17), so the server applies it at most once; with the
   gate shut no request changes. (3) Nothing optimistic: no attendance until the server answers; a saved clock-in shows
   fixed text, never a ticking timer (D10), with the server-anchored time. (4) `RequestOptions.headers` cannot replace
@@ -10370,8 +10372,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `CrewflowTests/Staff/OfflineSync/StaffOfflineStoreTests.swift`: gate shut = no header, nothing saved,
   today's uncertain message; gate open = saved with the same key, never resent online, no live attendance; timeout
   saved with the transport retry sharing the key; 409 never saved; a successful read sends and then shows the server's
-  attendance; today's `/me/active` shuts the gate; a 408 answer is never saved; an online punch never overtakes saved
-  ones (gate open: saved behind; gate shut: refused); an unreadable queue survives sign-out; clock-out after a saved clock-in (still offline, and after the
+  attendance; today's `/me/active` shuts the gate; a 408 answer is never saved; held behind saved ones only when the
+  sync gets no answer (gate shut + no network: refused); any sync answer (500, 429, 400, unknown outcome, undecodable
+  200, gate open or shut) lets the punch go online; an unreadable queue survives sign-out; clock-out after a saved clock-in (still offline, and after the
   clock-in is received); sign-out count and discard; D10 words; transport headers cannot be forged. The existing
   StaffStoreTests (no offline wiring) keep proving today's behaviour.
 - **Residual:** offers are not persisted, so after the app is killed while offline the clock screen has no shift to

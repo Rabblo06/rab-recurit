@@ -143,14 +143,14 @@ final class StaffOfflineStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testAnOnlinePunchNeverOvertakesSavedOnes() async throws {
+    func testAnOnlinePunchIsHeldBehindSavedOnesWhenTheSyncGetsNoAnswer() async throws {
         let (offline, _) = openGate()
         let online = StubFlag(false)
         server.setHandler { request in
             guard online.value else { return .failure(.notConnectedToInternet) }
             let path = request.url?.path ?? ""
-            // The server answers, but leaves the saved check-in unanswered.
-            if path.hasSuffix("/attendance/me/sync") { return SyncStub.results([]) }
+            // The sync gets no answer at all (the clock-in route would work).
+            if path.hasSuffix("/attendance/me/sync") { return .failure(.notConnectedToInternet) }
             if path.hasSuffix("/attendance/clock-in") {
                 return .json(201, StaffFixtures.attendanceJSON(status: "clocked_in", clockOutAt: nil, workedMinutes: nil))
             }
@@ -175,7 +175,46 @@ final class StaffOfflineStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testWithTheGateShutAndSavedActionsWaitingAnOnlinePunchIsRefusedNotSent() async throws {
+    func testAnySyncAnswerLetsTheOnlinePunchGoAndTheServerDecides() async throws {
+        let answers: [(String, StubResponse)] = [
+            ("500", .json(500, "")),
+            ("429", .json(429, "\"Too many requests\"", headers: ["Retry-After": "60"])),
+            ("unknown outcome", SyncStub.results([])),
+            ("undecodable 200", .json(200, "{\"results\":\"nope\"}")),
+            ("400", .json(400, "{\"message\":[\"bad\"]}")),
+        ]
+        for (name, answer) in answers {
+            for gateShut in [false, true] {
+                URLProtocolStub.server.reset()
+                let (offline, _) = openGate()
+                let online = StubFlag(false)
+                server.setHandler { request in
+                    guard online.value else { return .failure(.notConnectedToInternet) }
+                    let path = request.url?.path ?? ""
+                    if path.hasSuffix("/attendance/me/sync") { return answer }
+                    if path.hasSuffix("/attendance/clock-in") {
+                        return .json(201, StaffFixtures.attendanceJSON(status: "clocked_in", clockOutAt: nil, workedMinutes: nil))
+                    }
+                    return .json(404, "{\"message\":\"Not found.\"}")
+                }
+                let store = makeStore(offline)
+                _ = await store.checkIn(shiftId: StaffFixtures.shiftId, location: nil)
+                if gateShut { offline.updateFromServer(enabled: false, ticket: nil, serverNow: nil, fetchStarted: nil) }
+                online.value = true
+
+                let ok = await store.clockIn(shiftId: StaffFixtures.shiftId, qrToken: "qr", location: nil)
+
+                let label = "\(name), gate shut: \(gateShut)"
+                XCTAssertGreaterThanOrEqual(server.requests(to: "/attendance/me/sync").count, 1, label)
+                XCTAssertEqual(server.requests(to: "/attendance/clock-in").count, 1, "goes online: \(label)")
+                XCTAssertTrue(ok, label)
+                XCTAssertNil(offline.queue.pending(.clockIn, shiftId: StaffFixtures.shiftId), "not held back: \(label)")
+            }
+        }
+    }
+
+    @MainActor
+    func testWithTheGateShutAndNoNetworkAnOnlinePunchBehindSavedOnesIsRefused() async throws {
         let (offline, _) = openGate()
         server.setHandler { _ in .failure(.notConnectedToInternet) }
         let store = makeStore(offline)

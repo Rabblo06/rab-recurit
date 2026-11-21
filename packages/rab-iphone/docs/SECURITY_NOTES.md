@@ -194,8 +194,10 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
   so the server applies it at most once (D17). Only a genuine no-response failure is saved (`APIError.isNoResponse`:
   connection, DNS, TLS, connection lost, or the client's own timeout); any HTTP answer is not, and a server or proxy
   408 now maps to `.http(408)`, kept apart from the client timeout (still an uncertain outcome that reloads, never a
-  resend). While saved actions are waiting, a new punch first sends them and, if any still wait, is saved behind them
-  (gate open) or refused (gate shut): it is never sent online ahead of them. With the gate shut
+  resend). While saved actions are waiting, a new punch first sends them; it is held back (saved behind them with the
+  gate open, refused with it shut) ONLY when that attempt got no HTTP answer at all. On any answer (4xx, 429, 5xx, an
+  unknown outcome, an undecodable 200) it goes online and the server decides: out of order can only pay less (D3), and
+  a server fault never locks anyone out of clocking. With the gate shut
   (every build today) requests carry no header and the existing uncertain-outcome handling is unchanged. Nothing is
   optimistic: no attendance is shown until the server answers; a saved clock-in replaces the running timer with fixed
   text "Clocked in 09:02, saved on this phone, not yet confirmed" (D10; the time is the server-anchored estimate, never

@@ -131,7 +131,10 @@ final class StaffStore: ObservableObject {
                     offline?.renewTicket(raw, serverNow: serverNow, fetchStarted: started)
                 },
                 isOwnerSignedIn: { [weak offline] in offline?.isOwnerSignedIn() ?? false },
-                send: { body in try await repository.syncOffline(body) }
+                // Bound to the owner where the bearer is read (no await gap).
+                send: { [owner = offline.requestOwnerUserId] body in
+                    try await repository.syncOffline(body, ownerUserId: owner)
+                }
             )
         } else {
             offlineSync = nil
@@ -559,14 +562,20 @@ final class StaffStore: ObservableObject {
         }
     }
 
-    /// An online punch never overtakes punches saved earlier (review of the
-    /// Flutter queue, class 5). With saved actions waiting they are sent
-    /// first; if any still wait, this action is saved behind them (gate
-    /// open) or refused (gate shut), never sent online. true = go online.
+    /// With saved actions waiting, a new punch sends them first. It is held
+    /// back ONLY when that attempt got no HTTP answer at all (offline, DNS,
+    /// TLS, client timeout): then it is saved behind them (gate open) or
+    /// refused (gate shut), since sending it would overtake them. On ANY
+    /// answer (4xx, 429, 5xx, an unknown outcome, an undecodable 200), or a
+    /// run already in flight, it goes online and the server decides: out of
+    /// order can only ever pay less (D3), and a server problem must never
+    /// lock a person out of clocking. true = go online.
     private func savedActionsAllowOnline(_ makeRequest: (String) -> OfflinePunchRequest?) async -> Bool {
         guard let offline, offline.queue.hasPending else { return true }
-        await syncOffline(trigger: .manual)
+        let result = await syncOffline(trigger: .manual)
         guard offline.queue.hasPending else { return true }
+        let noAnswer = result != .deferred && (offlineSync?.lastRunEndedWithoutAnswer ?? false)
+        guard noAnswer else { return true }
         guard offline.canCapture, let request = makeRequest(offline.newIdempotencyKey()) else {
             attendanceError = StaffAttendanceFailure(message: StaffOfflinePresentation.sendSavedFirst, code: nil)
             return false
