@@ -209,15 +209,16 @@ describe('error → startup outcome (SU-07: every refusal is a named class)', ()
 });
 
 describe('NON_TRANSACTIONAL_MIGRATIONS (SU-03): derived from the migration sources', () => {
-  it('equals the set of migrations that declare `transaction = false` (ten, 1786721430000 included)', () => {
+  it('equals the set of migrations that declare `transaction = false` (eleven, 1786721430000 and 1786722700000 included)', () => {
     const fromSources = readdirSync(MIGRATIONS_DIR)
       .filter((f) => /^\d{13}-[^.]+\.ts$/.test(f))
       .filter((f) => /^\s*(public\s+|readonly\s+)*transaction\s*=\s*false\s*;/m.test(readFileSync(join(MIGRATIONS_DIR, f), 'utf8')))
       .map((f) => Number(f.slice(0, 13)))
       .sort((a, b) => a - b);
     expect([...NON_TRANSACTIONAL_MIGRATIONS].sort((a, b) => a - b)).toEqual(fromSources);
-    expect(NON_TRANSACTIONAL_MIGRATIONS).toHaveLength(10);
+    expect(NON_TRANSACTIONAL_MIGRATIONS).toHaveLength(11);
     expect(NON_TRANSACTIONAL_MIGRATIONS).toContain(1786721430000);
+    expect(NON_TRANSACTIONAL_MIGRATIONS).toContain(1786722700000);
   });
 });
 
