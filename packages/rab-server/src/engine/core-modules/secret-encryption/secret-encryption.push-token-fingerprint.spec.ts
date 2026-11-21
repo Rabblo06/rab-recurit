@@ -63,4 +63,19 @@ describe('push token fingerprint (SecretEncryptionService)', () => {
   it('refuses an empty token (fail closed, never a constant fingerprint)', () => {
     expect(() => service(null).pushTokenFingerprint('')).toThrow(/must not be empty/);
   });
+
+  it('review of #303: the lock key does not change when the active kid switches (instances on both sides take the same lock)', () => {
+    const before = service([OLD], OLD.kid).pushTokenLockKey('fcm-token-1');
+    expect(service([OLD, NEW], NEW.kid).pushTokenLockKey('fcm-token-1')).toBe(before);
+    expect(service([OLD, NEW], OLD.kid).pushTokenLockKey('fcm-token-1')).toBe(before);
+    expect(service(null).pushTokenLockKey('fcm-token-1')).toBe(before);
+    expect(Number.isInteger(before) && before >= -2147483648 && before <= 2147483647).toBe(true);
+  });
+
+  it('the lock key is its own purpose key: HMAC under derivePurposeKey(APP_SECRET, push-token-lock, v1), first 4 bytes signed', () => {
+    const expected = createHmac('sha256', derivePurposeKey('a'.repeat(32), 'push-token-lock', 'v1')).update('fcm-token-1').digest().readInt32BE(0);
+    expect(service([OLD], OLD.kid).pushTokenLockKey('fcm-token-1')).toBe(expected);
+    expect(service([OLD], OLD.kid).pushTokenFingerprint('fcm-token-1').readInt32BE(0)).not.toBe(expected);
+    expect(service(null).pushTokenLockKey('fcm-token-2')).not.toBe(expected);
+  });
 });

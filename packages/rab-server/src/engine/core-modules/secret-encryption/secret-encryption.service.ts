@@ -47,6 +47,8 @@ export class SecretEncryptionService {
   private readonly keyring: Map<string, Buffer>;
   /** C1 review F2: one push-token fingerprint key per kid of the keyring above (purpose `push-token-fingerprint`). */
   private readonly fingerprintKeys: Map<string, Buffer>;
+  /** Review of #303: the push-token advisory-lock key, from APP_SECRET only (never from the active kid). */
+  private readonly pushTokenLockSecret: Buffer;
   private readonly activeKid: string;
 
   constructor(env: EnvironmentService) {
@@ -58,6 +60,7 @@ export class SecretEncryptionService {
 
     this.keyring = new Map<string, Buffer>([[LEGACY_KID, legacyKey]]);
     this.fingerprintKeys = new Map<string, Buffer>([[LEGACY_KID, derivePurposeKey(secret, 'push-token-fingerprint', LEGACY_KID)]]);
+    this.pushTokenLockSecret = derivePurposeKey(secret, 'push-token-lock', 'v1');
 
     const rawKeyring = env.get('APP_ENCRYPTION_KEYRING');
     if (rawKeyring) {
@@ -113,6 +116,15 @@ export class SecretEncryptionService {
     const active = this.pushTokenFingerprint(pushToken);
     const others = [...this.fingerprintKeys.entries()].filter(([kid]) => kid !== this.activeKid).map(([, key]) => fingerprintUnder(key, pushToken));
     return [active, ...others];
+  }
+
+  /**
+   * Review of #303: the int4 advisory-lock key that serialises registrations of one push token (first 4 bytes, signed, of
+   * HMAC-SHA256 under the `push-token-lock` key). It depends on APP_SECRET only, never on the active encryption kid, so
+   * two instances on either side of an APP_ENCRYPTION_ACTIVE_KID switch take the SAME lock for the same token.
+   */
+  pushTokenLockKey(pushToken: string): number {
+    return fingerprintUnder(this.pushTokenLockSecret, pushToken).readInt32BE(0);
   }
 
   /** The active kid new encrypt() calls use — exposed read-only so SecretRotationService can tell "already on the active key" apart from "needs rotation" without a second source of truth. */

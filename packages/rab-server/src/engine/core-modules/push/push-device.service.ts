@@ -15,16 +15,13 @@ export interface RegisterDeviceParams {
 
 /**
  * C1 review F2: registrations of one provider token are serialised by a transaction-scoped advisory lock (two-key form,
- * namespace `hashtext('crewflow_push_token_fingerprint')`, second key = the first 4 bytes of the active-kid fingerprint),
- * so two concurrent registrations of the same token by two accounts cannot both stay active. A collision between two
- * different tokens only serialises them.
+ * namespace `hashtext('crewflow_push_token_fingerprint')`, second key = SecretEncryptionService.pushTokenLockKey: its own
+ * `push-token-lock` key from APP_SECRET, independent of the active encryption kid, so instances on either side of a kid
+ * switch take the same lock). Two concurrent registrations of the same token by two accounts cannot both stay active. A
+ * collision between two different tokens only serialises them.
  */
 export const PUSH_TOKEN_LOCK_SQL =
   "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('crewflow_push_token_fingerprint'), $1::int4)";
-
-export function pushTokenLockKey(fingerprint: Buffer): number {
-  return fingerprint.readInt32BE(0);
-}
 
 /**
  * Device/installation registration — identity (`userId`/`organisationId`) is ALWAYS taken from
@@ -54,7 +51,7 @@ export class PushDeviceService {
       const fingerprint = this.secretEncryption.pushTokenFingerprint(params.pushToken);
       const fingerprintCandidates = this.secretEncryption.pushTokenFingerprintCandidates(params.pushToken);
       // Serialise registrations of this token BEFORE anything is read (see PUSH_TOKEN_LOCK_SQL).
-      await manager.query(PUSH_TOKEN_LOCK_SQL, [pushTokenLockKey(fingerprint)]);
+      await manager.query(PUSH_TOKEN_LOCK_SQL, [this.secretEncryption.pushTokenLockKey(params.pushToken)]);
       const existing = await manager.findOne(PushDevice, { where: { userId: ctx.userId, deviceId: params.deviceId } });
       const now = new Date();
       // CF-35: one physical device delivers for one account at a time. When B signs in on a phone A used, A's

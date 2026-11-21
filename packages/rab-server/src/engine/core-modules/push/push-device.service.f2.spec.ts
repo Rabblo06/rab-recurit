@@ -1,4 +1,4 @@
-import { PUSH_TOKEN_LOCK_SQL, pushTokenLockKey, PushDeviceService } from './push-device.service';
+import { PUSH_TOKEN_LOCK_SQL, PushDeviceService } from './push-device.service';
 
 /**
  * C1 review F2 (review of #303), without a database: the registration takes the per-token advisory lock before it reads
@@ -40,6 +40,7 @@ function harness(existing: { id: string } | null) {
     decrypt: () => 'other-token',
     pushTokenFingerprint: () => active,
     pushTokenFingerprintCandidates: () => [active, previous],
+    pushTokenLockKey: () => 424242,
   };
   const service = new PushDeviceService(tenantContext as never, secretEncryption as never);
   return { service, calls, active, previous };
@@ -49,10 +50,10 @@ const CTX = { organisationId: 'org-1', workspaceId: null, userId: 'user-1', role
 const PARAMS = { deviceId: 'device-1', platform: 'android' as const, pushToken: 'fcm-token' };
 
 describe('PushDeviceService.register — C1 review F2', () => {
-  it('takes the per-token advisory lock FIRST, keyed by the active fingerprint', async () => {
+  it('takes the per-token advisory lock FIRST, keyed by the kid-independent lock key', async () => {
     const h = harness(null);
     await h.service.register(CTX, PARAMS);
-    expect(h.calls[0]).toEqual({ op: 'query', sql: PUSH_TOKEN_LOCK_SQL, params: [pushTokenLockKey(h.active)] });
+    expect(h.calls[0]).toEqual({ op: 'query', sql: PUSH_TOKEN_LOCK_SQL, params: [424242] });
     expect(PUSH_TOKEN_LOCK_SQL).toMatch(/pg_advisory_xact_lock\(pg_catalog\.hashtext\('crewflow_push_token_fingerprint'\), \$1::int4\)/);
   });
 
@@ -78,8 +79,4 @@ describe('PushDeviceService.register — C1 review F2', () => {
     expect(refresh.set!.active).toBe(true);
   });
 
-  it('the lock key is the first 4 bytes of the fingerprint as a signed int4', () => {
-    expect(pushTokenLockKey(Buffer.from([0xff, 0xff, 0xff, 0xfe, 1, 2]))).toBe(-2);
-    expect(pushTokenLockKey(Buffer.from([0x00, 0x00, 0x01, 0x00]))).toBe(256);
-  });
 });

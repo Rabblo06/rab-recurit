@@ -10318,8 +10318,10 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   matchable while the old kid is configured, and SecretRotationService rewrites the fingerprint under the new kid
   together with the ciphertext. A kid can only be dropped after that rotation; a row whose kid is gone can no longer be
   decrypted, so it cannot deliver anything. Registrations of one token are serialised by `pg_advisory_xact_lock(
-  hashtext('crewflow_push_token_fingerprint'), <first 4 bytes of the fingerprint>)`, taken before anything is read, so
-  concurrent registrations by two accounts leave one active row. Partial index `(organisation_id, token_fingerprint)
+  hashtext('crewflow_push_token_fingerprint'), <lock key>)`, taken before anything is read, so concurrent registrations
+  by two accounts leave one active row. The lock key is the first 4 bytes of an HMAC under its own `push-token-lock`
+  purpose key from APP_SECRET, independent of the active encryption kid, so instances on either side of an
+  `APP_ENCRYPTION_ACTIVE_KID` switch take the same lock (review of #303). Partial index `(organisation_id, token_fingerprint)
   WHERE active AND token_fingerprint IS NOT NULL`, not UNIQUE: a sign-in never fails on it. The migration's ACCESS
   EXCLUSIVE statements run with `lock_timeout` 5s (transaction-local, the previous value restored). The column is
   `select: false`, never returned or logged.
@@ -10338,7 +10340,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   deliver: a missed supersede, never a leak.
 - **Tests:** `secret-encryption.push-token-fingerprint.spec.ts` (derivePurposeKey per kid; legacy kid; after rotating the
   active kid an old-kid fingerprint is still a candidate; a removed kid is not; not plain SHA-256 and not the
-  encryption key; refuses empty input). `push-device.service.f2.spec.ts` (the lock comes first; the supersede predicate
+  encryption key; refuses empty input; the lock key is unchanged when the active kid switches and is its own purpose
+  key). `push-device.service.f2.spec.ts` (the lock comes first; the supersede predicate
   carries organisation_id from the context and every candidate; the fingerprint is written on the insert and the
   refresh path). `push-session-deactivation.integration.spec.ts` (e): another account's same token supersedes the first
   row (32-byte fingerprint); a different token and a self refresh are untouched; the same token in another
