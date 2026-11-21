@@ -25,9 +25,15 @@ Future<void> logoutWithOfflineGuard(
       key: const ValueKey('offline-logout-guard'),
       title: const Text('Actions not sent yet'),
       content: Text(
-        '${count == 1 ? '1 action is' : '$count actions are'} saved on this phone and '
-        'not sent yet. Connect to the internet to send them before you log out.\n\n'
-        'If you log out now they will be discarded and never sent, and your manager will not be told.',
+        count == 0
+            // The stored queue could not be read (security review L3): never cleared silently.
+            ? 'Actions saved on this phone could not be read right now, so they may not have been sent. '
+                  'Try again later, or tell your manager.\n\n'
+                  'If you log out now anything saved on this phone will be discarded and never sent, and your '
+                  'manager will not be told.'
+            : '${count == 1 ? '1 action is' : '$count actions are'} saved on this phone and '
+                  'not sent yet. Connect to the internet to send them before you log out.\n\n'
+                  'If you log out now they will be discarded and never sent, and your manager will not be told.',
       ),
       actions: [
         TextButton(

@@ -10366,11 +10366,13 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   show what is saved. Whose data: the staff member's own attendance.
 - **Threats and controls:**
   - *A dropped request recorded twice (once by the server, once from the queue).* Only a request that got NO response
-    is queued (socket / DNS / TLS / client error, or a timeout); any HTTP response, a 5xx included, is shown as an error
-    and never queued (`isNoResponseFailure`). When queueing is possible the online request carries an
-    `Idempotency-Key` and the queued entry reuses the same key (D17), so the server either reports the first attempt as
-    applied or applies it once. With offline mode off there is no key and no header: the request is byte-for-byte what
-    it was before M4 (tested).
+    is queued (socket / DNS / TLS / client error, or THIS CLIENT giving up waiting: `ApiTimeoutException`,
+    `TimeoutException`); any HTTP response, a 5xx or a server/proxy-sent 408 included, is shown as an error and never
+    queued (`isNoResponseFailure`; security review L2: a real 408 used to be indistinguishable from the client's own
+    timeout). When queueing is possible the online request carries an `Idempotency-Key` and the queued entry reuses the
+    same key (D17), so the server either reports the first attempt as applied or applies it once. With offline mode off
+    there is no key and no header: the request is byte-for-byte what it was before M4 (tested). `ApiClient.post` accepts
+    no extra header except `Idempotency-Key` (allowlist; anything else throws).
   - *A fake or client-driven timer (CLAUDE.md "no mock production logic"; D10).* A saved punch never sets `active` or
     any local attendance; the clock card shows a fixed "Clocked in 09:02 · Not yet confirmed" (`OfflinePendingCard`,
     no `Timer`, tested to stay identical after 5 s) and the server timer appears only once the server confirms. The
@@ -10382,6 +10384,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
     unsent: "Stay signed in" keeps them; "Discard and log out" deletes them (never sent; the manager is not told). With
     nothing unsent, logout deletes whatever is left (refused / too-old results, the ticket) before signing out. Session
     expiry does not delete the queue: it stays keyed to that user and is never readable by another account.
+    That decision is made on the STORED queue, re-read under the store's lock, never on memory alone: if start-up could
+    not read secure storage (memory empty) or the queue is unreadable, logout shows the guard and deletes nothing
+    unless the staff member explicitly discards (security review L3).
   - *Server text in the UI.* Refusals are shown by code through `offline_messages.dart`; server text is never shown.
 - **Still off, by construction:** the controller is created per staff session but `mayQueue` needs the build flag,
   `offline.enabled == true` from the server, a fresh ticket from this boot and an available device key; the shipped

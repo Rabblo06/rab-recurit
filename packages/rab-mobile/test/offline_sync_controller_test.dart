@@ -366,6 +366,38 @@ void main() {
     });
 
     test(
+      'security review L3: start-up could not read the store; logout re-reads it and keeps the stored queue',
+      () async {
+        final first = await enabled();
+        await clockIn(first);
+        final c = OfflineSyncController(
+          userId: 'user-a',
+          store: _FailsFirstLoad(),
+          bootClock: boot,
+          signer: signer,
+          buildFlag: true,
+        );
+        await c.ready;
+        expect(c.entries, isEmpty, reason: 'restore failed: memory is empty');
+        expect(await c.clearForLogout(), isFalse);
+        expect(c.hasUnsent, isTrue, reason: 'memory refreshed from the store');
+        expect(
+          secure.containsKey(OfflineQueueStore.queueKey('user-a')),
+          isTrue,
+        );
+      },
+    );
+
+    test('an unreadable stored queue is never cleared by logout', () async {
+      secure[OfflineQueueStore.queueKey('user-a')] = '{broken';
+      final c = controller();
+      await c.ready;
+      expect(await c.clearForLogout(), isFalse);
+      expect(c.storeUnreadable, isTrue);
+      expect(secure[OfflineQueueStore.queueKey('user-a')], '{broken');
+    });
+
+    test(
       'logout is refused while punches are unsent; discardAll clears queue and ticket',
       () async {
         final c = await enabled();
@@ -397,10 +429,10 @@ void main() {
       expect(isNoResponseFailure(const SocketException('down')), isTrue);
       expect(isNoResponseFailure(http.ClientException('down')), isTrue);
       expect(isNoResponseFailure(TimeoutException('slow')), isTrue);
-      expect(isNoResponseFailure(ApiException(408, 'timeout')), isTrue);
+      expect(isNoResponseFailure(ApiTimeoutException('timeout')), isTrue);
     });
-    test('any HTTP response, a 5xx included: never queued', () {
-      for (final status in [400, 401, 403, 404, 409, 429, 500, 503]) {
+    test('any HTTP response, a 5xx or a server 408 included: never queued', () {
+      for (final status in [400, 401, 403, 404, 408, 409, 429, 500, 503]) {
         expect(isNoResponseFailure(ApiException(status, 'x')), isFalse);
       }
       expect(isNoResponseFailure(StateError('bug')), isFalse);
@@ -411,4 +443,17 @@ void main() {
 class _FailingSigner extends FakeEntrySigner {
   @override
   Future<String?> sign(List<int> payload) async => null;
+}
+
+/// A store whose first [load] fails (secure storage unavailable at start-up), then works.
+class _FailsFirstLoad extends OfflineQueueStore {
+  var _failed = false;
+  @override
+  Future<OfflineQueueSnapshot> load(String userId) {
+    if (!_failed) {
+      _failed = true;
+      return Future.error(StateError('secure storage unavailable'));
+    }
+    return super.load(userId);
+  }
 }

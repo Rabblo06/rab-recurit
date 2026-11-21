@@ -155,6 +155,20 @@ class OfflineQueueStore {
     );
   });
 
+  /// Logout once nothing is waiting: under the lock, re-reads the stored queue and deletes the queue and ticket only
+  /// when it holds no pending entry and is readable. Returns null when it cleared, otherwise what is stored (nothing is
+  /// deleted). A storage error propagates (the caller refuses to log out silently).
+  Future<OfflineQueueSnapshot?> clearIfNothingUnsent(String userId) =>
+      _locked(() async {
+        final snapshot = await _load(userId);
+        if (snapshot.unreadable || snapshot.entries.any((e) => e.isPending)) {
+          return snapshot;
+        }
+        await _storage.delete(key: queueKey(userId));
+        await _storage.delete(key: ticketKey(userId));
+        return null;
+      });
+
   /// Deletes this user's queue and ticket (explicit discard, or logout once nothing is waiting to send).
   Future<void> clear(String userId) => _locked(() async {
     await _storage.delete(key: queueKey(userId));

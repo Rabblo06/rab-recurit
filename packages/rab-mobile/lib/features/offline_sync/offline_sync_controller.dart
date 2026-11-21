@@ -17,14 +17,14 @@ import 'offline_queue_store.dart';
 import 'offline_ticket.dart';
 
 /// True when a request failed BEFORE any response arrived (DESIGN §3.1): no connectivity, DNS, socket or TLS failure,
-/// or a timeout (an uncertain outcome: the same idempotency key is reused, so the server either reports the first
-/// attempt as applied or applies it once). Any HTTP response, a 5xx included, is NOT this: it is shown as an error.
+/// or this client giving up waiting ([ApiTimeoutException], [TimeoutException]: an uncertain outcome: the same idempotency key is reused, so the server either reports the first
+/// attempt as applied or applies it once). Any HTTP response, a 5xx or a server/proxy 408 included, is NOT this: it is shown as an error (security review L2).
 bool isNoResponseFailure(Object error) =>
     error is SocketException ||
     error is HandshakeException ||
     error is http.ClientException ||
     error is TimeoutException ||
-    (error is ApiException && error.statusCode == 408);
+    error is ApiTimeoutException;
 
 enum OfflineCaptureOutcome {
   queued,
@@ -83,12 +83,18 @@ class OfflineSyncController extends ChangeNotifier {
   bool _disposed = false;
 
   /// What the last `GET /attendance/me/active` said (`offline.enabled == true` exactly). Off until then.
-  bool serverEnabled = false;
+  bool _serverEnabled = false;
+  bool get serverEnabled => _serverEnabled;
   StoredOfflineTicket? _ticket;
   List<QueuedPunch> _entries = const [];
 
   /// A stored queue exists but cannot be read (nothing in it can be sent; see [OfflineQueueSnapshot.unreadable]).
-  bool unreadable = false;
+  bool _unreadable = false;
+  bool get unreadable => _unreadable;
+
+  /// The stored queue could not be read at start-up (secure storage failed). Memory may then be EMPTY while punches
+  /// are stored, so logout re-reads the store and never clears on this state alone (security review L3).
+  bool _restoreFailed = false;
 
   List<QueuedPunch> get entries => _entries;
   Iterable<QueuedPunch> get pending => _entries.where((e) => e.isPending);
@@ -136,11 +142,14 @@ class OfflineSyncController extends ChangeNotifier {
     try {
       final snapshot = await _store.load(userId);
       _entries = snapshot.entries;
-      unreadable = snapshot.unreadable;
+      _unreadable = snapshot.unreadable;
+      _restoreFailed = false;
       _ticket = _buildFlag ? await _store.loadTicket(userId) : null;
       await markTooOld();
     } catch (_) {
-      // Secure storage unavailable: nothing is queued (mayQueue needs a ticket), nothing is lost.
+      // Secure storage unavailable: nothing is queued (mayQueue needs a ticket), nothing is lost, and logout re-reads
+      // the store before it clears anything.
+      _restoreFailed = true;
     }
     _notify();
   }
@@ -158,13 +167,13 @@ class OfflineSyncController extends ChangeNotifier {
   }) async {
     // A build without the offline flag does nothing here at all: no platform call, no storage write.
     if (!_buildFlag) {
-      serverEnabled = false;
+      _serverEnabled = false;
       return;
     }
     final reading = await _bootClock.read();
     await ready;
     final offline = data['offline'];
-    serverEnabled = _buildFlag && offline is Map && offline['enabled'] == true;
+    _serverEnabled = _buildFlag && offline is Map && offline['enabled'] == true;
     try {
       if (!serverEnabled) {
         if (_ticket != null) {
@@ -341,19 +350,47 @@ class OfflineSyncController extends ChangeNotifier {
   Future<void> discardAll() async {
     await _store.clear(userId);
     _entries = const [];
-    unreadable = false;
+    _unreadable = false;
+    _restoreFailed = false;
     _ticket = null;
     _notify();
   }
 
   /// Logout once nothing is waiting to send: deletes what is left (refused / too old results, the ticket), so nothing
   /// of this session stays at rest. Returns false (and deletes nothing) while punches are unsent.
+  ///
+  /// The decision is made on the STORED queue, re-read under the store's lock, never on memory alone: memory can be empty
+  /// because start-up could not read the store. An unreadable queue or a store that cannot be read is never cleared
+  /// here (only by the explicit discard), and memory is refreshed so the guard shows what is really there (security
+  /// review L3).
   Future<bool> clearForLogout() async {
     await ready;
     if (hasUnsent) return false;
-    await discardAll();
+    final OfflineQueueSnapshot? left;
+    try {
+      left = await _store.clearIfNothingUnsent(userId);
+    } catch (_) {
+      _restoreFailed = true;
+      _notify();
+      return false;
+    }
+    if (left != null) {
+      _entries = left.entries;
+      _unreadable = left.unreadable;
+      _restoreFailed = false;
+      _notify();
+      return false;
+    }
+    _entries = const [];
+    _unreadable = false;
+    _restoreFailed = false;
+    _ticket = null;
+    _notify();
     return true;
   }
+
+  /// Logout must ask: something unsent, an unreadable queue, or a store that could not be read.
+  bool get storeUnreadable => _unreadable || _restoreFailed;
 
   @override
   void dispose() {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -174,15 +175,29 @@ void main() {
     );
 
     test(
-      'a timeout (uncertain outcome) is saved with the same key the request carried',
+      'this client giving up waiting (uncertain outcome) is saved with the same key the request carried',
       () async {
-        final s = server(punch: (r) async => http.Response('', 408));
+        final s = server(
+          punch: (r) async => throw TimeoutException('no answer'),
+        );
         final (provider, offline) = await mount(s.api);
         await provider.clockIn('shift-1', qrToken: 'qr');
         expect(
           offline.entries.single.idempotencyKey,
           s.punches.single.headers['Idempotency-Key'],
         );
+      },
+    );
+
+    test(
+      'security review L2: a server or proxy that ANSWERS 408 is a response: shown as an error, never saved',
+      () async {
+        final s = server(punch: (r) async => http.Response('', 408));
+        final (provider, offline) = await mount(s.api);
+        await provider.clockIn('shift-1', qrToken: 'qr');
+        expect(offline.entries, isEmpty);
+        expect(provider.errorMessage, isNotNull);
+        expect(provider.lastQueued, isNull);
       },
     );
 
@@ -287,5 +302,21 @@ void main() {
       expect(offline.entries, isEmpty);
       expect(provider.errorMessage, OfflineMessages.needsTicket);
     });
+  });
+
+  test('only Idempotency-Key may be added to a request (allowlist)', () async {
+    final s = server();
+    expect(
+      () => s.api.post('/attendance/clock-in', headers: {'Authorization': 'x'}),
+      throwsArgumentError,
+    );
+    expect(
+      () => s.api.post(
+        '/attendance/clock-in',
+        headers: {'X-Client-Platform': 'web'},
+      ),
+      throwsArgumentError,
+    );
+    expect(s.punches, isEmpty);
   });
 }
