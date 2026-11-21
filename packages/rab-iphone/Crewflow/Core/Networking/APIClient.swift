@@ -30,11 +30,17 @@ public struct RequestOptions: Sendable, Equatable {
     /// Sends `X-Crewflow-Background: 1` — use for automatic polling and
     /// background refresh so they do not keep an idle session alive.
     public var background: Bool
+    /// Extra request headers, e.g. `Idempotency-Key` (DESIGN M4 D17). The
+    /// transport's own headers (`Authorization`, `Content-Type`, `Accept`,
+    /// `X-Client-*`, `X-Crewflow-Background`, `Cookie`, `Host`) can never be
+    /// set or replaced this way.
+    public var headers: [String: String]
 
-    public init(retry: RetryPolicy, timeout: TimeInterval = APIClient.requestTimeout, background: Bool = false) {
+    public init(retry: RetryPolicy, timeout: TimeInterval = APIClient.requestTimeout, background: Bool = false, headers: [String: String] = [:]) {
         self.retry = retry
         self.timeout = timeout
         self.background = background
+        self.headers = headers
     }
 
     /// GET is repeat-safe; every mutation defaults to no automatic retry.
@@ -119,6 +125,11 @@ public final class APIClient: @unchecked Sendable {
     /// skip a check. Same value as the Flutter app's header.
     public static let capabilitiesHeaderName = "X-Client-Capabilities"
     public static let capabilitiesHeaderValue = "mfa-verify"
+    /// Headers `RequestOptions.headers` may never set (lower-cased).
+    static let reservedHeaderNames: Set<String> = [
+        "authorization", "content-type", "accept", "cookie", "host",
+        "x-client-platform", "x-client-capabilities", "x-crewflow-background",
+    ]
 
     public let baseURL: URL
     private let baseString: String
@@ -364,6 +375,9 @@ public final class APIClient: @unchecked Sendable {
         if options.background {
             // Fully validated, but does not slide the 7-day idle window.
             request.setValue("1", forHTTPHeaderField: "X-Crewflow-Background")
+        }
+        for (name, value) in options.headers where !Self.reservedHeaderNames.contains(name.lowercased()) {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         let started = Date()
         let result = try await transport(request, timeout: options.timeout)

@@ -10348,3 +10348,24 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   ticket renewal only on an open gate; single flight.
 - **Residual:** a server that answers `applied` for an entry it did not apply would make the phone drop it; the server
   is the authority and keeps the receipt.
+
+## iPhone Staff clock screen saves unanswered clock actions offline, no timer until confirmed, sign-out guard (branch feat/iphone-offline-clock-wiring, 2026-11-21; M4 Lane B iPhone 3/3, stacked on feat/iphone-offline-sync-client; no SQL, no server code)
+- **Surface:** the Staff clock flow (check-in, clock-in, clock-out) can fall back to the offline queue, the Profile
+  screen lists saved actions, and Log out is guarded. Attendance and pay; the gate is shut in every build (HARD RULE).
+- **Controls:** (1) Online first; an action is saved only when the gate is open AND the online request got no answer or
+  timed out after sending; any answered refusal is shown as today and never saved. (2) `Idempotency-Key` only while the
+  gate is open, shared by the online attempt and the saved copy (D17), so the server applies it at most once; with the
+  gate shut no request changes. (3) Nothing optimistic: no attendance until the server answers; a saved clock-in shows
+  fixed text, never a ticking timer (D10), with the server-anchored time. (4) `RequestOptions.headers` cannot replace
+  transport headers (Authorization, platform, background flag). (5) D18: Log out with unsent actions asks first (Send
+  now / Discard and log out / Cancel); discard is explicit and never sends. (6) An `/attendance/me/active` answer
+  without `offline.enabled: true` + ticket (today's server) shuts the gate and forgets the ticket.
+- **Tests:** `CrewflowTests/Staff/OfflineSync/StaffOfflineStoreTests.swift`: gate shut = no header, nothing saved,
+  today's uncertain message; gate open = saved with the same key, never resent online, no live attendance; timeout
+  saved with the transport retry sharing the key; 409 never saved; a successful read sends and then shows the server's
+  attendance; today's `/me/active` shuts the gate; clock-out after a saved clock-in (still offline, and after the
+  clock-in is received); sign-out count and discard; D10 words; transport headers cannot be forged. The existing
+  StaffStoreTests (no offline wiring) keep proving today's behaviour.
+- **Residual:** offers are not persisted, so after the app is killed while offline the clock screen has no shift to
+  act on (offline capture then needs the app to have been opened online first in that run). No UI test drives the
+  offline path (it needs a canned backend that toggles connectivity and the offline flag).
