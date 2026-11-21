@@ -611,9 +611,10 @@ const DELIVERY_AGG_SQL = `count(*) FILTER (WHERE eo.status IN ('PENDING','QUEUED
  * its report and the final timesheet's delivery counts, so those are filtered, ordered and paged first (`keys` -> `rows`
  * -> `page`, the same predicate, order and window total as before), and the staff / attendance counts are aggregated for
  * the page's shifts only (`c`). Same row set, same order, same columns; RLS applies to every table read, as before.
- * `rows` exposes the columns REPORT_IN_HISTORY_SQL / REPORT_NEEDS_ATTENTION_SQL expect on alias `r`.
+ * `rows` exposes the columns REPORT_IN_HISTORY_SQL / REPORT_NEEDS_ATTENTION_SQL expect on alias `r`. Exported for the
+ * old-vs-new equivalence integration test (shift-report-list-equivalence.integration.spec.ts) only.
  */
-const REPORT_PAGE_SQL = (manager: EntityManager, scopeSql: string, bucketSql: string, order: string, limitRef: string, offsetRef: string) => {
+export const REPORT_PAGE_SQL = (manager: EntityManager, scopeSql: string, bucketSql: string, order: string, limitRef: string, offsetRef: string) => {
   const t = businessTables(manager);
   // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
   return `WITH keys AS (

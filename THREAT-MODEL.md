@@ -10312,6 +10312,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   `report.view` is still asserted in the service before anything is read.
 - **Tests:** `shift-report-list-page-first.spec.ts` (scope, bucket, order and LIMIT / OFFSET precede every
   shift_assignment / attendance read; total computed before LIMIT; final rows keep the page order); the bucket boundaries
-  and Venue Manager scoping run against real rows in `venue-manager-scoping` / `sf2-layer2-venue-reports-workspace`.
+  and Venue Manager scoping run against real rows in `venue-manager-scoping` / `sf2-layer2-venue-reports-workspace`;
+  `shift-report-list-equivalence.integration.spec.ts` (security review L) runs the previous and the new statement in one
+  transaction as the runtime role for both buckets, both scopes and every page and requires identical rows and totals.
 - **Residual:** the final-timesheet delivery counts (email_outbox) are still read for every finalised report in scope
   (index of #312); removing that needs the persisted delivery time proposed in LOAD-TEST.md §4.4 (migration, owner review).
