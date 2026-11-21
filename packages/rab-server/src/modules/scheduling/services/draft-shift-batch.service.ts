@@ -9,6 +9,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
 import { VenueService } from '../../venue/services/venue.service';
 import { CopyPreviousWeekDto } from '../dto/copy-previous-week.dto';
+import { ShiftPatternDto } from '../dto/shift-pattern.dto';
 import { Shift } from '../entities/shift.entity';
 import {
   COPYABLE_SOURCE_STATUSES,
@@ -23,7 +24,10 @@ import {
   targetKey,
   weekCopyWindows,
 } from '../utils/draft-batch-plan';
+import { ShiftPatternDefinition, patternDefinitionError, patternOccurrences, zonedInstant } from '../utils/shift-pattern-plan';
+import { addDays } from '../../ai/tools/ai-date-range';
 import { SchedulingService } from './scheduling.service';
+import { randomUUID } from 'node:crypto';
 
 /** One row of a batch preview / result. Ids, times and counts only: never a pay amount. */
 export interface DraftBatchRow {
@@ -48,6 +52,11 @@ export interface DraftBatchPreview {
 export interface DraftBatchResult extends DraftBatchPreview {
   /** Only on confirm: the new DRAFT shifts, in row order (`key` → new shift id). */
   created: Array<{ key: string; shiftId: string }>;
+}
+
+export interface ShiftPatternResult extends DraftBatchResult {
+  /** The server-generated `recurrence_group_id` every shift of this generation carries (null when nothing was created). */
+  recurrenceGroupId: string | null;
 }
 
 /**
@@ -89,6 +98,72 @@ export class DraftShiftBatchService {
       const created = await this.insertPlanTx(manager, ctx, plan);
       return { ...summarise(plan, timezone, window), created };
     });
+  }
+
+  /** Named action `previewShiftPattern`: the occurrences `generateShiftPattern` would create. Writes nothing. */
+  previewShiftPattern(ctx: AuthContext, dto: ShiftPatternDto): Promise<DraftBatchPreview> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const { plan, timezone, window } = await this.planPatternTx(manager, ctx, dto);
+      return summarise(plan, timezone, window);
+    });
+  }
+
+  /**
+   * Named action `generateShiftPattern`: every `create` occurrence becomes a DRAFT shift; all of them share one
+   * server-generated `recurrence_group_id` (`shift.recurrence_group_id`, never accepted from a client). One transaction.
+   */
+  generateShiftPattern(ctx: AuthContext, dto: ShiftPatternDto): Promise<ShiftPatternResult> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const { plan, timezone, window } = await this.planPatternTx(manager, ctx, dto, dto.dates ? new Set(dto.dates) : undefined);
+      const recurrenceGroupId = plan.some((row) => row.outcome === 'create') ? randomUUID() : null;
+      const created = await this.insertPlanTx(manager, ctx, plan, recurrenceGroupId ? { recurrenceGroupId } : {});
+      return { ...summarise(plan, timezone, window), created, recurrenceGroupId };
+    });
+  }
+
+  /**
+   * The set-wide pre-check for a pattern: the definition is validated first (400 for the whole request), then every
+   * occurrence is checked together: the venue + job role once under `create`'s rules, the past, an identical live shift
+   * already in scope, and duplicates inside the set. Staff are never assigned here, so the staff double-booking
+   * exclusion (`shift_assignment_no_double_booking`) cannot be reached; it still applies when staff are offered later.
+   */
+  private async planPatternTx(
+    manager: EntityManager,
+    ctx: AuthContext,
+    dto: ShiftPatternDto,
+    selectedKeys?: ReadonlySet<string>,
+  ): Promise<{ plan: PlannedDraft[]; timezone: string; window: { from: Date; to: Date } }> {
+    await this.assertCreateTx(manager, ctx);
+    const def: ShiftPatternDefinition = {
+      venueId: dto?.venueId,
+      jobRoleId: dto?.jobRoleId,
+      startDate: dto?.startDate,
+      endDate: dto?.endDate,
+      weekdays: dto?.weekdays,
+      startTime: dto?.startTime,
+      endTime: dto?.endTime,
+      intervalWeeks: dto?.intervalWeeks ?? 1,
+      breakMinutes: dto?.breakMinutes ?? 0,
+      requiredCount: dto?.requiredCount,
+      chargeRatePence: dto?.chargeRatePence ?? 0,
+      notes: dto?.notes ?? null,
+    };
+    const invalid = patternDefinitionError(def);
+    if (invalid) throw new BadRequestException(invalid);
+    // The venue first, as its own 404 (an out-of-scope id never reaches the occurrence list).
+    await this.venueService.assertVenueAccessibleTx(manager, ctx, def.venueId);
+    const timezone = await this.organisationTimezoneTx(manager, ctx);
+    const candidates = patternOccurrences(def, timezone);
+    if (candidates.length > DRAFT_BATCH_MAX_ROWS) throw new BadRequestException(`A pattern can create at most ${DRAFT_BATCH_MAX_ROWS} shifts.`);
+    const window = { from: zonedInstant(def.startDate, '00:00', timezone), to: zonedInstant(addDays(def.endDate, 2), '00:00', timezone) };
+    const existing = await this.scopedShiftsTx(manager, ctx, window, DUPLICATE_BLOCKING_STATUSES, def.venueId);
+    const plan = planDrafts(candidates, {
+      existingSlots: new Set(existing.map((s) => slotKey(s.venueId, s.jobRoleId, s.startsAt, s.endsAt))),
+      targetChecks: await this.checkTargetsTx(manager, ctx, candidates),
+      now: new Date(),
+      selectedKeys,
+    });
+    return { plan, timezone, window: { from: window.from, to: zonedInstant(addDays(def.endDate, 1), '00:00', timezone) } };
   }
 
   private async planWeekCopyTx(

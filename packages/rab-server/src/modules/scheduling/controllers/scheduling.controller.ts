@@ -22,6 +22,7 @@ import { UpdateDraftShiftDto } from '../dto/update-draft-shift.dto';
 import { SchedulingService } from '../services/scheduling.service';
 import { DraftShiftBatchService } from '../services/draft-shift-batch.service';
 import { CopyPreviousWeekDto } from '../dto/copy-previous-week.dto';
+import { ShiftPatternDto } from '../dto/shift-pattern.dto';
 import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1')
@@ -165,6 +166,20 @@ export class SchedulingController {
   @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
   copyPreviousWeek(@AuthUser() ctx: AuthContext, @Body() dto: CopyPreviousWeekDto) {
     return this.draftBatch.copyPreviousWeek(ctx, dto);
+  }
+
+  @Post('shifts/pattern/preview')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  previewShiftPattern(@AuthUser() ctx: AuthContext, @Body() dto: ShiftPatternDto) {
+    return this.draftBatch.previewShiftPattern(ctx, dto);
+  }
+
+  @Post('shifts/pattern')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  generateShiftPattern(@AuthUser() ctx: AuthContext, @Body() dto: ShiftPatternDto) {
+    return this.draftBatch.generateShiftPattern(ctx, dto);
   }
 
   @Post('shifts')

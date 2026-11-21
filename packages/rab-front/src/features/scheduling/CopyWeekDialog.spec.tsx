@@ -57,7 +57,7 @@ it('previews the copy, explains skipped rows, and confirms only the rows left ti
   mount();
   const table = await screen.findByRole('table', { name: 'Shifts to copy' });
   expect(post).toHaveBeenCalledWith('/shifts/copy-previous-week/preview', { weekStart: '2026-12-07' });
-  expect(within(table).getByText('Already in this week')).toBeInTheDocument();
+  expect(within(table).getByText('Already scheduled')).toBeInTheDocument();
   expect(within(table).getAllByRole('checkbox')).toHaveLength(2); // a skipped row cannot be ticked
   expect(screen.getByRole('button', { name: 'Create 2 draft shifts' })).toBeEnabled();
 

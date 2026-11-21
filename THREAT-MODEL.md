@@ -10326,3 +10326,29 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   nothing written; another manager copies nothing of mine and gets 404 for my venue; another organisation's venue
   404; Venue Manager 403; organisationId/status/pay/createdBy → 400; bad dates → 400; new rows are DRAFT with no
   offer, seat, publication or recurrence, pay re-resolved, audited; second confirm creates nothing).
+
+## Recurring shift pattern — server-generated DRAFTs sharing shift.recurrence_group_id (branch feat/scheduling-shift-patterns, 2026-11-21; no SQL)
+- **Feature:** `POST /rest/v1/shifts/pattern/preview` and `POST /rest/v1/shifts/pattern` (`DraftShiftBatchService`)
+  turn a pattern (venue, job role, organisation-local date range of at most 92 days, weekdays, local start/end time,
+  every 1–4 weeks, people needed, break, notes) into DRAFT shifts. Confirm stamps every created shift with one
+  server-generated `recurrence_group_id` (the column existed since SchedulingSchema and was never written). No pattern
+  is stored, so there is no new table.
+- **Threats and controls:** the same layers as copy previous week (PermissionGuard(SCHEDULE_CREATE) +
+  RequireWorkspaceGuard + ManagerApplication → SCHEDULE_CREATE re-checked first in the service → venue 404 before any
+  occurrence is built → each target through `resolveDraftTargetsTx` → `insertNewShiftTx` → workspace RLS).
+  `recurrence_group_id` is never accepted from a client: the DTO doesn't declare it (400), and `insertNewShiftTx` takes
+  it as a separate server-only argument, so no client DTO passed as `input` can carry it. The whole definition is
+  validated in the service too (a direct caller never passes the ValidationPipe): real dates, range ≤ 92 days, ≤ 500
+  occurrences, valid weekdays/times, a break shorter than the shift. The set-wide pre-check skips occurrences in the
+  past, identical live shifts already in scope and duplicates in the set. Staff are never assigned, so the staff
+  double-booking exclusion (`shift_assignment_no_double_booking`) cannot be bypassed here; it still applies when the
+  drafts are later offered.
+- **Flagged assumptions (owner):** times are the organisation's wall clock (18:00 stays 18:00 across a clock change; a
+  wall time inside the spring-forward gap resolves an hour later); an end time at or before the start time ends the
+  next day; "every N weeks" counts Monday-first weeks from the week containing the start date; pay is resolved per
+  occurrence date from the current rates.
+- **Tests:** `shift-pattern-plan.spec.ts` (local wall time across both clock changes, weekdays, every-other-week,
+  overnight, every refusal); `shift-pattern.integration.spec.ts` (flag revoked → service 403, nothing written; another
+  manager's venue and another organisation's venue 404; Venue Manager 403; recurrenceGroupId / status / pay /
+  organisationId / createdBy in the body → 400; bad definitions → 400; one recurrence group across all created DRAFTs,
+  pay resolved, no offers; second run creates nothing; dates subset).

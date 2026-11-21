@@ -292,6 +292,10 @@
   margin-left: auto;
 }
 
-.walnut-calendar .calendar-head .calendar-copy-week + .calendar-view-switch {
+.walnut-calendar .calendar-head .calendar-pattern {
+  margin-left: 0;
+}
+
+.walnut-calendar .calendar-head .calendar-copy-week ~ .calendar-view-switch {
   margin-left: 0;
 }

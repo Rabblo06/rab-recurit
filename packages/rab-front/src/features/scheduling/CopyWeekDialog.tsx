@@ -26,7 +26,7 @@ interface JobRole { id: string; name: string }
 
 /** Plain-English text for every skip reason the server can return. */
 export const SKIP_REASON_TEXT: Record<string, string> = {
-  already_exists: 'Already in this week',
+  already_exists: 'Already scheduled',
   duplicate_in_batch: 'Duplicate of another row',
   starts_in_past: 'Would start in the past',
   venue_unavailable: 'Venue not available',

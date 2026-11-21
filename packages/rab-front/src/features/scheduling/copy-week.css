@@ -62,3 +62,45 @@
 .copy-week__skip td {
   color: var(--font-tertiary);
 }
+
+/* Repeating shifts form (ShiftPatternDialog.tsx). */
+
+.shift-pattern__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  border: 0;
+  padding: 0;
+  margin: 0 0 14px;
+}
+
+.shift-pattern__form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--font-secondary);
+}
+
+.shift-pattern__days {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.shift-pattern__days label {
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+}
+
+.shift-pattern__notes {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 560px) {
+  .shift-pattern__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
