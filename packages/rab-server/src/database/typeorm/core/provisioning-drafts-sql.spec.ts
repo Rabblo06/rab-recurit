@@ -25,6 +25,10 @@ import {
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../workspace-schema/workspace-schema-modules';
+import { selectWorkspaceFingerprintMajorForUnitTests } from '../../../__tests__/helpers/workspace-fingerprint-major';
+
+// The frozen migrations below read the workspace fingerprints in up() / down(); their fake runner is PostgreSQL 16 (no default).
+selectWorkspaceFingerprintMajorForUnitTests(16);
 
 /**
  * Phase B P8 migrations 1786721210000 (owner decision B) and 1786721220000 (owner decision C: counts-only health ONLY; the
