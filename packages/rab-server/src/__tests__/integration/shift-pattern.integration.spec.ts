@@ -131,7 +131,10 @@ describeIfDb('Recurring shift pattern (integration)', () => {
     for (const row of rows) {
       expect(row).toMatchObject({ status: ShiftStatus.DRAFT, recurrence_group_id: result.recurrenceGroupId, pay_rate_pence: '1400', published_at: null, created_by: a.userId });
     }
-    const offers = await admin.query(`SELECT count(*)::int AS n FROM ${siblingTable(shiftTable, 'job_offer')} WHERE shift_id = ANY($1)`, [ids]);
+    const offers = await admin.query(
+      `SELECT count(*)::int AS n FROM ${siblingTable(shiftTable, 'job_offer')} o JOIN ${siblingTable(shiftTable, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = ANY($1)`,
+      [ids],
+    );
     expect(offers[0].n).toBe(0);
 
     const again = await batch.generateShiftPattern(ctxA, def);
