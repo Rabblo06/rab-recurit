@@ -10300,3 +10300,45 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Auth refresh and password reset no longer take a second pool connection inside their transaction (branch fix/auth-refresh-pool-deadlock, 2026-11-21; no SQL)
+
+**Security finding (§5.8).** Found by the load test (open PR #313, `packages/rab-docker/docs/hardening/LOAD-TEST.md` §4.3).
+
+```
+[HIGH] (availability; §5.8 has no availability row: ranked by blast radius, every tenant of an API instance)
+Failure:      any holder of a valid refresh token (also ordinary devices refreshing together) → concurrent
+              POST /auth/refresh, about as many as the instance's pool has connections → every connection is held
+              by a transaction that waits for one more connection → the whole API instance (all tenants) returns
+              500 / times out until pg-pool's connection timeout (10 s), and again on the next such burst
+Actor:        any authenticated staff-app session; no special role
+Location:     packages/rab-server/src/engine/core-modules/auth/token/services/refresh-token.service.ts:247
+              (was :238); same pattern, rarer path: auth.service.ts resetPassword (:1123, was :1109, and the
+              organisation password-flag read behind passwordProviderPermits, :999)
+Root cause:   RefreshTokenService.rotate() runs inside the refresh transaction (it holds that connection and the
+              token's FOR UPDATE row lock) and called PlatformAdminService.isPlatformAdmin(), which opens a NEW
+              transaction on a second pool connection. resetPassword did the same for isPlatformAdmin() and for
+              OrganisationAuthProvidersService.getEffective(). With enough concurrent callers each holds one
+              connection and waits for another: a pool deadlock broken only by the connection timeout.
+Fix:          service layer: both lookups run on the open transaction's own manager.
+              rotate(): isPlatformAdminTx(manager, { userId: existing.userId }); resetPassword():
+              isPlatformAdminTx(manager, { userId: user.id }) and the new
+              OrganisationAuthProvidersService.getEffectiveTx(manager, organisationId) (getEffective now delegates
+              to it). core.is_active_platform_admin(uuid) is SECURITY DEFINER on an explicit user id, so its answer
+              does not depend on the caller's tenant GUCs, and the organisation flags are read under the same tenant
+              context as before: same results, same denials, no second connection. No SQL changed.
+Regression:   auth.service.single-connection.spec.ts (real RefreshTokenService / PlatformAdminService /
+              OrganisationAuthProvidersService over a fake one-connection pool that throws on any checkout while a
+              transaction is open; refresh and resetPassword pass, and the suspended-organisation refusal, the
+              platform-admin exemption and the CF-06 refusal/exemption are unchanged); refresh-token.service.spec.ts
+              (rotate() calls isPlatformAdminTx with its own manager and never isPlatformAdmin);
+              refresh-pool-deadlock.integration.spec.ts (real Postgres, PG_POOL_MAX_CONNECTIONS=3: one refresh token
+              presented 9 times at once gives no 5xx, exactly one 200, the rest the existing 401 reuse detection,
+              well inside the connection timeout, and the API keeps serving).
+```
+
+- **Residual:** the rule "a method handed a `manager` never opens its own transaction" is enforced by these tests for
+  the two auth paths only, not by a lint. A heuristic scan of rab-server and rab-worker found one more site outside
+  auth (`modules/attendance/files/report-file.policy.ts:32`, report PDF download, `userHasPermission` inside the file
+  read's transaction); it is listed for a follow-up, not changed here. The per-IP refresh rate limit is unchanged and is
+  not what bounds this: ordinary traffic from many devices triggered it in the load test.

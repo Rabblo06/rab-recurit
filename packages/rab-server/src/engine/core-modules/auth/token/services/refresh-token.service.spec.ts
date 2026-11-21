@@ -34,8 +34,19 @@ function buildManager(overrides: Partial<EntityManager> = {}, qbExecuteResult?: 
   } as unknown as EntityManager & { createQueryBuilder: () => typeof qb };
 }
 
-/** P2.8 — `rotate()`'s organisation-suspension check calls `PlatformAdminService.isPlatformAdmin`, which opens its own real tenant-context transaction; a plain mocked `false` keeps this a pure unit test. */
-const fakePlatformAdmin = { isPlatformAdmin: jest.fn().mockResolvedValue(false) } as unknown as import('../../../platform-admin/platform-admin.service').PlatformAdminService;
+/**
+ * P2.8 — `rotate()`'s organisation-suspension check asks whether the token's user is a platform admin. Load-test §4.3: it
+ * must ask on the rotation's OWN transaction (`isPlatformAdminTx(manager, ...)`); `isPlatformAdmin()` opens a second
+ * transaction on a second pool connection and deadlocked the pool under concurrent refreshes, so this fake throws if it is
+ * ever called.
+ */
+const platformAdminMocks = {
+  isPlatformAdmin: jest.fn(async () => {
+    throw new Error('rotate() must not open a second transaction (isPlatformAdmin); use isPlatformAdminTx(manager, ...)');
+  }),
+  isPlatformAdminTx: jest.fn(async (_manager: EntityManager, _ctx: { userId: string }) => false),
+};
+const fakePlatformAdmin = platformAdminMocks as unknown as import('../../../platform-admin/platform-admin.service').PlatformAdminService;
 
 describe('RefreshTokenService', () => {
   const service = new RefreshTokenService(fakePlatformAdmin);
@@ -312,6 +323,46 @@ describe('RefreshTokenService', () => {
       });
 
       await expect(service.rotate(manager, 'session-too-old', {})).rejects.toThrow(UnauthorizedException);
+    });
+  });
+
+  describe('rotate: no second pooled connection (load-test §4.3 pool deadlock)', () => {
+    const liveRow = () => ({
+      id: 'rt-1', familyId: 'fam-1', userId: 'user-1', organisationId: 'org-1',
+      revokedAt: null, replacedBy: null, expiresAt: new Date(Date.now() + 3_600_000), familyExpiresAt: new Date(Date.now() + 3_600_000),
+    });
+    const suspendedOrgQuery = () =>
+      jest.fn(async (sql: string) => (sql.includes('core.organisation') ? [{ suspended_at: new Date().toISOString() }] : []));
+
+    beforeEach(() => {
+      platformAdminMocks.isPlatformAdmin.mockClear();
+      platformAdminMocks.isPlatformAdminTx.mockReset().mockResolvedValue(false);
+    });
+
+    it('asks the platform-admin question on the rotation transaction itself (same manager, the token owner), never through isPlatformAdmin()', async () => {
+      const manager = buildManager({ findOne: jest.fn().mockResolvedValue(liveRow()) });
+      await service.rotate(manager, 'valid-token', {});
+      expect(platformAdminMocks.isPlatformAdminTx).toHaveBeenCalledTimes(1);
+      expect(platformAdminMocks.isPlatformAdminTx.mock.calls[0]![0]).toBe(manager);
+      expect(platformAdminMocks.isPlatformAdminTx.mock.calls[0]![1]).toEqual({ userId: 'user-1' });
+      expect(platformAdminMocks.isPlatformAdmin).not.toHaveBeenCalled();
+    });
+
+    it('denial unchanged: a non-admin in a suspended organisation is refused, and the suspension read runs on the same manager', async () => {
+      const query = suspendedOrgQuery();
+      const manager = buildManager({ findOne: jest.fn().mockResolvedValue(liveRow()), query } as never);
+      await expect(service.rotate(manager, 'valid-token', {})).rejects.toThrow('This organisation has been suspended');
+      expect(query).toHaveBeenCalledWith(expect.stringContaining('core.organisation'), ['org-1']);
+      expect(platformAdminMocks.isPlatformAdmin).not.toHaveBeenCalled();
+    });
+
+    it('exemption unchanged: a platform admin in a suspended organisation still rotates (the organisation row is not even read)', async () => {
+      platformAdminMocks.isPlatformAdminTx.mockResolvedValue(true);
+      const query = suspendedOrgQuery();
+      const manager = buildManager({ findOne: jest.fn().mockResolvedValue(liveRow()), query } as never);
+      await expect(service.rotate(manager, 'valid-token', {})).resolves.toMatchObject({ userId: 'user-1' });
+      expect(query).not.toHaveBeenCalledWith(expect.stringContaining('core.organisation'), expect.anything());
+      expect(platformAdminMocks.isPlatformAdmin).not.toHaveBeenCalled();
     });
   });
 
