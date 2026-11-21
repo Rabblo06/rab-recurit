@@ -9,7 +9,7 @@
 #   bash restore-drill.sh            (after stack.sh up and at least one load run, so the source holds real traffic)
 set -uo pipefail
 W="${LANEF_WORK:-/data/crewtest-lanef}"
-R=$W/results/restore
+R=$W/results/restore${RESTORE_LABEL:+-$RESTORE_LABEL}
 mkdir -p "$R" "$W/backup"
 # shellcheck disable=SC1091
 . "$W/env.sh"
@@ -29,6 +29,14 @@ COUNTS="select 'migrations', count(*)::text || '/' || max(timestamp)::text from 
  from unnest(array['user','organisation','manager_workspace','staff_profile','venue','job_role','shift','shift_assignment','job_offer','attendance','payroll_record','payroll_run','payroll_run_line','shift_report','audit_log','user_session','email_outbox']) t
  order by 1"
 : > "$R/steps.log"
+# §4.4 / §5.1: the API and the Worker are stopped and GONE before the backup (the Worker drains for up to 30 s).
+for f in api worker sinks; do
+  pid="$(cat "$W/$f.pid" 2> /dev/null)"
+  [ -n "$pid" ] || continue
+  kill "$pid" 2> /dev/null
+  for _ in $(seq 1 60); do kill -0 "$pid" 2> /dev/null || break; sleep 1; done
+done
+log "application stopped: $(su_sql $SRC -d crewflow -At -c "select count(*) from pg_stat_activity where datname = 'crewflow' and usename = 'crewflow_owner'") crewflow_owner session(s) left"
 
 log "source counts at backup time"
 su_sql $SRC -d crewflow -At -F ' ' -c "$COUNTS" > "$R/source-counts.txt"
@@ -44,6 +52,10 @@ T_DUMP=$(($(ms) - t0))
 log "dump rc=$rc1/$rc2 in ${T_DUMP} ms: $(du -h "$W/backup/crewflow.dump" | cut -f1) archive, $(wc -c < "$W/backup/roles.sql") bytes of roles"
 (cd "$W/backup" && sha256sum crewflow.dump roles.sql > SHA256SUMS)
 log "physical: pg_basebackup -Ft -z -X stream (for the physical-backup timing only)"
+# A replication connection needs its own pg_hba line (the bundled db's hba has none: physical backups there need one too).
+docker exec $SRC sh -c 'cd /var/lib/postgresql/data && grep -q "^local replication" pg_hba.conf || { printf "local replication lanef_admin scram-sha-256
+" >> pg_hba.conf; }'
+su_sql $SRC -d crewflow -q -c "select pg_reload_conf()" > /dev/null
 t0=$(ms)
 rm -rf "$W/backup/base"
 mkdir -p "$W/backup/base"
@@ -77,7 +89,10 @@ log "roles (no passwords), then a NEW random crewflow_owner password: the copy n
 su_sql $DST -d postgres -q -f - < "$W/backup/roles.sql" > "$R/roles-load.txt" 2>&1
 log "roles load: $(grep -c ERROR "$R/roles-load.txt") ERROR line(s): $(grep ERROR "$R/roles-load.txt" | head -3 | tr '\n' ' ')"
 (umask 077 && openssl rand -hex 32 > "$W/secrets/owner-restore")
-docker exec -i -u postgres $DST sh -c 'umask 077; cat > /tmp/opw; PGPASSWORD="$(cat /run/lanef/su)" psql -X -q -h /var/run/postgresql -U lanef_admin -d postgres -v pw="$(cat /tmp/opw)" -c "ALTER ROLE crewflow_owner PASSWORD :'"'"'pw'"'"'"; rm -f /tmp/opw' < "$W/secrets/owner-restore"
+# psql interpolates :'pw' only in a script (never in -c): the statement goes in on stdin, the value from the file.
+docker cp "$W/secrets/owner-restore" $DST:/tmp/opw > /dev/null
+docker exec $DST chown postgres /tmp/opw
+echo "ALTER ROLE crewflow_owner PASSWORD :'pw';" | docker exec -i -u postgres $DST sh -c 'PGPASSWORD="$(cat /run/lanef/su)" psql -X -q -v ON_ERROR_STOP=1 -h /var/run/postgresql -U lanef_admin -d postgres -v pw="$(cat /tmp/opw)" -f -; rc=$?; rm -f /tmp/opw; exit $rc' && log "crewflow_owner password replaced on the copy"
 log "pg_restore --exit-on-error -j 2 (owners and ACLs kept; never --no-owner)"
 t0=$(ms)
 su_sql $DST -d postgres -q -c "CREATE DATABASE crewflow"

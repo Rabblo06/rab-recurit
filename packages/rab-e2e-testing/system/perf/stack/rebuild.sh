@@ -13,6 +13,9 @@ docker rm -f crewtest-lanef-pg crewtest-lanef-redis >/dev/null 2>&1
 sudo rm -rf $W/pgdata $W/redis
 bash $W/db-up.sh | tail -1
 bash $W/tls.sh | tail -1
+# Measurement only: pg_stat_statements (preloaded by db-up.sh) is read from the postgres database; a smaller WAL ceiling
+# keeps the disposable host's disk in budget.
+bash $W/psql.sh -d postgres -q -c "create extension if not exists pg_stat_statements" -c "ALTER SYSTEM SET max_wal_size = '512MB'" -c "select pg_reload_conf()" > /dev/null
 echo "== install"; t0=$(date +%s)
 env -i PATH="$PATH" HOME=$HOME TMPDIR=$TMPDIR NODE_ENV=production PG_ADMIN_URL="$LF_ADMIN_URL" PG_DATABASE_URL="$LF_OWNER_URL" PG_SSL_CA_CERT_PATH="$PG_SSL_CA_CERT_PATH" \
   node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js 2>&1 | red | grep RESULT
