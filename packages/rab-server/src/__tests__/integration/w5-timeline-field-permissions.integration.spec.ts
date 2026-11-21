@@ -11,6 +11,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { freshStepUp } from './helpers/step-up-kit';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -127,7 +128,11 @@ describeIfDb('wave 5: field permissions + activity timeline (integration)', () =
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
     [{ id: recordId }] = await admin.query(`SELECT id FROM ${siblingTable(await businessTableOf(admin, 'attendance', attendanceId), 'payroll_record')} WHERE attendance_id = $1`, [attendanceId]);
-    expect((await http().post(`/rest/v1/payroll/records/${recordId}/approve`).set(auth(tokenA))).status).toBe(200);
+    // Owner decision 5 (maker-checker): A finalised the timesheet, so a second manager of A's workspace approves, after a fresh step-up.
+    const approver = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'w5tl-approver' });
+    const approverToken = await factory.login(approver);
+    await freshStepUp(app, approverToken, approver.password);
+    expect((await http().post(`/rest/v1/payroll/records/${recordId}/approve`).set(auth(approverToken))).status).toBe(200);
   });
 
   afterAll(async () => {

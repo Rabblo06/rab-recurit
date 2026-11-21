@@ -28,6 +28,7 @@ import { renderReportPdf, ReportDocument } from '../../queues/rab-reports/render
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { freshStepUp } from './helpers/step-up-kit';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
@@ -83,6 +84,13 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
   let a: TestIdentity;
   let staff: TestIdentity[];
   let tokens: { a: string; staff: string[] };
+  // Owner decision 5 (maker-checker): A finalises the timesheets; a second manager of A's workspace approves, after a fresh step-up.
+  let approver: TestIdentity;
+  let approverTok: string;
+  const approverToken = async (): Promise<string> => {
+    await freshStepUp(app, approverTok, approver.password);
+    return approverTok;
+  };
   let venueId: string;
   let jobRoleId: string;
 
@@ -115,6 +123,8 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
     venueId = venue.body.id;
     const role = await http().post('/rest/v1/job-roles').set(auth(tokenA)).send({ name: `Role-${randomUUID()}`, defaultRatePence: 1337 });
     jobRoleId = role.body.id;
+    approver = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'stmtwake-approver' });
+    approverTok = await factory.login(approver);
     const staffTokens: string[] = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
     tokens = { a: tokenA, staff: staffTokens };
@@ -197,7 +207,7 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
     expect(wake.enabled).toBe(true);
     wakeRecord = await pendingRecordFor(0);
     expect(await wakeJobs()).toHaveLength(0);
-    const approved = await http().post(`/rest/v1/payroll/records/${wakeRecord}/approve`).set(auth(tokens.a));
+    const approved = await http().post(`/rest/v1/payroll/records/${wakeRecord}/approve`).set(auth(await approverToken()));
     expect(approved.status).toBe(200);
     const jobs = await eventually(wakeJobs, (j) => j.length >= 1);
     expect(jobs).toHaveLength(1);
@@ -214,14 +224,14 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
     const rec = await pendingRecordFor(1);
     const before = (await wakeJobs()).length;
     const spy = jest.spyOn(audit, 'record').mockRejectedValueOnce(new Error('audit unavailable'));
-    const res = await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(tokens.a));
+    const res = await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(await approverToken()));
     spy.mockRestore();
     expect(res.status).toBeGreaterThanOrEqual(500);
     await settleMs(1_500);
     expect(await wakeJobs()).toHaveLength(before);
     expect(await recordRow(rec)).toMatchObject({ status: 'pending_approval', statement_status: 'none', statement_dispatch_generation: 0 });
     // Clean approval afterwards (the next test needs it approved): one more wake, after commit.
-    expect((await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(tokens.a))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(await approverToken()))).status).toBe(200);
     expect(await eventually(wakeJobs, (j) => j.length === before + 1)).toHaveLength(before + 1);
   });
 
@@ -281,7 +291,7 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
     const before = (await wakeJobs()).length;
     // The API's wake producer loses Redis (its own fail-fast connection; the test's Redis client stays up to observe).
     (wake as unknown as { connection: Redis }).connection.disconnect();
-    const res = await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(tokens.a));
+    const res = await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(await approverToken()));
     expect(res.status).toBe(200);
     await settleMs(1_500);
     expect(await wakeJobs()).toHaveLength(before);

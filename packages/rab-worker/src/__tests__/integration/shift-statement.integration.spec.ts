@@ -23,6 +23,7 @@ import { OFFICIAL_CALENDAR_2026 } from '@rab/server/modules/payroll/constants/of
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { freshStepUp } from './helpers/step-up-kit';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessTable } from './helpers/hws-fixtures';
 
@@ -55,6 +56,13 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
   let b: TestIdentity;
   let staff: TestIdentity[];
   let tokens: { a: string; b: string; vm: string; staff: string[] };
+  // Owner decision 5 (maker-checker): A finalises the timesheets; a second manager of A's workspace approves, after a fresh step-up.
+  let approver: TestIdentity;
+  let approverTok: string;
+  const approverToken = async (): Promise<string> => {
+    await freshStepUp(app, approverTok, approver.password);
+    return approverTok;
+  };
   let venueId: string;
   let jobRoleId: string;
 
@@ -87,6 +95,8 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     const role = await http().post('/rest/v1/job-roles').set(auth(tokenA)).send({ name: `Role-${randomUUID()}`, defaultRatePence: 1337 });
     jobRoleId = role.body.id;
     const vm = await factory.createVenueManager(seeded.organisation, { owner: a, venueIds: [venueId], label: 'paystmt-vm' });
+    approver = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'paystmt-approver' });
+    approverTok = await factory.login(approver);
     const staffTokens: string[] = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
     tokens = { a: tokenA, b: await factory.login(b), vm: await factory.login(vm), staff: staffTokens };
@@ -150,7 +160,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     const [rec] = await adminDataSource.query(`SELECT id FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
     attendanceOf[rec.id] = out.body.id;
     if (!approve) return rec.id as string;
-    const approved = await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(tokens.a));
+    const approved = await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(await approverToken()));
     expect(approved.status).toBe(200);
     expect(approved.body.statement.state).toBe('processing');
     return rec.id as string;

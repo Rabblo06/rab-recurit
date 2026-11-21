@@ -152,6 +152,11 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/instructions', body: { reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
       // AI Phase 6a (agents, storage only until EX-3): every agent, trigger and agent-role write needs this session's step-up.
       { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/agents', body: { name: 'stale-probe', label: 'Stale probe', prompt: 'Stale probe.', model: { tier: 'fast', modelId: null }, reason: 'stale probe' }, action: 'organisation.ai.agent.update' },
+      // Owner decision 5: approving payroll (single and bulk) and finalising a run need this session's step-up — checked before
+      // the record is even looked up, so an unknown id still gets the step-up refusal (and discloses nothing).
+      { token: mgrToken, actor: manager, method: 'post', path: `/rest/v1/payroll/records/${someone}/approve`, action: 'payroll.record.approve' },
+      { token: mgrToken, actor: manager, method: 'post', path: '/rest/v1/payroll/records/bulk-approve', body: { ids: [someone] }, action: 'payroll.record.approve' },
+      { token: mgrToken, actor: manager, method: 'post', path: `/rest/v1/payroll/runs/${someone}/finalise`, action: 'payroll.run.finalise' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.

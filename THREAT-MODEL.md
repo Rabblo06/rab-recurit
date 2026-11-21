@@ -10354,3 +10354,45 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Payroll approval: maker-checker and a fresh step-up, no override (decision 5, branch feat/payroll-approval-maker-checker, 2026-11-21; no SQL)
+
+- **Who can call this:** a workspace manager holding `payroll.approve` (approve / bulk-approve a payroll record; finalise a
+  run). Venue Managers are refused categorically (unchanged).
+- **Threat:** one person prepares pay and approves it (fraud or an unchecked mistake), or a hijacked-but-live session
+  (stolen cookie / token, unattended machine) approves pay.
+- **Controls (layer 2, in the services, so jobs and direct calls are covered too):**
+  - `PayrollService.approve` / `bulkApprove`: refused when the caller finalised the shift report that created the record
+    (`shift_report.finalised_by`, read under the same row lock; the report finalisation is what prepares a record). 403
+    single; per-id `prepared_by_you` in bulk. An unreadable preparer is refused (409 / `not_ready`), never treated as
+    "someone else". The own-hours refusal is unchanged.
+  - `PayrollRunService.finalise`: refused (403) when the caller created the run (`prepared_by`) or added lines to it through
+    `prepare` (the insert-only `payroll_run.prepared` audit row each prepare writes in the same transaction as its lines,
+    `linesAdded > 0`). A run the check cannot read counts as prepared by the caller (fail closed).
+  - All three need a fresh step-up of THIS session (`StepUpReauthService.assertRecentStepUp`, actions
+    `payroll.record.approve` / `payroll.run.finalise`): password within AUTH_STEP_UP_WINDOW_SECONDS (default 5 min) plus the
+    authenticator code when the approver has 2FA. Checked before the transaction opens (the step-up uses its own short
+    transactions; holding two pool connections is the deadlock class fixed in #323) and before the record is looked up,
+    so an unknown id discloses nothing. Refusals are audited (`auth.step_up_failed` with the action). Admin Inspect is refused.
+  - No override exists; an organisation with one payroll person cannot approve until it adds a second (decision 5's stated
+    consequence).
+- **Not changed:** reject, statement retry, prepare, upload, net and mark-paid need no step-up (decision 5 names approval).
+- **Database layer:** none added. The maker-checker facts live in other tables (shift_report, audit_log), and decision 5
+  says "no SQL unless b is chosen". RLS still refuses own-hours approval (`payroll_record_update` WITH CHECK).
+- **Tests:** payroll-approval (decision-5 case: preparer refused single + bulk with a fresh step-up, stale session refused
+  and audited, another organisation 404 after step-up, second manager approves), payroll-runs (preparer refused, stale
+  session refused, second manager finalises), lane-d step-up adoption (three new routes), and every suite that approves
+  pay now uses a second manager of the workspace (server: realtime-c1b, w5-timeline; worker: shift-statement,
+  shift-statement-wake, phase-d cutover, phase-d two-worker).
+
+SECURITY TRADE-OFF
+Decision:   "a fresh 2FA check" is implemented with the existing step-up: password always, plus the authenticator code when
+            the approver has 2FA. An approver WITHOUT 2FA is not refused.
+Reason:     decision 2 phases MFA in (owners / Initial Managers at the DigitalOcean move, other web managers 4 weeks later);
+            refusing un-enrolled approvers now would stop payroll for every organisation before that rollout.
+Risk:       an attacker with a live session AND the approver's password (no 2FA enrolled) can approve pay prepared by
+            someone else.
+Mitigation: maker-checker still needs a second person; the password is re-proved at approval; once decision 2's MFA
+            enforcement reaches managers, every approver has a factor and the code is required.
+Reversal:   refuse `payroll.record.approve` / `payroll.run.finalise` when the approver has no enabled factor (one check in
+            the two services before assertRecentStepUp), or turn on manager MFA enforcement.

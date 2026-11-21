@@ -23,6 +23,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { freshStepUp } from './helpers/step-up-kit';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -259,7 +260,12 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenM))).status).toBe(200);
     const records = businessTable(manager.workspaceId!, 'payroll_record');
     const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM ${records} WHERE attendance_id = $1`, [out.body.id]);
-    expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(tokenM))).status).toBe(200);
+    // Owner decision 5 (maker-checker): the manager finalised the timesheet, so a second manager of the workspace approves,
+    // after a fresh step-up of their session.
+    const approver = await factory.createWorkspaceCoManager(org, manager, { label: 'cut-approver' });
+    const approverToken = await factory.login(approver);
+    await freshStepUp(app, approverToken, approver.password);
+    expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(approverToken))).status).toBe(200);
     const [row] = await admin.query<[{ statement_status: string }]>(`SELECT statement_status FROM ${records} WHERE id = $1`, [rec.id]);
     expect(row.statement_status).toBe('pending');
     orgOf.set(rec.id, org.id);

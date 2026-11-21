@@ -90,6 +90,10 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.instructions.update',
   // AI Phase 6a (storage only until EX-3): the CEO creating, editing or deleting an agent, its triggers or its role flags.
   'organisation.ai.agent.update',
+  // Owner decision 5 (2026-11-21): approving pay needs a fresh proof (password + the authenticator code when enrolled) at the
+  // moment of approval, on top of the maker-checker rule. Approve / bulk-approve of payroll records, and finalising a run.
+  'payroll.record.approve',
+  'payroll.run.finalise',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 

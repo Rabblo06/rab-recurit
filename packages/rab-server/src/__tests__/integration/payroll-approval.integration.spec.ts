@@ -15,6 +15,9 @@ import { AttendanceQrService } from '../../modules/attendance/services/attendanc
 import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { freshStepUp } from './helpers/step-up-kit';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
+import { createHash } from 'node:crypto';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -57,6 +60,15 @@ describeIfDb('payroll approval (integration)', () => {
   let tokenA: string;
   let tokenB: string;
   let tokenVm: string;
+  // Owner decision 5 (maker-checker): C is a second Internal Manager of A's workspace, the approver of what A prepared.
+  let c: TestIdentity;
+  let tokenC: string;
+  let redis: AuthCacheRedisClientProvider;
+  /** A fresh step-up of the session right before approving (decision 5); returns the token. */
+  const stepped = async (token: string, who: TestIdentity): Promise<string> => {
+    await freshStepUp(app, token, who.password);
+    return token;
+  };
   let staffTokens: string[];
   let venueId: string;
   let jobRoleId: string;
@@ -82,10 +94,13 @@ describeIfDb('payroll approval (integration)', () => {
     orgId = seeded.organisation.id;
     [a, b] = seeded.managers as [TestIdentity, TestIdentity];
     staff = [];
-    for (let i = 0; i < 6; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `payroll-s${i}` }));
+    for (let i = 0; i < 7; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `payroll-s${i}` }));
     // Offerable staff (the factory default employment status is not ACTIVE).
     await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     [tokenA, tokenB] = [await factory.login(a), await factory.login(b)];
+    c = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'payroll-c' });
+    tokenC = await factory.login(c);
+    redis = moduleRef.get(AuthCacheRedisClientProvider);
     staffTokens = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
 
@@ -217,7 +232,7 @@ describeIfDb('payroll approval (integration)', () => {
 
   it('(5) another workspace manager (same org, holds payroll.approve) gets 404 and never sees the record', async () => {
     const id = (await recordFor(worked.s0!.attendanceId))!.id as string;
-    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenB))).status).toBe(404);
+    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenB, b)))).status).toBe(404);
     expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenB)).send({ reason: 'Not mine to reject' })).status).toBe(404);
     const crossBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenB)).send({ ids: [id] });
     expect(crossBulk.status).toBe(200);
@@ -263,11 +278,11 @@ describeIfDb('payroll approval (integration)', () => {
 
   it('(3) approve: a non-Initial Internal Manager approves in their own workspace — 200, audited, and only now staff history carries payrollStatus approved + payrollApprovedPence', async () => {
     const id = (await recordFor(worked.s0!.attendanceId))!.id as string;
-    const res = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenA));
+    const res = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenC, c)));
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ id, status: 'approved', approvedByName: 'Manager Test', amountPence: worked.s0!.earnedPence });
+    expect(res.body).toMatchObject({ id, status: 'approved', approvedByName: 'Second Approver', amountPence: worked.s0!.earnedPence });
     const rec = (await recordFor(worked.s0!.attendanceId))!;
-    expect(rec).toMatchObject({ status: 'approved', approved_by: a.userId, statement_status: 'pending', statement_file_id: null, statement_notified_at: null });
+    expect(rec).toMatchObject({ status: 'approved', approved_by: c.userId, statement_status: 'pending', statement_file_id: null, statement_notified_at: null });
     expect(res.body.statement).toEqual({ state: 'processing', fileId: null, filename: null, generatedAt: null, notifiedAt: null });
     expect(rec.approved_at).not.toBeNull();
     const row = await historyRow(0, worked.s0!.attendanceId);
@@ -276,12 +291,12 @@ describeIfDb('payroll approval (integration)', () => {
     const audit = await adminDataSource.query(
       `SELECT actor_user_id, metadata FROM core.audit_log WHERE organisation_id = $1 AND action = 'payroll_record.approved' AND entity_id = $2`, [orgId, id]);
     expect(audit).toHaveLength(1);
-    expect(audit[0]).toMatchObject({ actor_user_id: a.userId, metadata: expect.objectContaining({ amountPence: worked.s0!.earnedPence, bulk: false }) });
+    expect(audit[0]).toMatchObject({ actor_user_id: c.userId, metadata: expect.objectContaining({ amountPence: worked.s0!.earnedPence, bulk: false }) });
   });
 
   it('(9) invalid transitions are 409: approve twice, reject an approved record', async () => {
     const id = (await recordFor(worked.s0!.attendanceId))!.id as string;
-    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenA))).status).toBe(409);
+    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenC, c)))).status).toBe(409);
     expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: 'Too late to reject' })).status).toBe(409);
     expect((await recordFor(worked.s0!.attendanceId))!.status).toBe('approved');
     const audits = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE entity_id = $1`, [id]);
@@ -301,7 +316,7 @@ describeIfDb('payroll approval (integration)', () => {
     expect(res.body).toMatchObject({ status: 'rejected', rejectionReason: 'Hours disputed by venue', rejectedByName: 'Manager Test' });
     const row = await historyRow(1, worked.s1.attendanceId);
     expect(row).toMatchObject({ payrollStatus: 'rejected', payrollApprovedPence: null });
-    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenA))).status).toBe(409);
+    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenC, c)))).status).toBe(409);
     expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenA)).send({ reason: 'Again' })).status).toBe(409);
     const audit = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_record.rejected' AND entity_id = $1`, [id]);
     expect(audit).toHaveLength(1);
@@ -321,7 +336,7 @@ describeIfDb('payroll approval (integration)', () => {
     expect((await recordFor(worked.s3.attendanceId))!.status).toBe('pending_approval');
 
     // Single approve of s2 leaves s3 pending.
-    expect((await http().post(`/rest/v1/payroll/records/${id2}/approve`).set(auth(tokenA))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/records/${id2}/approve`).set(auth(await stepped(tokenC, c)))).status).toBe(200);
     expect((await recordFor(worked.s3.attendanceId))!.status).toBe('pending_approval');
     expect((await historyRow(3, worked.s3.attendanceId))).toMatchObject({ payrollStatus: 'pending_approval', payrollApprovedPence: null });
 
@@ -338,7 +353,7 @@ describeIfDb('payroll approval (integration)', () => {
     const id4 = (await recordFor(worked.s4.attendanceId))!.id as string;
     const unknown = randomUUID();
     const attendanceIdNotARecord = worked.s2.attendanceId; // an attendance id is never an approvable payroll record id
-    const bulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenA)).send({ ids: [id3, unknown, id0, id1, id4, attendanceIdNotARecord] });
+    const bulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(await stepped(tokenC, c))).send({ ids: [id3, unknown, id0, id1, id4, attendanceIdNotARecord] });
     expect(bulk.status).toBe(200);
     expect(bulk.body.approved.map((r: { id: string; status: string; statement: { state: string } }) => [r.id, r.status, r.statement.state]).sort())
       .toEqual([[id3, 'approved', 'processing'], [id4, 'approved', 'processing']].sort());
@@ -355,7 +370,7 @@ describeIfDb('payroll approval (integration)', () => {
       `SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payroll_record.approved' AND entity_id::text = ANY($1::text[]) AND (metadata->>'bulk')::boolean`, [[id3, id4]]);
     expect(audits[0].n).toBe(2);
     // Re-sending the same batch approves nothing new.
-    const again = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenA)).send({ ids: [id3, id4] });
+    const again = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(await stepped(tokenC, c))).send({ ids: [id3, id4] });
     expect(again.body.approved).toEqual([]);
     expect(again.body.blocked.map((b: { reason: string }) => b.reason)).toEqual(['not_ready', 'not_ready']);
     expect(await historyRow(3, worked.s3.attendanceId)).toMatchObject({ payrollStatus: 'approved', payrollApprovedPence: worked.s3.earnedPence });
@@ -419,9 +434,43 @@ describeIfDb('payroll approval (integration)', () => {
     expect((await http().get(`/rest/v1/payroll/period?month=${month}`).set(auth(tokenVm))).status).toBe(403);
     expect((await http().get('/rest/v1/payroll/period?month=2026-13').set(auth(tokenA))).status).toBe(400);
     // The extra attendance stays unapprovable: its id is not a payroll record.
-    const tryIt = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenA)).send({ ids: [extra.attendanceId] });
+    const tryIt = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(await stepped(tokenC, c))).send({ ids: [extra.attendanceId] });
     expect(tryIt.body).toMatchObject({ approved: [], blocked: [{ reason: 'not_found' }] });
-    expect((await http().post(`/rest/v1/payroll/records/${extra.attendanceId}/approve`).set(auth(tokenA))).status).toBe(404);
+    expect((await http().post(`/rest/v1/payroll/records/${extra.attendanceId}/approve`).set(auth(tokenC))).status).toBe(404);
+  });
+
+  it('(11) decision 5: whoever finalised the timesheet never approves it; approving needs a fresh step-up; no override', async () => {
+    const PREPARED = 'You finalised the timesheet for these hours, so another payroll approver must approve them.';
+    const sidOf = (token: string) => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+    const staleGrant = (token: string) => redis.client.del(`crewflow:test:step-up:${createHash('sha256').update(sidOf(token)).digest('hex')}`);
+    worked.s6 = await workShift(6);
+    await reviewAndFinalise(worked.s6, 6); // finalised by A
+    const id = (await recordFor(worked.s6.attendanceId))!.id as string;
+    // A prepared it (finalised the report): refused even with a fresh step-up, single and bulk; nothing written.
+    const own = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenA, a)));
+    expect({ status: own.status, message: own.body.message }).toEqual({ status: 403, message: PREPARED });
+    const ownBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenA)).send({ ids: [id] });
+    expect(ownBulk.body).toEqual({ approved: [], blocked: [{ id, reason: 'prepared_by_you', message: PREPARED }] });
+    expect((await recordFor(worked.s6.attendanceId))!).toMatchObject({ status: 'pending_approval', approved_by: null });
+    // C with a STALE session (grant expired = removed): 403 STEP_UP_REQUIRED, nothing written, refusal audited with the action.
+    await staleGrant(tokenC);
+    const refusalsBefore = (await adminDataSource.query(
+      `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [c.userId]))[0].n;
+    for (const req of [http().post(`/rest/v1/payroll/records/${id}/approve`), http().post('/rest/v1/payroll/records/bulk-approve').send({ ids: [id] })]) {
+      const stale = await req.set(auth(tokenC));
+      expect({ status: stale.status, code: stale.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
+    }
+    expect((await adminDataSource.query(
+      `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [c.userId]))[0].n).toBe(refusalsBefore + 2);
+    expect((await recordFor(worked.s6.attendanceId))!.status).toBe('pending_approval');
+    // Another organisation's manager: still 404 after a fresh step-up (the tenant boundary is not disclosed).
+    const other = await factory.createOrganisationWithManagers(1, { workspace: true, permissions: 'production', label: 'payroll-other' });
+    const otherToken = await factory.login(other.managers[0]!);
+    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(otherToken, other.managers[0]!)))).status).toBe(404);
+    // C, after a fresh step-up: approved.
+    const ok = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenC, c)));
+    expect(ok.status).toBe(200);
+    expect((await recordFor(worked.s6.attendanceId))!).toMatchObject({ status: 'approved', approved_by: c.userId });
   });
 
   it('humans can never record a generated statement or a notification (RLS)', async () => {
