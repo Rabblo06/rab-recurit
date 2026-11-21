@@ -4183,7 +4183,6 @@ __metadata:
     dotenv: "npm:^16.4.7"
     ioredis: "npm:^5.4.2"
     jsqr: "npm:1.4.0"
-    nest-commander: "npm:^3.15.0"
     pdfjs-dist: "npm:4.10.38"
     pg: "npm:^8.13.1"
     qrcode: "npm:^1.5.4"
