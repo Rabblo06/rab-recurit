@@ -10354,3 +10354,44 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## DigitalOcean deployment shape — Managed PostgreSQL verify-full, isolation enforce, Redis password, Cloudflare-only edge (branch feat/digitalocean-deploy-shape, 2026-11-21; owner decisions 24, 25, 26, 53; no SQL, no runtime code)
+- **Threats:** (1) the database admin URL or the crewflow_owner login reaching the runtime or a pooler (25061), or TLS
+  without server verification (a network peer impersonates the cluster); (2) a host where the container hardening keys
+  are silently dropped (OpenShip drops user / read_only / tmpfs / cap_drop / security_opt / pids_limit / env_file /
+  depends_on conditions); (3) an unauthenticated Redis reachable by any container, or a disabled `default` user that loses
+  BullMQ data on AOF replay (Redis 7.4, DOCKER_SECURITY_AND_CLEANUP_REPORT 2026-11-02 §3.5); (4) a forged client address:
+  anyone who reaches the origin directly sets `CF-Connecting-IP` and picks their own rate-limit bucket on sign-in (the
+  login limiter keys on it); (5) a connection budget the managed plan cannot hold (the API pool fills and every tenant
+  times out).
+- **Controls:** `digitalocean/docker-compose.digitalocean.yml` overrides only two things (the bundled db pinned to 0
+  replicas; a fixed default subnet 172.30.0.0/24, gateway 172.30.0.1); every hardening key, `CREWFLOW_RUNTIME_ISOLATION=enforce`,
+  the env files and the dependency conditions come from docker-compose.image.yml unchanged, and the generic gates
+  (compose-owner-login.cjs combo `digitalocean`, compose-one-image.cjs) render this combination. `verify-digitalocean.cjs`
+  (ci-security, deployment-config) adds: PG_ADMIN_URL / the owner URL on `*.db.ondigitalocean.com`, port 25060 only
+  (25061 refused by number), `sslmode=verify-full` only, the cluster CA mounted read-only and named in database.env;
+  every service non-root, read-only, cap_drop ALL with no cap_add, no-new-privileges, PID/memory/CPU limits, bounded logs,
+  nothing privileged or on the host network, only rab-api published and only on 127.0.0.1; the ACL file's `default` user
+  ON with its own SHA-256 password and exactly the app user's permissions, `crewflow` with its own hash, no clear-text
+  password, `nopass` only on the PING-only health-check user; `TRUSTED_PROXY_CIDRS` exactly 172.30.0.1/32 (the bridge
+  gateway the host's Caddy connection arrives from); the runtime.env connection budget at most 47 (2 GiB plan; the
+  template is 40) with one API and one Worker; AI off. The edge (digitalocean/edge/Caddyfile.example): Cloudflare
+  Origin CA certificate (Full (strict)), Authenticated Origin Pulls (mTLS, `require_and_verify`), a `remote_ip` refusal of
+  every non-Cloudflare peer, and the DigitalOcean Cloud Firewall allowing 80/443 from Cloudflare's ranges only and SSH
+  from the owner's address only: three independent fences before `CF-Connecting-IP` is believed. The lints print names
+  and reasons only (a test proves the admin password and host never reach stdout).
+- **Not chosen:** an edge container in compose (the gates allow only rab-api to publish, and only on loopback);
+  `requirepass` (cannot be combined with an ACL file; the password lives in the ACL); disabling the `default` user
+  (decision 25.3 and the AOF-replay loss); `ALTER ROLE crewflow_owner SET jit = off` for the load-test JIT problem (the
+  semantic-posture boot gate refuses an unreviewed role setting; decision 49 a puts it in the tenant binder instead).
+- **Tests:** `digitalocean/verify-digitalocean.test.cjs`: 34 single-change weakenings of the rendered model (each OpenShip
+  key, isolation warn, cap_add, root, privileged, host network, Docker socket, open API bind, Redis published or without
+  its ACL, edge subnet removed or changed, admin URL on the runtime, CA unmounted, pool port, AI on, an extra service);
+  later overrides that weaken through Compose merging; compose.env, database.env, runtime.env and ACL refusals; the
+  budget constants read from connection-budget.ts; the CLI never prints a value.
+- **Residual / to confirm in the rehearsal:** that DigitalOcean's cluster certificate verifies for the PRIVATE (VPC)
+  host name (if not, db-setup refuses at verify-full: fail closed, then use the public host with trusted sources);
+  that rab-api sees 172.30.0.1 as the peer of Caddy's loopback connection (if not, every client shares one
+  rate-limit bucket until TRUSTED_PROXY_CIDRS is corrected: degraded, not open); Cloudflare's IP list changes are
+  manual (a missing new range refuses Cloudflare traffic, it never admits anyone else). The PING-only health-check
+  user needs no password (unchanged from the generic template).

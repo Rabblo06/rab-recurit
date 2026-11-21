@@ -124,7 +124,9 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
 | (c) An OpenShip feature or setting | A supported way to pass these keys. | **Not available** at v0.9.8 or HEAD. The keys are explicitly "not modeled", and the runtime has no per-service security settings. It would need an upstream change: the parser would have to map the keys and `docker.ts` would have to send them in `HostConfig`. |
 | (d) Import guard | A long-form `type: tmpfs` mount, which OpenShip classifies as blocking. | **Included** (rab-api `/tmp` in `docker-compose.image.yml` since PR 2 #124; before that, the operations container's, and rab-migrate's until O3). It refuses the import before anything runs. It depends on OpenShip's current classification, which is why (a) stays as the runtime backstop. `staging/verify-image-compose.cjs` fails if the guard is missing. |
 
-**Recommendation: (b) plain `docker compose` on a dedicated VM**, with (a) and (d) kept as safeguards. Do not deploy
+**Recommendation: (b) plain `docker compose` on a dedicated VM**, with (a) and (d) kept as safeguards (owner decision 25,
+2026-11-21: DigitalOcean; the runbook and the override are `docs/deploy/DIGITALOCEAN.md` and
+`digitalocean/docker-compose.digitalocean.yml`). Do not deploy
 this variant through OpenShip. The temporary OpenShip deployment stays as it is: not redeployed, not migrated, and
 no settings changed (R4).
 

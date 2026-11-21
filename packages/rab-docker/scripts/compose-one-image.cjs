@@ -65,6 +65,8 @@ const DEPLOY_COMBOS = Object.freeze([
   ['docker-compose.image.yml'],
   ['docker-compose.image.yml', 'staging/docker-compose.staging.yml'],
   ['docker-compose.image.yml', 'staging/rehearsal/docker-compose.image-rehearsal.yml'],
+  // Owner decisions 24 / 25 (2026-11-21): the DigitalOcean production shape.
+  ['docker-compose.image.yml', 'digitalocean/docker-compose.digitalocean.yml'],
 ]);
 
 /**
