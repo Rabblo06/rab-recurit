@@ -6705,6 +6705,20 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Residual.**
   - Optional values without a default reach the containers as `""` on OpenShip. Every reader treats blank as unset
     (verified against env validation and the direct readers).
+  - Follow-up (2026-11-18, owner request): those optional keys are now committed as `${KEY:-}` (an empty default), so
+    OpenShip shows them as "fallback default" instead of "needs value", and plain Compose now passes `""` as well
+    (before: nothing). Every reader was re-checked for "" = unset (env.validation.ts drops blanks, but
+    `EnvironmentService.get` falls back to the raw `process.env` value, so each direct reader was checked too), including
+    the bundled-db CA rule in api-prestart.sh / worker-start.sh / db-setup.sh (`-z "${PG_SSL_CA_CERT_PATH:-}"`) and the
+    "both CA settings set" refusal (pg-config.ts `present()` trims and drops ""). One key stays bare: `WORKSPACE_BASE_DOMAIN`
+    (`GET /auth/config` answers `""` instead of `null`; no client reads it). The image-vs-production gate treats rab-api's
+    `PG_POOL_MAX_CONNECTIONS` `""` as "not set" (that key only); any other value is still compared exactly.
+    Refresh onto main (2026-11-20): db-harden's two CA keys get the same `${KEY:-}` as db-setup's, and
+    compose-owner-login.cjs's "PG_DATABASE_URL / PG_DATABASE_APP_PASSWORD only as the committed expression" rule now
+    matches those variable names EXACTLY (`${PG_DATABASE_URL` not followed by a name character), because the prefix match
+    refused `${PG_DATABASE_URL_IS_DIRECT:-}` (a different variable, a boolean, no credential). Every Compose form of the
+    two credential variables (`${V}`, `${V:-x}`, `${V-x}`, `${V:?x}`, `${V?x}`, `${V:+x}`, `${V+x}`) is still refused
+    outside the committed line (compose-owner-login.test.cjs denial cases).
   - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
 - **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
   wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
@@ -9076,16 +9090,22 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   No dependent can drop it either: the current release of every one still requires picomatch (@nx/js and
   @nx/workspace 24.0.6 `^4.0.7`, vite 8.3.8 `^4.0.7`, jest-util / jest-haste-map / jest-message-util 30.5.1 `^4.0.3`,
   tinyglobby 0.2.17 `^4.0.4`, anymatch 3.1.3 `^2.0.4`, micromatch 4.0.8 `^2.3.1`; node-gyp 13.1.0 via tinyglobby).
-- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`:
-  `@rab/server > argon2 > node-gyp@13.0.1 > tinyglobby > picomatch@4.0.5` and `@rab/worker > bullmq > msgpackr >
-  msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5` (install-time native build tool, never imported at
-  runtime). Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
+- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`
+  (node-gyp@13.0.1, an install-time native build tool, never imported at runtime). node-gyp has THREE production
+  parents, each with an injected `node-gyp: npm:latest` edge: `argon2` directly (`@rab/server > argon2`),
+  `node-addon-api` (`@rab/server > argon2 > node-addon-api`) and `msgpackr-extract` (`@rab/worker > bullmq > msgpackr >
+  msgpackr-extract`). Below node-gyp there is exactly ONE picomatch chain: `node-gyp > tinyglobby > picomatch@4.0.5`.
+  (Corrected on branch fix/npm-audit-register-severity, 2026-11-18: the text above previously listed only the argon2
+  and msgpackr-extract parents.) Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
   `jest-environment-jsdom`, `jest-haste-map > anymatch` (2.3.2, 4.0.5), rab-front `vite` (4.0.5), rab-server/worker
   `ts-node-dev > chokidar > anymatch/readdirp` (2.3.2). No first-party code imports a glob matcher; the rab-front
   production bundle contains no picomatch (built and grepped).
 - **Control (`tools/check-npm-audit.cjs` + `tools/npm-audit-decisions.json`, schema 2):** same
   `yarn npm audit --severity high --all --recursive`; a finding passes only with an entry that is
   - *scoped:* exactly one GHSA id + one package (`package`, a `packages` list is refused), `accepted-risk` only;
+    the entry also records the advisory `severity` it decided (`high` for this one, added on branch
+    fix/npm-audit-register-severity; the check binds it from the follow-up hardening PR on: a finding rated above
+    the recorded severity is not covered, so a re-scored advisory needs a new owner decision);
   - *owned and explained:* owner_decision_ref (issue/PR of this repo, no placeholder), decided_by, decided_on,
     `reason`, `drop_when`;
   - *time-boxed:* at most 30 days; expired / over-long / duplicate entries fail; no date override;
@@ -10060,6 +10080,48 @@ Mitigation: default off; exactly true/false; one value for both services; still 
             limits cap spend; AI_DEV_ALLOW_REAL_PROVIDERS stays refused outside development.
 Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and revert the two gates' AI_ENABLED rules.
 ```
+
+## CI supply chain — actions pinned to verified commit SHAs, release via gh, Dependabot covers composite actions (branch ci/actions-pins-sha, 2026-11-18; replaces Dependabot #222, #223, #224; no SQL, no runtime code)
+- **Threat:** *whoever can move a tag or push to an action's repository* (a compromised maintainer, a hijacked release, a
+  fork commit served through the parent's API) → has their code run in our jobs with the job's GITHUB_TOKEN and secrets
+  → for cd-deploy-tag that token held `contents: write` on the whole workflow and was handed to a third-party action
+  (softprops/action-gh-release). A SHA pin only helps if the SHA is a commit of the named repository: dorny/paths-filter
+  was pinned to `15192bc0…`, the annotated **tag object** `v3`, not a commit (it resolved to the v3.0.4 commit
+  `0e4a8c6e…`, which is now the pin; same code).
+- **Control (`tools/check-action-pins.cjs`, ci-security `action-pins`, in the gate's `needs`):** every `uses:` under
+  `.github/workflows/**` and `.github/actions/**` must be `owner/repo[/path]@<40 lowercase hex> # vX.Y.Z`; only
+  `./.github/actions/` and `./.github/workflows/` local references are exempt (any other `./` path fails); `docker://`
+  needs `@sha256:<64 hex>`. Two readings must agree (independent review of #236: an escaped quoted key `"uses"`, an
+  explicit `? uses` key and a fake block scalar inside an open `{` each hid an unpinned `uses` from a line scanner
+  alone): (1) a line scanner, which also refuses those three forms, flow mappings, aliases and a value on the next
+  line, and ignores `uses:` text inside `run: |` blocks and comments; (2) the real YAML parser (root devDependency
+  `yaml`; missing = fail): every mapping key `uses`, aliases and `<<` merges resolved, duplicate keys and parse errors
+  fail. The multiset of `uses` values must be identical. Before either reading, a file containing NEL / U+2028 /
+  U+2029, a bare CR or any other C0 control character (tab, LF, CR excepted) is refused: YAML 1.1 / libyaml-family
+  parsers may break a line there (`# c<U+2028>      - uses: evil/act@main` is a comment to a 1.2 parser, possibly a
+  step to Actions; re-review of #236). The parser must be yaml 2.x. `--remote` (GITHUB_TOKEN) asks the
+  API, per distinct repository@SHA: `git/commits/<sha>` must exist (else `git/tags/<sha>` tells a tag object apart and the
+  error names the commit to pin), and the comment's tag (`git/ref/tags/<tag>`, through tag objects) must resolve to
+  exactly that commit — this also refuses a fork-only "impostor" commit, which no tag of the parent points at. Any
+  lookup that cannot complete fails the job (fail closed). Limitation: the check proves the pin matches the named release
+  today; it does not review what that release does (Dependabot's 14-day cooldown and code review do).
+- **Release path:** cd-deploy-tag now runs `tools/create-github-release.sh` (`gh release create <tag> --repo …
+  --verify-tag --title <tag> --generate-notes --notes-file <our notes>`); workflow `permissions: {}`, the job
+  `contents: write` only, checkout `persist-credentials: false`. Behaviour changes, both fail closed: a tag that does not
+  exist on GitHub is never created, and an existing release for the tag is an error (softprops updated it silently).
+  The workflow only runs on a tag, so `tools/create-github-release.test.cjs` runs the script on every PR: exact argv
+  and notes through a recording `gh`, a dry run, refused inputs (no gh call), the installed gh's own flag list, and the
+  workflow's permissions/checkout wiring.
+- **Bumps:** actions/upload-artifact v4.6.2 → v7.0.2 (`cf430e03…`), actions/download-artifact v4.3.0 → v8.0.2
+  (`9000827c…`) together (v8 fails on an artifact digest mismatch instead of warning; since v5 a `pattern:` download
+  that matches ONE artifact lands in `path/` instead of `path/<name>/`, so image-security-gate's manifest job puts a
+  one-platform download back under its name before the merge; caught by this PR's own PR-mode gate), actions/setup-node v4.4.0 →
+  v7.1.0 (`949feb24…`, also in the yarn-install composite action; v5's automatic cache applies only to npm since v6, so
+  nothing changes for Yarn). Every SHA checked against `gh api repos/<owner>/<repo>/tags`. Version comments of the
+  unchanged checkout/cache pins corrected from `# v4` to the exact release (`v4.4.0`, `v4.3.0`).
+- **Dependabot:** `directories: ['/', '/.github/actions/*']` (composite actions were never scanned, so yarn-install's
+  setup-node pin could not be renewed) and `cooldown: default-days: 14` for github-actions; security updates are not
+  delayed by it. The docker ecosystem entry is unchanged.
 
 ## Phone apps print money exactly like the website (branch fix/mobile-money-format-en-gb, not merged)
 

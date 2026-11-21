@@ -86,6 +86,15 @@ const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_EN
   'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS',
   'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS', 'WORKER_SHIFT_SCAN_MODE', 'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS'];
 /**
+ * PINNED_ENV keys that are OPTIONAL on one service and committed there as ${KEY:-} (an EMPTY default, so OpenShip shows
+ * "fallback default" instead of "needs value"): rab-api's PG_POOL_MAX_CONNECTIONS (the Worker pins "12"). Docker Compose
+ * renders that as "" where the image file has no key at all, and every reader treats "" as unset (pg-config.ts present()),
+ * so for these keys alone "" and "not set" compare equal. Any other value is still compared exactly.
+ */
+const BLANK_IS_UNSET_PINNED_ENV = Object.freeze(['PG_POOL_MAX_CONNECTIONS']);
+/** The value of a PINNED_ENV key as the comparison sees it (see BLANK_IS_UNSET_PINNED_ENV). */
+const pinnedEnvValue = (env, key) => (BLANK_IS_UNSET_PINNED_ENV.includes(key) && env[key] === '' ? undefined : env[key]);
+/**
  * Notification delivery (owner decision 2026-11-06): committed on rab-api AND rab-worker with exactly these values, in both
  * compose files (PINNED_ENV alone would accept the two files drifting together). The API registers the email scheduler with
  * its own interval and the consume-only Worker never compares intervals, so the two services must agree.
@@ -536,7 +545,7 @@ function checkVariant(variant, production, variantFiles = variant) {
       if (stable(av) !== stable(bv)) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
     for (const key of PINNED_ENV) {
-      if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} differs from docker-compose.production.yml`);
+      if (stable(pinnedEnvValue(envOf(a), key)) !== stable(pinnedEnvValue(envOf(b), key))) fail(`${name}.environment.${key} differs from docker-compose.production.yml`);
     }
     // depends_on: same services and conditions (the production file's, without build-only additions).
     const deps = (s) => Object.fromEntries(Object.entries(s.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
@@ -875,7 +884,7 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     // The approval mode is the operator's compose.env opt-in (BC-11/C4): validated, not compared with the reference render.
     // AI_ENABLED (owner decision 2026-11-20) is the operator's compose.env switch: validated below, not compared.
     for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX' && k !== 'CREWFLOW_MIGRATION_APPROVAL_MODE' && k !== AI_ENABLED_KEY)) {
-      if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} is overridden in the deployed model`);
+      if (stable(pinnedEnvValue(envOf(a), key)) !== stable(pinnedEnvValue(envOf(b), key))) fail(`${name}.environment.${key} is overridden in the deployed model`);
     }
     if (name === 'rab-api' && !['none', 'token'].includes(String(envOf(a).CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model');
     if (!SWITCH_VALUES.includes(String(envOf(a)[AI_ENABLED_KEY] ?? ''))) fail(`${name}: ${AI_ENABLED_KEY} is not exactly true or false in the deployed model (compose.env; unset = false)`);
@@ -1108,4 +1117,4 @@ if (require.main === module) {
 }
 
 module.exports = {
-  NOT_THE_APP_LOGIN, DB_SERVICE, DB_SETUP_SERVICE, DB_HARDEN_SERVICE, ADMIN_SERVICES, PID1_ENTRYPOINTS, optionAProblems, dbHardenProblems, pid1Problems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, pgCaFileEnvironmentProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+  NOT_THE_APP_LOGIN, PINNED_ENV, BLANK_IS_UNSET_PINNED_ENV, pinnedEnvValue, DB_SERVICE, DB_SETUP_SERVICE, DB_HARDEN_SERVICE, ADMIN_SERVICES, PID1_ENTRYPOINTS, optionAProblems, dbHardenProblems, pid1Problems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, pgCaFileEnvironmentProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

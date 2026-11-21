@@ -1,0 +1,8 @@
+# CI image, pinned by digest. Read by ci-pdf-equality's `docker run` through ../ref.sh; the redis `services:` in
+# ci-server, ci-worker, ci-e2e and ci-twenty-tests pin the same digest inline (a service image is resolved before
+# checkout, so it cannot read this file).
+# redis:7-alpine: OCI image index (multi-arch) digest read from registry-1.docker.io on 2026-11-18 (Redis 7.4.12).
+# Dependabot (docker ecosystem, .github/dependabot.yml) renews the digest within this tag; the date above is when it was
+# first pinned. tools/check-image-pins.cjs (ci-security) refuses a tag without a digest and any two different digests
+# for the same tag across .github/ (an inline copy, such as a workflow `services:` image, must move with this file).
+image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe

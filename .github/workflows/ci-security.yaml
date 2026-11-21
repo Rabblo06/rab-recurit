@@ -19,7 +19,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/yarn-install
       # Same `yarn npm audit --severity high --all --recursive`. A High/Critical advisory passes only with a valid entry
       # in tools/npm-audit-decisions.json (one GHSA id + one package, owner decision, <= 30 days), only while NO fix
@@ -35,7 +35,7 @@ jobs:
   constraints-and-licenses:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/yarn-install
       - name: Yarn constraints (dependency version drift)
         run: yarn constraints
@@ -48,7 +48,7 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
@@ -61,7 +61,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: javascript-typescript
@@ -80,7 +80,7 @@ jobs:
     # posture and semantic goldens are compared exactly, and the owner-login guard and behaviour-catalogue suites run as
     # crewflow_owner (they skip - never pass - on any other login). Every credential is random and masked.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -138,7 +138,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           fetch-depth: 0 # the --base step reads the base branch's baseline with git show
@@ -176,7 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           fetch-depth: 0 # the --base step reads the base branch's baseline with git show
@@ -197,13 +197,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: The check's own tests
         run: node --test tools/check-protected-table-writes.test.cjs
       - name: Writes to the seven owner-accepted pre-auth tables stay in their owning code
         run: node tools/check-protected-table-writes.cjs
+
+  # Supply chain: every `uses:` in .github/workflows/** and .github/actions/** is a full 40-character commit SHA with a
+  # `# vX.Y.Z` comment (local ./ actions exempt; docker:// needs a digest). --remote asks the GitHub API that each SHA is a
+  # COMMIT of that repository (not an annotated tag object, not a fork-only commit) and that the comment's tag resolves to
+  # exactly it. Also runs cd-deploy-tag's `gh release create` (dry run, a recording gh, the real gh's flag list), which
+  # otherwise would first run on a real tag. Every file is also read by the real YAML parser (the root devDependency
+  # `yaml`), and both readings must find the same `uses:` values.
+  action-pins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - name: The checks' own tests (pin scanner, cd-deploy-tag release command)
+        run: node --test tools/check-action-pins.test.cjs tools/create-github-release.test.cjs
+      - name: Every action is pinned to a commit SHA that matches its version tag
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # read-only lookups of the actions' public repositories
+        run: node tools/check-action-pins.cjs --remote
 
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
   # never migrate, refuse migration credentials), every committed compose definition that runs the Worker (O1: the one
@@ -215,7 +236,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -251,6 +272,13 @@ jobs:
       # rab-ops removal (PR 2): the gate's refusals of the retired operations container and its environment.
       - name: Compose credential isolation, retired-ops refusals (self-tests)
         run: node --test packages/rab-docker/scripts/compose-credential-isolation.ops.test.cjs
+      # Supply chain: every container image CI pulls (`services:` / `container:` images, the `docker run|pull`s in run:
+      # scripts, .github/ci-images/*) is pinned by digest, and one tag never has two digests. Here rather than in its own
+      # job so the ci-security-gate `needs` list is unchanged (#236 edits that line); it can move to #236's action-pins job.
+      - name: CI image pins, self-tests (tag-only images, expressions, unknown docker options, digest drift all fail)
+        run: node --test tools/check-image-pins.test.cjs
+      - name: Every CI container image is pinned by digest
+        run: node tools/check-image-pins.cjs
       # Docker hardening H5: the H1-L1 apk-option check (no `apk -X…/--rep…/--allow-u…/--keys-dir` in a Dockerfile) now runs
       # in image-security-gate.yaml's static job, which the image-gate job below (and every release) calls.
 
@@ -279,7 +307,7 @@ jobs:
   ci-security-gate:
     name: ci-security gate
     # `changes` too: if change detection fails, the image gate falls back to amd64 only, which must not read as passed.
-    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, sql-injection-lint, import-boundaries, protected-table-writes, deployment-config, changes, image-gate]
+    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, sql-injection-lint, import-boundaries, protected-table-writes, action-pins, deployment-config, changes, image-gate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
