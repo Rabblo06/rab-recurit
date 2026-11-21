@@ -10300,3 +10300,24 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Realtime SSE: an instance-wide stream cap; both caps documented as per instance (C1 review F7, branch fix/c1-f7-realtime-instance-cap; no SQL)
+- **Finding (C1 review F7, Low):** `REALTIME_MAX_CONNECTIONS_PER_USER` is counted in an in-memory registry per API
+  process, so with N API instances one user can hold N × 3 streams, and nothing bounded the streams of one process
+  across users (memory, file descriptors, one heartbeat query per stream every 30 s).
+- **Actor → action → consequence:** an authenticated user (or many accounts) → opens SSE streams against one API
+  instance → that instance's memory, descriptors and heartbeat database load grow without a ceiling.
+- **Control:** `REALTIME_MAX_CONNECTIONS_PER_INSTANCE` (default 1000, 1-100000, refused at boot outside that range),
+  checked before the per-user cap, before the stream opens, and re-checked with the slot reservation at subscribe time
+  (two handlers in the same tick cannot both take the last slot). Over the cap: 429 + `Retry-After: 30`, code
+  `REALTIME_INSTANCE_LIMIT`. The clients already treat 429 as "wait Retry-After with jitter", and polling keeps their data
+  correct meanwhile. Both caps are documented as per instance (environment-variables.ts, the controller, rab-docs).
+- **SECURITY TRADE-OFF (vetoable): per instance, not cluster-wide.** A cluster-wide count would need a shared Redis
+  counter (sorted set with heartbeat expiry) on the connect path, and a decision on Redis being down (refuse every stream,
+  or allow uncounted). Per instance fails closed without that dependency. Exposure: one user can still hold
+  N instances × 3 streams. Each stream is still authenticated, revalidated every heartbeat and limited to that user's own
+  id-only events. `REALTIME_ENABLED` stays false in production; nothing here enables it.
+- **Assumption (flagged):** 1000 per instance is an operational default, not a measured capacity.
+- **Tests:** `realtime-gateway.controller.spec.ts`: different users cannot exceed the instance cap (429, Retry-After,
+  nothing registered); re-check at subscribe time; a closed stream frees its slot; the per-user cap still applies
+  below the instance cap. `env.validation.realtime-instance-cap.spec.ts`: default, range, refusals.

@@ -109,6 +109,56 @@ describe('RealtimeGatewayController.stream', () => {
     });
   });
 
+  describe('C1 review F7 — an instance-wide stream cap, before the per-user cap', () => {
+    const INSTANCE = { ...ENABLED, REALTIME_MAX_CONNECTIONS_PER_USER: 3, REALTIME_MAX_CONNECTIONS_PER_INSTANCE: 2 };
+
+    it('many different users cannot open more than the instance cap on one API process: 429 + Retry-After, nothing registered', () => {
+      const { controller, registry } = controllerWith(INSTANCE);
+      const subs = [controller.stream(requestFor('u-1')).subscribe(), controller.stream(requestFor('u-2')).subscribe()];
+      const req = requestFor('u-3'); // a fresh user, far below their own per-user cap
+      let thrown: unknown;
+      try {
+        controller.stream(req);
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as HttpException).getStatus()).toBe(HttpStatus.TOO_MANY_REQUESTS);
+      expect((thrown as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_INSTANCE_LIMIT' });
+      expect(req.sentHeaders['retry-after']).toBe(String(REALTIME_CAP_RETRY_AFTER_SECONDS));
+      expect((registry as RealtimeConnectionRegistryService).size).toBe(2);
+      expect((registry as RealtimeConnectionRegistryService).countForUser('u-3')).toBe(0);
+      subs.forEach((s) => s.unsubscribe());
+    });
+
+    it('re-checked at subscribe time: two handlers that passed in the same tick cannot both take the last instance slot', () => {
+      const { controller, registry } = controllerWith({ ...INSTANCE, REALTIME_MAX_CONNECTIONS_PER_INSTANCE: 1 });
+      const a = controller.stream(requestFor('u-1'));
+      const b = controller.stream(requestFor('u-2'));
+      const subA = a.subscribe();
+      let bError: unknown;
+      const subB = b.subscribe({ error: (e) => (bError = e) });
+      expect((bError as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_INSTANCE_LIMIT' });
+      expect((registry as RealtimeConnectionRegistryService).size).toBe(1);
+      subA.unsubscribe();
+      subB.unsubscribe();
+      expect((registry as RealtimeConnectionRegistryService).size).toBe(0);
+    });
+
+    it('a closed stream frees its instance slot; the per-user cap still applies below the instance cap', () => {
+      const { controller } = controllerWith({ ...INSTANCE, REALTIME_MAX_CONNECTIONS_PER_USER: 1, REALTIME_MAX_CONNECTIONS_PER_INSTANCE: 5 });
+      controller.stream(requestFor('u-1')).subscribe().unsubscribe();
+      const sub = controller.stream(requestFor('u-1')).subscribe();
+      let thrown: unknown;
+      try {
+        controller.stream(requestFor('u-1'));
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_CONNECTION_LIMIT' });
+      sub.unsubscribe();
+    });
+  });
+
   describe('C1b — keepalive bytes', () => {
     it('keepalive interval is min(heartbeat, 25 s)', () => {
       expect(realtimeKeepaliveMs(30_000)).toBe(25_000);
