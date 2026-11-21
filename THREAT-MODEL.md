@@ -10308,8 +10308,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   device and stayed readable in devtools indefinitely. It was also fake persistence: nothing reached the server.
 - **Control:** notes on that page live in React component memory only, keyed by the profile's user id (a note added on
   one person's page is never shown on another's), and are lost on navigation or reload. The page says so ("Notes on
-  this page are not saved...") and the button reads "Add note", not "Save note". On mount the page removes every
-  `user-notes-*` key an older build left in `localStorage` (other keys untouched); storage errors (private mode,
+  this page are not saved...") and the button reads "Add note", not "Save note". At app start-up (App.tsx, whatever page
+  opens first) and again when the page mounts, every `user-notes-*` key an older build left in `localStorage` is removed
+  (other keys untouched; `features/users/legacyNotes.ts`); storage errors (private mode,
   blocked storage) are swallowed because nothing was stored there. No new table, endpoint or SQL.
 - **Assumption (data retention, flagged):** purging the legacy `user-notes-*` keys deletes notes a console user may
   believe they saved. They existed only on that one browser, never on the server, and keeping them is the leak this
@@ -10321,6 +10322,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `packages/rab-front/src/features/users/UserProfile.spec.tsx`: adding a note shows it while
   `Storage.prototype.setItem` and `sessionStorage.setItem` are never called and both storages stay empty; notes seeded
   under `user-notes-*` by an older build are not shown and are removed on mount, an unrelated key survives; a note added
-  on user A's page is not shown after navigating to user B's page.
+  on user A's page is not shown after navigating to user B's page. `App.spec.tsx`: rendering `<App>` (the login page) with
+  a seeded `user-notes-x` key removes it and keeps an unrelated key (fails without the start-up purge).
 - **Residual:** notes on this page are not saved at all until a server-side, RLS-scoped notes store backs it (a new
   table = owner SQL review).

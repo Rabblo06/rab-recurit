@@ -9,6 +9,7 @@ import {
 import { api } from '../../shared/api';
 import { DetailSkeleton, EmptyState, type EmptyStateVariant } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import { purgeLegacyNotes } from './legacyNotes';
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 const avatarColors = [
@@ -113,23 +114,6 @@ const TABS: { key: Tab; label: string; Icon: React.FC<any> }[] = [
 // device. Until a server-side, RLS-scoped notes store backs this page, a note
 // lives only while this page is open and is gone on navigation or reload.
 type Note = { id: string; text: string; createdAt: string };
-
-// Builds before CF-23 persisted notes under this prefix. They are purged on
-// mount so a shared device stops carrying another account's notes.
-const LEGACY_NOTES_KEY_PREFIX = 'user-notes-';
-
-function purgeLegacyNotes() {
-  try {
-    const stale: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k?.startsWith(LEGACY_NOTES_KEY_PREFIX)) stale.push(k);
-    }
-    stale.forEach(k => localStorage.removeItem(k));
-  } catch {
-    // Storage unavailable (private mode, blocked): nothing was persisted there.
-  }
-}
 
 function useNotes(userId: string) {
   const [state, setState] = useState<{ userId: string; notes: Note[] }>({ userId, notes: [] });
