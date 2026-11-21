@@ -58,6 +58,14 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
     hits: 1,
     why: 'operator script reads its own DRIFT_DATABASE_URL; connects through the factory (createPgClientForUrl)',
   },
+  'packages/rab-server/src/database/typeorm/scripts/check-index-hygiene.ts': {
+    hits: 1,
+    why: 'CI / operator script reads its own INDEX_HYGIENE_DATABASE_URL; connects through the factory (createPgClientForUrl, read-only session); catalogue SELECTs only',
+  },
+  'packages/rab-server/src/database/typeorm/scripts/index-usage-report.ts': {
+    hits: 1,
+    why: 'operator report reads its own INDEX_REPORT_DATABASE_URL; connects through the factory (createPgClientForUrl, read-only session); SELECTs only',
+  },
   'packages/rab-server/src/database/typeorm/scripts/check-pending-migrations.ts': { hits: 1, why: 'TypeORM DataSource built from core.datasource factory options' },
   'packages/rab-server/src/database/typeorm/scripts/migrate-workspace-schemas.ts': { hits: 1, why: 'TypeORM DataSource built from factory options' },
   'packages/rab-server/src/database/typeorm/scripts/migrate/locked-migration-runner.ts': { hits: 1, why: 'the migration DataSource, built from pgTypeOrmConnectionOptions' },
