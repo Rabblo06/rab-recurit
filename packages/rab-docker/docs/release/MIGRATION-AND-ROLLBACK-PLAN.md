@@ -169,7 +169,7 @@ can apply it.
 | 27 | 1786720030000 | OAuthReauthenticateIntent | schema (OAuth re-authentication intent) | M | destructive | — |
 | 28 | 1786720100000 | AdminPanelReadFunctions | HAND_OVER (admin read definers) | **B** | may refuse | — |
 | 29 | 1786720110000 | AuditLogOrganisationActionIndex | index `CONCURRENTLY` | M | needs the bootstrap identity | `transaction = false`; own `lock_timeout` |
-| 30 | 1786720210000 | AiUsePermissionDefault | data (AI permission default) | M | reverts | AI stays off in production (`AI_ENABLED=false`) |
+| 30 | 1786720210000 | AiUsePermissionDefault | data (AI permission default) | M | reverts | AI is off in production unless the operator sets `AI_ENABLED=true` (default false, owner decision 2026-11-20) |
 | 31 | 1786720220000 | AiPhase1Schema | HAND_OVER (AI phase 1 schema) | **B** | destructive | — |
 | 32 | 1786720230000 | AiDevRealProvider | HAND_OVER (AI provider definers) | **B** | destructive | — |
 | 33 | 1786720240000 | AiSettingsPermission | data (AI settings permission) | M | reverts | — |

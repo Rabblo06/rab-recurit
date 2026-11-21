@@ -25,15 +25,19 @@
  *
  * DB-SETUP (database setup like Twenty, owner decisions D1 a / D3 / D4 / D5): both files carry the bundled database `db`,
  * and its definition (image, entrypoint, command, environment, volumes, network, health check and every H6 key) must be
- * IDENTICAL in the two files. PR #125 option 2 + PG_ADMIN_URL (owner decision 2026-11-17): the database settings
- * (PG_ADMIN_URL = an admin URL; PG_DATABASE_URL = ALWAYS crewflow_owner; neither = the bundled db, from
- * PG_DATABASE_PASSWORD) are committed ONLY on the one-shot db-setup service (compose.env); db-setup's database environment,
- * runtime keys, volumes and depends_on are identical in the two files. rab-api and rab-worker never have a PG_ADMIN_URL key,
- * pin PG_DATABASE_URL to the literal empty string (never a URL, the crewflow_owner one included) and hold no postgres://
- * value anywhere in their definition (they read db-setup's target volume, read-only). Neither URL may come from an env
- * file; in the deployed model the --environment preflight applies compose-owner-login.cjs dbSettingsProblems (the three
- * modes, PG_DATABASE_PASSWORD exactly while the bundled db runs, verify-full, no pooler, the login rules). Only the login
- * part of a URL is ever read.
+ * IDENTICAL in the two files. Owner decision 2026-11-18 (Twenty's way): PG_DATABASE_URL is ALWAYS the crewflow_owner URL
+ * (your own, or the bundled db's built from PG_DATABASE_APP_PASSWORD), and db-setup, rab-api and rab-worker receive the SAME
+ * value (compose.env); PG_ADMIN_URL (an admin URL) is committed ONLY on the one-shot db-setup service; db-setup's database
+ * environment, runtime keys, volumes and depends_on are identical in the two files; db-setup starts through the wait-for-db
+ * wrapper with NO depends_on and nothing depends on db (owner instruction 2026-11-18, Twenty's Helm wait-for-db;
+ * db-setup-wait.cjs). rab-api and rab-worker pin PG_ADMIN_URL
+ * to the literal empty string, carry exactly db-setup's crewflow_owner PG_DATABASE_URL, and hold no OTHER postgres:// value
+ * anywhere in their definition. No file carries a credential: the retired crewflow-db-target volume (and any mount at
+ * /run/crewflow/db-target) is refused everywhere. Neither URL may come from an env file, and PG_DATABASE_APP_PASSWORD never
+ * reaches a container; in the deployed model the --environment preflight applies compose-owner-login.cjs
+ * dbSettingsProblems (the three modes, PG_DATABASE_PASSWORD exactly while the bundled db runs, sslmode require / verify-ca /
+ * verify-full (all full verification), the login rules). A connection pooler is refused by db-setup's capability checks, never
+ * by its address. Only the login part of a URL is ever read.
  *
  * Exit 0 = every check passed, 1 = a check failed, 2 = usage error or docker compose unavailable.
  * Never prints an environment value other than image references (which are not secrets).
@@ -45,8 +49,9 @@ const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
-const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems, dbSettingsProblems, DB_SETUP_DB_KEYS, ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS } = require('../scripts/compose-owner-login.cjs');
+const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems, dbSettingsProblems, DB_SETUP_DB_KEYS, ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS, HARDEN_TIMEOUT_KEY, hardenTimeoutOk, AI_ENABLED_KEY, AI_ENABLED_EXPR, AI_ENABLED_DEFAULT } = require('../scripts/compose-owner-login.cjs');
 const { pgCaFileProblem } = require('../scripts/pg-ca-pem.cjs');
+const { dbSetupStartProblems, WAIT_SECONDS_KEY, WAIT_SECONDS_DEFAULT } = require('../scripts/db-setup-wait.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -67,7 +72,11 @@ const RUNTIME_KEYS = [
   // Security review L3: other ways to mount or shadow files (db-setup's password volume included).
   'volumes_from', 'secrets', 'configs',
 ];
-/** Committed environment keys that must keep the production file's value on rab-api / rab-worker. */
+/**
+ * Committed environment keys that must keep the production file's value on rab-api / rab-worker. AI_ENABLED (owner decision
+ * 2026-11-20) is compared in the reference render only (both files commit ${AI_ENABLED:-false}, so both render false there);
+ * in the deployed model it is the operator's compose.env value: exactly true or false, the same on both services.
+ */
 const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'CREWFLOW_HWS_CUTOVER_BACKUP_MARKER', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
   'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
   'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
@@ -76,6 +85,15 @@ const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_EN
   'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS',
   'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS',
   'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS', 'WORKER_SHIFT_SCAN_MODE', 'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS'];
+/**
+ * PINNED_ENV keys that are OPTIONAL on one service and committed there as ${KEY:-} (an EMPTY default, so OpenShip shows
+ * "fallback default" instead of "needs value"): rab-api's PG_POOL_MAX_CONNECTIONS (the Worker pins "12"). Docker Compose
+ * renders that as "" where the image file has no key at all, and every reader treats "" as unset (pg-config.ts present()),
+ * so for these keys alone "" and "not set" compare equal. Any other value is still compared exactly.
+ */
+const BLANK_IS_UNSET_PINNED_ENV = Object.freeze(['PG_POOL_MAX_CONNECTIONS']);
+/** The value of a PINNED_ENV key as the comparison sees it (see BLANK_IS_UNSET_PINNED_ENV). */
+const pinnedEnvValue = (env, key) => (BLANK_IS_UNSET_PINNED_ENV.includes(key) && env[key] === '' ? undefined : env[key]);
 /**
  * Notification delivery (owner decision 2026-11-06): committed on rab-api AND rab-worker with exactly these values, in both
  * compose files (PINNED_ENV alone would accept the two files drifting together). The API registers the email scheduler with
@@ -190,7 +208,7 @@ const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_
 /** The one runtime login. */
 const OWNER_LOGIN = 'crewflow_owner';
 /**
- * DB-SETUP T-1: PG_DATABASE_URL is the database ADMIN URL (or crewflow_owner, passed through). Still never one of the former
+ * PG_DATABASE_URL is the crewflow_owner URL and PG_ADMIN_URL the database admin URL. Neither is ever one of the former
  * separated logins / schema roles (mirrors NOT_THE_APP_LOGIN in scripts/compose-owner-login.cjs; a test asserts the two agree).
  */
 const NOT_THE_APP_LOGIN = Object.freeze(['crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_migrator', 'rab_owner', 'rab_secure_owner', 'rab_app']);
@@ -200,73 +218,144 @@ const DB_SERVICE = 'db';
  * DB-SETUP PID 1 (lead decision 2026-11-12): each app service's ENTRYPOINT is its cleaning script (PID 1), which execs the
  * image's tini only once the environment is clean; no command, no compose init (docker-init at PID 1 keeps the admin URL).
  */
-const PID1_ENTRYPOINTS = Object.freeze({ 'rab-api': './api-prestart.sh', 'rab-worker': './worker-start.sh', 'db-setup': './db-setup.sh' });
-/** PR #125 options A and 2: the one-shot setup service (the only service with PG_DATABASE_URL) and its target volume. */
+const PID1_ENTRYPOINTS = Object.freeze({ 'rab-api': ['./api-prestart.sh'], 'rab-worker': ['./worker-start.sh'], 'db-setup': ['./db-setup.sh'], 'db-harden': ['./db-setup.sh', 'harden'] });
+/** The one-shot setup service (with db-harden, the only services with an admin URL). */
 const DB_SETUP_SERVICE = 'db-setup';
-const DB_TARGET_VOLUME = 'crewflow-db-target';
-const DB_TARGET_DIR = '/run/crewflow/db-target';
+/**
+ * The one-shot CREATEROLE hardening (owner decision 2026-11-18, security review of PR #246, M1): db-setup's image and database
+ * settings, entrypoint `./db-setup.sh harden`, NO depends_on, and nothing depends on it.
+ */
+const DB_HARDEN_SERVICE = 'db-harden';
+/** The services that may hold the admin URL (PG_ADMIN_URL with a value, the bundled superuser URL). */
+const ADMIN_SERVICES = Object.freeze([DB_SETUP_SERVICE, DB_HARDEN_SERVICE]);
+/** The retired setup volume (PR #125 option 2: db-setup's target and crewflow_owner password files). Never again. */
+const RETIRED_TARGET_VOLUME = 'crewflow-db-target';
+const RETIRED_TARGET_DIR = '/run/crewflow/db-target';
+/** The variable compose interpolates into the bundled PG_DATABASE_URL (owner decision 2026-11-18); never a container's. */
+const APP_PASSWORD_KEY = 'PG_DATABASE_APP_PASSWORD';
 /** db-setup keys that must be identical in the two files (besides RUNTIME_KEYS; the image differs only by its default). */
 const DB_SETUP_KEYS = [...RUNTIME_KEYS, 'networks', 'ports', 'profiles', 'build'];
-/** The five services of the committed files (anything else in a deployed model was added by an override). */
-const KNOWN_SERVICES = ['db', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker'];
+/** The six services of the committed files (anything else in a deployed model was added by an override). */
+const KNOWN_SERVICES = ['db', 'db-harden', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker'];
 const isPgUrlText = (v) => /postgres(ql)?:\/\//i.test(String(v ?? ''));
+/** The login of a URL value, or null when it is not a URL. Never returns the password. */
+const urlLogin = (value) => {
+  try {
+    return decodeURIComponent(new URL(String(value ?? '')).username);
+  } catch {
+    return null;
+  }
+};
+const underRetiredTarget = (t) => {
+  const n = String(t ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+  return n === RETIRED_TARGET_DIR || n.startsWith(`${RETIRED_TARGET_DIR}/`);
+};
 /**
- * Option 2, both models: rab-api / rab-worker pin PG_DATABASE_URL to the literal empty string (any value, a crewflow_owner
- * URL included, is refused) and nothing in their definition holds a postgres:// value; they mount the target volume
- * read-only. db-setup mounts it writable, restart "no", rab-api waits for it.
+ * Owner decision 2026-11-18 (Twenty's way), both models: db-setup, rab-api and rab-worker carry the SAME PG_DATABASE_URL, a
+ * crewflow_owner URL; rab-api / rab-worker pin PG_ADMIN_URL to "" and hold no OTHER postgres:// value anywhere in their
+ * definition; db-setup is a one-shot after a healthy db that rab-api waits for. The retired crewflow-db-target volume is
+ * refused on every service, as a mount source or as anything at /run/crewflow/db-target (volume, bind or tmpfs).
  */
-function optionAProblems(services, where = '') {
+function optionAProblems(services, where = '', { renderedWait = WAIT_SECONDS_DEFAULT } = {}) {
   const out = [];
+  const setup = services[DB_SETUP_SERVICE];
+  const setupUrl = setup ? envOf(setup).PG_DATABASE_URL : undefined;
   for (const name of ['rab-api', 'rab-worker']) {
     const svc = services[name];
     if (!svc) continue;
-    // Option 2: pinned empty (the crewflow_owner URL comes from db-setup's target file); never a URL, crewflow_owner included.
-    const url = envOf(svc).PG_DATABASE_URL;
+    const env = envOf(svc);
+    const url = env.PG_DATABASE_URL;
     // Owner requirement 2026-11-17 + owner decision L-2: PG_ADMIN_URL pinned to the literal empty string (any value refused),
     // never the retired name nor db-setup's bundled-db URL.
-    const admin = envOf(svc)[ADMIN_URL_KEY];
+    const admin = env[ADMIN_URL_KEY];
     if (admin === undefined) out.push(`${name}: ${ADMIN_URL_KEY} is not pinned to ""${where} (an env-file value would reach it; owner decision L-2)`);
-    else if (String(admin) !== '') out.push(`${name}: has ${ADMIN_URL_KEY} with a value${where} (the database admin URL reaches db-setup only; rab-api / rab-worker pin it to "")`);
-    for (const key of [...RETIRED_ADMIN_URL_KEYS, 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) if (Object.prototype.hasOwnProperty.call(envOf(svc), key)) out.push(`${name}: has ${key}${where} (db-setup's input only)`);
-    if (url === undefined) out.push(`${name}: PG_DATABASE_URL is not pinned to ""${where} (an env-file value would reach it)`);
-    else if (String(url) !== '') out.push(`${name}: PG_DATABASE_URL is not empty${where} (option 2: only db-setup receives a database URL, in any form)`);
-    if (isPgUrlText(JSON.stringify(svc))) out.push(`${name}: holds a postgres:// value somewhere in its definition${where} (option 2: never)`);
-    if (!(svc.volumes ?? []).some((v) => v.type === 'volume' && v.source === DB_TARGET_VOLUME && v.target === DB_TARGET_DIR && v.read_only === true)) out.push(`${name}: does not mount db-setup's target volume read-only${where}`);
+    else if (String(admin) !== '') out.push(`${name}: has ${ADMIN_URL_KEY} with a value${where} (the database admin URL reaches db-setup / db-harden only; rab-api / rab-worker pin it to "")`);
+    for (const key of [...RETIRED_ADMIN_URL_KEYS, 'CREWFLOW_BUNDLED_DB_ADMIN_URL', APP_PASSWORD_KEY]) if (Object.prototype.hasOwnProperty.call(env, key)) out.push(`${name}: has ${key}${where} (compose / db-setup input only)`);
+    // The crewflow_owner URL, from compose.env: committed here (an env-file value never wins), the same as db-setup's.
+    if (url === undefined || String(url) === '') out.push(`${name}: PG_DATABASE_URL is not set in its environment${where} (the crewflow_owner URL, committed from compose.env)`);
+    else {
+      if (urlLogin(url) !== OWNER_LOGIN) out.push(`${name}: PG_DATABASE_URL does not log in as ${OWNER_LOGIN}${where} (it is always the app login, never an admin URL)`);
+      if (setup && String(url) !== String(setupUrl ?? '')) out.push(`${name}: PG_DATABASE_URL differs from db-setup's${where} (rab-api / rab-worker use exactly the crewflow_owner URL db-setup created or checked)`);
+    }
+    const rest = { ...svc, environment: Object.fromEntries(Object.entries(env).filter(([k]) => k !== 'PG_DATABASE_URL')) };
+    if (isPgUrlText(JSON.stringify(rest))) out.push(`${name}: holds a postgres:// value outside PG_DATABASE_URL somewhere in its definition${where} (never a second database credential)`);
   }
-  const setup = services[DB_SETUP_SERVICE];
-  if (!setup) out.push(`${DB_SETUP_SERVICE}: missing${where} (option 2: the only service with PG_DATABASE_URL)`);
+  if (!setup) out.push(`${DB_SETUP_SERVICE}: missing${where} (the only service with an admin login)`);
   else {
     if (setup.restart !== 'no') out.push(`${DB_SETUP_SERVICE}: restart is not "no"${where} (a one-shot)`);
     if ((setup.ports ?? []).length) out.push(`${DB_SETUP_SERVICE}: publishes a port${where}`);
-    if (!(setup.volumes ?? []).some((v) => v.type === 'volume' && v.source === DB_TARGET_VOLUME && v.target === DB_TARGET_DIR && v.read_only !== true)) out.push(`${DB_SETUP_SERVICE}: does not mount the target volume writable${where}`);
-    const deps = setup.depends_on ?? {};
-    if (stable(Object.keys(deps)) !== stable([DB_SERVICE]) || deps[DB_SERVICE]?.condition !== 'service_healthy') out.push(`${DB_SETUP_SERVICE}: depends_on must be exactly a healthy ${DB_SERVICE}${where}`);
+    if (setupUrl === undefined || String(setupUrl) === '') out.push(`${DB_SETUP_SERVICE}: PG_DATABASE_URL is not set${where} (always the crewflow_owner URL)`);
+    else if (urlLogin(setupUrl) !== OWNER_LOGIN) out.push(`${DB_SETUP_SERVICE}: PG_DATABASE_URL does not log in as ${OWNER_LOGIN}${where} (an admin URL goes in ${ADMIN_URL_KEY})`);
+    if (Object.prototype.hasOwnProperty.call(envOf(setup), APP_PASSWORD_KEY)) out.push(`${DB_SETUP_SERVICE}: has ${APP_PASSWORD_KEY}${where} (compose interpolates it into PG_DATABASE_URL; never a container variable)`);
+    // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): the wait-for-db wrapper (db-setup-wait.cjs), NO depends_on,
+    // and rab-api never depends on db (with CREWFLOW_BUNDLED_DB=0 there is no db container; OpenShip skipped the dependent).
+    out.push(...dbSetupStartProblems(services, { requireWait: true, renderedWait, where }));
     if (setup.image !== services['rab-api']?.image) out.push(`${DB_SETUP_SERVICE}: image differs from rab-api's${where} (O2: one image)`);
-    // Twenty Helm model (OWNER-DB-FINAL.md Part A): APP_SECRET is never part of a database credential; db-setup never has it.
+    // APP_SECRET is never part of a database credential; db-setup never has it.
     if (Object.prototype.hasOwnProperty.call(envOf(setup), 'APP_SECRET')) out.push(`${DB_SETUP_SERVICE}: has APP_SECRET${where} (never part of a database credential)`);
   }
   if (services['rab-api']?.depends_on?.[DB_SETUP_SERVICE]?.condition !== 'service_completed_successfully') out.push(`rab-api: does not wait for ${DB_SETUP_SERVICE} (service_completed_successfully)${where}`);
   for (const [name, svc] of Object.entries(services)) {
-    if (!['rab-api', 'rab-worker', DB_SETUP_SERVICE].includes(name) && (svc.volumes ?? []).some((v) => v.source === DB_TARGET_VOLUME)) out.push(`${name}: mounts db-setup's target volume${where}`);
-    // The crewflow_owner password file lives on that volume: nothing else may be mounted at (or under) its path.
+    // Owner decision 2026-11-18: no file carries a credential; the retired setup volume never comes back.
     for (const v of svc.volumes ?? []) {
-      const t = String(v.target ?? '');
-      if ((t === DB_TARGET_DIR || t.startsWith(`${DB_TARGET_DIR}/`)) && !(v.type === 'volume' && v.source === DB_TARGET_VOLUME && ['rab-api', 'rab-worker', DB_SETUP_SERVICE].includes(name))) {
-        out.push(`${name}: mounts something at ${t}${where} (db-setup's volume holds the crewflow_owner password file)`);
-      }
+      if (v.source === RETIRED_TARGET_VOLUME || underRetiredTarget(v.target)) out.push(`${name}: mounts ${v.source === RETIRED_TARGET_VOLUME ? RETIRED_TARGET_VOLUME : 'something'} at ${String(v.target ?? '')}${where} (the retired setup volume: no file carries a credential)`);
     }
-    if (name !== DB_SETUP_SERVICE && Object.prototype.hasOwnProperty.call(envOf(svc), 'PG_DATABASE_URL') && !['rab-api', 'rab-worker'].includes(name)) out.push(`${name}: has PG_DATABASE_URL${where} (only db-setup; rab-api / rab-worker pin it empty)`);
-    if (name !== DB_SETUP_SERVICE && !['rab-api', 'rab-worker'].includes(name) && Object.prototype.hasOwnProperty.call(envOf(svc), ADMIN_URL_KEY)) out.push(`${name}: has ${ADMIN_URL_KEY}${where} (only db-setup)`);
+    if (!['rab-api', 'rab-worker', ...ADMIN_SERVICES].includes(name) && Object.prototype.hasOwnProperty.call(envOf(svc), 'PG_DATABASE_URL')) out.push(`${name}: has PG_DATABASE_URL${where} (only db-setup, db-harden, rab-api and rab-worker)`);
+    if (!ADMIN_SERVICES.includes(name) && !['rab-api', 'rab-worker'].includes(name) && Object.prototype.hasOwnProperty.call(envOf(svc), ADMIN_URL_KEY)) out.push(`${name}: has ${ADMIN_URL_KEY}${where} (only db-setup and db-harden)`);
+    if (!['rab-api', 'rab-worker', DB_SETUP_SERVICE].includes(name) && Object.prototype.hasOwnProperty.call(envOf(svc), APP_PASSWORD_KEY)) out.push(`${name}: has ${APP_PASSWORD_KEY}${where} (compose interpolation only)`);
   }
+  out.push(...dbHardenProblems(services, where));
+  return out;
+}
+const hasDeps = (deps) => (Array.isArray(deps) ? deps.length > 0 : Object.keys(deps ?? {}).length > 0);
+/**
+ * Owner decision 2026-11-18 (security review of PR #246, M1), both models: the one-shot db-harden service. The only other
+ * service with the admin login: db-setup's image (and rab-api's: O2), EXACTLY db-setup's database settings
+ * (DB_SETUP_DB_KEYS), its own bounded wait (CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS, 60-7200, on no other service), restart "no",
+ * no port, no profile, no APP_SECRET, production NODE_ENV / RAB_RUNTIME_ENV, uid 1000 with a read-only root, and NO
+ * depends_on (it polls by itself; OpenShip drops conditions). No service may depend on it (it never blocks rab-api). Its
+ * entrypoint is held by pid1Problems. Pure: names keys, never prints a value.
+ */
+function dbHardenProblems(services, where = '') {
+  const out = [];
+  for (const [name, svc] of Object.entries(services)) {
+    const deps = svc?.depends_on;
+    if ((Array.isArray(deps) ? deps : Object.keys(deps ?? {})).includes(DB_HARDEN_SERVICE)) out.push(`${name}: depends on ${DB_HARDEN_SERVICE}${where} (nothing waits for it; it never blocks rab-api or the Worker)`);
+    if (name !== DB_HARDEN_SERVICE && Object.prototype.hasOwnProperty.call(envOf(svc), HARDEN_TIMEOUT_KEY)) out.push(`${name}: has ${HARDEN_TIMEOUT_KEY}${where} (db-harden's own setting)`);
+  }
+  const h = services[DB_HARDEN_SERVICE];
+  if (!h) {
+    out.push(`${DB_HARDEN_SERVICE}: missing${where} (the one-shot CREATEROLE hardening, owner decision 2026-11-18 M1)`);
+    return out;
+  }
+  const setup = services[DB_SETUP_SERVICE] ?? {};
+  const env = envOf(h);
+  const senv = envOf(setup);
+  if (hasDeps(h.depends_on)) out.push(`${DB_HARDEN_SERVICE}: has depends_on${where} (it waits for the database and the ledger by itself)`);
+  if (h.restart !== 'no') out.push(`${DB_HARDEN_SERVICE}: restart is not "no"${where} (a one-shot)`);
+  if ((h.ports ?? []).length) out.push(`${DB_HARDEN_SERVICE}: publishes a port${where}`);
+  if ((h.profiles ?? []).length) out.push(`${DB_HARDEN_SERVICE}: has a profile${where} (it always runs)`);
+  if (!h.image || h.image !== setup.image || h.image !== services['rab-api']?.image) out.push(`${DB_HARDEN_SERVICE}: image differs from db-setup's or rab-api's${where} (O2: one image)`);
+  if (String(h.user ?? '') !== '1000:1000' || h.read_only !== true) out.push(`${DB_HARDEN_SERVICE}: does not run as 1000:1000 with a read-only root${where}`);
+  for (const key of DB_SETUP_DB_KEYS) {
+    const same = Object.prototype.hasOwnProperty.call(env, key) === Object.prototype.hasOwnProperty.call(senv, key) && String(env[key] ?? '') === String(senv[key] ?? '');
+    if (!same) out.push(`${DB_HARDEN_SERVICE}: ${key} is not db-setup's${where} (exactly db-setup's database settings)`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(env, HARDEN_TIMEOUT_KEY)) out.push(`${DB_HARDEN_SERVICE}: ${HARDEN_TIMEOUT_KEY} is not set${where} (committed as \${${HARDEN_TIMEOUT_KEY}:-1200})`);
+  else if (!hardenTimeoutOk(env[HARDEN_TIMEOUT_KEY])) out.push(`${DB_HARDEN_SERVICE}: ${HARDEN_TIMEOUT_KEY} is not a whole number of seconds from 60 to 7200${where}`);
+  if (Object.prototype.hasOwnProperty.call(env, 'APP_SECRET')) out.push(`${DB_HARDEN_SERVICE}: has APP_SECRET${where} (never part of a database credential)`);
+  for (const key of ['NODE_ENV', 'RAB_RUNTIME_ENV']) if (String(env[key] ?? '') !== 'production') out.push(`${DB_HARDEN_SERVICE}: ${key} is not "production"${where}`);
   return out;
 }
 const hasCommand = (svc) => (Array.isArray(svc?.command) ? svc.command.length > 0 : svc?.command !== undefined && svc?.command !== null);
 function pid1Problems(services, where = '') {
   const out = [];
-  for (const [name, script] of Object.entries(PID1_ENTRYPOINTS)) {
+  for (const [name, entrypoint] of Object.entries(PID1_ENTRYPOINTS)) {
     const svc = services[name];
     if (!svc) continue;
-    if (stable(svc.entrypoint) !== stable([script])) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
+    const script = entrypoint.join(' ');
+    // db-setup: the wait-for-db wrapper execs ./db-setup.sh as the same PID 1 (checked exactly by dbSetupStartProblems).
+    if (name !== DB_SETUP_SERVICE && stable(svc.entrypoint) !== stable(entrypoint)) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
     if (hasCommand(svc)) out.push(`${name}: has a command${where} (${script}, the entrypoint, takes none)`);
     if (svc.init === true) out.push(`${name}: init: true${where} (docker-init would be PID 1 with the admin URL)`);
   }
@@ -291,6 +380,9 @@ const PRODUCTION_REQUIRED_DUMMIES = Object.freeze({
   // DB-SETUP: the bundled db's superuser password (mode a; both files' db and db-setup's bundled URL use it; owner decision
   // 2026-11-17: no `:?` any more, so the reference model also renders without it).
   PG_DATABASE_PASSWORD: 'dummy-production-required-db-password-0000',
+  // Owner decision 2026-11-18: the bundled crewflow_owner password (mode a), interpolated into PG_DATABASE_URL of db-setup,
+  // rab-api and rab-worker. Also not `:?` (your own database does not need it).
+  PG_DATABASE_APP_PASSWORD: 'dummy-production-required-app-password-0000',
   APP_SECRET: 'dummy-production-required-app-secret',
   APP_URL: 'https://app.example.com',
   ACCOUNTS_URL: 'https://app.example.com',
@@ -382,7 +474,7 @@ function checkVariant(variant, production, variantFiles = variant) {
   const services = variant?.services ?? {};
   const names = Object.keys(services).sort();
   // O3 (owner decisions C1-C5): no rab-migrate; the API migrates on start.
-  const expected = ['db', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker'];
+  const expected = ['db', 'db-harden', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker'];
   if (stable(names) !== stable(expected)) fail(`services are ${names.join(',')}; expected exactly ${expected.join(',')}`);
   // PR #125 option A: db-setup is the same one-shot in both files, and the app services never hold a database URL.
   for (const pr of optionAProblems(services)) fail(pr);
@@ -392,20 +484,23 @@ function checkVariant(variant, production, variantFiles = variant) {
   for (const pr of credentialMountProblems(production?.services ?? {}, ' in docker-compose.production.yml', { redisUser: false })) fail(pr);
   for (const pr of topLevelVolumeProblems(variant)) fail(pr);
   for (const pr of topLevelVolumeProblems(production, ' in docker-compose.production.yml')) fail(pr);
-  const vset = services[DB_SETUP_SERVICE];
-  const pset = production?.services?.[DB_SETUP_SERVICE];
-  if (vset && pset) {
+  // db-setup and db-harden (owner decision 2026-11-18, M1): each the same one-shot in both files.
+  for (const admin of ADMIN_SERVICES) {
+    const vset = services[admin];
+    const pset = production?.services?.[admin];
+    if (!vset || !pset) continue;
     for (const key of DB_SETUP_KEYS) {
       const av = key === 'volumes' ? withoutCa(vset.volumes) : vset[key];
       const bv = key === 'volumes' ? withoutCa(pset.volumes) : pset[key];
-      if (stable(av) !== stable(bv)) fail(`${DB_SETUP_SERVICE}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
+      if (stable(av) !== stable(bv)) fail(`${admin}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
-    for (const key of [...DB_SETUP_DB_KEYS, 'NODE_ENV', 'RAB_RUNTIME_ENV']) if (stable(envOf(vset)[key]) !== stable(envOf(pset)[key])) fail(`${DB_SETUP_SERVICE}.environment.${key} differs from docker-compose.production.yml`);
+    const envKeys = [...DB_SETUP_DB_KEYS, WAIT_SECONDS_KEY, 'NODE_ENV', 'RAB_RUNTIME_ENV', ...(admin === DB_HARDEN_SERVICE ? [HARDEN_TIMEOUT_KEY] : [])];
+    for (const key of envKeys) if (stable(envOf(vset)[key]) !== stable(envOf(pset)[key])) fail(`${admin}.environment.${key} differs from docker-compose.production.yml`);
     const deps = (x) => Object.fromEntries(Object.entries(x.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
-    if (stable(deps(vset)) !== stable(deps(pset))) fail(`${DB_SETUP_SERVICE}.depends_on differs from docker-compose.production.yml`);
-    const files = envFiles(DB_SETUP_SERVICE).map(baseName);
+    if (stable(deps(vset)) !== stable(deps(pset))) fail(`${admin}.depends_on differs from docker-compose.production.yml`);
+    const files = envFiles(admin).map(baseName);
     // Twenty Helm model: database.env ONLY (the TLS settings); never runtime.env (no APP_SECRET, no runtime secret).
-    if (stable(files) !== stable(['database.env'])) fail(`${DB_SETUP_SERVICE}: must read database.env only (got ${files.join(', ') || 'none'}; never runtime.env)`);
+    if (stable(files) !== stable(['database.env'])) fail(`${admin}: must read database.env only (got ${files.join(', ') || 'none'}; never runtime.env)`);
   }
   for (const pr of retiredOpsProblems(services)) fail(pr);
   // DB-SETUP: the bundled db is the same service in both files (never a weaker copy in one of them), never published.
@@ -456,7 +551,7 @@ function checkVariant(variant, production, variantFiles = variant) {
       if (stable(av) !== stable(bv)) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
     for (const key of PINNED_ENV) {
-      if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} differs from docker-compose.production.yml`);
+      if (stable(pinnedEnvValue(envOf(a), key)) !== stable(pinnedEnvValue(envOf(b), key))) fail(`${name}.environment.${key} differs from docker-compose.production.yml`);
     }
     // depends_on: same services and conditions (the production file's, without build-only additions).
     const deps = (s) => Object.fromEntries(Object.entries(s.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
@@ -493,6 +588,12 @@ function checkVariant(variant, production, variantFiles = variant) {
   const worker = envOf(services['rab-worker']);
   if (api.CREWFLOW_MIGRATE_ON_START !== 'true') fail('rab-api: CREWFLOW_MIGRATE_ON_START is not "true" (O3 C1)');
   if (!['none', 'token'].includes(String(api.CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token (compose.env; default none)');
+  // Owner decision 2026-11-20: AI is operator-set, default OFF. The reference render sets no AI_ENABLED, so a committed
+  // ${AI_ENABLED:-false} renders false; a literal "true" (or another default) does not.
+  for (const name of ['rab-api', 'rab-worker']) {
+    const v = envOf(services[name])[AI_ENABLED_KEY];
+    if (String(v ?? '') !== AI_ENABLED_DEFAULT) fail(`${name}: ${AI_ENABLED_KEY} is not "${AI_ENABLED_DEFAULT}" when compose.env does not set it (commit ${AI_ENABLED_EXPR}: operator-set, default off)`);
+  }
   if (api.DISABLE_DB_MIGRATIONS === 'true' || api.DISABLE_CRON_JOBS_REGISTRATION === 'true') fail('rab-api: must migrate and register the job schedulers (O3 C1/C2)');
   if (worker.DISABLE_DB_MIGRATIONS !== 'true' || worker.DISABLE_CRON_JOBS_REGISTRATION !== 'true') fail('rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION must be "true" (O3 C1/C2)');
   for (const name of ['rab-api', 'rab-worker']) {
@@ -535,6 +636,8 @@ function checkVariant(variant, production, variantFiles = variant) {
     for (const [k, v] of Object.entries(env)) {
       const value = String(v ?? '');
       if (value.includes(SENTINEL_MIGRATOR_PW) || value.includes(SENTINEL_OPS_PW) || /crewflow_migrator/.test(value)) fail(`${name}: ${k} carries a migration/ops credential`);
+      // An env file's PG_DATABASE_URL (the sentinel planted in database.env) must never win over the committed value.
+      if (value.includes(SENTINEL_OWNER_PW)) fail(`${name}: ${k} carries a value from an env file's PG_DATABASE_URL (the committed compose.env value must win)`);
     }
     for (const k of [...MIGRATION_AUTHORITY, ...OPS_ONLY, ...LEGACY_DB]) {
       if (Object.prototype.hasOwnProperty.call(env, k)) fail(`${name}: sets ${k}`);
@@ -614,7 +717,7 @@ function addedServiceProblems(name, svc, where) {
   if (svc?.privileged) out.push(`${name}: an added service is privileged${where}`);
   for (const ns of ['pid', 'ipc', 'network_mode', 'userns_mode', 'uts', 'cgroup']) if (String(svc?.[ns] ?? '').startsWith('host')) out.push(`${name}: an added service uses the host ${ns}${where}`);
   if (Array.isArray(svc?.devices) && svc.devices.length) out.push(`${name}: an added service maps host devices${where}`);
-  // The bundled database's internal network: only db, db-setup, rab-api and rab-worker are on it.
+  // The bundled database's internal network: only db, db-setup, db-harden, rab-api and rab-worker are on it.
   if (Object.keys(svc?.networks ?? {}).includes('crewflow-db')) out.push(`${name}: an added service is on the bundled database's crewflow-db network${where}`);
   return out;
 }
@@ -775,22 +878,23 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     if (Object.prototype.hasOwnProperty.call(envOf(svc), 'REDIS_URL')) fail(`${name}: REDIS_URL is committed in a compose file (enter it in the env file)`);
     for (const k of envFileKeys[name]?.unfilled ?? []) fail(`${name}: ${k} still holds a template <placeholder>`);
     if (envFileKeys[name] && !fromFiles.includes('REDIS_URL')) fail(`${name}: REDIS_URL is missing from its env file`);
-    // DB-SETUP option 2: PG_DATABASE_URL is a compose.env value for db-setup only; in an app's env file it is pinned away
-    // (and refused by the entrypoint), and the bundled db's password never belongs in an env file.
-    if (fromFiles.includes('PG_DATABASE_URL')) fail(`${name}: PG_DATABASE_URL is set in an env file (set it in compose.env: it belongs to db-setup only)`);
+    // Owner decision 2026-11-18: PG_DATABASE_URL is a compose.env value (the same on db-setup, rab-api and rab-worker); an
+    // env file's value would be silently overridden, and the bundled db's passwords never belong in an env file.
+    if (fromFiles.includes('PG_DATABASE_URL')) fail(`${name}: PG_DATABASE_URL is set in an env file (set it in compose.env: db-setup, rab-api and rab-worker take the same value)`);
+    if (fromFiles.includes(APP_PASSWORD_KEY) || Object.prototype.hasOwnProperty.call(envOf(svc), APP_PASSWORD_KEY)) fail(`${name}: ${APP_PASSWORD_KEY} reaches the container (compose.env only)`);
     // Owner requirement 2026-11-17: an env file of rab-api / rab-worker carrying PG_ADMIN_URL would hand them the admin URL.
-    for (const key of [ADMIN_URL_KEY, ...RETIRED_ADMIN_URL_KEYS]) if (fromFiles.includes(key)) fail(`${name}: ${key} is set in an env file (rab-api / rab-worker NEVER receive the admin URL; set PG_ADMIN_URL in compose.env, db-setup only)`);
+    for (const key of [ADMIN_URL_KEY, ...RETIRED_ADMIN_URL_KEYS]) if (fromFiles.includes(key)) fail(`${name}: ${key} is set in an env file (rab-api / rab-worker NEVER receive the admin URL; set PG_ADMIN_URL in compose.env, db-setup / db-harden only)`);
     if (fromFiles.includes('PG_DATABASE_PASSWORD') || Object.prototype.hasOwnProperty.call(envOf(svc), 'PG_DATABASE_PASSWORD')) fail(`${name}: PG_DATABASE_PASSWORD reaches the container (compose.env only)`);
     for (const [k, login] of Object.entries(envFileKeys[name]?.dbUsers ?? {})) {
       if (NOT_THE_APP_LOGIN.includes(login)) fail(`${name}: ${k} logs in as "${login}" (a former separated login)`);
     }
   }
   if (String(envOf(services['rab-api']).PG_DATABASE_URL ?? '') !== String(envOf(services['rab-worker']).PG_DATABASE_URL ?? '')) fail('PG_DATABASE_URL differs between rab-api and rab-worker in the deployed model');
-  // PR #125 option 2: the app services never hold a database URL; db-setup alone carries it.
-  for (const pr of optionAProblems(services, ' in the deployed model')) fail(pr);
+  // Owner decision 2026-11-18: one crewflow_owner URL on db-setup, rab-api and rab-worker; no admin URL on the app services.
+  for (const pr of optionAProblems(services, ' in the deployed model', { renderedWait: null })) fail(pr);
   for (const pr of credentialMountProblems(services, ' in the deployed model')) fail(pr);
-  // Security re-review F2: an override may add services; none of them may run as root or as uid 1000 (the owner of the
-  // crewflow_owner password file), whatever it mounts.
+  // Security re-review F2: an override may add services; none of them may run as root or as uid 1000 (the app's uid),
+  // whatever it mounts.
   for (const [name, svc] of Object.entries(services)) {
     if (KNOWN_SERVICES.includes(name)) continue;
     for (const pr of addedServiceProblems(name, svc, ' in the deployed model')) fail(pr);
@@ -807,13 +911,15 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     if (fromFiles.includes('PG_DATABASE_URL')) fail(`${DB_SETUP_SERVICE}: PG_DATABASE_URL is set in an env file (set it in compose.env; the committed default would silently override it)`);
     for (const key of [ADMIN_URL_KEY, ...RETIRED_ADMIN_URL_KEYS]) if (fromFiles.includes(key)) fail(`${DB_SETUP_SERVICE}: ${key} is set in an env file (set PG_ADMIN_URL in compose.env; the committed value would silently override it)`);
     if (fromFiles.includes('PG_DATABASE_PASSWORD') || Object.prototype.hasOwnProperty.call(envOf(setup), 'PG_DATABASE_PASSWORD')) fail(`${DB_SETUP_SERVICE}: PG_DATABASE_PASSWORD reaches the container (compose.env only)`);
+    if (fromFiles.includes(APP_PASSWORD_KEY)) fail(`${DB_SETUP_SERVICE}: ${APP_PASSWORD_KEY} reaches the container from an env file (compose.env only)`);
     if (fromFiles.includes('APP_SECRET')) fail(`${DB_SETUP_SERVICE}: APP_SECRET reaches the container from an env file (db-setup reads database.env only)`);
     for (const [k, login] of Object.entries(envFileKeys[DB_SETUP_SERVICE]?.dbUsers ?? {})) {
       if (NOT_THE_APP_LOGIN.includes(login)) fail(`${DB_SETUP_SERVICE}: ${k} logs in as "${login}" (a former separated login)`);
     }
-    // The three modes (owner decision 2026-11-17), the SAME rule as the compose.env lint (dbSettingsProblems): never both
-    // URLs; PG_DATABASE_URL only crewflow_owner ("renamed to PG_ADMIN_URL"); PG_ADMIN_URL never crewflow_owner; verify-full;
-    // no pooler; PG_DATABASE_PASSWORD (inside db-setup's bundled URL) exactly while the bundled db runs.
+    // The three modes (owner decision 2026-11-18), the SAME rule as the compose.env lint (dbSettingsProblems): PG_DATABASE_URL
+    // only crewflow_owner; PG_ADMIN_URL never crewflow_owner; sslmode require / verify-ca / verify-full (a pooler is refused by
+    // db-setup's capability checks, never by address); PG_DATABASE_PASSWORD (inside
+    // db-setup's bundled URL) exactly while the bundled db runs.
     const senv = envOf(setup);
     for (const key of DB_SETUP_DB_KEYS) if (!Object.prototype.hasOwnProperty.call(senv, key)) fail(`${DB_SETUP_SERVICE}: ${key} is missing in the deployed model`);
     const bundled = String(services[DB_SERVICE]?.deploy?.replicas ?? 1) === '0' ? '0' : '1';
@@ -821,8 +927,10 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     let passwordSet = false;
     try { passwordSet = new URL(String(senv.CREWFLOW_BUNDLED_DB_ADMIN_URL ?? '')).password !== ''; } catch { /* missing: reported above */ }
     for (const msg of dbSettingsProblems({ adminUrl: senv[ADMIN_URL_KEY], appUrl: senv.PG_DATABASE_URL, bundled, passwordSet })) fail(`${DB_SETUP_SERVICE}: ${msg} (deployed model)`);
-    const url = senv[ADMIN_URL_KEY] || senv.PG_DATABASE_URL;
-    try { const host = new URL(String(url ?? '')).hostname; ownDatabase = host !== '' && host !== DB_SERVICE; } catch { ownDatabase = false; }
+    // Your own database: the crewflow_owner URL (and any admin URL) names a host other than the bundled db.
+    const hostOf = (u) => { try { return new URL(String(u ?? '')).hostname; } catch { return ''; } };
+    const hosts = [senv.PG_DATABASE_URL, senv[ADMIN_URL_KEY]].filter((u) => u !== undefined && String(u) !== '').map(hostOf);
+    ownDatabase = hosts.length > 0 && hosts.every((h) => h !== '' && h !== DB_SERVICE);
     if (pset) {
       for (const key of DB_SETUP_KEYS) {
         const av = key === 'volumes' ? withoutCa(setup.volumes) : setup[key];
@@ -831,6 +939,30 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
       }
       const deps = (x) => Object.fromEntries(Object.entries(x.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
       if (stable(deps(setup)) !== stable(deps(pset))) fail(`${DB_SETUP_SERVICE}.depends_on differs from docker-compose.production.yml in the deployed model`);
+    }
+  }
+  // Owner decision 2026-11-18 (M1): db-harden reads database.env only and takes its database settings from compose.env,
+  // exactly as db-setup (optionAProblems holds them equal); an override must not change its shape.
+  const harden = services[DB_HARDEN_SERVICE];
+  const phard = production?.services?.[DB_HARDEN_SERVICE];
+  if (harden) {
+    const fromFiles = envFileKeys[DB_HARDEN_SERVICE]?.names ?? [];
+    if (fromFiles.includes('PG_DATABASE_URL')) fail(`${DB_HARDEN_SERVICE}: PG_DATABASE_URL is set in an env file (set it in compose.env; the committed default would silently override it)`);
+    for (const key of [ADMIN_URL_KEY, ...RETIRED_ADMIN_URL_KEYS]) if (fromFiles.includes(key)) fail(`${DB_HARDEN_SERVICE}: ${key} is set in an env file (set PG_ADMIN_URL in compose.env; the committed value would silently override it)`);
+    if (fromFiles.includes(HARDEN_TIMEOUT_KEY)) fail(`${DB_HARDEN_SERVICE}: ${HARDEN_TIMEOUT_KEY} is set in an env file (set it in compose.env; the committed default would silently override it)`);
+    if (fromFiles.includes('PG_DATABASE_PASSWORD') || Object.prototype.hasOwnProperty.call(envOf(harden), 'PG_DATABASE_PASSWORD')) fail(`${DB_HARDEN_SERVICE}: PG_DATABASE_PASSWORD reaches the container (compose.env only)`);
+    if (fromFiles.includes(APP_PASSWORD_KEY)) fail(`${DB_HARDEN_SERVICE}: ${APP_PASSWORD_KEY} reaches the container from an env file (compose.env only)`);
+    if (fromFiles.includes('APP_SECRET')) fail(`${DB_HARDEN_SERVICE}: APP_SECRET reaches the container from an env file (db-harden reads database.env only)`);
+    for (const [k, login] of Object.entries(envFileKeys[DB_HARDEN_SERVICE]?.dbUsers ?? {})) {
+      if (NOT_THE_APP_LOGIN.includes(login)) fail(`${DB_HARDEN_SERVICE}: ${k} logs in as "${login}" (a former separated login)`);
+    }
+    if (phard) {
+      for (const key of DB_SETUP_KEYS) {
+        const av = key === 'volumes' ? withoutCa(harden.volumes) : harden[key];
+        const bv = key === 'volumes' ? withoutCa(phard.volumes) : phard[key];
+        if (stable(av) !== stable(bv)) fail(`${DB_HARDEN_SERVICE}.${key} differs from docker-compose.production.yml in the deployed model`);
+      }
+      if (hasDeps(harden.depends_on)) fail(`${DB_HARDEN_SERVICE}.depends_on is added in the deployed model (it has none)`);
     }
   }
   // DB-SETUP: the bundled db as committed (an override must not weaken it), and the Worker wrapper.
@@ -844,7 +976,7 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     const withoutReplicas = (d) => { const { replicas: _r, ...rest } = d ?? {}; return rest; };
     if (stable(withoutReplicas(ddb.deploy)) !== stable(withoutReplicas(pdb.deploy))) fail(`${DB_SERVICE}.deploy is overridden in the deployed model (only deploy.replicas may differ)`);
     const replicas = ddb.deploy?.replicas;
-    if (!(replicas === 1 || (replicas === 0 && ownDatabase))) fail(`${DB_SERVICE}.deploy.replicas is ${replicas === undefined ? 'unset' : replicas} (only 1, or 0 with your own database in PG_ADMIN_URL or PG_DATABASE_URL)`);
+    if (!(replicas === 1 || (replicas === 0 && ownDatabase))) fail(`${DB_SERVICE}.deploy.replicas is ${replicas === undefined ? 'unset' : replicas} (only 1, or 0 with your own database in PG_DATABASE_URL and any PG_ADMIN_URL)`);
     // PR #125 review, finding 6: the deployed db's environment holds the real password, so it is not compared with the
     // reference render; it is checked against the same rules as the committed one (names and rules only, never a value).
     // Owner decision 2026-11-17: the password is required only while the bundled db runs (replicas 1).
@@ -865,10 +997,13 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
       if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
     // The approval mode is the operator's compose.env opt-in (BC-11/C4): validated, not compared with the reference render.
-    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX' && k !== 'CREWFLOW_MIGRATION_APPROVAL_MODE')) {
-      if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} is overridden in the deployed model`);
+    // AI_ENABLED (owner decision 2026-11-20) is the operator's compose.env switch: validated below, not compared.
+    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX' && k !== 'CREWFLOW_MIGRATION_APPROVAL_MODE' && k !== AI_ENABLED_KEY)) {
+      if (stable(pinnedEnvValue(envOf(a), key)) !== stable(pinnedEnvValue(envOf(b), key))) fail(`${name}.environment.${key} is overridden in the deployed model`);
     }
     if (name === 'rab-api' && !['none', 'token'].includes(String(envOf(a).CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model');
+    if (!SWITCH_VALUES.includes(String(envOf(a)[AI_ENABLED_KEY] ?? ''))) fail(`${name}: ${AI_ENABLED_KEY} is not exactly true or false in the deployed model (compose.env; unset = false)`);
+    if ((envFileKeys[name]?.names ?? []).includes(AI_ENABLED_KEY)) fail(`${name}: ${AI_ENABLED_KEY} is set in an env file (set it in compose.env; the committed ${AI_ENABLED_EXPR} would silently override it)`);
     for (const [key, want] of Object.entries(NOTIFICATION_DELIVERY)) {
       if (String(envOf(a)[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" in the deployed model (owner decision 2026-11-06)`);
     }
@@ -885,6 +1020,8 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
       if (!p.host_ip || p.host_ip === '0.0.0.0' || p.host_ip === '::') fail(`${name}: port ${p.target} is published on every interface (CREWFLOW_API_BIND)`);
     }
   }
+  // Owner decision 2026-11-20: one AI switch for both services (the Worker refuses every queued turn while it is false).
+  if (services['rab-api'] && services['rab-worker'] && String(envOf(services['rab-api'])[AI_ENABLED_KEY] ?? '') !== String(envOf(services['rab-worker'])[AI_ENABLED_KEY] ?? '')) fail(`${AI_ENABLED_KEY} differs between rab-api and rab-worker in the deployed model (one compose.env value for both)`);
   // Phase X J2 (SJ-03): the switches come from the env files (or a compose value); the intervals must be committed.
   const switchesFromFiles = Object.fromEntries(['rab-api', 'rab-worker'].map((n) => [n, envFileKeys[n]?.switches ?? {}]));
   for (const pr of featureSweepProblems(envOf(services['rab-api']), envOf(services['rab-worker']), switchesFromFiles, ' in the deployed model')) fail(pr);
@@ -969,7 +1106,7 @@ function renderModels(variantPath = VARIANT, productionPath = PRODUCTION) {
     fs.writeFileSync(path.join(dir, '.env.migrate'), `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.migrate']}=1\n`);
     fs.writeFileSync(path.join(dir, '.env.ops'), `CREWFLOW_OPS_RUN=one-off\nPG_OPS_APP_DATABASE_URL=postgresql://crewflow_app:${SENTINEL_OPS_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.ops']}=1\n`);
     // Only what the files require; nothing inherited from this machine's CREWFLOW_* / DATABASE_* / REDIS_URL.
-    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET)/.test(k)));
+    const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET|AI_ENABLED$)/.test(k)));
     const env = {
       ...base,
       ...PRODUCTION_REQUIRED_DUMMIES,
@@ -1046,7 +1183,7 @@ function environmentMode(argv) {
   // The runtime services' env files: variable NAMES, unfilled placeholders, and the login part of database URLs only.
   const envFileKeys = {};
   const skippedEnvFiles = [];
-  for (const name of ['rab-api', 'rab-worker', DB_SETUP_SERVICE]) {
+  for (const name of ['rab-api', 'rab-worker', DB_SETUP_SERVICE, DB_HARDEN_SERVICE]) {
     const paths = (model.services?.[name]?.env_file ?? []).map((e) => (typeof e === 'string' ? e : e.path));
     if (!paths.length) {
       // G7: never skip these checks silently. Without an env file the service would also start without credentials.
@@ -1122,4 +1259,4 @@ if (require.main === module) {
 
 module.exports = {
   hwsImageProblems, backupBindProblems, HWS_MIN_IMAGE_VERSION,
-  NOT_THE_APP_LOGIN, DB_SERVICE, DB_SETUP_SERVICE, optionAProblems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, pgCaFileEnvironmentProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+  NOT_THE_APP_LOGIN, PINNED_ENV, BLANK_IS_UNSET_PINNED_ENV, pinnedEnvValue, DB_SERVICE, DB_SETUP_SERVICE, DB_HARDEN_SERVICE, ADMIN_SERVICES, PID1_ENTRYPOINTS, optionAProblems, dbHardenProblems, pid1Problems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, pgCaFileEnvironmentProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
