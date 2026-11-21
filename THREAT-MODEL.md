@@ -10122,3 +10122,38 @@ Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and
 - **Dependabot:** `directories: ['/', '/.github/actions/*']` (composite actions were never scanned, so yarn-install's
   setup-node pin could not be renewed) and `cooldown: default-days: 14` for github-actions; security updates are not
   delayed by it. The docker ecosystem entry is unchanged.
+
+## CI release path — cd-deploy-tag on rab/vX.Y.Z tags, drafts only; publish-image starts from a person's publish (branch ci/release-tag-alignment, 2026-11-18, on top of ci/actions-pins-sha; no SQL, no runtime code)
+- **Finding:** cd-deploy-tag listened for `v*.*.*` while every release since rab/v0.1.0-beta.1 used `rab/vX.Y.Z`, and
+  publish-image's release guard (`release_guard.py` RELEASE_TAG, review F2) and the `release` environment's tag policy
+  accept only `rab/v*`. The workflow had never run (zero runs). Had it run, the release it created with GITHUB_TOKEN
+  would not have started publish-image: events caused by GITHUB_TOKEN start no workflow (only `workflow_dispatch` /
+  `repository_dispatch` are exempt). Releases were in fact cut by the owner in GitHub, whose `release: published`
+  event started publish-image directly (rab/v0.4.0); for rab/v0.6.0 the image was published by a dispatch from `main`
+  first, and the release-event run was rejected at the `release` approval.
+- **Control:** cd-deploy-tag triggers on `rab/v*.*.*`. `tools/create-github-release.sh` accepts exactly RELEASE_TAG
+  (a test compares the two on accepted and refused samples, in JS and through the real Python module). It refuses a tag
+  whose commit is not on `origin/main` (`git fetch --no-tags origin main` + `git merge-base --is-ancestor`, full-history
+  checkout), the rule release_guard.py applies before publishing, so a tag on an unreviewed branch commit gets no
+  release record at all (review of #250). It then looks the release up (`gh release view`, drafts
+  included) and, if one exists, changes nothing. Otherwise it creates a **draft** (`--draft`, `--prerelease` for a
+  `-suffix` tag, `--verify-tag`), never a published release, and its job summary tells the owner to publish the draft.
+  Publishing is a person's event, so publish-image starts on the tag and the `release` environment approval (required
+  reviewers) still gates the push. Fail closed: a failed fetch or merge-base, and any lookup error other than gh's exact
+  `release not found`, fail the job and create nothing; a release created between lookup and create makes
+  `gh release create` fail, never overwrite. The job has no `environment:` (it deploys nothing; `production` only
+  recorded a misleading deployment). RELEASE_TAG itself now uses `[0-9]`, not `\d`: Python's `\d` matched Unicode
+  digits (`rab/v\u0661.2.3`, U+0661 ARABIC-INDIC DIGIT ONE), which the guard accepted and the environment's tag
+  policy would then have had to stop.
+- **Not chosen:** a PAT or GitHub App token for cd-deploy-tag (a long-lived credential that could publish releases and
+  so start the image push, held by a tag-triggered workflow) and `gh workflow run publish-image --ref <tag>` with
+  `actions: write` (the guard allows dispatches only from `main`; widening it to tags is a change to review F2 and is
+  not needed when a person publishes the release anyway). The job keeps `contents: write` only.
+- **Tests:** `tools/create-github-release.test.cjs` (ci-security `action-pins`): a fake `git` (off-main -> refused
+  before any gh call; failed fetch / merge-base -> fail closed); missing release -> exact git calls, then `view` and
+  `create --draft` argv, notes and summary; prerelease tag; existing published / draft release -> no create;
+  lookup error -> fail, no create; dry run calls nothing; refused inputs (bare `v1.2.3`, `+build`, ...) call nothing;
+  RELEASE_TAG alignment including Unicode-digit samples (`test_release_guard.py` refuses them too); the installed gh's flags (`--draft`, `--prerelease`, `view --json isDraft`); the workflow's
+  trigger, permissions and wiring; publish-image still starts on `release: published`.
+- **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
+  drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
