@@ -2,9 +2,11 @@ import Darwin
 import Foundation
 
 /// One reading of the boot clock (docs/plans/m4-offline/DESIGN.md §3.3,
-/// §4.2): the boot session id plus milliseconds of Darwin `CLOCK_MONOTONIC`,
-/// which keeps counting while the phone sleeps and ignores wall-clock
-/// changes. NOT `ProcessInfo.systemUptime`: that stops in sleep, so an
+/// §4.2): the boot session id plus milliseconds of Darwin
+/// `CLOCK_MONOTONIC_RAW` (the `mach_continuous_time` base), which keeps
+/// counting while the phone sleeps and is unaffected by wall-clock changes
+/// and by time/frequency adjustment. NOT `ProcessInfo.systemUptime`: that
+/// stops in sleep, so an
 /// offline clock-in would look EARLIER than it was, which means more pay.
 ///
 /// The phone's wall clock is never an input to an offline punch time. The
@@ -34,7 +36,7 @@ final class SystemOfflineBootClock: OfflineBootClock {
 
     func reading() -> OfflineBootReading? {
         guard let bootId = Self.bootSessionId() else { return nil }
-        let nanos = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+        let nanos = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
         return OfflineBootReading(bootId: bootId, bootMs: Int64(nanos / 1_000_000))
     }
 
