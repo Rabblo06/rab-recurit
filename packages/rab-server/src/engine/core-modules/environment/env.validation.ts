@@ -296,6 +296,14 @@ export function productionConfigurationProblems(env: EnvironmentVariables): stri
       'WORKER_INVITE_AUTO_DELETE_ENABLED=true would let the Worker automatically delete user accounts, and the owner has not approved a retention policy for that (grace period, eligibility, audit wording, rollback/monitoring). Missing owner approval: set WORKER_INVITE_AUTO_DELETE_ENABLED=false (or leave it unset) in production.',
     );
   }
+  // M4 HARD RULE (owner, 2026-11-21): offline clock-in stays OFF in production until M5 payroll adjustments exist and
+  // /attendance/me/sync is pen-tested. There is deliberately NO approval constant here: the owner-set release flag that would
+  // allow it is built later, in its own reviewed change (docs/plans/m4-offline/ROLLOUT-CHECKLIST.md section B).
+  if (env.OFFLINE_ATTENDANCE_ENABLED === true) {
+    problems.push(
+      'OFFLINE_ATTENDANCE_ENABLED=true is not allowed in production: offline clock-in stays off until M5 payroll adjustments exist and /attendance/me/sync has been pen-tested (owner rule 2026-11-21, ROLLOUT-CHECKLIST.md). Set OFFLINE_ATTENDANCE_ENABLED=false (or leave it unset).',
+    );
+  }
   // O3 C2: the interval timers are off the production path (unset already defaults to bullmq in production).
   if (env.WORKER_SCHEDULER === 'interval') {
     problems.push(

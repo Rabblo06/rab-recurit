@@ -1836,6 +1836,56 @@ export class EnvironmentVariables {
   @Max(90)
   QR_MAX_AGE_DAYS: number = 14;
 
+  /**
+   * M4 offline clock-in (docs/plans/m4-offline/DESIGN.md D1): the GLOBAL kill switch, default OFF. Offline punches are accepted
+   * only when this is true AND the venue's own `offline_attendance_enabled` is true.
+   * HARD RULE (owner, 2026-11-21): offline stays OFF everywhere until M5 payroll adjustments exist and `/attendance/me/sync`
+   * has been pen-tested (ROLLOUT-CHECKLIST.md). So `true` in production REFUSES TO BOOT (env.validation.ts
+   * productionConfigurationProblems): the explicit owner-set release flag that would allow it is deliberately not built, and
+   * nothing in the code turns it on. Development and test may set it for disposable tests.
+   * Strict boolean: anything but true/false (e.g. `1`, `TRUE`, `yes`) refuses to boot — never silently true.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: 'OFFLINE_ATTENDANCE_ENABLED must be exactly true or false' })
+  OFFLINE_ATTENDANCE_ENABLED: boolean = false;
+
+  /**
+   * M4 D5: the longest a punch may be captured on the phone after its offline ticket was issued (hours). The maximum is the
+   * owner-approved value, so a deployment can only make it stricter, never looser.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(16)
+  OFFLINE_MAX_CAPTURE_AGE_HOURS: number = 16;
+
+  /** M4 D5: the longest an offline punch may wait before it is synced (hours). Maximum = the owner-approved value. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(72)
+  OFFLINE_SYNC_MAX_DELAY_HOURS: number = 72;
+
+  /** M4 DESIGN §3.5 / §7.2: entries per `/attendance/me/sync` request (more is a 400). Maximum = the designed batch size. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(25)
+  OFFLINE_SYNC_MAX_BATCH: number = 25;
+
+  /** M4 DESIGN §4.5: phone wall clock vs anchored punch time beyond this many seconds raises `clock_skew` (a flag, never a time). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3600)
+  OFFLINE_CLOCK_SKEW_FLAG_SECONDS: number = 300;
+
   /** The pre-shift roster+QR report is generated/emailed this many minutes before `shift.startsAt`. */
   @IsOptional()
   @Type(() => Number)

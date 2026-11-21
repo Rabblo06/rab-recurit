@@ -10300,3 +10300,18 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## M4 offline clock-in kill switch, enforced off (branch feat/m4-offline-kill-switch, 2026-11-21; no SQL)
+- **Owner HARD RULE (2026-11-21).** Offline clock-in stays OFF in production and at every venue until M5 payroll adjustments
+  exist AND `/attendance/me/sync` has been pen-tested (docs/plans/m4-offline/DESIGN.md, ROLLOUT-CHECKLIST.md). Reason (D12):
+  a punch refused because the shift was cancelled or reassigned while the phone was offline can only be paid through a
+  manager payroll adjustment, which does not exist yet.
+- **Control.** `OFFLINE_ATTENDANCE_ENABLED` (strict boolean, default false). In production `true` refuses to boot
+  (`productionConfigurationProblems`). There is deliberately no approval constant or environment variable that could allow
+  it; building the owner-set release flag is ROLLOUT-CHECKLIST.md section B, a separate reviewed change. The offline limits
+  (`OFFLINE_MAX_CAPTURE_AGE_HOURS` <= 16, `OFFLINE_SYNC_MAX_DELAY_HOURS` <= 72, `OFFLINE_SYNC_MAX_BATCH` <= 25,
+  `OFFLINE_CLOCK_SKEW_FLAG_SECONDS` 30-3600) accept only values at or stricter than the owner-approved D5 maxima.
+- **Nothing reads the switch yet.** No offline endpoint exists; the per-venue flag ships with the schema PR, with no route,
+  command or migration that sets it to true.
+- **Tests.** `env.validation.offline-attendance.spec.ts`: default false, strict parsing, production + true refused through
+  `validate()`, no approval constant in env.validation.ts, looser limits refused, stricter ones accepted.
