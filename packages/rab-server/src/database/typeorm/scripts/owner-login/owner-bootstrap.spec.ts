@@ -2614,6 +2614,14 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     expect(t).toContain(OWNER_BOOTSTRAP_BEGIN);
     expect(t).toContain(OWNER_BOOTSTRAP_COMMIT);
     expect(t.lastIndexOf(OWNER_BOOTSTRAP_COMMIT)).toBeGreaterThan(t.lastIndexOf(OWNER_BOOTSTRAP_BEGIN));
+    // The grant runs inside that transaction (the DO block carries the GRANT), and nothing rolls it back afterwards.
+    const begin = t.lastIndexOf(OWNER_BOOTSTRAP_BEGIN);
+    const commit = t.lastIndexOf(OWNER_BOOTSTRAP_COMMIT);
+    const grantAt = t.indexOf(OWNER_BOOTSTRAP_Q4C_DO, begin);
+    expect(grantAt).toBeGreaterThan(begin);
+    expect(grantAt).toBeLessThan(commit);
+    expect(t[grantAt]).toContain('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION');
+    expect(t.slice(begin).filter((x) => x === OWNER_BOOTSTRAP_ROLLBACK)).toEqual([]);
     // The password was not changed (rotateNothingToDo is reached only when nothing was set) and never sent in plain text.
     expect(t).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
     expect(lines).not.toContain(OWNER_BOOTSTRAP_MESSAGES.rotateDone);
@@ -2892,6 +2900,10 @@ describe('owner decision 2026-11-20, F1 a: send anyway, but warn by name', () =>
     // HANDOFF 20 Nov follow-up: a debug log_min_messages (Q1 lowers it only for a superuser) and a verbose auto_explain.
     ['log_min_messages = debug1 (non-superuser admin: Q1 could not raise it)', { log_min_messages: 'debug1' }, ['log_min_messages']],
     ['log_min_messages = DEBUG5 (case-insensitive)', { log_min_messages: 'DEBUG5' }, ['log_min_messages']],
+    ['log_min_messages = warning,backend:debug1 (a debug level for one module)', { log_min_messages: 'warning,backend:debug1' }, ['log_min_messages']],
+    ['log_min_messages = backend:debug3, warning (list with a space)', { log_min_messages: 'backend:debug3, warning' }, ['log_min_messages']],
+    ['log_min_messages = warning,backend:info (no debug level)', { log_min_messages: 'warning,backend:info' }, []],
+    ['log_min_messages = debug9 (not a level)', { log_min_messages: 'debug9' }, []],
     ['log_min_messages = info / notice / warning (no statement debug output)', { log_min_messages: 'notice' }, []],
     ['log_min_messages unreadable (null)', { log_min_messages: null }, []],
     [

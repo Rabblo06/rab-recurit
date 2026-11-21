@@ -10309,7 +10309,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   where a custom plan has folded in the bound value, even with `auto_explain.log_parameter_max_length = 0`).
 - **Control:** W1 (`OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS`) also reads `current_setting('log_min_messages')` and
   `current_setting('auto_explain.log_verbose', true)` (NULL when auto_explain is not loaded); `plainLoggingRisks` adds
-  `log_min_messages` for debug1-debug5 (case-insensitive) and `auto_explain.log_verbose` when it is on while
+  `log_min_messages` when debug1-debug5 appears anywhere in the value (case-insensitive; also a list form such as
+  `warning,backend:debug1`) and `auto_explain.log_verbose` when it is on while
   `auto_explain.log_min_duration >= 0`. Unchanged: names only, never a value, never a refusal (owner decision F1 a); an
   unreadable W1 still prints the "unknown" warning. Still a fixed, parameterless, read-only SELECT.
 - **Docs:** OWNER-LOGIN-DEPLOYMENT.md lists the two settings, and says that F6 a also applies to a grant-only run: with
@@ -10317,6 +10318,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   commits the grant and then refuses (64), so the API and Worker do not start on that deploy.
 - **Tests:** `owner-bootstrap.spec.ts`: debug1 / DEBUG5 warn, notice / null do not; verbose auto_explain warns with
   parameters off, not when auto_explain is off or verbose is off; the all-at-once order; W1 contains both new reads; a
-  grant-only run with the opt-in commits the grant (BEGIN ... COMMIT, no plain form) and then exits 64.
+  grant-only run with the opt-in sends the GRANT (in the DO block) between BEGIN and COMMIT, no ROLLBACK after it and no
+  plain form, and then exits 64.
 - **Residual:** other debug-style settings (`debug_print_parse`, `debug_print_plan`, `log_parser_stats`) are not named;
   they print parse/plan trees at LOG level and could carry the value too.
