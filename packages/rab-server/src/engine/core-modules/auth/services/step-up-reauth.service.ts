@@ -90,6 +90,8 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.instructions.update',
   // AI Phase 6a (storage only until EX-3): the CEO creating, editing or deleting an agent, its triggers or its role flags.
   'organisation.ai.agent.update',
+  // M5 payroll adjustments (owner decisions 3 + 5): approving a correction, bonus or expense needs a fresh proof.
+  'payroll.adjustment.approve',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 

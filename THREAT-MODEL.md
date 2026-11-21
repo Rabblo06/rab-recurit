@@ -10354,3 +10354,45 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Payroll adjustments: corrections, bonuses and expenses as separate approved lines (Lane P2, M5, owner decision 3, branch feat/payroll-adjustments, 2026-11-21; NEW SQL: PayrollAdjustmentSchema1786723100000, DRAFT for owner review)
+- **Asset / actors:** money added to a person's pay after their hours were approved. Attackers considered: a payroll
+  manager paying themselves or a friend (insider), a manager approving their own entry, a Venue Manager or a staff member
+  writing pay lines, another organisation reading or approving by id, a stolen but live manager session, a bug or direct
+  SQL changing an approved or already-paid line, and a deduction taken from a worker without consent (Employment Rights
+  Act 1996 s.13).
+- **Controls (five layers):** (1) PermissionGuard: list `payroll.view`, add `payroll.calculate`, approve / reject
+  `payroll.approve`; console only (`@ManagerApplication`). (2) PayrollAdjustmentService re-checks the flag and refuses
+  Venue Managers before any read; nobody adds, approves or rejects a line that pays THEMSELVES (403
+  `PAYROLL_ADJUSTMENT_OWN_PAY`); the creator never approves or rejects their own line (403
+  `PAYROLL_ADJUSTMENT_SAME_PERSON`); approve needs a recent step-up of the session, checked before any read (403
+  `STEP_UP_REQUIRED`, `payroll.adjustment.approve` in STEP_UP_ACTIONS); a correction must point at an approved record of
+  the caller's workspace and takes the staff member from that record, never the body; a reduction can never exceed what
+  the original shift paid. (3) Every query pinned to the session's organisation AND workspace (404 for anything else).
+  (4) RLS tenant predicate, ENABLE + FORCE in the same migration. (5) RLS non-venue, non-archived workspace manager
+  predicate on every write and manager read; staff read only their OWN APPROVED lines. In the database itself: CHECKs
+  for exactly three kinds (no deduction kind exists), only a correction may be negative, a correction names its record,
+  creator != paid person, decider != creator and != paid person; `core.payroll_adjustment_guard()` refuses any change
+  once the run is finalised (locked_at), any change of the figures or authorship, any status change other than
+  pending_approval -> approved | rejected, a decision naming anyone but the session user, and moving a line out of its
+  run; crewflow_app has no DELETE and no UPDATE on the figures; the owner login is held to the same by the reviewed
+  grant-parity guard (UPDATE allow-list, DELETE, TRUNCATE). Every create / approve / reject / run inclusion is audited
+  (shipped as `payroll_approval`).
+- **Payroll lock:** an approved line joins the run of the agency period containing its approval date at prepare; the
+  run's finalise locks it in the same transaction. A line approved after that sits on the next period (carried forward),
+  so a finalised run, its payslips and its export never change. The approved original record is never edited.
+- **Not chosen / trade-off:** a workspace table (owner decision 48's approach: core table, no foreign key to
+  staff_profile / payroll_record / payroll_run, integrity by service checks; those rows are never hard-deleted by the
+  application). Staff do not see the free-text reason (it may name other people); they see kind and amount.
+- **Tests:** `payroll-adjustments.integration.spec.ts` (zero rows without tenant context as crewflow_app without
+  BYPASSRLS; HTTP abuse cases: mass assignment of organisationId / status / createdBy / staffUserId / workspaceId = 400,
+  no deduction route, Venue Manager and staff 403, other organisation 404, creator 403, stale session 403 with the
+  refusal audited; RLS per role; CHECK and guard denials as the runtime login; locked rows refused even to the table
+  owner; carry-forward to the next period; staff payslip timeline shows only their own approved lines),
+  `payroll-adjustment.service.spec.ts` (layer 2 without a database), `payroll-adjustment-sql.spec.ts`,
+  `lane-d-step-up-adoption.integration.spec.ts` (the new step-up action), `constraint-regression` (transition table ==
+  DB CHECK), `owner-login-guards` (parity trigger count).
+- **Residual / flagged for the owner:** (a) a reduction is capped at the original shift's pay (assumption, see the PR);
+  (b) holiday pay is not added on adjustments (decision 4 PR states the rule); (c) the second approver must also pass
+  P1's MFA-enrolment rule once decision 5 lands (today: a recent step-up, which includes the code when the approver has
+  MFA).

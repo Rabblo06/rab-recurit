@@ -118,6 +118,16 @@ export const AuditAction = {
   PAYSLIP_UPLOADED: 'payslip.uploaded',
   PAYSLIP_NET_RECORDED: 'payslip.net_recorded',
   PAYSLIP_MARKED_PAID: 'payslip.marked_paid',
+  /**
+   * Payroll adjustments (owner decision 3; PayrollAdjustmentService). `entityType` `payroll_adjustment`, `targetUserId` the
+   * staff member it pays. Metadata: kind, amountPence, staffProfileId, correctsPayrollRecordId (created); kind, amountPence,
+   * createdBy (approved); kind, reason (rejected, like payroll_record.rejected). The creation reason stays on the row only.
+   */
+  PAYROLL_ADJUSTMENT_CREATED: 'payroll_adjustment.created',
+  PAYROLL_ADJUSTMENT_APPROVED: 'payroll_adjustment.approved',
+  PAYROLL_ADJUSTMENT_REJECTED: 'payroll_adjustment.rejected',
+  /** Run prepare added approved adjustments to a run (`entityType` payroll_run; metadata periodId, adjustments, carriedForward). */
+  PAYROLL_ADJUSTMENTS_INCLUDED: 'payroll_run.adjustments_included',
   STAFF_REVIEW_SAVED: 'shift_review.saved',
   // Wave 5 (lane DATA) — named archive/restore actions. `entityType`/`entityId` = the archived record; staff and
   // manager rows also carry `targetUserId` so the person's timeline shows them. Metadata never carries pay or email.

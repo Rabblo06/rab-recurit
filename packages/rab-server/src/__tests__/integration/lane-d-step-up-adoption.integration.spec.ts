@@ -152,6 +152,8 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/instructions', body: { reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
       // AI Phase 6a (agents, storage only until EX-3): every agent, trigger and agent-role write needs this session's step-up.
       { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/agents', body: { name: 'stale-probe', label: 'Stale probe', prompt: 'Stale probe.', model: { tier: 'fast', modelId: null }, reason: 'stale probe' }, action: 'organisation.ai.agent.update' },
+      // M5 payroll adjustments (owner decisions 3 + 5): approving a correction / bonus / expense. Step-up before any read.
+      { token: mgrToken, actor: manager, method: 'post', path: `/rest/v1/payroll/adjustments/${someone}/approve`, action: 'payroll.adjustment.approve' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.

@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { addPence, assertSafePence, formatPence, multiplyPence, payForMinutes, subtractPence } from './money';
+import { addPence, assertSafePence, formatPence, multiplyPence, payForMinutes, penceToDecimalString, subtractPence } from './money';
 
 describe('money', () => {
   it('adds pence exactly, no float drift', () => {
@@ -186,5 +186,25 @@ describe('formatPence shared cross-platform cases (money-format-cases.json)', ()
       compared++;
     }
     expect(compared).toBeGreaterThan(20);
+  });
+});
+
+describe('penceToDecimalString (payroll provider CSV)', () => {
+  it('prints two decimals with no symbol or separator', () => {
+    expect(penceToDecimalString(0)).toBe('0.00');
+    expect(penceToDecimalString(5)).toBe('0.05');
+    expect(penceToDecimalString(1250)).toBe('12.50');
+    expect(penceToDecimalString(123456789)).toBe('1234567.89');
+  });
+
+  it('keeps the sign of a negative correction', () => {
+    expect(penceToDecimalString(-1)).toBe('-0.01');
+    expect(penceToDecimalString(-1250)).toBe('-12.50');
+  });
+
+  it('is exact at the safe-integer limit and refuses anything beyond it or fractional', () => {
+    expect(penceToDecimalString(Number.MAX_SAFE_INTEGER)).toBe('90071992547409.91');
+    expect(() => penceToDecimalString(Number.MAX_SAFE_INTEGER + 1)).toThrow(RangeError);
+    expect(() => penceToDecimalString(1.5)).toThrow(RangeError);
   });
 });

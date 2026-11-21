@@ -5,6 +5,7 @@ import { PermissionsService } from '../../engine/core-modules/permissions/permis
 import { FileAccessRegistry } from '../../engine/core-modules/storage/file-access.registry';
 import { FileKind } from '../../engine/core-modules/storage/file-kinds';
 
+import { PayrollAdjustmentController } from './controllers/payroll-adjustment.controller';
 import { PayrollController, StaffShiftStatementsController } from './controllers/payroll.controller';
 import { ShiftStatementFilePolicy } from './files/shift-statement-file.policy';
 import { PayslipFilePolicy } from './files/payslip-file.policy';
@@ -13,6 +14,7 @@ import { PayrollCalendarService } from './services/payroll-calendar.service';
 import { PayrollRunService } from './services/payroll-run.service';
 import { PayrollService } from './services/payroll.service';
 import { PayrollAssistantService } from './services/payroll-assistant.service';
+import { PayrollAdjustmentService } from './services/payroll-adjustment.service';
 
 /**
  * Payroll approval (owner rule 2026-10-20). Imports nothing from other domain modules: the attendance module depends on
@@ -21,8 +23,8 @@ import { PayrollAssistantService } from './services/payroll-assistant.service';
 @Module({
   // AuthModule: JwtAuthGuard's own dependencies (same as every other controller-owning domain module).
   imports: [AuthModule, NotificationModule],
-  controllers: [PayrollController, StaffShiftStatementsController],
-  providers: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService],
+  controllers: [PayrollController, StaffShiftStatementsController, PayrollAdjustmentController],
+  providers: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService, PayrollAdjustmentService],
   // PayrollRunService: AI Phase 1's read-only `compare_payroll_runs` tool (listPeriods + detail totals, modules/ai).
   // PayrollAssistantService: AI Phase 3 `compare_payroll_runs` (SQL totals, integer pence) and `get_timesheet_approval_queue`.
   exports: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService],

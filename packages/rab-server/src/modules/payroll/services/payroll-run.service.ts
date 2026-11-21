@@ -1,4 +1,4 @@
-import { assertSafePence, assertTransition, NotificationType, PAYROLL_RECORD_TRANSITIONS, PayrollRecordStatus, PermissionFlag } from '@rab/shared';
+import { assertSafePence, assertTransition, NotificationType, PAYROLL_RECORD_TRANSITIONS, PayrollRecordStatus, penceToDecimalString, PermissionFlag } from '@rab/shared';
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { EntityManager } from 'typeorm';
@@ -16,7 +16,8 @@ import { payrollAudience } from '../../../engine/core-modules/realtime/realtime-
 import { NotificationService } from '../../notification/services/notification.service';
 import { FieldPolicy, FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
-import { activePeriods, allocateRecords, PeriodRef, periodsById } from './payroll-allocation';
+import { activePeriods, Allocation, allocateRecords, PeriodRef, periodsById } from './payroll-allocation';
+import { AdjustmentLine, AdjustmentTotals, adjustmentTotals, PayrollAdjustmentService } from './payroll-adjustment.service';
 
 type Flag = typeof PermissionFlag.PAYROLL_VIEW | typeof PermissionFlag.PAYROLL_CALCULATE | typeof PermissionFlag.PAYROLL_APPROVE | typeof PermissionFlag.PAYROLL_MARK_PAID;
 
@@ -25,22 +26,27 @@ export type PayslipStatus = 'upcoming' | 'processing' | 'available' | 'paid';
 
 export interface PayslipDocumentRef { fileId: string; filename: string | null; version: number; uploadedAt: string }
 
-export interface RunStaffRow {
+/** One approved adjustment line as a run or a payslip shows it (owner decision 3). No reason: it may name other people. */
+export type RunAdjustmentLine = Pick<AdjustmentLine, 'id' | 'kind' | 'amountPence' | 'correctsPayrollRecordId'>;
+
+export interface RunStaffRow extends AdjustmentTotals {
   staffProfileId: string; staffName: string; staffRef: string | null;
-  records: number; minutes: number; grossPence: number; lateCount: number;
+  /** grossPence = approved shift pay only; totalPence = grossPence + adjustmentsPence (corrections + bonuses + expenses). */
+  records: number; minutes: number; grossPence: number; lateCount: number; totalPence: number;
+  adjustments: RunAdjustmentLine[];
   payslip: { id: string; status: PayslipStatus; version: number; document: PayslipDocumentRef | null; netPence: number | null; netSource: 'provider_document' | null; paidAt: string | null; paymentReference: string | null } | null;
 }
 
 export interface RunView {
   id: string; status: 'prepared' | 'finalised'; period: PeriodRef | null;
   preparedAt: string; preparedByName: string | null; finalisedAt: string | null; finalisedByName: string | null;
-  totals: { records: number; staff: number; minutes: number; grossPence: number; lateCount: number };
+  totals: { records: number; staff: number; minutes: number; grossPence: number; lateCount: number; totalPence: number } & AdjustmentTotals;
   staff: RunStaffRow[];
 }
 
 export interface PeriodRunSummary {
   period: PeriodRef;
-  run: { id: string; status: 'prepared' | 'finalised'; records: number; grossPence: number } | null;
+  run: { id: string; status: 'prepared' | 'finalised'; records: number; grossPence: number; adjustmentsPence: number; totalPence: number } | null;
 }
 
 /** `GET /rest/v1/payroll/me/payslips` entry (staff app). */
@@ -51,7 +57,12 @@ export interface StaffPayslipEntry {
   payday: string;
   status: PayslipStatus;
   shiftCount: number;
+  /** Approved shift pay only. */
   grossPence: number;
+  /** The caller's own approved adjustments in this period (owner decision 3); totalPence = grossPence + adjustmentsPence. */
+  adjustmentsPence: number;
+  totalPence: number;
+  adjustments: RunAdjustmentLine[];
   netPence: number | null;
   netSource: 'provider_document' | null;
   document: PayslipDocumentRef | null;
@@ -59,6 +70,7 @@ export interface StaffPayslipEntry {
 }
 
 const iso = (v: unknown): string | null => (v ? new Date(v as string).toISOString() : null);
+const lineOf = (a: AdjustmentLine): RunAdjustmentLine => ({ id: a.id, kind: a.kind, amountPence: a.amountPence, correctsPayrollRecordId: a.correctsPayrollRecordId });
 
 /**
  * One CSV cell: quoted when needed, and spreadsheet formula injection neutralised (a staff name such as
@@ -73,7 +85,21 @@ interface RunCsvColumn {
   header: string;
   /** FieldPolicy 'payroll_record' field this column belongs to; omitted ⇒ always present. */
   field?: string;
+  /**
+   * A money cell this code formats itself (penceToDecimalString: `-?digits.dd`). Written as is, so a negative correction
+   * stays a number (`-12.50`) instead of being neutralised as a formula like free text; anything else is refused.
+   */
+  money?: boolean;
   value: (s: RunStaffRow, v: RunView) => string;
+}
+
+const MONEY_CELL = /^-?\d+\.\d{2}$/;
+
+function runCsvCell(c: RunCsvColumn, s: RunStaffRow, v: RunView): string {
+  const value = c.value(s, v);
+  if (!c.money) return csvCell(value);
+  if (!MONEY_CELL.test(value)) throw new Error(`payroll CSV: ${c.header} is not a money value`);
+  return value;
 }
 
 const RUN_CSV_COLUMNS: readonly RunCsvColumn[] = [
@@ -85,6 +111,11 @@ const RUN_CSV_COLUMNS: readonly RunCsvColumn[] = [
   { header: 'Shifts', value: (s) => String(s.records) },
   { header: 'Hours', field: 'workedTime', value: (s) => (s.minutes / 60).toFixed(2) },
   { header: 'Gross (GBP)', field: 'amount', value: (s) => (s.grossPence / 100).toFixed(2) },
+  // Owner decision 3: each adjustment kind as its own column (the provider pays expenses differently from pay), then the total.
+  { header: 'Corrections (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.correctionsPence) },
+  { header: 'Bonuses (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.bonusesPence) },
+  { header: 'Expenses (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.expensesPence) },
+  { header: 'Total (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.totalPence) },
   { header: 'Late approvals', value: (s) => String(s.lateCount) },
   { header: 'Run status', value: (_s, v) => v.status },
 ];
@@ -95,7 +126,7 @@ const RUN_CSV_COLUMNS: readonly RunCsvColumn[] = [
  */
 export function buildPayrollRunCsv(v: RunView, policy: FieldPolicy): string {
   const columns = RUN_CSV_COLUMNS.filter((c) => !c.field || !policy.hiddenFields.has(c.field));
-  const rows = v.staff.map((s) => columns.map((c) => csvCell(c.value(s, v))).join(','));
+  const rows = v.staff.map((s) => columns.map((c) => runCsvCell(c, s, v)).join(','));
   return [columns.map((c) => csvCell(c.header)).join(','), ...rows].join('\n');
 }
 
@@ -114,6 +145,10 @@ export class PayrollRunService {
 
   @Inject(FieldPolicyService)
   private readonly fieldPolicy!: FieldPolicyService;
+
+  /** Owner decision 3: approved adjustments join the run at prepare and are locked at finalise (same transaction). */
+  @Inject(PayrollAdjustmentService)
+  private readonly adjustments!: PayrollAdjustmentService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -141,11 +176,19 @@ export class PayrollRunService {
            FROM ${t.payroll_run} r LEFT JOIN ${t.payroll_run_line} l ON l.run_id = r.id
           WHERE r.organisation_id = $1 AND r.workspace_id = $2 GROUP BY r.id`, [ctx.organisationId, ctx.workspaceId]);
       const byPeriod = new Map(runs.map((r) => [r.period_id, r]));
+      const adj: Array<{ run_id: string; total: string }> = runs.length ? await m.query(
+        `SELECT run_id, sum(amount_pence)::text AS total FROM core.payroll_adjustment
+          WHERE organisation_id = $1 AND workspace_id = $2 AND status = 'approved' AND run_id = ANY($3::uuid[]) GROUP BY run_id`,
+        [ctx.organisationId, ctx.workspaceId, runs.map((r) => r.id)]) : [];
+      const adjByRun = new Map(adj.map((a) => [a.run_id, assertSafePence(Number(a.total), 'payroll run adjustments')]));
       const extra = await periodsById(m, ctx.organisationId!, runs.filter((r) => !periods.some((p) => p.id === r.period_id)).map((r) => r.period_id));
       return {
         periods: [...periods, ...extra.values()].sort((a, b) => a.start.localeCompare(b.start)).map((period) => {
           const r = byPeriod.get(period.id);
-          return { period, run: r ? { id: r.id, status: r.status, records: r.records, grossPence: assertSafePence(Number(r.gross), 'payroll run gross') } : null };
+          if (!r) return { period, run: null };
+          const grossPence = assertSafePence(Number(r.gross), 'payroll run gross');
+          const adjustmentsPence = adjByRun.get(r.id) ?? 0;
+          return { period, run: { id: r.id, status: r.status, records: r.records, grossPence, adjustmentsPence, totalPence: assertSafePence(grossPence + adjustmentsPence, 'payroll run total') } };
         }),
       };
     });
@@ -198,7 +241,8 @@ export class PayrollRunService {
           });
         }
       }
-      await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_PREPARED, { entityType: 'payroll_run', entityId: run.id, metadata: { periodId, linesAdded: added, lateLines: late } });
+      const adjustmentsAdded = (await this.adjustments.includeInRun(m, ctx, run.id, periodId)).added;
+      await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_PREPARED, { entityType: 'payroll_run', entityId: run.id, metadata: { periodId, linesAdded: added, lateLines: late, adjustmentsAdded } });
       return this.view(m, ctx, run.id);
     });
   }
@@ -213,18 +257,21 @@ export class PayrollRunService {
       const lines: Array<{ payroll_record_id: string; staff_profile_id: string; status: string }> = await m.query(
         `SELECT l.payroll_record_id, l.staff_profile_id, pr.status FROM ${t.payroll_run_line} l JOIN ${t.payroll_record} pr ON pr.id = l.payroll_record_id
           WHERE l.run_id = $1 ORDER BY pr.id FOR UPDATE OF pr`, [runId]);
-      if (!lines.length) throw new ConflictException('This payroll run has no records to finalise.');
+      const adjustmentLines = await this.adjustments.linesForRun(m, ctx, runId);
+      if (!lines.length && !adjustmentLines.length) throw new ConflictException('This payroll run has no records to finalise.');
       for (const l of lines) assertTransition(PAYROLL_RECORD_TRANSITIONS, l.status as never, PayrollRecordStatus.PROCESSING);
       const [, moved] = (await m.query(
         `UPDATE ${t.payroll_record} SET status = 'processing', updated_at = now() WHERE id = ANY($1::uuid[]) AND status = 'approved' AND workspace_id = $2`,
         [lines.map((l) => l.payroll_record_id), ctx.workspaceId])) as [unknown, number];
       if (moved !== lines.length) throw new ConflictException('Payroll changed while the run was being finalised. Refresh and try again.');
       await m.query(`UPDATE ${t.payroll_run} SET status = 'finalised', finalised_at = now(), finalised_by = $2, updated_at = now() WHERE id = $1`, [runId, ctx.userId]);
-      for (const staffId of [...new Set(lines.map((l) => l.staff_profile_id))]) {
+      // Owner decision 3: the run's adjustments are locked with it; core.payroll_adjustment_guard() refuses any later change.
+      await this.adjustments.lockForRun(m, ctx, runId);
+      for (const staffId of [...new Set([...lines.map((l) => l.staff_profile_id), ...adjustmentLines.map((a) => a.staffProfileId)])]) {
         await m.query(`INSERT INTO ${t.payslip} (organisation_id, workspace_id, run_id, staff_profile_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
           [ctx.organisationId, ctx.workspaceId, runId, staffId]);
       }
-      await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_FINALISED, { entityType: 'payroll_run', entityId: runId, metadata: { records: lines.length } });
+      await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_FINALISED, { entityType: 'payroll_run', entityId: runId, metadata: { records: lines.length, adjustments: adjustmentLines.length } });
       // C1b realtime (same transaction): records approved → processing. Payroll readers of this workspace only; ids only.
       await this.realtimeEvents.recordForRecipients(m, {
         organisationId: ctx.organisationId!, eventKey: `payroll.record_changed:${runId}:finalised`, eventType: RealtimeEventType.PAYROLL_RECORD_CHANGED, entityType: 'payroll_run', entityId: runId,
@@ -339,16 +386,26 @@ export class PayrollRunService {
   }
 
   /** Staff app: the caller's own official payslip timeline (upcoming → processing → available → paid). */
-  async listMine(ctx: AuthContext): Promise<{ data: StaffPayslipEntry[]; unallocated: { shiftCount: number; grossPence: number } }> {
+  async listMine(ctx: AuthContext): Promise<{ data: StaffPayslipEntry[]; unallocated: { shiftCount: number; grossPence: number; adjustmentCount: number; adjustmentsPence: number } }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       if (!(await this.permissions.userHasPermissionTx(m, ctx, PermissionFlag.PAYSLIP_VIEW_OWN))) throw new ForbiddenException('Permission required.');
       const t = businessTables(m);
       const [profile] = await m.query(`SELECT id FROM ${t.staff_profile} WHERE user_id = $1 AND workspace_id = $2`, [ctx.userId, ctx.workspaceId]);
-      if (!profile) return { data: [], unallocated: { shiftCount: 0, grossPence: 0 } };
+      if (!profile) return { data: [], unallocated: { shiftCount: 0, grossPence: 0, adjustmentCount: 0, adjustmentsPence: 0 } };
       const runRows: Array<{ run_id: string; period_id: string; run_status: string; shifts: number; gross: string }> = await m.query(
         `SELECT l.run_id, r.period_id, r.status AS run_status, count(*)::int AS shifts, sum(l.amount_pence) AS gross
            FROM ${t.payroll_run_line} l JOIN ${t.payroll_run} r ON r.id = l.run_id
           WHERE l.staff_profile_id = $1 AND l.workspace_id = $2 GROUP BY l.run_id, r.period_id, r.status`, [profile.id, ctx.workspaceId]);
+      // Owner decision 3: the caller's OWN approved adjustments (RLS: own + approved only), in runs and upcoming.
+      const own = await this.adjustments.linesForStaff(m, ctx, profile.id);
+      const adjByRun = new Map<string, RunAdjustmentLine[]>();
+      for (const a of own.inRuns) adjByRun.set(a.runId, [...(adjByRun.get(a.runId) ?? []), lineOf(a)]);
+      const adjustmentOnlyRuns = [...adjByRun.keys()].filter((id) => !runRows.some((r) => r.run_id === id));
+      if (adjustmentOnlyRuns.length) {
+        const extra: Array<{ id: string; period_id: string; status: string }> = await m.query(
+          `SELECT id, period_id, status FROM ${t.payroll_run} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`, [adjustmentOnlyRuns, ctx.workspaceId]);
+        for (const r of extra) runRows.push({ run_id: r.id, period_id: r.period_id, run_status: r.status, shifts: 0, gross: '0' });
+      }
       const slips: Array<Record<string, unknown>> = await m.query(
         `SELECT ps.id, ps.run_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, d.file_id, d.uploaded_at,
                 (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id AND f.status = 'AVAILABLE') AS filename
@@ -368,30 +425,61 @@ export class PayrollRunService {
         if (!p) continue;
         const s = slipByRun.get(r.run_id);
         const document = s?.file_id ? { fileId: s.file_id as string, filename: (s.filename as string) ?? null, version: Number(s.version), uploadedAt: iso(s.uploaded_at)! } : null;
+        const adjustments = adjByRun.get(r.run_id) ?? [];
+        const grossPence = assertSafePence(Number(r.gross), 'payslip gross');
+        const adjustmentsPence = adjustmentTotals(adjustments).adjustmentsPence;
         entries.push({
           payslipId: (s?.id as string) ?? null, runId: r.run_id, period: { id: p.id, start: p.start, end: p.end }, payday: p.payday,
-          status: s?.paid_at ? 'paid' : document ? 'available' : 'processing', shiftCount: r.shifts, grossPence: assertSafePence(Number(r.gross), 'payslip gross'),
+          status: s?.paid_at ? 'paid' : document ? 'available' : 'processing', shiftCount: r.shifts, grossPence,
+          adjustmentsPence, totalPence: assertSafePence(grossPence + adjustmentsPence, 'payslip total'), adjustments,
           netPence: s?.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s?.net_source as 'provider_document') ?? null, document, paidAt: iso(s?.paid_at),
         });
       }
       const upcoming = new Map<string, StaffPayslipEntry>();
+      const upcomingFor = (a: Allocation): StaffPayslipEntry => upcoming.get(a.period!.id) ?? {
+        payslipId: null, runId: a.runId, period: { id: a.period!.id, start: a.period!.start, end: a.period!.end }, payday: a.period!.payday,
+        status: 'upcoming' as PayslipStatus, shiftCount: 0, grossPence: 0, adjustmentsPence: 0, totalPence: 0, adjustments: [],
+        netPence: null, netSource: null, document: null, paidAt: null,
+      };
       let unallocatedShifts = 0;
       let unallocatedGross = 0;
+      let unallocatedAdjustments = 0;
+      let unallocatedAdjustmentsPence = 0;
       for (const p of pending) {
         const a = alloc.get(p.id)!;
         if (!a.period) { unallocatedShifts += 1; unallocatedGross = assertSafePence(unallocatedGross + assertSafePence(Number(p.amount_pence), 'payroll_record.amount_pence'), 'unallocated gross'); continue; }
-        const e = upcoming.get(a.period.id) ?? { payslipId: null, runId: a.runId, period: { id: a.period.id, start: a.period.start, end: a.period.end }, payday: a.period.payday,
-          status: 'upcoming' as PayslipStatus, shiftCount: 0, grossPence: 0, netPence: null, netSource: null, document: null, paidAt: null };
+        const e = upcomingFor(a);
         e.shiftCount += 1;
         e.grossPence = assertSafePence(e.grossPence + assertSafePence(Number(p.amount_pence), 'payroll_record.amount_pence'), 'upcoming gross');
         upcoming.set(a.period.id, e);
       }
+      for (const u of own.upcoming) {
+        if (!u.allocation?.period) {
+          unallocatedAdjustments += 1;
+          unallocatedAdjustmentsPence = assertSafePence(unallocatedAdjustmentsPence + u.amountPence, 'unallocated adjustments');
+          continue;
+        }
+        const e = upcomingFor(u.allocation);
+        e.adjustments.push(lineOf(u));
+        e.adjustmentsPence = assertSafePence(e.adjustmentsPence + u.amountPence, 'upcoming adjustments');
+        upcoming.set(u.allocation.period.id, e);
+      }
       for (const e of upcoming.values()) {
+        e.totalPence = assertSafePence(e.grossPence + e.adjustmentsPence, 'upcoming total');
         const merged = entries.find((x) => x.period.id === e.period.id);
-        if (merged) { merged.shiftCount += e.shiftCount; merged.grossPence = assertSafePence(merged.grossPence + e.grossPence, 'payslip gross'); } else entries.push(e);
+        if (merged) {
+          merged.shiftCount += e.shiftCount;
+          merged.grossPence = assertSafePence(merged.grossPence + e.grossPence, 'payslip gross');
+          merged.adjustments.push(...e.adjustments);
+          merged.adjustmentsPence = assertSafePence(merged.adjustmentsPence + e.adjustmentsPence, 'payslip adjustments');
+          merged.totalPence = assertSafePence(merged.grossPence + merged.adjustmentsPence, 'payslip total');
+        } else entries.push(e);
       }
       entries.sort((a, b) => b.payday.localeCompare(a.payday));
-      return { data: entries, unallocated: { shiftCount: unallocatedShifts, grossPence: unallocatedGross } };
+      return {
+        data: entries,
+        unallocated: { shiftCount: unallocatedShifts, grossPence: unallocatedGross, adjustmentCount: unallocatedAdjustments, adjustmentsPence: unallocatedAdjustmentsPence },
+      };
     });
   }
 
@@ -434,11 +522,33 @@ export class PayrollRunService {
         WHERE l.run_id = $1
         GROUP BY l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, ps.id, d.file_id, d.uploaded_at
         ORDER BY u.first_name, u.last_name`, [runId]);
+    const adjustmentLines = await this.adjustments.linesForRun(m, ctx, runId);
+    const adjByStaff = new Map<string, RunAdjustmentLine[]>();
+    for (const a of adjustmentLines) adjByStaff.set(a.staffProfileId, [...(adjByStaff.get(a.staffProfileId) ?? []), { id: a.id, kind: a.kind, amountPence: a.amountPence, correctsPayrollRecordId: a.correctsPayrollRecordId }]);
+    // Owner decision 3: a staff member whose only pay in this run is an adjustment still gets a row (and a payslip).
+    const lineStaff = new Set(staff.map((s) => s.staff_profile_id as string));
+    const adjustmentOnly = [...adjByStaff.keys()].filter((id) => !lineStaff.has(id));
+    if (adjustmentOnly.length) {
+      const extra: Array<Record<string, unknown>> = await m.query(
+        `SELECT sp.id AS staff_profile_id, u.first_name, u.last_name, sp.staff_ref, 0 AS records, 0 AS minutes, 0 AS gross, 0 AS late,
+                ps.id AS payslip_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, ps.payment_reference, d.file_id, d.uploaded_at,
+                (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id) AS filename
+           FROM ${t.staff_profile} sp JOIN core."user" u ON u.id = sp.user_id
+           LEFT JOIN ${t.payslip} ps ON ps.run_id = $1 AND ps.staff_profile_id = sp.id
+           LEFT JOIN ${t.payslip_document} d ON d.payslip_id = ps.id AND d.version = ps.version
+          WHERE sp.id = ANY($2::uuid[]) AND sp.workspace_id = $3`, [runId, adjustmentOnly, ctx.workspaceId]);
+      staff.push(...extra);
+      staff.sort((a, b) => `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`));
+    }
     const rows: RunStaffRow[] = staff.map((s) => {
       const document = s.file_id ? { fileId: s.file_id as string, filename: (s.filename as string) ?? null, version: Number(s.version), uploadedAt: iso(s.uploaded_at)! } : null;
+      const adjustments = adjByStaff.get(s.staff_profile_id as string) ?? [];
+      const adj = adjustmentTotals(adjustments);
+      const grossPence = assertSafePence(Number(s.gross), 'run staff gross');
       return {
         staffProfileId: s.staff_profile_id as string, staffName: `${s.first_name} ${s.last_name}`, staffRef: (s.staff_ref as string) ?? null,
-        records: Number(s.records), minutes: Number(s.minutes), grossPence: assertSafePence(Number(s.gross), 'run staff gross'), lateCount: Number(s.late),
+        records: Number(s.records), minutes: Number(s.minutes), grossPence, lateCount: Number(s.late),
+        ...adj, totalPence: assertSafePence(grossPence + adj.adjustmentsPence, 'run staff total'), adjustments,
         payslip: s.payslip_id ? {
           id: s.payslip_id as string, status: s.paid_at ? 'paid' : document ? 'available' : 'processing', version: Number(s.version), document,
           netPence: s.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s.net_source as 'provider_document') ?? null,
@@ -446,12 +556,16 @@ export class PayrollRunService {
         } : null,
       };
     });
+    const sum = (pick: (r: RunStaffRow) => number, label: string) => assertSafePence(rows.reduce((n, r) => n + pick(r), 0), label);
     return {
       id: run.id, status: run.status, period, preparedAt: iso(run.prepared_at)!, preparedByName: run.prepared_by_name ?? null,
       finalisedAt: iso(run.finalised_at), finalisedByName: run.finalised_by_name ?? null,
       totals: {
         records: rows.reduce((n, r) => n + r.records, 0), staff: rows.length, minutes: rows.reduce((n, r) => n + r.minutes, 0),
-        grossPence: assertSafePence(rows.reduce((n, r) => n + r.grossPence, 0), 'run gross total'), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
+        grossPence: sum((r) => r.grossPence, 'run gross total'), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
+        correctionsPence: sum((r) => r.correctionsPence, 'run corrections total'), bonusesPence: sum((r) => r.bonusesPence, 'run bonuses total'),
+        expensesPence: sum((r) => r.expensesPence, 'run expenses total'), adjustmentsPence: sum((r) => r.adjustmentsPence, 'run adjustments total'),
+        totalPence: sum((r) => r.totalPence, 'run total'),
       },
       staff: rows,
     };
