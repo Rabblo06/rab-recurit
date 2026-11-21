@@ -5,8 +5,10 @@ and verify the handoff against current code. Continue relevant pending work;
 do not trust stale text over repository evidence. Update that same canonical
 handoff after substantial changes, including important new production modules.
 
-Workforce staffing platform: one NestJS backend, one PostgreSQL database, three
-clients (`rab-front` web console + venue portal, `rab-mobile` staff app). Full
+Workforce staffing platform: one NestJS backend (`rab-server`, with the
+`rab-worker` background process), one PostgreSQL database, three clients
+(`rab-front` web console + venue portal, `rab-mobile` Flutter staff app,
+`rab-iphone` native Swift app). Full
 architecture, ERD, permission matrix, API structure, schema and milestone plan
 live in `rab-workforce-architecture.md` at the repo root — read it before making
 structural changes.
@@ -28,8 +30,14 @@ structural changes.
   decision 2026-11-04, Option A, permanent; THREAT-MODEL.md PT-01). The API,
   the Worker, the CLI and the short-lived migration child all connect as it
   through one `PG_DATABASE_URL`. Its shape is fixed (M0 §5.1): NOSUPERUSER,
-  NOBYPASSRLS, NOREPLICATION, NOCREATEDB, CREATEROLE; it INHERITs
-  `rab_secure_owner` and `crewflow`, so it **owns every table**. The legacy
+  NOBYPASSRLS, NOREPLICATION, NOCREATEDB; it INHERITs
+  `rab_secure_owner` and `crewflow`, so it **owns every table**. CREATEROLE
+  is needed only until the first start has created the schema roles: an
+  admin marks the role with an expiring comment (24 h grace), the one-shot
+  `db-harden` service (or db-setup, or the operator in mode c) removes
+  CREATEROLE and the mark once the schema is complete, and in production the
+  boot gate refuses a CREATEROLE `crewflow_owner` without a valid, unexpired
+  mark (`assertCreateRoleGate`, `owner-login-posture.ts`). The legacy
   roles `rab_owner`, `rab_app`, `rab_secure_owner`, `crewflow`,
   `crewflow_app` and `crewflow_worker` remain as **schema roles** that
   historical migrations and SECURITY DEFINER functions need. None of them is
@@ -45,6 +53,32 @@ structural changes.
   keep is in the reviewed behaviour-change catalogue
   (`owner-login-behaviour-catalogue.ts`), with a severity and a reproducing
   test. A catalogue difference is never "fixed" by flipping a test to pass.
+- **Database versions, URLs and TLS** (#227, #228, #230).
+  - Supported PostgreSQL is **16–18**: one list, `SUPPORTED_POSTGRES_MAJORS`
+    (`database/postgres/supported-majors.ts`), read by db-setup, the migrate
+    child and boot gate 2. 15 cannot be added (the role model needs 16);
+    19+ only once its fingerprints and goldens exist and are reviewed.
+  - `PG_ADMIN_URL` is the database admin URL, and only the one-shot
+    `db-setup` and `db-harden` services read it. `PG_DATABASE_URL` always
+    means `crewflow_owner`; any other login there is refused, never treated
+    as an admin URL.
+  - rab-api and rab-worker read `PG_DATABASE_URL` (the `crewflow_owner` URL)
+    from their environment, like Twenty (owner decision 2026-11-18): the
+    compose files give rab-api, rab-worker and db-setup the same committed
+    expression, so what db-setup created or checked is exactly what they
+    use. Compose pins `PG_ADMIN_URL` (and `PG_ADMIN_DIRECT_URL`) to `""` on
+    both, and both entrypoints refuse (exit 64) a non-empty admin URL, a
+    second database URL, a role password (`PG_DATABASE_PASSWORD`,
+    `PG_DATABASE_APP_PASSWORD`) and an empty `PG_DATABASE_URL` or empty
+    password in it (`api-prestart.sh`, `worker-start.sh`,
+    `never-in-runtime-env.ts`). db-setup writes no file.
+  - Production TLS accepts exactly `sslmode=require`, `verify-ca` or
+    `verify-full`, and all three are enforced as full verification (chain
+    and host name, `PG_PRODUCTION_SSLMODES` in `pg-tls.ts`); any other
+    sslmode, or none, is refused. A private CA is given as PEM text in
+    `PG_SSL_CA_CERT` or as a file in `PG_SSL_CA_CERT_PATH`, never both. It is
+    validated at boot (`validatePgCaPem`) and never logged; it only picks the
+    trusted root, and the chain and host-name checks stay on.
 - **Every tenant-scoped table gets `organisation_id` + an RLS policy
   (`ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + `USING` +
   `WITH CHECK`) in the *same* migration that creates it.** No exceptions, no
@@ -126,14 +160,15 @@ structural changes.
   refuses to boot (env is validated on process start). An unknown state
   transition is rejected, never silently accepted. A query run with no tenant
   context bound returns zero rows, never all rows.
-  - **Owner exception (2026-11-05, C3, like Twenty):** an upgrade migration
-    failure continues start-up by default. The API logs an ERROR naming the
-    failed migration and serves. The Worker also starts, and runs every job,
-    when the pending migrations are an in-order tail of its chain (decided
-    from the database alone). A first-install failure, and identity,
-    config and RLS failures, still fail closed. Do not widen this exception:
-    no other gate may be downgraded because of it (THREAT-MODEL consequence
-    item 13 lists the gates that still refuse).
+  - **Upgrade failures (OWNER-DB-ULTIMATE Part B3; replaces the earlier C3
+    "continue on migration failure" exception):** a failed migration, or a
+    version too old to upgrade from, refuses to start (exit 66 or 65) and
+    retries on the next start. Only a failed upgrade COMMAND, after every
+    migration applied and the post-checks passed, starts degraded (exit 70):
+    the API serves, `/healthz` shows `upgradeFailed: true`, and the affected
+    workspaces are blocked ("Workspace is being upgraded"). `--force` exists
+    only on the manual `upgrade` command. Do not widen this: no other gate
+    may be downgraded (`migrate-on-start.ts`, `api-prestart.sh`).
 - **404, not 403, for a record outside the caller's tenant, venue, or own
   scope.** A 403 confirms the row exists, which is itself a disclosure. 403 is
   reserved for "this exists and you may see it exists, but you categorically
@@ -147,14 +182,41 @@ structural changes.
   (auth, permissions, secrets, audit, file storage, email, queue, tenant
   context). `modules/` is the staffing domain (staff, venue, scheduling,
   attendance, payroll). The dependency only flows one way.
-- **Money is always `bigint` pence.** Never a float, never a string used for
+- **Import boundaries only shrink** (#191, `tools/check-import-boundaries.cjs`,
+  in the required ci-security gate). Four rules are counted per file:
+  engine→modules, Worker→rab-server outside `engine/worker-shared/`,
+  rab-front feature→feature and rab-mobile feature→feature. Today's
+  violations are `tools/import-boundaries.baseline.json`. It must match the
+  tree exactly and may only shrink against the PR's base branch. A new
+  violation means importing through the owning surface instead. Growth is
+  allowed only by an exact, owner-dated entry in
+  `tools/import-boundaries.approved.json` (rule, file, from, to, optional
+  target). CI reads that file **from the base branch (main)** (#225), so an
+  approval works only after it has merged in its own PR, and a diff that
+  changes it together with any `tools/*.baseline.json` fails. Remove the
+  entry once it is used. Never edit the tool's logic to let a change through.
+- **Money is always integer pence.** The database column is `bigint`; in code
+  `Pence` is a JS `number` that must stay a safe integer (`assertSafePence`
+  refuses anything else, and the server's `bigintAsNumber` column transformer
+  calls it on every read and write). Never a float, never a string used for
   arithmetic. Use `@rab/shared`'s `money.ts`.
 - **Worked-minutes calculation lives in exactly one place**: `@rab/shared`'s
-  `duration.ts`. Mobile timer, attendance console and payroll engine all import
-  it. Do not reimplement it anywhere.
+  `duration.ts` (`computeWorkedMinutes`). Its callers are the server's
+  attendance and offer services, which store the result as `worked_minutes`;
+  payroll and the Worker's reports read that stored value, and the web and
+  iPhone clients display the server's `workedMinutes` (rab-mobile and
+  rab-iphone are Dart and Swift and cannot import it). Do not reimplement it
+  anywhere.
 - **Permissions are resolved server-side per request**, never read off the JWT.
   Use the `PermissionGuard(flag)` mixin factory declaratively on the
   handler — never an inline `if` check in a resolver/controller body.
+- **Every service method that a guard protects re-checks the same flag
+  itself** (layer 2, SF-2): call `PermissionsService.assertPermissionTx(flag)`
+  inside the method's own transaction, before reading any row. It only ever
+  throws 403, so a missing permission never reveals whether a record exists.
+  Records outside the caller's scope still get 404 after the check. Jobs,
+  CLI commands and other services call services directly, so a check that
+  lives only in the guard is not implemented.
 - **`audit_log` is insert-only.**
   - No update or delete route may ever be added for it, at the application
     layer or in the database grants. `UPDATE`, `DELETE` and `TRUNCATE` are
@@ -175,6 +237,20 @@ structural changes.
   the account doesn't exist.
 - **Migrations only.** `synchronize: false` always. Every schema change is a
   versioned TypeORM migration, never edited after merge.
+- **Upgrade commands and structure levels belong to a minor release only**
+  (#219). The registries stay keyed by major-minor
+  (`upgrade-commands/registry.ts`). A patch release (0.6.1) carries no
+  upgrade command, workspace command or structure level: its only step is
+  its TypeORM migrations, and a patch-keyed registry entry is refused
+  (exit 64, `upgrade-registry-key.ts`). A patch upgrades only from earlier
+  published versions of its own minor line, whose `.0` must be in
+  `CREWFLOW_PREVIOUS_VERSIONS`; any other jump is refused (exit 65,
+  `upgrade-version.ts`). A fix that needs an upgrade command or a structure
+  change ships as the next minor. Images are published only by
+  `publish-image.yaml` (a published GitHub release, or a manual run with
+  mode=publish), after the owner approves the `release` environment, and
+  are deployed by digest
+  (`CREWFLOW_IMAGE_TAG=sha256:…`), never by tag.
 - **Production upgrades need no deployment ID or approval token** (owner
   decision 2026-11-05, BC-11, like Twenty). Both stay available as an opt-in
   and are off by default. Do not reintroduce them as a requirement, and do
@@ -252,6 +328,18 @@ yarn test    # nx run-many test
   `emitDecoratorMetadata` reflects them as `Object`, and TypeORM rejects
   `Object` as an unsupported column type. Plain `string`/`boolean`/`Date`
   properties don't need this — only alias types.
+- **Nx in a git worktree writes to the MAIN checkout's cache.** Nx 22 points
+  the cache and task database of any git worktree at the main worktree
+  (`getMainWorktreeRoot`), whatever `NX_WORKSPACE_ROOT_PATH` says. In an
+  agent worktree, set all three of `NX_WORKSPACE_ROOT_PATH`,
+  `NX_CACHE_DIRECTORY` and `NX_WORKSPACE_DATA_DIRECTORY` to the worktree
+  before any `nx` command, or you will write into the owner's checkout.
+- **Required checks are the five gate jobs** (`ci-security gate`,
+  `ci-server gate`, `ci-worker gate`, `ci-e2e gate`, `ci-pdf-equality
+  gate`). They always report, even when the path filters skip the suites,
+  so a skipped suite counts as a pass only when its files did not change.
+  A green push run on main tests only the last push's diff. A batch of
+  merges is proven by the batch PR's run, not by the final main run.
 
 ## Conventions
 
@@ -266,9 +354,10 @@ yarn test    # nx run-many test
   owns its own page(s), drawers/modals, and feature-local styles, and should
   be self-contained: importable on its own, without another feature reaching
   into it.
-  - `rab-front`: `src/features/<domain>/` — currently `auth`, `dashboard`,
-    `users`, `scheduling`, `offers`, `venues`, `payroll`, `audit`,
-    `notifications`, `settings`.
+  - `rab-front`: `src/features/<domain>/` — currently `ai`, `audit`, `auth`,
+    `dashboard`, `errors`, `help`, `notifications`, `offers`, `onboarding`,
+    `payroll`, `scheduling`, `settings`, `users`, `venues`,
+    `workspace-host`.
   - `rab-mobile`: `lib/features/<domain>/` — the same rule, already in place
     before `rab-front` adopted it; match its shape for new mobile domains.
   - `src/shared/` (`rab-front` only) is for code used by **three or more**
@@ -290,7 +379,9 @@ yarn test    # nx run-many test
   wired in `main.ts`) — the anti-mass-assignment control. A body carrying
   `organisationId`, `status`, or any field the DTO doesn't declare gets a 400,
   not a silently-ignored or silently-applied field. Never spread a client
-  object into an entity update; map allowed fields explicitly.
+  object into an entity update; map allowed fields explicitly with
+  `pickFields(dto, ALLOW_LIST)` and a typed allow-list per site (SF-7), plus a
+  spec that keeps the allow-list in step with the DTO.
 
 ## Testing floor
 
@@ -303,3 +394,15 @@ and asserts zero rows back. Run as the owner login, this proves FORCE; run as
 a non-owner, it proves nothing.
 `THREAT-MODEL.md` gets a new entry, in the same PR, for any feature touching
 auth, money, or another person's data — not written after the fact.
+
+- **Spec files are type-checked** (#217). `rab-server:lint` and
+  `rab-worker:lint` also run `tsc --noEmit -p tsconfig.spec.json`, because
+  ts-jest with `isolatedModules` reports no type errors. Fix a spec type
+  error properly, never with `any` or `@ts-ignore`.
+- **The `rab.actor_type = 'worker'` marker opens the `*_worker_*` RLS
+  policies**, so only trusted server code may set it.
+  `__tests__/static/worker-actor-type-trusted-only.spec.ts` pins the exact
+  sites per file in rab-server and rab-worker (any `actorType` assignment,
+  any raw `set_config('rab.actor_type'` / `SET rab.actor_type` outside
+  `TenantContextService`). A new site needs review and a spec change in the
+  same PR; never set it from a JWT, request body, queue payload or Redis.

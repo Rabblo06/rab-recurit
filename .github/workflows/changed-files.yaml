@@ -62,6 +62,8 @@ jobs:
             ci-wiring: &ciwiring
               - '.github/workflows/changed-files.yaml'
               - '.github/actions/**'
+              # The digest-pinned CI images disposable-postgres and the inline `docker run`s pull (a Dependabot digest bump).
+              - '.github/ci-images/**'
             # Source of each package plus everything it imports (the Nx project graph: server -> shared, emails;
             # worker -> server; front -> shared, ui). The *-lib keys are anchors; the outputs below add the triggers that
             # must not spread to other packages (root manifests, CI wiring, the package's own workflow file).
@@ -146,6 +148,8 @@ jobs:
               - '.github/workflows/ci-e2e.yaml'
               - '.github/workflows/changed-files.yaml'
               - '.github/actions/**'
+              # The digest-pinned CI images disposable-postgres and the inline `docker run`s pull (a Dependabot digest bump).
+              - '.github/ci-images/**'
               - 'package.json'
               - 'yarn.lock'
               - 'nx.json'

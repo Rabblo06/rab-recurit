@@ -15,6 +15,8 @@ on:
       # rab-server imports @rab/emails; the job builds it before the server.
       - 'packages/rab-emails/**'
       - '.github/workflows/ci-twenty-tests.yaml'
+      # The digest-pinned postgres:<major>-alpine images this workflow pulls (a Dependabot digest bump).
+      - '.github/ci-images/**'
   workflow_dispatch:
 
 concurrency:
@@ -35,7 +37,8 @@ jobs:
         pg: ['16', '17', '18']
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -58,9 +61,10 @@ jobs:
           wk="$(openssl rand -hex 24)"; own="$(openssl rand -hex 24)"; secret="$(openssl rand -hex 32)"
           for v in "$su_pass" "$cf" "$app" "$wk" "$own" "$secret"; do echo "::add-mask::$v"; done
           mkdir -p "${RUNNER_TEMP}/pg"; printf '%s' "$su_pass" > "${RUNNER_TEMP}/pg/su"; chmod 644 "${RUNNER_TEMP}/pg/su"
+          pg_image="$(bash .github/ci-images/ref.sh "postgres-${{ matrix.pg }}")" # index digest, Dependabot-renewed
           docker run -d --name twenty-pg -p 127.0.0.1:5432:5432 -v "${RUNNER_TEMP}/pg/su:/run/su:ro" \
             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/su -e POSTGRES_DB=postgres \
-            "postgres:${{ matrix.pg }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
+            "${pg_image}" -c crewflow.disposable_cluster=on > /dev/null
           for i in $(seq 1 90); do docker exec twenty-pg pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break; sleep 1; done
           docker exec twenty-pg pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null
           url="postgres://ci_bootstrap:${su_pass}@127.0.0.1:5432/postgres"; echo "::add-mask::$url"
