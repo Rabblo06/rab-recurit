@@ -1,7 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { Organisation } from '../../../modules/identity/entities';
+import { Organisation } from '../identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { SecurityVersionService } from '../auth/services/security-version.service';
 import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
