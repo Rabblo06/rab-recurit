@@ -316,7 +316,7 @@ export const SEMANTIC_GOLDEN_PG18: readonly string[] = Object.freeze([
   "policy|ai_usage|ai_usage_retention_delete|PERMISSIVE|public|d|using=abef6046fdafb8bbe5843de0cda18ae1|check=-",
   "policy|ai_usage|ai_usage_retention_select|PERMISSIVE|public|r|using=abef6046fdafb8bbe5843de0cda18ae1|check=-",
   "policy|attendance_correction|attendance_correction_tenant|PERMISSIVE|public|*|using=1548d58f4dea2a4e9fa16034d67e1638|check=1548d58f4dea2a4e9fa16034d67e1638",
-  "policy|attendance|attendance_tenant|PERMISSIVE|public|*|using=1548d58f4dea2a4e9fa16034d67e1638|check=1548d58f4dea2a4e9fa16034d67e1638",
+  "policy|attendance|attendance_tenant|PERMISSIVE|public|*|using=41773011ff0c57fd977cfa1d2c9c9ba9|check=41773011ff0c57fd977cfa1d2c9c9ba9",
   "policy|audit_log|audit_log_tenant|PERMISSIVE|public|*|using=f7960d545fd4f89857d0966ce0fcdbaa|check=f7960d545fd4f89857d0966ce0fcdbaa",
   "policy|deployment_identity_history|deployment_identity_history_definer_insert|PERMISSIVE|rab_secure_owner|a|using=-|check=ff380729f4cc508971cb4724ed93233d",
   "policy|deployment_identity_history|deployment_identity_history_definer_select|PERMISSIVE|rab_secure_owner|r|using=ff380729f4cc508971cb4724ed93233d|check=-",
