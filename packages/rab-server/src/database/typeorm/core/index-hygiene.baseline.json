@@ -386,6 +386,10 @@
       "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
     },
     {
+      "key": "core.index_field_metadata(object_metadata_id,workspace_id) -> core.object_metadata",
+      "reason": "pre-existing on 2026-11-21: metadata engine M1 table (the metadata engine is parked by the owner, M1 stays exactly as merged; an index here is a metadata decision)"
+    },
+    {
       "key": "core.job_offer(confirmed_by) -> core.user",
       "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
     },
@@ -408,10 +412,6 @@
     {
       "key": "core.login_handoff(workspace_id,organisation_id) -> core.manager_workspace",
       "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
-    },
-    {
-      "key": "core.login_history(user_id) -> core.user",
-      "reason": "pre-existing on 2026-11-21 (index-fix list): user-reference foreign key (index-fix IDX-C / H5, awaiting the owner's decision)"
     },
     {
       "key": "core.manager_venue(organisation_id) -> core.organisation",
@@ -608,10 +608,6 @@
     {
       "key": "core.refresh_token(organisation_id) -> core.organisation",
       "reason": "pre-existing on 2026-11-21 (index-fix list): organisation-delete cascade child; organisations are rarely deleted (index-fix L6, owner decision)"
-    },
-    {
-      "key": "core.refresh_token(replaced_by) -> core.refresh_token",
-      "reason": "pre-existing on 2026-11-21 (index-fix list): unindexed foreign key (index-fix L5, awaiting the owner's decision)"
     },
     {
       "key": "core.replacement_request(approved_by) -> core.user",
