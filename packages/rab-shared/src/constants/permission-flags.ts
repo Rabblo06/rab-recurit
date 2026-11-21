@@ -66,6 +66,18 @@ export const PermissionFlag = {
    * predicate `core.ai_agent_writer()` (AiAgentSchema1786721050000) also require the bound user to be the organisation's CEO.
    */
   AI_AGENTS_MANAGE: 'ai.agents.manage',
+  /**
+   * Staff documents (StaffDocumentPermissions1786722310000). See any staff member's documents in the caller's own workspace.
+   * Default holder: the `manager` system role (Initial + Internal Managers) — OWNER DECISION pending. Narrowed in the service
+   * and in RLS to non-venue managers of the bound workspace; a Venue Manager sees no documents even if granted the flag.
+   */
+  STAFF_DOCUMENT_VIEW: 'staff_document.view',
+  /** Upload a document for a staff member, verify, reject or revoke one. Default holder: `manager` (OWNER DECISION). Never one's own. */
+  STAFF_DOCUMENT_MANAGE: 'staff_document.manage',
+  /** Choose which document types the organisation REQUIRES before an offer can be sent. Default holder: `manager` (OWNER DECISION). */
+  STAFF_DOCUMENT_CONFIGURE: 'staff_document.configure',
+  /** Staff app: see one's own documents and upload new ones (never verify). Default holder: the `staff` role (OWNER DECISION). */
+  STAFF_DOCUMENT_OWN: 'staff_document.own',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];
