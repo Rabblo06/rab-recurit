@@ -10123,6 +10123,26 @@ Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and
   setup-node pin could not be renewed) and `cooldown: default-days: 14` for github-actions; security updates are not
   delayed by it. The docker ecosystem entry is unchanged.
 
+## Phone apps print money exactly like the website (branch fix/mobile-money-format-en-gb, not merged)
+
+Display only. No payroll, rate-resolution, rounding or pay-date rule changes; no endpoint, table, migration, role, grant
+or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting.swift`) and Flutter (`formatPence`,
+`lib/core/theme/money.dart`) formatters print the web's en-GB `Intl.NumberFormat` currency output, matching `@rab/shared`
+`formatPence`: sign before the pound sign and comma thousands separators (`-£1,234.56`; before: `£-1234.56`).
+
+- **Asset:** pay amounts shown to staff and venue managers (pay rates, estimated pay, earned pay, payslip net and
+  statement amounts).
+- **Risk addressed (Low, integrity of what a person reads):** the same amount printed differently on the website and on
+  a phone (`£-1.50` vs `-£1.50`, `£1234.56` vs `£1,234.56`) invites misreading a deduction or a total. Both apps still
+  format from integer pence with integer arithmetic (never a float, never the device locale), and the sign comes from
+  the value itself, so `Int64.min` / the most negative Dart int print correctly.
+- **Drift control:** one table, `packages/rab-shared/src/utils/money-format-cases.json`, is read by the web
+  (`money.spec.ts`, which also checks every case against `Intl.NumberFormat('en-GB', GBP)` where the float input is
+  exact), Flutter (`test/money_format_test.dart`) and iPhone (`MoneyTests`, bundled via `project.yml`) test suites.
+  `ci-iphone` now also runs when that file changes; `ci-mobile` already runs on any `packages/rab-shared/**` change.
+- **Callers checked:** every money display in both apps goes through `formatPence` / `payRateLabel` /
+  `estimatedPayLabel`; none pre-formats an amount or concatenates its own sign.
+
 ## CI audit — owner exceptions read from the base ref; audit ignore lists, broken yarn, missing tree versions and re-scored advisories fail (branch ci/npm-audit-decisions-harden, 2026-11-18; review F1, F3-F8 of #229; register prerequisite: branch fix/npm-audit-register-severity)
 - **Re-checked first (2026-11-18), so the exception is still the only option:** GHSA-fc5q-39xc-vjpf has
   `first_patched_version: null` (range `<= 4.0.7`); the registry's picomatch list ends at 4.0.7 with no prerelease ever

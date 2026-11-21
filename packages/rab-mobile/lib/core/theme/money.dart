@@ -1,16 +1,30 @@
-/// Mirrors `formatPence` in `packages/rab-shared/src/utils/money.ts` — pence
-/// is always an integer, formatted here rather than converted to a float.
+/// Mirrors `formatPence` in `packages/rab-shared/src/utils/money.ts`, which
+/// prints the en-GB GBP currency format of `Intl.NumberFormat`: the sign
+/// before the pound sign, comma thousands separators, two decimals
+/// (`-£1,234.56`). Owner decision: the phone apps print money exactly like
+/// the website. The cases are shared with the web and the iPhone app in
+/// `packages/rab-shared/src/utils/money-format-cases.json`.
 ///
-/// The sign comes from `pence` itself; pounds and pence are formatted from the
-/// magnitude. (Splitting the signed value lost the sign under £1, because `~/`
-/// truncates, and `%` is Euclidean in Dart, so -199 printed "£-1.01".) The
-/// sign keeps this app's position, "£-1.50" (the web prints "-£1.50").
+/// Pence is always an integer, formatted with integer arithmetic rather than
+/// converted to a float. Pounds and pence come from truncating division and
+/// `remainder` (both round toward zero) and are then made positive, so the
+/// sign is taken from `pence` alone and even the most negative int prints
+/// correctly (`int.abs()` would overflow there).
 String formatPence(int pence) {
   final sign = pence < 0 ? '-' : '';
-  final magnitude = pence.abs();
-  final pounds = magnitude ~/ 100;
-  final remainder = (magnitude % 100).toString().padLeft(2, '0');
-  return '£$sign$pounds.$remainder';
+  final pounds = (pence ~/ 100).abs().toString();
+  final remainder = pence.remainder(100).abs().toString().padLeft(2, '0');
+  return '$sign£${_groupThousands(pounds)}.$remainder';
+}
+
+/// "1234567" → "1,234,567".
+String _groupThousands(String digits) {
+  final buffer = StringBuffer();
+  for (var i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 == 0) buffer.write(',');
+    buffer.write(digits[i]);
+  }
+  return buffer.toString();
 }
 
 /// Hourly rate label. ASSUMPTION (display only, flagged to the owner): a rate
