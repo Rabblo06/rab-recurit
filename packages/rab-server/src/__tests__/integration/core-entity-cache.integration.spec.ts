@@ -19,6 +19,7 @@ import { Organisation, User } from '../../modules/identity/entities';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { managerWorkspaceByOwnerCached } from '../../modules/manager-workspace/services/manager-workspace-display-cache';
 import { Venue } from '../../modules/venue/entities/venue.entity';
+import { venueSummaryCached } from '../../modules/venue/services/venue-summary-cache';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -357,20 +358,20 @@ describeIfDb('Core Entity Cache (integration)', () => {
       );
 
       const first = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, (m) =>
-        entityCache.getVenueSummary(m, venueId),
+        venueSummaryCached(entityCache, m, venueId),
       );
       expect(first?.name).toBe('Original Venue Name');
 
       // Raw SQL, like the superuser update it replaces: no application-side cache invalidation runs.
       await asManager((m) => m.query(`UPDATE ${businessTables(m).venue} SET name = 'Renamed Venue' WHERE id = $1`, [venueId]));
       const stale = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, (m) =>
-        entityCache.getVenueSummary(m, venueId),
+        venueSummaryCached(entityCache, m, venueId),
       );
       expect(stale?.name).toBe('Original Venue Name'); // still cached
 
       await entityCache.invalidate('venue', venueId);
       const fresh = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, (m) =>
-        entityCache.getVenueSummary(m, venueId),
+        venueSummaryCached(entityCache, m, venueId),
       );
       expect(fresh?.name).toBe('Renamed Venue');
     });

@@ -2,7 +2,6 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { Organisation, User } from '../identity/entities';
-import { Venue } from '../../../modules/venue/entities/venue.entity';
 import { EnvironmentService } from '../environment/environment.service';
 import { AuthCacheRedisClientProvider } from '../auth/services/auth-cache-redis-client.provider';
 import { isL1CacheableKind, MetadataL1CacheService } from './metadata-l1-cache.service';
@@ -131,13 +130,6 @@ export interface OrganisationDisplayProjection {
   slug: string;
   logoFileId: string | null;
   timezone: string;
-}
-
-export interface VenueSummaryProjection {
-  id: string;
-  organisationId: string;
-  workspaceId: string | null;
-  name: string;
 }
 
 @Injectable()
@@ -315,14 +307,6 @@ export class CoreEntityCacheService {
       const row = await manager.findOne(Organisation, { where: { id: organisationId } });
       if (!row) return null;
       return { id: row.id, name: row.name, slug: row.slug, logoFileId: row.logoFileId ?? null, timezone: row.timezone };
-    });
-  }
-
-  async getVenueSummary(manager: EntityManager, venueId: string): Promise<VenueSummaryProjection | null> {
-    return this.getOrFetch('venue', venueId, async () => {
-      const row = await manager.findOne(Venue, { where: { id: venueId } });
-      if (!row) return null;
-      return { id: row.id, organisationId: row.organisationId, workspaceId: row.workspaceId ?? null, name: row.name };
     });
   }
 }
