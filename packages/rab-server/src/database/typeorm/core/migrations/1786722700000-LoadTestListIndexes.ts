@@ -8,7 +8,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *    orders by `a.clock_in_at DESC, a.id DESC LIMIT 50`. With no index on that order, the plan joined and RLS-checked EVERY
  *    attendance row of the workspace (90,180) and sorted them to keep 50: 598 ms per page with JIT off, 2.0 s with JIT on
  *    (11 s under the peak). workspace_id leads because RLS adds `workspace_id = core.current_workspace()` (STABLE SQL,
- *    inlined, usable as the Index Cond); the planner then walks the index in order and stops after 50 rows: 1.5 ms.
+ *    inlined, usable as the Index Cond); the planner then walks the index in order and stops after 50 rows: 1.5 ms for
+ *    the PAGE statement only. list() also runs an unindexed `count(*)` over the same five joins (attendance.service.ts
+ *    list(), ~120 ms at this size), which this index does not change; the regression spec EXPLAINs a simplified
+ *    statement with the same ORDER BY under the same RLS. HWS switch-on blocker: the workspace-schema template
+ *    (workspace-schema-v1.sql, attendance indexes) needs the same index before business rows move to workspace schemas.
  *  - email_outbox_attachment_file_idx `(attachment_file_id) WHERE attachment_file_id IS NOT NULL`: the shift-report list
  *    (ShiftReportService.listReports, GET /attendance/report/shifts, console and Venue Manager app) runs a LATERAL count
  *    of the e-mails that carried each report's final timesheet, `WHERE eo.attachment_file_id = b.final_file_id`, once per
@@ -24,8 +28,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Same CONCURRENTLY / INVALID-retry handling and `transaction = false` as OutboxClaimIndexes1786721440000: an INVALID leftover
  * of a failed concurrent build is dropped (CONCURRENTLY) and rebuilt; the build must end VALID or the migration throws (and
- * stays unrecorded, so the next run retries); when TypeORM forces a transaction (migration:revert) the plain locking form is
- * used. Listed in NON_TRANSACTIONAL_MIGRATIONS. No table, column, RLS, FORCE, grant, ownership, function or template change.
+ * stays unrecorded, so the next run retries). up() REFUSES to run inside a transaction (no plain-CREATE fallback: it would
+ * block clock-in / clock-out for the build); only down() keeps the plain locking DROP when TypeORM forces a transaction
+ * (migration:revert). Listed in NON_TRANSACTIONAL_MIGRATIONS. No table, column, RLS, FORCE, grant, ownership, function or template change.
  * Not in production-migration-approval.ts: production approval is a separate owner gate.
  */
 const INDEXES: ReadonlyArray<{ name: string; definition: string }> = Object.freeze([
@@ -40,8 +45,14 @@ export class LoadTestListIndexes1786722700000 implements MigrationInterface {
   transaction = false;
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // Never the plain locking form here: inside a forced transaction (e.g. a CLI run with `-t all`) CREATE INDEX would hold
+    // a SHARE lock on core.attendance for the whole build and block every clock-in / clock-out. Refuse instead; the
+    // migration stays unrecorded and the normal (non-transactional) run builds it CONCURRENTLY.
+    if (queryRunner.isTransactionActive) {
+      throw new Error(`${this.name} must run outside a transaction (CREATE INDEX CONCURRENTLY); refusing the locking form on core.attendance`);
+    }
     await this.assertAuthority(queryRunner);
-    const cc = queryRunner.isTransactionActive ? '' : 'CONCURRENTLY ';
+    const cc = 'CONCURRENTLY ';
     await queryRunner.query(`SET lock_timeout = '60s'`);
     try {
       for (const index of INDEXES) {
