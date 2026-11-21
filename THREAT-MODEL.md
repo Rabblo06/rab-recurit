@@ -9554,3 +9554,42 @@ This entry covers only what release 0.7.0 adds to switch it on.
   `it.failing` full-team case for a `manager` + `staff` user is now a normal `it`. `structure-level-24.spec.ts`: the
   statement is the frozen predicate with only the role test changed, the level-24 template is level 23 + that statement,
   and the goldens pin the new policy hash.
+
+## Attendance, layer 5: a staff-own-or-manager RLS predicate (branch fix/attendance-staff-scope-rls, 2026-11-21; release 0.7.0, structure level 25; DRAFT: new SQL, owner review first; stacked on #243, which depends on #175 and #177)
+- **Finding closed (security finding format, §5.8; M4 design §11 LOW).** Severity: Low. Actor: a staff user (`attendance.clock`)
+  reached through a code path that forgets `ownStaffProfile` / `attendanceReadScopeCondition`. Action: reads or writes another
+  staff member's attendance in the same workspace. Consequence before: the database allowed it: `attendance_tenant`
+  (template `workspace-schema-v1.sql:500`, and the core copy) bound only organisation + workspace, so the service layer was
+  the only staff-to-staff isolation (the fifth enforcement layer was missing). Root cause: attendance never got the second,
+  tighter predicate that `payroll_record_select` has.
+- **Change (narrows only).** `ALTER POLICY attendance_tenant ... USING (P) WITH CHECK (P)` where P = the unchanged tenant
+  binding AND one of: the worker marker (`rab.actor_type = 'worker'`, bound only by TenantContextService for Worker
+  contexts); the caller's own staff profile (`staff_profile.user_id = core.current_uid()`); a non-venue manager profile of
+  this workspace (Manager, CEO: `payroll_record_select`'s payrollManager); a Venue Manager linked (manager_venue) to the
+  shift's venue. Per workspace by the 0.7.0 workspace command `AttendanceStaffScope` (structure level 25), on
+  `core.attendance` (HWS off) and in `core.provision_workspace` (new workspaces) by migration
+  AttendanceStaffScopeRls1786722100000. FOR ALL / PERMISSIVE / TO PUBLIC unchanged; no grant, no new policy, no data change.
+  Every clause is a subset of the tenant-only policy it replaces, so no caller gains a row.
+- **Who loses rows (intended).** Staff see only their own attendance; a Venue Manager only attendance of shifts at their own
+  venues (as `attendanceReadScopeCondition` already scoped them); a manager profile bound to another workspace, a custom
+  workspace member (never granted `attendance.view`), and any session with no `rab.user_id` and no worker marker see none.
+  An unset user makes `core.current_uid()` NULL, so no staff / manager clause can match (fail closed).
+- **Residual risk.** The worker marker and `rab.user_id` are transaction-local GUCs set by TenantContextService; a
+  compromised runtime connection (injection) can set them (same trust level as `staff_profile_worker_scan`, BC-01). The
+  Venue Manager clause trusts `manager_venue` rows, which only workspace managers write. Internal Managers are scoped at
+  the database to the whole workspace (as payroll); the narrower "Staff they created" rule stays in the service.
+- **Fail closed in the migration and the runner.** The core ALTER replaces only a known pair of expressions (tenant-only,
+  or its own, by semantic-golden hash on USING and WITH CHECK) and re-checks PERMISSIVE / FOR ALL / TO PUBLIC before and
+  after; core.provision_workspace must be the expected predecessor body (#243's level-24 literal for up(), this level-25
+  literal for down()); each workspace step is checked against the declared level-25 v2 fingerprint (a workspace that does
+  not reach it is blocked, 503); down() is refused while any workspace's attendance policy is not the tenant-only form.
+- **Tests.** `ws-attendance-staff-scope.integration.spec.ts`, as the runtime login, on a workspace schema AND on core:
+  Staff A sees only their own row, gets 0 rows for Staff B's id, updates 0 rows of Staff B's attendance and is refused
+  (42501, WITH CHECK) inserting attendance for Staff B; a workspace Manager sees every row; a manager of another workspace
+  sees none; Venue Manager X sees only venue X's rows and Venue Manager Y only venue Y's; the worker marker sees every row,
+  and no user without the marker sees none; an unrelated user, an unknown user id, another organisation and another
+  workspace see none; zero rows with no tenant context. Plus: level-24 → 25 fingerprint measured and declared per major,
+  runner upgrade idempotent, both provisioners build the same level-25 structure, the core policy hash, up() refusing a
+  non-level-24 body, down() refused while a level-25 workspace exists, and (rolled back) down() / up() round trip with an
+  unknown core expression refused. `structure-level-25.spec.ts`: statement shape, template = level 24 + the statement,
+  goldens pin the predicate.

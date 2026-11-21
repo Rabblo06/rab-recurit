@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { StaffShiftTeamMultiRole1786721600000 } from '../../database/typeorm/core/migrations/1786721600000-StaffShiftTeamMultiRole';
+import { AttendanceStaffScopeRls1786722100000 } from '../../database/typeorm/core/migrations/1786722100000-AttendanceStaffScopeRls';
+import { attendanceTenantOnlySql } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import {
@@ -51,6 +53,8 @@ const L22_STEP = `0.6.0_${WORKSPACE_CORE_FK_REMOVAL.name}_${WORKSPACE_CORE_FK_RE
 /** The registry through level 22 (how 0.6.0 built a workspace) and through level 23 (#177, before this command). */
 const L22 = { '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])] };
 const L23 = { ...L22, '0-7': [STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE] };
+/** The registry through level 24 (this spec's command): later structural commands (level 25, attendance scope) are proven by their own spec. */
+const L24 = { ...L22, '0-7': [STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE, STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE] };
 
 describeIfDb('#205: staff_profile_shift_team_select tests staff role membership, structure level 24 (integration, throwaway database)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -60,7 +64,7 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
   const created: SeededWorkspace[] = [];
   let seq = 0;
 
-  const make = async (n: string, how: 'level22' | 'level23' | 'ts' | 'sql' = 'level22'): Promise<SeededWorkspace> => {
+  const make = async (n: string, how: 'level22' | 'level23' | 'level24' | 'ts' | 'sql' = 'level22'): Promise<SeededWorkspace> => {
     seq += 1;
     const ws = await seedWorkspace(admin, `wsl24-${n}-${SFX}-${seq}`);
     created.push(ws);
@@ -72,6 +76,7 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
       );
     }
     if (how === 'level23') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: L23 })).toBe('READY');
+    if (how === 'level24') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: L24 })).toBe('READY');
     if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
     if (how === 'sql') expect(await provisionServerPath(appUrl, ws)).toBe('READY');
     return ws;
@@ -89,7 +94,7 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
   const EQUALITY_DEPARSED = "(current_setting('rab.role'::text, true) = 'staff'::text)";
   const v2 = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [ws.id])).rows[0].f as string;
   const runner = (o: Partial<WorkspaceRunOptions> & Pick<WorkspaceRunOptions, 'workspaceIds'>) =>
-    new WorkspaceCommandRunner({ codeVersion: '0.7.0', versions: ['0.4.0', '0.5.0', '0.6.0'], force: false, adopt: false, log: () => undefined, ...o }).run(session);
+    new WorkspaceCommandRunner({ codeVersion: '0.7.0', versions: ['0.4.0', '0.5.0', '0.6.0'], force: false, adopt: false, log: () => undefined, workspaceRegistry: L24, ...o }).run(session);
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
@@ -113,7 +118,7 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
   });
 
   it('the command is level 24 of this code: one ALTER POLICY that changes only the role test; no pre-check, no drop; a v2 fingerprint declared for this major', async () => {
-    expect(codeWorkspaceStructureLevel()).toBe(24);
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(24);
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure).toMatchObject({ level: 24, provisionFunctionLiteral: 'db:provision_workspace@StaffShiftTeamMultiRole1786721600000' });
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure?.mayDrop).toBeUndefined();
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.precheck).toBeUndefined();
@@ -170,7 +175,13 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
       expect((await policyOf(w.schema)).using).toContain(MEMBERSHIP_DEPARSED);
     }
     expect((await runner({ workspaceIds: [a.id, b.id] })).outcomes.map((o) => o.status)).toEqual(['up-to-date', 'up-to-date']);
-    for (const w of [await make('nw-ts', 'ts'), await make('nw-sql', 'sql')]) {
+    // core.provision_workspace builds THIS code's level (25 since the attendance scope): compared with the upgraded one only
+    // while that is 24; the TypeScript provisioner is pinned to the level-24 registry.
+    const nwTs = await make('nw-ts', 'level24');
+    const nwSql = await make('nw-sql', 'sql');
+    expect((await registryOf(admin, nwSql.id)).module_version).toBe(codeWorkspaceStructureLevel());
+    expect((await policyOf(nwSql.schema)).using).toContain(MEMBERSHIP_DEPARSED);
+    for (const w of codeWorkspaceStructureLevel() === 24 ? [nwTs, nwSql] : [nwTs]) {
       expect((await registryOf(admin, w.id)).module_version).toBe(24);
       expect(await v2(w)).toBe(await v2(a));
     }
@@ -335,6 +346,16 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
       for (const r of rows as Array<{ nspname: string }>) await admin.query(shiftTeamSelectSingleRoleSql(r.nspname));
       // The fail-closed guard recognises the level-23 form on this major (else it would count these and refuse).
       expect((await admin.query(LEVEL_24_WORKSPACES_SQL)).rows[0].n).toBe(0);
+      // Level 25 (attendance scope) is installed on top: take it down first, the same way (its workspaces back to the tenant-only
+      // attendance policy, then its own down()), so this migration's down() finds its own level-24 body.
+      if ((await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'AttendanceStaffScopeRls1786722100000'`)).rows.length === 1) {
+        const att = await admin.query(
+          `SELECT DISTINCT n.nspname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname ~ '^workspace_[0-9a-f]{32}$' AND c.relname = 'attendance' AND p.polname = 'attendance_tenant'`,
+        );
+        for (const r of att.rows as Array<{ nspname: string }>) await admin.query(attendanceTenantOnlySql(r.nspname));
+        await new AttendanceStaffScopeRls1786722100000().down(runnerOf(admin));
+      }
 
       await migration.down(runnerOf(admin));
       expect(await coreHash()).toBe(CORE_SHIFT_TEAM_USING_HASH_EQUALITY);

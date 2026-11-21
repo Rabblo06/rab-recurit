@@ -59,8 +59,9 @@ describe('#205: staff_profile_shift_team_select tests staff role membership (str
   });
 
   it('release 0.7.0 registers it as level 24 (after #177 = 23), with its provision literal mapped to 24', () => {
-    expect(WORKSPACE_UPGRADE_COMMANDS['0-7']![WORKSPACE_UPGRADE_COMMANDS['0-7']!.length - 1]).toBe(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE);
-    expect(codeWorkspaceStructureLevel()).toBe(24);
+    expect(WORKSPACE_UPGRADE_COMMANDS['0-7']).toContain(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE);
+    // 25 since the attendance scope (M4 §11 LOW): this spec pins only that level 24 is this command's.
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(24);
     expect(declaredProvisionLiterals()['db:provision_workspace@StaffShiftTeamMultiRole1786721600000']).toBe(24);
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure?.mayDrop).toBeUndefined();
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.precheck).toBeUndefined();

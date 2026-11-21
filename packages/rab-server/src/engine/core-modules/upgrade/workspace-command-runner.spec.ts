@@ -57,16 +57,17 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
     expect(lastInstanceStepOfVersion('0.6.0')).toBe('0.6.0_TypeOrmMigrations');
   });
 
-  it('0.7.0 has two workspace commands (level 23, C3 Q3 DRAFT; level 24, #205 DRAFT), after the instance command of the release (the HWS cutover)', () => {
+  it('0.7.0 has three workspace commands (level 23, C3 Q3 DRAFT; level 24, #205 DRAFT; level 25, attendance scope DRAFT), after the instance command of the release (the HWS cutover)', () => {
     expect(WORKSPACE_UPGRADE_COMMANDS['0-7'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true, Boolean(c.precheck)])).toEqual([
       ['ValidateStaffProfileWorkspaceRequired', 1786721595000, 23, false, false],
       ['ShiftTeamSelectMultiRole', 1786721600000, 24, false, false],
+      ['AttendanceStaffScope', 1786722100000, 25, false, false],
     ]);
     expect(lastInstanceStepOfVersion('0.7.0')).toBe('0.7.0_HwsCutover_1786721540100');
-    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_ShiftTeamSelectMultiRole_1786721600000');
+    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_AttendanceStaffScope_1786722100000');
   });
 
-  it('the level-21 to level-24 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
+  it('the level-21 to level-25 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
     for (const command of [...WORKSPACE_UPGRADE_COMMANDS['0-6'], ...WORKSPACE_UPGRADE_COMMANDS['0-7']].filter((c) => c.structure)) {
       const fps = command.structure!.fingerprints;
       expect(Object.keys(fps).sort()).toEqual(['16', '17', '18']);
@@ -178,7 +179,7 @@ describe('Part D (review M3): the code structure level drives the gates', () => 
 
   it('20 with no structural command; 21, 22 with probes; a gap is refused', () => {
     expect(codeWorkspaceStructureLevel({})).toBe(20);
-    expect(codeWorkspaceStructureLevel()).toBe(24);
+    expect(codeWorkspaceStructureLevel()).toBe(25);
     const reg = { '0-7': [probe(21, { provisionFunctionLiteral: 'db:provision_workspace@Probe1799999999991' })], '0-8': [probe(22)] };
     expect(codeWorkspaceStructureLevel(reg)).toBe(22);
     expect(structuralCommandsThrough(21, reg).map((s) => s.structure.level)).toEqual([21]);
@@ -291,12 +292,13 @@ describe('Part D (review Info / N4): source guard on upgrade-commands/**', () =>
 describe('Part D (review N4): a structural command cannot land unreviewed', () => {
   /** Raise ONLY together with a review of MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION (D-RUNNER.md §5.3 step 4). */
   // 21 since StaffProfileMemberSelect (0b), 22 since DropWorkspaceCoreForeignKeys (0a), 23 since
-  // ValidateStaffProfileWorkspaceRequired (C3 Q3, DRAFT), 24 since ShiftTeamSelectMultiRole (#205, DRAFT). Reviewed floor: 20 —
-  // this code reads nothing level 21-24 creates (a member policy that fails closed when absent; dropped constraints; a CHECK
-  // that is enforced on every write either way; below 24 the shift-team policy still matches single-role staff and shows a
-  // multi-role caller only their own row, fail closed), and a workspace below the code level is BLOCKED by the runner
-  // (review P1). The pair is pinned explicitly, never derived.
-  const REVIEWED_STRUCTURE_LEVEL = 24;
+  // ValidateStaffProfileWorkspaceRequired (C3 Q3, DRAFT), 24 since ShiftTeamSelectMultiRole (#205, DRAFT), 25 since
+  // AttendanceStaffScope (M4 §11 LOW, DRAFT). Reviewed floor: 20 — this code reads nothing level 21-25 creates (a member policy
+  // that fails closed when absent; dropped constraints; a CHECK that is enforced on every write either way; below 24 the
+  // shift-team policy still matches single-role staff and shows a multi-role caller only their own row, fail closed; below 25
+  // attendance keeps its tenant-only policy, so staff isolation there is the service layer alone, as before), and a workspace
+  // below the code level is BLOCKED by the runner (review P1). The pair is pinned explicitly, never derived.
+  const REVIEWED_STRUCTURE_LEVEL = 25;
   const REVIEWED_ROUTING_FLOOR = 20;
   it('the code structure level and the routing floor equal their reviewed values', () => {
     expect(codeWorkspaceStructureLevel()).toBe(REVIEWED_STRUCTURE_LEVEL);
