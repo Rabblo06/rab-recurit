@@ -10326,6 +10326,14 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   "R if R is in the window"); this keeps D3 for both trust levels and can only lower pay.
 - **Not changed.** No endpoint, no SQL, no app behaviour: nothing calls the offline functions yet and offline mode stays OFF
   (HARD RULE, DESIGN.md / ROLLOUT-CHECKLIST.md).
+- **Security review fixes (2026-11-21).** The D7 floor no longer depends on the caller: `BreakRecordInput.source`
+  ('offline' when a break's start or end was recorded offline) makes duration.ts itself deduct max(recorded unpaid,
+  scheduled break); the caller-supplied `minimumUnpaidBreakMinutes` option is removed. A manager-confirmed break
+  (`confirmedBreakMinutes`) beats recorded breaks and the schedule (D7 precedence). A negative or fractional
+  `scheduledBreakMinutes` / `confirmedBreakMinutes` throws `RangeError` (a negative break used to inflate worked time).
+  Worked time is rounded once and the break figure is derived, so gross − break = worked exactly in whole minutes.
+  `OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS` is deep-frozen and a static test allows importing it only from
+  `modules/attendance/services/offline-sync.service.ts`.
 
 ## Attendance monitor flags an abandoned break (branch feat/m4-monitor-on-break, stacked on #307, 2026-11-21; no SQL)
 - **Gap closed (M4 design §1 / §8.2, A10 fail closed).** The monitor flagged only `status = 'clocked_in'`, so once breaks

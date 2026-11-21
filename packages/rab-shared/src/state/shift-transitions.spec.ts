@@ -1,4 +1,7 @@
-import { ShiftAssignmentStatus, ShiftStatus } from '../types';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+
+import { ShiftAssignmentStatus, ShiftAssignmentStatusType, ShiftStatus } from '../types';
 import { assertTransition } from './assert-transition';
 import { OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS, SHIFT_ASSIGNMENT_TRANSITIONS, SHIFT_TRANSITIONS } from './shift-transitions';
 import { expectExhaustiveTransitionTable } from './test-helpers';
@@ -35,5 +38,31 @@ describe('OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS (M4 D6, offline sync only)', () =>
   it('the general table still refuses no_show -> confirmed: no other caller gains the edge', () => {
     expect(() => assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus.NO_SHOW, ShiftAssignmentStatus.CONFIRMED)).toThrow();
     expect(Object.isFrozen(OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS)).toBe(true);
+    for (const list of Object.values(OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS)) expect(Object.isFrozen(list)).toBe(true);
+    expect(() => (OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS[ShiftAssignmentStatus.CONFIRMED] as ShiftAssignmentStatusType[]).push(ShiftAssignmentStatus.COMPLETED)).toThrow();
+  });
+
+  it('static: only the offline sync service may import it (no manager action or job can reach the edge)', () => {
+    const PACKAGES = join(__dirname, '..', '..', '..');
+    const ALLOWED = new Set(['rab-server/src/modules/attendance/services/offline-sync.service.ts']);
+    const walk = (dir: string): string[] => {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return [];
+      }
+      return names.flatMap((n) => {
+        const p = join(dir, n);
+        if (['node_modules', 'dist', 'dist-cjs', 'dist-esm', 'build', '.dart_tool'].includes(n)) return [];
+        if (statSync(p).isDirectory()) return walk(p);
+        return /\.(ts|tsx|js|cjs|mjs)$/.test(n) && !/\.(spec|test)\.[cm]?[jt]sx?$/.test(n) ? [p] : [];
+      });
+    };
+    const users = ['rab-server/src', 'rab-worker/src', 'rab-front/src', 'rab-ui/src']
+      .flatMap((d) => walk(join(PACKAGES, d)))
+      .filter((p) => readFileSync(p, 'utf8').includes('OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS'))
+      .map((p) => relative(PACKAGES, p).split(sep).join('/'));
+    expect(users.filter((u) => !ALLOWED.has(u))).toEqual([]);
   });
 });
