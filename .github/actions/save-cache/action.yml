@@ -1,10 +1,15 @@
 name: Save Nx cache
-description: Saves the Nx computation cache for reuse by later runs
+description: >-
+  Saves the Nx computation cache for reuse by later runs, on pushes to main only (CI audit 2026-11-12, S6). A pull request
+  still restores main's newest cache (restore-cache's `nx-<os>-` prefix), but no longer writes an 80 MB entry under a new
+  key on every job of every push: those entries filled the 10 GB Actions cache and evicted the Yarn cache. A no-op
+  elsewhere, so the call sites need no condition of their own.
 
 runs:
   using: composite
   steps:
     - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       with:
         path: .nx/cache
         key: nx-${{ runner.os }}-${{ github.run_id }}
