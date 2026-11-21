@@ -59,16 +59,17 @@ export const SHIFT_ASSIGNMENT_TRANSITIONS: TransitionTable<ShiftAssignmentStatus
  * job; this table only names the one extra edge so it goes through `assertTransition` like every other status change.
  *
  * Deliberately a SEPARATE table, not an edge in SHIFT_ASSIGNMENT_TRANSITIONS: no other caller (a manager action, a job) can
- * use `no_show → confirmed` by accident. Every other transition is refused here.
+ * use `no_show → confirmed` by accident. Every other transition is refused here. Deep-frozen (the table and every list), and
+ * a static test allows importing it only from the offline sync service (modules/attendance/services/offline-sync.service.ts).
  */
 export const OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS: TransitionTable<ShiftAssignmentStatusType> = Object.freeze({
-  [ShiftAssignmentStatus.OFFERED]: [],
-  [ShiftAssignmentStatus.STAFF_ACCEPTED]: [],
-  [ShiftAssignmentStatus.CONFIRMED]: [],
-  [ShiftAssignmentStatus.DECLINED]: [],
-  [ShiftAssignmentStatus.REJECTED]: [],
-  [ShiftAssignmentStatus.WITHDRAWN]: [],
-  [ShiftAssignmentStatus.CANCELLED]: [],
-  [ShiftAssignmentStatus.NO_SHOW]: [ShiftAssignmentStatus.CONFIRMED],
-  [ShiftAssignmentStatus.COMPLETED]: [],
+  [ShiftAssignmentStatus.OFFERED]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.STAFF_ACCEPTED]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.CONFIRMED]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.DECLINED]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.REJECTED]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.WITHDRAWN]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.CANCELLED]: Object.freeze([] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.NO_SHOW]: Object.freeze([ShiftAssignmentStatus.CONFIRMED] as ShiftAssignmentStatusType[]),
+  [ShiftAssignmentStatus.COMPLETED]: Object.freeze([] as ShiftAssignmentStatusType[]),
 });

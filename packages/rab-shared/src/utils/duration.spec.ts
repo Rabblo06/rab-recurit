@@ -171,35 +171,62 @@ describe('computeWorkedMinutes', () => {
     ).toThrow(RangeError);
   });
 
-  it('D7: with minimumUnpaidBreakMinutes the deduction is max(recorded unpaid, minimum)', () => {
-    const base = { clockInAt: at('06:00:00'), clockOutAt: at('14:00:00'), minimumUnpaidBreakMinutes: 30 };
-    const shortBreak = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false }] });
-    expect(shortBreak.unpaidBreakMinutes).toBe(30);
-    expect(shortBreak.workedMinutes).toBe(450);
-    const longBreak = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:45:00'), isPaid: false }] });
-    expect(longBreak.unpaidBreakMinutes).toBe(45);
-    // A paid recorded break does not count towards the recorded unpaid time; the floor still applies.
-    const paidBreak = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:45:00'), isPaid: true }] });
-    expect(paidBreak.unpaidBreakMinutes).toBe(30);
+  it('D7: any offline break floors the deduction at the scheduled break, decided inside duration.ts', () => {
+    const base = { clockInAt: at('06:00:00'), clockOutAt: at('14:00:00'), scheduledBreakMinutes: 30 };
+    const offlineShort = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false, source: 'offline' }] });
+    expect(offlineShort).toEqual({ grossMinutes: 480, unpaidBreakMinutes: 30, workedMinutes: 450 });
+    // The same short break recorded online: A4, the recorded break wins (12 minutes).
+    const onlineShort = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false, source: 'online' }] });
+    expect(onlineShort.unpaidBreakMinutes).toBe(12);
+    expect(computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false }] }).unpaidBreakMinutes).toBe(12);
+    // One offline break among online ones still floors the total; a longer recorded total stands.
+    const mixed = computeWorkedMinutes({
+      ...base,
+      breaks: [
+        { startedAt: at('09:00:00'), endedAt: at('09:05:00'), isPaid: false },
+        { startedAt: at('12:00:00'), endedAt: at('12:10:00'), isPaid: false, source: 'offline' },
+      ],
+    });
+    expect(mixed.unpaidBreakMinutes).toBe(30);
+    const longOffline = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:45:00'), isPaid: false, source: 'offline' }] });
+    expect(longOffline.unpaidBreakMinutes).toBe(45);
+    // A paid offline break does not count as unpaid time; the floor still applies.
+    const paidOffline = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:45:00'), isPaid: true, source: 'offline' }] });
+    expect(paidOffline.unpaidBreakMinutes).toBe(30);
+    // breaksPaidByDefault: the schedule deducts nothing, so neither does the floor.
+    expect(computeWorkedMinutes({ ...base, breaksPaidByDefault: true, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:05:00'), isPaid: false, source: 'offline' }] }).unpaidBreakMinutes).toBe(5);
   });
 
-  it('D7: the floor never pushes worked time below zero, and is validated', () => {
+  it('D7 precedence: a manager-confirmed break beats recorded breaks (offline floor included) and the schedule', () => {
+    const base = { clockInAt: at('06:00:00'), clockOutAt: at('14:00:00'), scheduledBreakMinutes: 30 };
+    const recorded = [{ startedAt: at('10:00:00'), endedAt: at('10:45:00'), isPaid: false, source: 'offline' as const }];
+    expect(computeWorkedMinutes({ ...base, breaks: recorded, confirmedBreakMinutes: 20 })).toEqual({ grossMinutes: 480, unpaidBreakMinutes: 20, workedMinutes: 460 });
+    expect(computeWorkedMinutes({ ...base, confirmedBreakMinutes: 0 }).workedMinutes).toBe(480);
+    expect(computeWorkedMinutes({ ...base, breaks: recorded, confirmedBreakMinutes: null }).unpaidBreakMinutes).toBe(45);
+  });
+
+  it('a negative or fractional scheduled / confirmed break is refused (it would inflate worked time)', () => {
+    for (const bad of [-1, -30, 1.5, Number.NaN]) {
+      expect(() => computeWorkedMinutes({ clockInAt: at('06:00:00'), clockOutAt: at('14:00:00'), scheduledBreakMinutes: bad })).toThrow(RangeError);
+      expect(() => computeWorkedMinutes({ clockInAt: at('06:00:00'), clockOutAt: at('14:00:00'), confirmedBreakMinutes: bad })).toThrow(RangeError);
+    }
+  });
+
+  it('gross - break = worked exactly in minutes (worked rounded once), even when the break exceeds the shift', () => {
     const tiny = computeWorkedMinutes({
       clockInAt: at('06:00:00'),
       clockOutAt: at('06:20:00'),
-      minimumUnpaidBreakMinutes: 30,
-      breaks: [{ startedAt: at('06:05:00'), endedAt: at('06:10:00'), isPaid: false }],
+      scheduledBreakMinutes: 30,
+      breaks: [{ startedAt: at('06:05:00'), endedAt: at('06:10:00'), isPaid: false, source: 'offline' }],
     });
-    expect(tiny.workedMinutes).toBe(0);
-    for (const bad of [-1, 1.5, Number.NaN]) {
-      expect(() =>
-        computeWorkedMinutes({
-          clockInAt: at('06:00:00'),
-          clockOutAt: at('14:00:00'),
-          minimumUnpaidBreakMinutes: bad,
-          breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:10:00'), isPaid: false }],
-        }),
-      ).toThrow(RangeError);
+    expect(tiny).toEqual({ grossMinutes: 20, unpaidBreakMinutes: 20, workedMinutes: 0 });
+    for (const [inAt, outAt, bStart, bEnd] of [
+      ['06:00:00', '09:10:45', '07:00:00', '07:20:15'],
+      ['06:00:20', '13:59:50', '10:00:40', '10:29:30'],
+      ['06:00:31', '06:59:29', '06:10:29', '06:20:31'],
+    ]) {
+      const r = computeWorkedMinutes({ clockInAt: at(inAt!), clockOutAt: at(outAt!), breaks: [{ startedAt: at(bStart!), endedAt: at(bEnd!), isPaid: false }] });
+      expect(r.grossMinutes - r.unpaidBreakMinutes).toBe(r.workedMinutes);
     }
   });
 
