@@ -10355,7 +10355,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
-## MFA enforced for platform admins in production (owner decision 2, 2026-11-21; branch chore/mfa-platform-admin-production-default; no SQL, no runtime code path change)
+## MFA enforced for platform admins in production (owner decision 2, 2026-11-21; branch chore/mfa-platform-admin-production-default; no SQL; the only server change is the Admin panel Security tab text)
 - **Finding:** every `AUTH_MFA_ENFORCE_*` switch was off in production, so a platform administrator (cross-organisation
   read and admin actions, MFA reset of other users) could sign in with a password alone unless they had enrolled
   voluntarily. A phished or reused platform-admin password was a full platform takeover.
