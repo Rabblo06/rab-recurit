@@ -36,8 +36,9 @@ security objects differ from the reviewed posture ...`.
 Nothing in the database differs: the same policy, the same three roles. The posture renderer lists a policy's roles with
 `string_agg(<role name>, ',' ORDER BY 1)` (`packages/rab-server/src/database/posture-drift/semantic-posture.ts:61`).
 Inside an aggregate, `ORDER BY 1` orders by the constant `1`, not by the first column, so the names come out in the order
-of `pg_policy.polroles`, i.e. role OID order. A restore recreates the roles from the roles file in its own order, the OIDs
-differ, the line differs, and the fail-closed boot gate refuses. Every restore onto a new cluster hits this; so would any
+of the `pg_policy.polroles` array: the policy's `TO` list as it was stored, which `pg_dump` re-emits in its own order
+(not strictly role OID order). After a restore the array order of this policy differs, the line differs, and the
+fail-closed boot gate refuses. Every restore onto a new cluster hits this; so would any
 migration of the database to another provider.
 
 Proposed fix (not committed: `semantic-posture.ts` is in another lane's open PR #253), applied on the test host for
@@ -62,7 +63,8 @@ Failure:      operator → restores the documented backup onto a new cluster (di
               API and the Worker refuse to start (semantic-posture boot gate), so the restore does not bring the service back
 Actor:        none (a defect, not an attack)
 Location:     packages/rab-server/src/database/posture-drift/semantic-posture.ts:61
-Root cause:   aggregate `ORDER BY 1` sorts by a constant; the rendered role list follows role OIDs, which a restore changes
+Root cause:   aggregate `ORDER BY 1` sorts by a constant; the rendered role list follows the polroles array order, which a
+              dump and restore can change
 Fix:          sort by the role name (diff above), in the posture renderer and the two other renderers with the same pattern
 Regression:   renderer test with roles created out of order; CI restore round-trip
 ```

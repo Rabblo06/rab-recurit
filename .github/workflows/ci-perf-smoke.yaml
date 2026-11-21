@@ -85,11 +85,13 @@ jobs:
             PERF_PHASES=smoke:120:0.25 PERF_MANAGER_SESSIONS=2 PERF_STAFF_READERS=100 PERF_PAYROLL_RUN_AT=60 \
             node packages/rab-e2e-testing/system/perf/load-mix.mjs "$WORK/load.json"
           node packages/rab-e2e-testing/system/perf/check-thresholds.mjs "$WORK/load.json" --phase smoke --p95 1500 --p99 3000 --error-rate 1
-      - name: Collect the smoke results (never the seeded identities file)
+      # load.json only: the API and seed logs are not uploaded (EMAIL_DRIVER=LOGGER writes whole e-mail bodies, with their
+      # links, to the API log), and neither are the seeded identities.
+      - name: Collect the smoke results (load.json only)
         if: always()
         run: |
           mkdir -p test-results/perf-smoke
-          cp "${RUNNER_TEMP}"/perf-smoke/load.json "${RUNNER_TEMP}"/perf-smoke/*.log test-results/perf-smoke/ 2> /dev/null || true
+          cp "${RUNNER_TEMP}"/perf-smoke/load.json test-results/perf-smoke/ 2> /dev/null || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

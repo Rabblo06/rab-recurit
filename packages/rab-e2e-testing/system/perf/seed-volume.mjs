@@ -60,8 +60,15 @@ const c = new pg.Client({ connectionString: url.toString(), ssl });
 await c.connect();
 const q = async (text, params = []) => (await c.query(text, params)).rows;
 
-const [guard] = await q(`select current_setting('crewflow.disposable_test_database', true) marker, (select rolsuper from pg_roles where rolname = current_user) su`);
-if (guard.marker !== 'true') throw new Error('refusing: the database is not marked crewflow.disposable_test_database=true');
+// The marker is read from the CATALOG (ALTER DATABASE ... SET, pg_db_role_setting), never from current_setting(): a
+// connection option or PGOPTIONS could set the session value and fake it.
+const [guard] = await q(
+  `select exists (select 1 from pg_db_role_setting s, unnest(s.setconfig) c
+                   where s.setdatabase = (select oid from pg_database where datname = current_database()) and s.setrole = 0
+                     and c = 'crewflow.disposable_test_database=true') marker,
+          (select rolsuper from pg_roles where rolname = current_user) su`,
+);
+if (guard.marker !== true) throw new Error('refusing: the database is not marked crewflow.disposable_test_database=true in its catalog (ALTER DATABASE ... SET)');
 if (!guard.su) throw new Error('refusing: the seed needs the disposable cluster superuser (fixture connection)');
 
 const [admin] = await q(`select u.id, u.organisation_id from core."user" u where lower(u.email) = lower($1)`, [CONSOLE_ADMIN_EMAIL]);

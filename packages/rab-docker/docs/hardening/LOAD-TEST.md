@@ -10,8 +10,8 @@ were removed from the host afterwards. The restore drill on the same database is
 - **Baseline (`main` as is): fails.** The stack collapsed in the first minute of the expected peak (1.0x, about 21
   requests/s): p50 13-20 s in every group, 20-98 % errors, every request queued behind a 10-connection pool held by
   JIT-compiling list queries. The 2x spike could not be measured meaningfully.
-- **With three fixes** (two indexes, draft PR #312; JIT off for tenant transactions; the refresh pool-deadlock fix, both
-  proposed diffs below): the 15-minute peak holds. Staff app reads, clock-in/out, offers, manager writes, the Venue
+- **With three fixes** (two indexes, draft PR #312; JIT off for tenant transactions, proposed diff below; the refresh
+  pool-deadlock fix, pending in its own PR; the last two applied on the test host only): the 15-minute peak holds. Staff app reads, clock-in/out, offers, manager writes, the Venue
   Manager app and token refresh meet the targets; clock-in/out p99 is 633 ms (target 800). Still over target at peak:
   manager reads p95 974 ms / p99 2,562 ms and 0.15 % errors (the shift-report list, a search term that matches every
   record, the offer count), payroll reads p95 812 ms / p99 1,454 ms, staff login p99 1,402 ms.
@@ -20,8 +20,8 @@ were removed from the host afterwards. The restore drill on the same database is
   the database time in that run was four statement families in the attendance, offer and search modules: the
   shift-report list (41 %), the offer list count (18 %), the broad search (12 %) and the attendance list count (9 %)
   (§4.4). Those fixes, or more database CPU, are needed before a 2x day.
-- **One security finding** came out of it: concurrent token refreshes deadlock the API's connection pool (HIGH,
-  availability; §4.3).
+- **One security finding** came out of it: concurrent token refreshes can deadlock the API's connection pool (HIGH,
+  availability; §4.3; fix pending in its own PR).
 
 ### Per endpoint group, peak phase (15 min at 1.0x)
 
@@ -191,43 +191,33 @@ identical).
 
 Applied on the test host through the migration itself (`twenty-migrate.js` as `crewflow_owner`; both indexes VALID).
 
-### 4.3 The refresh path deadlocks the connection pool (security finding, proposed fix)
+### 4.3 The refresh path can deadlock the connection pool (security finding, fix pending in its own PR)
 
 After the first two fixes the peak ran within target for 11 minutes, then collapsed again with the API and the database
-both idle (API 1-17 % CPU, database 0-2 %, one active database session, 300 requests in flight). The load generator
-creates its staff sessions together, so their access tokens reach the refresh age together: a burst of refreshes.
-Reproduced in isolation: **40 concurrent staff-app refreshes returned 37 × 500 after 10 s**; `pg_stat_activity` showed all
-10 pool connections `idle in transaction` after `SELECT revoked_at ... FROM core.user_session`.
+both idle while requests waited for database connections. The load generator's staff sessions reach their refresh age
+together, and concurrent token refreshes exhausted the API's connection pool. This repository is public, so the exact
+reproduction is kept out of this document; the lead has it.
 
 ```
 [HIGH] (availability; §5.8 has no availability row: ranked by blast radius, every tenant, any staff account)
-Failure:      any holder of ~10 refresh tokens (one staff account logged in on a few devices, or ordinary phones resuming
-              together at a shift change) → POST /auth/refresh concurrently → every API connection is held by a refresh
-              transaction waiting for a second connection; the whole API (all tenants) returns 500 / times out for the
-              pool's connection timeout (10 s), and again for every new burst
-Actor:        any authenticated staff-app session (no special role); also triggered by normal traffic
-Location:     packages/rab-server/src/engine/core-modules/auth/token/services/refresh-token.service.ts:238
-Root cause:   RefreshTokenService.rotate() runs inside the refresh transaction (it holds `manager`'s connection and the
-              FOR UPDATE row lock) and calls PlatformAdminService.isPlatformAdmin(), which opens a NEW transaction on a
-              second pool connection (runInTenantContext). With pool-size concurrent refreshes, each holds one connection
-              and waits for another: a pool deadlock broken only by the connection timeout.
-Fix:          service layer: use the transaction's own manager,
-              `await this.platformAdmin.isPlatformAdminTx(manager, { userId: existing.userId })`
-              (core.is_active_platform_admin(uuid) is SECURITY DEFINER and takes the user id, so the answer does not
-              depend on the session's tenant GUCs: same result, no second connection). Same pattern, rarer path:
-              AuthService.resetPassword (auth.service.ts:1109) calls isPlatformAdmin() inside runInTenantContext.
-              Generally: no service called with a `manager` may open its own transaction; a lint/test can fence it.
-Regression:   integration test: with PG_POOL_MAX_CONNECTIONS=4, 12 concurrent refreshes of distinct sessions all return
-              200 within 2 s; and a unit test that rotate() never calls isPlatformAdmin (only isPlatformAdminTx).
+Failure:      concurrent refresh requests → every API pool connection is held by a refresh transaction that waits for a
+              second connection → the whole API (all tenants) returns 500 / times out until the pool's connection
+              timeout, repeatedly while the requests keep coming
+Actor:        any authenticated staff-app session (no special role). Likely a single refresh token presented about
+              pool-size times concurrently is enough: each waiter holds a connection while it waits on the token row's
+              FOR UPDATE lock. Throttled to about 5 refreshes per minute per client IP, so one source cannot sustain it
+              alone; normal traffic (many phones resuming at a shift change) can also trigger it.
+Location:     packages/rab-server/src/engine/core-modules/auth/token/services/refresh-token.service.ts (rotate())
+Root cause:   RefreshTokenService.rotate() runs inside the refresh transaction and calls PlatformAdminService
+              .isPlatformAdmin(), which opens a NEW transaction on a second pool connection. Same pattern, rarer path:
+              AuthService.resetPassword calls isPlatformAdmin() inside runInTenantContext.
+Fix:          pending in its own PR (service layer: use the transaction's own manager, isPlatformAdminTx(manager, ...);
+              generally, no service called with a `manager` may open its own transaction).
+Regression:   an integration test that saturates a small pool with concurrent refreshes and expects every one to
+              succeed, plus a unit test that rotate() never opens a second transaction.
 ```
 
-Applied on the test host only (not committed: `engine/core-modules/auth/**` is in another lane's scope): 40 concurrent
-refreshes then returned 40 × 200, slowest 178 ms.
-
-```diff
--    if (!(await this.platformAdmin.isPlatformAdmin({ userId: existing.userId }))) {
-+    if (!(await this.platformAdmin.isPlatformAdminTx(manager, { userId: existing.userId }))) {
-```
+The "after" numbers in this document were measured with that fix applied on the test host only.
 
 ### 4.4 Proposed for the busy modules (written diffs, not applied)
 
@@ -297,12 +287,12 @@ indexes).
 - **The synthetic data is uniform:** one organisation, one workspace, one job role, names that all share "Perf Staff".
   Real selectivity (search, venue scopes) is better than here; organisation-level fan-out is not exercised.
 - **Sessions refresh together:** all staff sessions were created during the 40 s preparation, so their first refreshes
-  arrive in one burst about 11 minutes in (about 3,000 refreshes in 40 s). That burst is harsher than steady state, and it
-  is what exposed §4.3; it was kept identical in every run so the runs compare.
+  arrive together about 11 minutes in. That is harsher than steady state, and it is what exposed §4.3; it was kept
+  identical in every run so the runs compare.
 - **Not covered:** the web console's own rendering, WebSockets / realtime (off in production), push (off), mobile network
   latency, a second API instance, PgBouncer (not part of the deployment).
-- **The test host's API ran fixes that are not on `main`:** the index migration (#312), and the two proposed diffs in
-  §4.1 and §4.3. The "after" numbers hold only once all three land.
+- **The test host's API ran fixes that are not on `main`:** the index migration (#312), the proposed diff in §4.1 and the
+  pending fix of §4.3. The "after" numbers hold only once all three land.
 
 ## 7. Reproduce
 
