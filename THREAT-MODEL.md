@@ -10387,6 +10387,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
     That decision is made on the STORED queue, re-read under the store's lock, never on memory alone: if start-up could
     not read secure storage (memory empty) or the queue is unreadable, logout shows the guard and deletes nothing
     unless the staff member explicitly discards (security review L3).
+    If that explicit discard itself fails (broken store), logout still runs; whatever could not be deleted stays keyed
+    to that user (re-review Low).
   - *Server text in the UI.* Refusals are shown by code through `offline_messages.dart`; server text is never shown.
 - **Still off, by construction:** the controller is created per staff session but `mayQueue` needs the build flag,
   `offline.enabled == true` from the server, a fresh ticket from this boot and an available device key; the shipped

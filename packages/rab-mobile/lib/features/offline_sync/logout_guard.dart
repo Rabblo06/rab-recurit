@@ -59,8 +59,7 @@ Future<void> logoutWithOfflineGuard(
   );
   switch (choice) {
     case _GuardChoice.discard:
-      await offline.discardAll();
-      await logout();
+      await discardThenLogout(offline, logout);
     case _GuardChoice.send:
       await offline.syncNow(userInitiated: true);
       if (await offline.clearForLogout()) {
@@ -73,4 +72,19 @@ Future<void> logoutWithOfflineGuard(
     case _GuardChoice.stay || null:
       return;
   }
+}
+
+/// The staff member chose to discard. A broken store must never trap them signed in (re-review Low): if the discard
+/// itself fails, logout still runs. Whatever could not be deleted stays keyed to this user (never readable by another
+/// account) and shows again if they sign back in.
+Future<void> discardThenLogout(
+  OfflineSyncController offline,
+  Future<void> Function() logout,
+) async {
+  try {
+    await offline.discardAll();
+  } catch (error) {
+    debugPrint('Offline queue discard failed, logging out anyway: $error');
+  }
+  await logout();
 }
