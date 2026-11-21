@@ -224,6 +224,26 @@ void main() {
       },
     );
 
+    test(
+      'the rooted-phone hint is recorded on the entry (a flag, never a refusal)',
+      () async {
+        final c = OfflineSyncController(
+          userId: 'user-r',
+          bootClock: boot,
+          signer: signer,
+          buildFlag: true,
+          rootedSignal: () => true,
+        );
+        await c.ingestActive(active(), fetchDuration: Duration.zero);
+        final result = await clockIn(c);
+        expect(result.queued, isTrue);
+        expect(result.punch!.entry.integrity.rootedSignal, isTrue);
+        expect(result.punch!.entry.toWireJson()['integrity'], {
+          'rootedSignal': true,
+        });
+      },
+    );
+
     test('clientSeq increases across captures', () async {
       final c = await enabled();
       final a = await clockIn(c);

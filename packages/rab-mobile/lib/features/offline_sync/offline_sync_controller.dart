@@ -9,6 +9,7 @@ import '../../core/push/push_device_store.dart';
 import '../../core/services/location_service.dart';
 import 'boot_clock.dart';
 import 'entry_signer.dart';
+import 'integrity_signal.dart' as integrity;
 import 'offline_config.dart';
 import 'offline_entry.dart';
 import 'offline_messages.dart';
@@ -57,11 +58,13 @@ class OfflineSyncController extends ChangeNotifier {
     OfflineQueueStore? store,
     BootClock? bootClock,
     OfflineEntrySigner? signer,
+    bool Function()? rootedSignal,
     bool? buildFlag,
     DateTime Function()? deviceNow,
   }) : _store = store ?? OfflineQueueStore(),
        _bootClock = bootClock ?? const PlatformBootClock(),
        _signer = signer ?? const UnavailableEntrySigner(),
+       _rootedSignal = rootedSignal ?? integrity.rootedSignal,
        _buildFlag = buildFlag ?? kOfflineAttendanceBuildFlag,
        _deviceNow = deviceNow ?? DateTime.now {
     ready = _restore();
@@ -71,6 +74,7 @@ class OfflineSyncController extends ChangeNotifier {
   final OfflineQueueStore _store;
   final BootClock _bootClock;
   final OfflineEntrySigner _signer;
+  final bool Function() _rootedSignal;
   final bool _buildFlag;
   final DateTime Function() _deviceNow;
 
@@ -258,7 +262,7 @@ class OfflineSyncController extends ChangeNotifier {
         punchBootId: reading.bootId,
         punchBootMs: reading.elapsedMs,
         deviceWallClockAt: deviceWallClockIso(_deviceNow()),
-        ticketDeviceWallClockAt: ticket.deviceWallClockAt,
+        integrity: OfflineIntegrity(rootedSignal: _rootedSignal()),
         qrToken: qrToken,
         location: location == null
             ? null
