@@ -10315,3 +10315,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   command or migration that sets it to true.
 - **Tests.** `env.validation.offline-attendance.spec.ts`: default false, strict parsing, production + true refused through
   `validate()`, no approval constant in env.validation.ts, looser limits refused, stricter ones accepted.
+- **Security review fix (2026-11-21).** The refusal also covers a production runtime that NODE_ENV does not announce:
+  `RAB_RUNTIME_ENV=production`, `DB_TARGET=production` or the database URL policy (`isProductionRuntime`, the same signals
+  as the rate-limit switch) with `OFFLINE_ATTENDANCE_ENABLED=true` refuses to boot even with NODE_ENV development or unset.
+  `OFFLINE_CLOCK_SKEW_FLAG_SECONDS` is capped at 300 (the design's 5 minutes is the loosest). Tests added for both signals.

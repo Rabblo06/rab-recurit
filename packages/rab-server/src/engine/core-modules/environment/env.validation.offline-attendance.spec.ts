@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { EnvironmentVariables } from './environment-variables';
-import { productionConfigurationProblems, validate } from './env.validation';
+import { offlineAttendanceRuntimeProblem, productionConfigurationProblems, validate } from './env.validation';
 
 /**
  * M4 offline clock-in, owner HARD RULE (2026-11-21): offline stays OFF everywhere until M5 payroll adjustments exist and
@@ -78,6 +78,7 @@ describe('OFFLINE_ATTENDANCE_ENABLED (M4 global kill switch; owner HARD RULE: of
     ['OFFLINE_SYNC_MAX_DELAY_HOURS', '73'],
     ['OFFLINE_SYNC_MAX_BATCH', '26'],
     ['OFFLINE_CLOCK_SKEW_FLAG_SECONDS', '29'],
+    ['OFFLINE_CLOCK_SKEW_FLAG_SECONDS', '301'],
     ['OFFLINE_SYNC_MAX_BATCH', '2.5'],
   ])('%s=%s (looser than the owner-approved value, or not a whole number) refuses to boot', (key, value) => {
     expect(() => validate({ ...base, [key]: value })).toThrow(new RegExp(key));
@@ -86,5 +87,24 @@ describe('OFFLINE_ATTENDANCE_ENABLED (M4 global kill switch; owner HARD RULE: of
   it('a stricter limit is accepted', () => {
     const env = validate({ ...base, OFFLINE_MAX_CAPTURE_AGE_HOURS: '8', OFFLINE_SYNC_MAX_DELAY_HOURS: '24', OFFLINE_SYNC_MAX_BATCH: '10' });
     expect([env.OFFLINE_MAX_CAPTURE_AGE_HOURS, env.OFFLINE_SYNC_MAX_DELAY_HOURS, env.OFFLINE_SYNC_MAX_BATCH]).toEqual([8, 24, 10]);
+  });
+
+  it.each([
+    ['RAB_RUNTIME_ENV', 'production'],
+    ['DB_TARGET', 'production'],
+    ['RAB_RUNTIME_ENV', ' Production '],
+  ])('a production runtime announced only by %s=%p (NODE_ENV development or unset) also refuses true', (key, value) => {
+    expect(() => validate({ ...base, [key]: value, OFFLINE_ATTENDANCE_ENABLED: 'true' })).toThrow(/OFFLINE_ATTENDANCE_ENABLED=true is not allowed in production/);
+    expect(() => validate({ ...base, NODE_ENV: 'development', [key]: value, OFFLINE_ATTENDANCE_ENABLED: 'true' })).toThrow(
+      /OFFLINE_ATTENDANCE_ENABLED=true is not allowed in production/,
+    );
+  });
+
+  it('offlineAttendanceRuntimeProblem: null outside a production runtime and when the switch is off', () => {
+    const on = validate({ ...base, NODE_ENV: 'test', OFFLINE_ATTENDANCE_ENABLED: 'true' });
+    expect(offlineAttendanceRuntimeProblem(on, { NODE_ENV: 'test' })).toBeNull();
+    expect(offlineAttendanceRuntimeProblem(on, { DB_TARGET: 'production' })).toMatch(/not allowed in production/);
+    expect(offlineAttendanceRuntimeProblem(on, { RAB_RUNTIME_ENV: 'production' })).toMatch(/not allowed in production/);
+    expect(offlineAttendanceRuntimeProblem(validate({ ...base }), { DB_TARGET: 'production' })).toBeNull();
   });
 });

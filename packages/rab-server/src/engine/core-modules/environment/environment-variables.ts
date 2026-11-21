@@ -1878,12 +1878,12 @@ export class EnvironmentVariables {
   @Max(25)
   OFFLINE_SYNC_MAX_BATCH: number = 25;
 
-  /** M4 DESIGN §4.5: phone wall clock vs anchored punch time beyond this many seconds raises `clock_skew` (a flag, never a time). */
+  /** M4 DESIGN §4.5: phone wall clock vs anchored punch time beyond this many seconds raises `clock_skew` (a flag, never a time); 30-300, the design's 5 minutes being the loosest. */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(30)
-  @Max(3600)
+  @Max(300)
   OFFLINE_CLOCK_SKEW_FLAG_SECONDS: number = 300;
 
   /** The pre-shift roster+QR report is generated/emailed this many minutes before `shift.startsAt`. */
