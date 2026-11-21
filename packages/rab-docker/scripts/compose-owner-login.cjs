@@ -511,7 +511,8 @@ const DATABASE_OPT_INS = Object.freeze(['CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREW
 /**
  * Keys that belong in database.env only (read by db-setup, rab-api and rab-worker alike), so runtime.env refuses them: the
  * opt-ins above plus the database CA. Kept apart from DATABASE_OPT_INS because the production compose file commits the CA
- * keys as bare optional entries (no value), which the "never a compose value" model check on the opt-ins would refuse.
+ * keys as optional entries with an EMPTY default (`${PG_SSL_CA_CERT:-}`, `${PG_SSL_CA_CERT_PATH:-}`; an empty value is
+ * unset to every reader), which the "never a compose value" model check on the opt-ins would refuse.
  */
 const DATABASE_ENV_ONLY = Object.freeze([...DATABASE_OPT_INS, 'PG_SSL_CA_CERT', 'PG_SSL_CA_CERT_PATH']);
 /**
@@ -1599,7 +1600,10 @@ function databaseExpressionProblems(rel, text) {
     // `$$` is Compose's escape for a literal `$` (db-setup's wait-for-db wrapper reads PG_DATABASE_URL in its own shell):
     // only an unescaped `${...}` is an interpolation.
     const u = l.split('$$').join('');
-    if ((u.includes('${PG_DATABASE_URL') || u.includes('${PG_DATABASE_APP_PASSWORD')) && !urlLine.test(l)) {
+    // The variable names exactly (`(?![A-Za-z0-9_])`): ${PG_DATABASE_URL_IS_DIRECT:-}, another variable (a boolean, no
+    // credential), is not an interpolation of PG_DATABASE_URL; every Compose form of the two (${V}, ${V:-x}, ${V-x}, ${V:?x},
+    // ${V?x}, ${V:+x}, ${V+x}) still is.
+    if (/\$\{(?:PG_DATABASE_URL|PG_DATABASE_APP_PASSWORD)(?![A-Za-z0-9_])/.test(u) && !urlLine.test(l)) {
       problems.push(`${rel}: interpolates \${PG_DATABASE_URL...} or \${PG_DATABASE_APP_PASSWORD...} other than as the committed line PG_DATABASE_URL: ${APP_URL_EXPR}`);
     }
   }

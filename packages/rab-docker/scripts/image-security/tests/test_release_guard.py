@@ -170,6 +170,13 @@ class Guard(unittest.TestCase):
         self.assertIn('not on origin/main', out)
         rc, out = self.environment(good_env(), event='release', ref='refs/tags/v1.0.0')
         self.assertEqual(rc, 1)
+        # Unicode digits (Arabic-Indic one, fullwidth two) are not a release tag: RELEASE_TAG uses [0-9], not \d.
+        for ref in ('refs/tags/rab/v\u0661.0.0', 'refs/tags/rab/v1.\uff12.0'):
+            rc, out = self.environment(good_env(), event='release', ref=ref)
+            self.assertEqual(rc, 1, ref)
+            self.assertIn('is not refs/tags/rab/vX.Y.Z', out)
+        rc, out = self.candidate(good_run(event='release', head_branch='rab/v\u0661.2.3'))
+        self.assertEqual(rc, 1)
 
     def test_other_events_never_publish(self):
         rc, out = self.environment(good_env(), event='push')

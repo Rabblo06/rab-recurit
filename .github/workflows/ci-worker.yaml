@@ -23,7 +23,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -42,7 +43,7 @@ jobs:
       # checkout and built by the restricted-migrator fresh install; tests get TEST_DATABASE_URL (crewflow_app),
       # TEST_DATABASE_URL_UNPOOLED (bootstrap superuser) and TEST_DATABASE_CREWFLOW_URL (crewflow, provisioner tests).
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # P5 (PDF renderer migration): the Worker renders PDFs natively. Fails if @rab/worker or @rab/server declares or
@@ -121,7 +122,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -135,7 +137,7 @@ jobs:
       PHASE_D_SQL_APPROVED: 'true'
       PHASE_D_D5: before
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -209,7 +211,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -221,7 +224,7 @@ jobs:
       WORKER_SCHEDULER: bullmq
       HWS_RUNTIME_ENABLED: 'false'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -261,7 +264,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -273,7 +277,7 @@ jobs:
       WORKER_SCHEDULER: bullmq
       CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
