@@ -2,7 +2,7 @@ import { isCustomRoleKey } from '@rab/shared';
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { Role, UserRole } from '../../../modules/identity/entities';
+import { Role, UserRole } from '../identity/entities';
 import { ManagerProfile, ManagerVenue } from '../../../modules/manager/entities';
 import { AuthContext } from '../tenant/auth-context.interface';
 
