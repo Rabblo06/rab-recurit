@@ -298,10 +298,17 @@ final class OfflinePunchQueue: ObservableObject {
 
     /// D18: the person explicitly discarded everything saved on this phone.
     /// Discarded actions are never sent and the manager is not told.
-    func discardAll() {
+    ///
+    /// Refused (false, nothing cleared) while the stored queue is unreadable:
+    /// the person cannot see what it holds, so it is never wiped on their
+    /// behalf; it stays under this user's id (and ages out server-side).
+    @discardableResult
+    func discardAll() -> Bool {
+        reload()
+        guard !unreadable else { return false }
         storage.clearQueue()
         items = []
-        unreadable = false
+        return true
     }
 
     private func commit(_ next: [OfflineQueuedPunch], or failure: AppendError) throws {
