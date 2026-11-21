@@ -10354,3 +10354,20 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Report PDF access checks report.view on the file transaction, no second pool connection (branch fix/report-file-policy-single-connection, 2026-11-21; no SQL)
+
+- **Finding (§5.8, MEDIUM, availability):** a holder of `report.view` making concurrent report-PDF downloads → each
+  download's transaction (FilesController `deliver()`) held one pool connection while `ReportFilePolicy.canRead`
+  (`packages/rab-server/src/modules/attendance/files/report-file.policy.ts:32`) asked `PermissionsService.userHasPermission()`,
+  which opens a second transaction on a second connection → with about pool-size concurrent downloads the API
+  instance's pool deadlocks until the connection timeout, for every tenant. Same pattern as the refresh finding above
+  (load test, PR #313 §4.3); narrower actor (manager tier with `report.view`).
+- **Root cause / fix:** a method handed the caller's `manager` opened its own transaction. It now calls
+  `userHasPermissionTx(manager, ctx, REPORT_VIEW)`: same identity, same tenant context, same answer (override first,
+  then role grants visible under RLS, memoised per transaction). No SQL changed.
+- **Regression:** `modules/attendance/__tests__/report-file-policy.single-connection.spec.ts`: the real FilesController,
+  FileAccessRegistry, PermissionsService and ReportFilePolicy over a fake one-connection pool that throws on any checkout
+  while a transaction is open: download and serve succeed in one transaction; without `report.view`, and out of
+  venue/owner scope, the file is still 404 and the denial audited; the previews call site stays on one connection. All
+  five fail against the old line.
