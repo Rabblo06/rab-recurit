@@ -1,10 +1,12 @@
 import { Injectable } from '@nestjs/common';
 
+import { EnvironmentService } from '../environment/environment.service';
 import { SecretEncryptionService } from '../secret-encryption/secret-encryption.service';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { PushDevice } from './entities/push-device.entity';
 import { deactivateAllPushDevicesForUser, deactivatePushDeviceForUser } from './push-device-deactivation';
+import { pushTokenFingerprint, pushTokenFingerprintKey } from './push-token-fingerprint';
 
 export interface RegisterDeviceParams {
   deviceId: string;
@@ -23,10 +25,15 @@ export interface RegisterDeviceParams {
  */
 @Injectable()
 export class PushDeviceService {
+  private readonly fingerprintKey: Buffer;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly secretEncryption: SecretEncryptionService,
-  ) {}
+    env: EnvironmentService,
+  ) {
+    this.fingerprintKey = pushTokenFingerprintKey(env.get('APP_SECRET'));
+  }
 
   /**
    * Upserts on `(userId, deviceId)` — a registration refresh/replacement (a rotated FCM token,
@@ -36,6 +43,7 @@ export class PushDeviceService {
   async register(ctx: AuthContext, params: RegisterDeviceParams): Promise<{ id: string }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const encrypted = this.secretEncryption.encrypt(params.pushToken);
+      const fingerprint = pushTokenFingerprint(this.fingerprintKey, params.pushToken);
       const existing = await manager.findOne(PushDevice, { where: { userId: ctx.userId, deviceId: params.deviceId } });
       const now = new Date();
       // CF-35: one physical device delivers for one account at a time. When B signs in on a phone A used, A's
@@ -45,6 +53,18 @@ export class PushDeviceService {
         .update(PushDevice)
         .set({ active: false, deactivatedAt: now, deactivatedReason: 'device_registered_by_another_account' })
         .where('device_id = :deviceId AND user_id <> :userId AND active = true', { deviceId: params.deviceId, userId: ctx.userId })
+        .execute();
+
+      // C1 review F2: the same provider token registered by ANOTHER account of this organisation (a shared or second-hand
+      // phone reinstalled with a new installation id, so the device-id rule above does not match). The provider delivers a
+      // token to one phone, so the other account's row would send its notifications to whoever holds the phone now.
+      // Matched by keyed fingerprint (no decryption); organisation-scoped by FORCE RLS like the rule above. A token reused in
+      // ANOTHER organisation is not visible here (residual, THREAT-MODEL).
+      await manager
+        .createQueryBuilder()
+        .update(PushDevice)
+        .set({ active: false, deactivatedAt: now, deactivatedReason: 'token_registered_by_another_account' })
+        .where('token_fingerprint = :fingerprint AND user_id <> :userId AND active = true', { fingerprint, userId: ctx.userId })
         .execute();
 
       // C1b (D5): the SAME user's other active row carrying this exact provider token is the same phone under an older
@@ -70,6 +90,7 @@ export class PushDeviceService {
         await manager.update(PushDevice, { id: existing.id }, {
           platform: params.platform,
           pushTokenEncrypted: encrypted,
+          tokenFingerprint: fingerprint,
           appVersion: params.appVersion ?? null,
           active: true,
           lastSeenAt: now,
@@ -85,6 +106,7 @@ export class PushDeviceService {
         deviceId: params.deviceId,
         platform: params.platform,
         pushTokenEncrypted: encrypted,
+        tokenFingerprint: fingerprint,
         appVersion: params.appVersion ?? null,
         registeredAt: now,
         lastSeenAt: now,

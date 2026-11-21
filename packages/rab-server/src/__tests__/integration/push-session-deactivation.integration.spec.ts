@@ -25,7 +25,9 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
  *      deactivates every device;
  *  (c) every session revoked (suspension / sign-out-everywhere / password reset) and organisation suspension
  *      deactivate every affected registration;
- *  (d) the same phone re-registering under a new installation id supersedes the old row (no double delivery).
+ *  (d) the same phone re-registering under a new installation id supersedes the old row (no double delivery);
+ *  (e) C1 review F2: the same provider token registered by ANOTHER account of the organisation supersedes the earlier
+ *      account's row (keyed fingerprint, no decryption); another organisation's row is never touched (RLS).
  */
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -238,5 +240,52 @@ describeIfDb('C1b push device deactivation on logout / revocation / suspension (
     expect(await active(staff.userId, legacyHexId)).toBe(false);
     expect(await reason(staff.userId, legacyHexId)).toBe('superseded_by_new_device_id');
     expect(await active(staff.userId, otherPhone)).toBe(true); // a different token = a different phone
+  });
+
+  const fingerprintOf = async (userId: string, deviceId: string) =>
+    (await owner.query(`SELECT token_fingerprint FROM core.push_device WHERE user_id = $1 AND device_id = $2`, [userId, deviceId]))[0]?.token_fingerprint as Buffer | null;
+
+  it('(e) F2: the same provider token registered by another account of the organisation supersedes the first account’s row', async () => {
+    const first = await factory.createStaff(org, { owner: manager, label: 'c1push-e1' });
+    const second = await factory.createStaff(org, { owner: manager, label: 'c1push-e2' });
+    const pushToken = `fcm-${randomUUID()}`;
+    const firstDevice = randomUUID();
+    const secondDevice = randomUUID(); // a reinstall: a new installation id, so the device-id rule (CF-35) does not match
+    expect((await register((await factory.loginTokens(first)).accessToken, firstDevice, pushToken)).status).toBeLessThan(300);
+    expect((await register((await factory.loginTokens(second)).accessToken, secondDevice, pushToken)).status).toBeLessThan(300);
+
+    expect(await active(first.userId, firstDevice)).toBe(false);
+    expect(await reason(first.userId, firstDevice)).toBe('token_registered_by_another_account');
+    expect(await active(second.userId, secondDevice)).toBe(true);
+    // Stored as a 32-byte keyed fingerprint, identical for the same token, never the token itself.
+    const fp = await fingerprintOf(second.userId, secondDevice);
+    expect(fp).toHaveLength(32);
+    expect((await fingerprintOf(first.userId, firstDevice))!.equals(fp!)).toBe(true);
+    expect(fp!.toString('utf8')).not.toContain(pushToken);
+  });
+
+  it('(e) F2: a different token of another account is untouched, and re-registering one’s own device never deactivates it', async () => {
+    const a = await factory.createStaff(org, { owner: manager, label: 'c1push-e3' });
+    const b = await factory.createStaff(org, { owner: manager, label: 'c1push-e4' });
+    const aTokens = await factory.loginTokens(a);
+    const aDevice = randomUUID();
+    const aToken = `fcm-${randomUUID()}`;
+    await register(aTokens.accessToken, aDevice, aToken);
+    await register((await factory.loginTokens(b)).accessToken, randomUUID()); // another token
+    await register(aTokens.accessToken, aDevice, aToken); // a refresh of the same registration
+    expect(await active(a.userId, aDevice)).toBe(true);
+  });
+
+  it('(e) F2 abuse: the same token registered in ANOTHER organisation never touches this organisation’s row (RLS)', async () => {
+    const victim = await factory.createStaff(org, { owner: manager, label: 'c1push-e5' });
+    const other = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'c1push-e-org' });
+    const outsider = await factory.createStaff(other.organisation, { owner: other.managers[0]!, label: 'c1push-e6' });
+    const pushToken = `fcm-${randomUUID()}`;
+    const victimDevice = randomUUID();
+    await register((await factory.loginTokens(victim)).accessToken, victimDevice, pushToken);
+    const outsiderDevice = randomUUID();
+    expect((await register((await factory.loginTokens(outsider)).accessToken, outsiderDevice, pushToken)).status).toBeLessThan(300);
+    expect(await active(victim.userId, victimDevice)).toBe(true);
+    expect(await active(outsider.userId, outsiderDevice)).toBe(true);
   });
 });
