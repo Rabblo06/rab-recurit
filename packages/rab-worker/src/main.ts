@@ -61,7 +61,7 @@ import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDe
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
-import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
+import { describePdfRendering, retiredPdfRendererNotice } from './queues/rab-reports/render-pdf.util';
 import { assertQueueRegistryValid } from './core/scheduler/queue-registry';
 import { buildSchedulerPlan, resolveWorkerSchedulerRole } from './core/scheduler/scheduler-plan';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
@@ -435,17 +435,17 @@ async function bootstrap(): Promise<void> {
       ? 'account-invite cleanup: WORKER_INVITE_AUTO_DELETE_ENABLED=true — automatic deletion of expired invited accounts is ENABLED (non-production only)'
       : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the cleanup cycle does nothing (no invite is expired, no account is deleted)',
   );
-  // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
+  // PDF renderer P1: every report kind renders natively (PDF_RENDERER is retired, XM-05: a leftover value is reported, never applied).
   // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
   // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start, and so
   // does a pool whose threads' heap caps would not fit PDF_NATIVE_MEMORY_BUDGET_MB (review M-3, fail closed).
   try {
     logger.log(describePdfRendering());
-    if (pdfRendererMode() === 'native') {
-      const plan = pdfNativeMemoryPlan();
-      logger.log(`native PDF render pool: ${plan.size} thread(s) × ${plan.heapLimitMb} MB heap cap ≤ PDF_NATIVE_MEMORY_BUDGET_MB=${plan.budgetMb}`);
-      prewarmRenderPool();
-    }
+    const retiredRenderer = retiredPdfRendererNotice();
+    if (retiredRenderer) logger.warn(retiredRenderer);
+    const plan = pdfNativeMemoryPlan();
+    logger.log(`native PDF render pool: ${plan.size} thread(s) × ${plan.heapLimitMb} MB heap cap ≤ PDF_NATIVE_MEMORY_BUDGET_MB=${plan.budgetMb}`);
+    prewarmRenderPool();
   } catch (error) {
     refuseStartup(error);
   }

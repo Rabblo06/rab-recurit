@@ -41,21 +41,15 @@ const logger = new Logger('RenderReportPdf');
 // ─── Renderer selection (P5 / owner decision D10) ─────────────────────────────────────────────────────────────────────
 
 /**
- * `PDF_RENDERER` is kept for ONE release after P5 (D10) and accepts only `native` (or unset / empty, which mean
- * native). `chromium` is refused with a message naming the rollback: there is no Chromium in this image, so the only way
- * back is redeploying the previous (P4) image, never a switch. Anything else is refused as before. The Worker's env
- * validation (`EnvironmentVariables.PDF_RENDERER`) applies the same rule at boot. After that release the key is deleted.
+ * Phase X XM-05: `PDF_RENDERER` is retired. Owner decision D10 kept it for ONE release after P5 (rab/v0.4.0), accepting
+ * only `native`; every report renders natively and there is no browser in the image, so the key no longer selects
+ * anything and is neither read nor validated. A leftover value is reported once at boot (a rollback to Chromium is a
+ * redeploy of an older image, never a switch) and otherwise ignored.
  */
-export const PDF_RENDERER_MODES = Object.freeze(['native'] as const);
-export type PdfRendererMode = (typeof PDF_RENDERER_MODES)[number];
-
-export function pdfRendererMode(env: NodeJS.ProcessEnv = process.env): PdfRendererMode {
+export function retiredPdfRendererNotice(env: NodeJS.ProcessEnv = process.env): string | null {
   const raw = env.PDF_RENDERER;
-  if (raw === undefined || raw === '' || raw === 'native') return 'native';
-  if (raw === 'chromium') {
-    throw new Error('PDF_RENDERER=chromium is retired (P5: this Worker has no browser); roll back by redeploying the previous Worker image');
-  }
-  throw new Error('PDF_RENDERER must be exactly "native" (or unset)');
+  if (raw === undefined || raw === '') return null;
+  return 'PDF_RENDERER is retired and ignored: every report renders natively (no browser in this image). Remove it from the environment.';
 }
 
 /**
@@ -74,9 +68,8 @@ export const NATIVE_KINDS: ReadonlySet<ReportDocument['kind']> = new Set<ReportD
   'approved-shift-statement',
 ]);
 
-/** One log line at Worker boot; also re-validates PDF_RENDERER (throws on a bad or retired value). */
-export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): string {
-  pdfRendererMode(env);
+/** One log line at Worker boot. */
+export function describePdfRendering(): string {
   return `PDF rendering: native for ${[...NATIVE_KINDS].join(', ')}; no browser`;
 }
 
@@ -89,8 +82,8 @@ export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): stri
  * retry path handles it (warning log with the code; for the statement, `statement_error` and the SHIFT_STATEMENT_FAILED
  * audit row carry it).
  */
-export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
-  pdfRendererMode(env);
+export async function renderReportPdf(doc: ReportDocument, _env?: NodeJS.ProcessEnv): Promise<Buffer> {
+  // `_env` is accepted and ignored: it carried PDF_RENDERER, retired (XM-05); callers and the PDF harness still pass it.
   if (!NATIVE_KINDS.has(doc.kind)) {
     logger.error(`refused to render an unknown report kind`);
     throw new Error(`no native layout for report kind ${String((doc as { kind?: unknown }).kind)}`);

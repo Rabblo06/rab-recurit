@@ -12,38 +12,33 @@ import {
   NATIVE_KINDS,
   PDF_RENDER_STEP_TIMEOUT_MS,
   PdfRenderTimeoutError,
-  pdfRendererMode,
   renderReportPdf,
   ReportDocument,
+  retiredPdfRendererNotice,
 } from './render-pdf.util';
 
 /**
  * PDF renderer P5 — native only, at the data-in seam `renderReportPdf(doc)` (owner decisions D1, T3, D10).
- * PDF_RENDERER: unset / empty / "native" → native; "chromium" is refused (retired: no browser in the Worker); anything
- * else is refused before the renderer runs. No browser package is ever loaded.
+ * PDF_RENDERER is retired (Phase X XM-05): no value selects anything; a leftover one is reported at boot. No browser
+ * package is ever loaded.
  */
 jest.setTimeout(60_000);
 
 const data = FINAL_TIMESHEET_CASES['one-page']!;
 const doc: ReportDocument = { kind: 'final-timesheet', data };
 
-describe('pdfRendererMode (native only, strict)', () => {
-  it.each([[{}], [{ PDF_RENDERER: '' }], [{ PDF_RENDERER: 'native' }]])('native for %p', (env) => {
-    expect(pdfRendererMode(env)).toBe('native');
+describe('PDF_RENDERER is retired (XM-05)', () => {
+  it.each([[{}], [{ PDF_RENDERER: '' }]])('no notice when it is not set (%p)', (env) => {
+    expect(retiredPdfRendererNotice(env)).toBeNull();
   });
 
-  it('refuses chromium and names the rollback', () => {
-    expect(() => pdfRendererMode({ PDF_RENDERER: 'chromium' })).toThrow(/retired .*redeploying the previous Worker image/);
-  });
-
-  it.each([' ', 'Native', 'NATIVE', ' native', 'native ', 'chrome', 'pdfkit', 'true', '1', 'chromium,native'])('refuses %p', (value) => {
-    expect(() => pdfRendererMode({ PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly "native"/);
+  it.each(['native', 'chromium', ' ', 'anything'])('a leftover PDF_RENDERER=%p is reported, never applied', (value) => {
+    expect(retiredPdfRendererNotice({ PDF_RENDERER: value })).toMatch(/PDF_RENDERER is retired and ignored: every report renders natively/);
   });
 
   it('every report kind is native, and the boot line says so', () => {
     expect([...NATIVE_KINDS].sort()).toEqual(['approved-shift-statement', 'final-timesheet', 'pre-shift']);
-    expect(describePdfRendering({})).toBe('PDF rendering: native for pre-shift, final-timesheet, approved-shift-statement; no browser');
-    expect(() => describePdfRendering({ PDF_RENDERER: 'chromium' })).toThrow(/retired/);
+    expect(describePdfRendering()).toBe('PDF rendering: native for pre-shift, final-timesheet, approved-shift-statement; no browser');
   });
 });
 
@@ -103,9 +98,10 @@ describe('renderReportPdf', () => {
     expect(native).not.toHaveBeenCalled();
   });
 
-  it.each(['chromium', ' ', 'Native'])('PDF_RENDERER=%p: rejects before the renderer runs', async (value) => {
-    await expect(renderReportPdf(doc, { PDF_RENDERER: value })).rejects.toThrow(/PDF_RENDERER/);
-    expect(native).not.toHaveBeenCalled();
+  it('a leftover PDF_RENDERER=chromium selects nothing: the native renderer runs (there is no browser to switch to)', async () => {
+    native.mockResolvedValue(Buffer.from('%PDF-stub'));
+    await renderReportPdf(doc, { PDF_RENDERER: 'chromium' });
+    expect(native).toHaveBeenCalledWith(doc);
   });
 
   it('the render pool deadline error (PdfRenderTimeoutError, step "native-render") reaches the job unchanged', async () => {
