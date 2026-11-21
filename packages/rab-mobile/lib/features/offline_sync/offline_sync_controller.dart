@@ -428,13 +428,17 @@ class OfflineSyncController extends ChangeNotifier {
   /// Sends pending entries to `POST /attendance/me/sync` (DESIGN §3.5): `clientSeq` order, at most 25 per request,
   /// one request at a time (single-flight; a call during a run shares it).
   ///
+  /// - Never from a build without the offline flag (it stays fully inert, even with leftovers), and never while the
+  ///   signed-in session belongs to a different user than this queue (checked before every request: the account-switch
+  ///   window, security review L6).
   /// - 200: per item, `applied` / `duplicate` / `replayed` entries are deleted, `rejected` ones are kept (with their
-  ///   code) until dismissed, and an entry the response does not mention stays pending.
-  /// - 400 / 413 for a whole batch (a client bug): resent one at a time; an entry refused alone is parked
+  ///   code) until dismissed. The run STOPS at the first entry the response leaves unanswered, so nothing after it can
+  ///   overtake it (security review L5); it is retried on the next run.
+  /// - 400 / 413 for a whole batch (a client bug): resent one at a time, in order; an entry refused alone is parked
   ///   ("Could not send. Contact support") and never resent.
   /// - 401: the shared [ApiClient] already refreshed the token and retried once; a second 401 means the session
   ///   ended, so this stops (entries stay, keyed to this user).
-  /// - 429: waits for `Retry-After` (60 s when absent), even for "Send now".
+  /// - 429: waits for `Retry-After` (60 s when absent, at most 15 min), even for "Send now".
   /// - anything else (5xx, 403, 404, network, timeout, a malformed body): exponential backoff from 1 s to 5 min.
   ///   [userInitiated] ("Send now") skips this backoff, never the 429 wait.
   Future<void> syncNow({bool userInitiated = false}) =>
@@ -442,9 +446,9 @@ class OfflineSyncController extends ChangeNotifier {
 
   Future<void> _drain(bool userInitiated) async {
     final client = _client;
-    if (client == null) return;
+    if (client == null || !_buildFlag) return;
     await ready;
-    if (_disposed || unreadable) return;
+    if (_disposed || _unreadable) return;
     final now = _deviceNow();
     if (_retryAfterUntil != null && now.isBefore(_retryAfterUntil!)) return;
     if (!userInitiated &&
@@ -459,22 +463,13 @@ class OfflineSyncController extends ChangeNotifier {
     }
     _notify(); // isSyncing
     var acknowledged = false;
-    // An entry the server left unanswered is not resent in the same run.
-    final tried = <String>{};
     try {
       while (!_disposed) {
-        final batch = pending
-            .where((e) => !tried.contains(e.idempotencyKey))
-            .take(OfflineLimits.maxBatch)
-            .toList();
+        final batch = pending.take(OfflineLimits.maxBatch).toList();
         if (batch.isEmpty) break;
-        tried.addAll(batch.map((e) => e.idempotencyKey));
-        final progressed = await _send(
-          client,
-          batch,
-          () => acknowledged = true,
-        );
-        if (!progressed) break;
+        if (!await _sessionIsThisUser(client)) break;
+        final complete = await _send(client, batch, () => acknowledged = true);
+        if (!complete) break;
       }
       _failures = 0;
       _backoffUntil = null;
@@ -485,7 +480,16 @@ class OfflineSyncController extends ChangeNotifier {
     if (acknowledged && !_disposed) onApplied?.call();
   }
 
-  /// Sends one batch. True when at least one entry left the pending state.
+  Future<bool> _sessionIsThisUser(OfflineSyncClient client) async {
+    try {
+      return await client.sessionUserId() == userId;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Sends one batch. True when EVERY entry of it got a final answer (applied / duplicate / replayed / rejected, or
+  /// parked); false when at least one is still pending, which stops the run.
   Future<bool> _send(
     OfflineSyncClient client,
     List<QueuedPunch> batch,
@@ -504,16 +508,18 @@ class OfflineSyncController extends ChangeNotifier {
           await _setState(batch.single, QueuedPunchState.parked);
           return true;
         }
-        var progressed = false;
         for (final punch in batch) {
-          if (_disposed) break;
-          if (await _send(client, [punch], onAcknowledged)) progressed = true;
+          if (_disposed) return false;
+          if (!await _send(client, [punch], onAcknowledged)) return false;
         }
-        return progressed;
+        return true;
       }
       if (e.statusCode == 429) {
+        final wait = e.retryAfter ?? const Duration(seconds: 60);
         _retryAfterUntil = _deviceNow().add(
-          e.retryAfter ?? const Duration(seconds: 60),
+          wait > OfflineLimits.maxRetryAfter
+              ? OfflineLimits.maxRetryAfter
+              : wait,
         );
         throw const _StopSync();
       }
@@ -552,6 +558,7 @@ class OfflineSyncController extends ChangeNotifier {
     );
   }
 
+  /// Applies a 200's per-item outcomes. True when every entry of [batch] got a final answer.
   Future<bool> _applyResults(
     List<QueuedPunch> batch,
     SyncBatchResponse response,
@@ -562,23 +569,22 @@ class OfflineSyncController extends ChangeNotifier {
       for (final r in response.results)
         if (sent.contains(r.idempotencyKey)) r.idempotencyKey: r,
     };
-    var progressed = false;
+    var complete = true;
     final newNotices = <String>[];
     _entries = await _store.update(userId, (all) {
       final next = <QueuedPunch>[];
       for (final e in all) {
-        final result = e.isPending ? byKey[e.idempotencyKey] : null;
-        if (result == null) {
+        final inBatch = e.isPending && sent.contains(e.idempotencyKey);
+        final result = inBatch ? byKey[e.idempotencyKey] : null;
+        if (!inBatch) {
           next.add(e);
-        } else if (result.acknowledged) {
-          progressed = true;
+        } else if (result != null && result.acknowledged) {
           onAcknowledged();
           final at = result.appliedAt;
           if (result.flags.contains('clamped_to_schedule') && at != null) {
             newNotices.add(OfflineMessages.clamped(e.entry.type, at));
           }
-        } else if (result.rejected) {
-          progressed = true;
+        } else if (result != null && result.rejected) {
           next.add(
             e.withState(
               QueuedPunchState.rejected,
@@ -587,13 +593,15 @@ class OfflineSyncController extends ChangeNotifier {
             ),
           );
         } else {
-          next.add(e); // an outcome this build does not know: keep it pending
+          // Unanswered, or an outcome this build does not know: keep it pending and stop the run here.
+          complete = false;
+          next.add(e);
         }
       }
       return next;
     });
     notices.addAll(newNotices);
-    return progressed;
+    return complete;
   }
 
   void dismissNotice(String notice) {

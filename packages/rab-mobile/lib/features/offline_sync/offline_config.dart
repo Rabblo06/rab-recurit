@@ -46,6 +46,9 @@ abstract final class OfflineLimits {
   /// DESIGN §3.5: a 5xx or network failure backs off exponentially between these.
   static const Duration minBackoff = Duration(seconds: 1);
   static const Duration maxBackoff = Duration(minutes: 5);
+
+  /// A server `Retry-After` longer than this is capped (a bad or hostile value must not park the queue for days).
+  static const Duration maxRetryAfter = Duration(minutes: 15);
 }
 
 /// Diagnostics only (`appVersion` in an entry). Never used for any decision.

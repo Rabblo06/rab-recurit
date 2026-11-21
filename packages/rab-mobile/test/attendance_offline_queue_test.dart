@@ -24,7 +24,11 @@ void main() {
 
   late Map<String, String> secure;
   setUp(() {
-    secure = {'rab.accessToken': 'a', 'rab.refreshToken': 'r'};
+    secure = {
+      'rab.accessToken': 'a',
+      'rab.refreshToken': 'r',
+      'rab.sessionUserId': 'user-a',
+    };
     stubSecureStorageChannel(secure);
   });
   tearDown(clearSecureStorageChannel);
@@ -383,5 +387,107 @@ void main() {
       throwsArgumentError,
     );
     expect(s.punches, isEmpty);
+  });
+
+  group('security review L5: an online punch never overtakes saved ones', () {
+    Future<(AttendanceProvider, OfflineSyncController, List<String>)>
+    setUpSaved({required bool syncWorks}) async {
+      var enabled = true;
+      final posted = <String>[];
+      final api = ApiClient(
+        httpClient: MockClient((request) async {
+          final path = request.url.path;
+          if (path.endsWith('/attendance/me/active')) {
+            return http.Response(
+              jsonEncode({
+                'attendance': null,
+                'serverNow': '2026-11-21T09:30:00.000Z',
+                'offline': {'enabled': enabled},
+                'offlineTicket': 'tkt',
+              }),
+              200,
+            );
+          }
+          if (path.endsWith('/attendance/me/history')) {
+            return http.Response('[]', 200);
+          }
+          posted.add(path);
+          if (path.endsWith('/attendance/me/sync') && syncWorks) {
+            final entries =
+                ((jsonDecode(request.body) as Map)['entries'] as List)
+                    .cast<Map<String, dynamic>>();
+            return http.Response(
+              jsonEncode({
+                'results': [
+                  for (final e in entries)
+                    {
+                      'idempotencyKey': e['idempotencyKey'],
+                      'outcome': 'applied',
+                    },
+                ],
+              }),
+              200,
+            );
+          }
+          if (path.endsWith('/attendance/clock-out')) {
+            return http.Response(
+              jsonEncode({
+                ...attendanceJson(),
+                'status': 'clocked_out',
+                'clockOutAt': '2026-11-21T17:00:00.000Z',
+              }),
+              200,
+            );
+          }
+          throw http.ClientException('Connection refused');
+        }),
+      );
+      final offline = OfflineSyncController(
+        userId: 'user-a',
+        bootClock: FakeBootClock(),
+        signer: FakeEntrySigner(),
+        buildFlag: true,
+        client: OfflineSyncClient(api),
+      );
+      final provider = AttendanceProvider(api, offline: offline);
+      await provider.refreshActive();
+      await provider.clockIn('shift-1', qrToken: 'qr');
+      expect(offline.hasUnsent, isTrue);
+      // The server then switches offline off: the next punch can no longer be saved behind the first.
+      enabled = false;
+      await provider.refreshActive();
+      expect(offline.mayQueue, isFalse);
+      posted.clear();
+      return (provider, offline, posted);
+    }
+
+    test(
+      'saved punches still unsent: the punch is refused, never sent online out of order',
+      () async {
+        final (provider, offline, posted) = await setUpSaved(syncWorks: false);
+        final ok = await provider.clockOut(qrToken: 'qr-out');
+        expect(ok, isFalse);
+        expect(provider.errorMessage, OfflineMessages.sendSavedFirst);
+        expect(
+          posted.where((p) => p.endsWith('/attendance/clock-out')),
+          isEmpty,
+        );
+        expect(
+          posted.where((p) => p.endsWith('/attendance/me/sync')),
+          isNotEmpty,
+          reason: 'tried to send them first',
+        );
+      },
+    );
+
+    test(
+      'once the saved punches are sent, the punch goes online as usual',
+      () async {
+        final (provider, offline, posted) = await setUpSaved(syncWorks: true);
+        await provider.clockOut(qrToken: 'qr-out');
+        expect(offline.hasUnsent, isFalse);
+          expect(posted.last, endsWith('/attendance/clock-out'));
+      },
+    );
   });
 }

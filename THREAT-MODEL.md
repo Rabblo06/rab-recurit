@@ -10417,8 +10417,16 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
     (keyed by user id); the shared `ApiClient` attaches the current session's token, refreshes once on a 401 and never
     replays a request across a logout (CF-36 / P0.1 generation checks). A dead session stops the run with every entry
     kept for that user only.
+  - *Punches overtaking each other (security review L5).* The run stops at the first entry a response leaves
+    unanswered (also inside a 400 one-at-a-time resend), so nothing later in `clientSeq` order is sent before it. An
+    online punch never overtakes saved ones: when it cannot be saved behind them (offline now off, ticket expired, no
+    device key), the saved ones are sent first, and if any are still waiting the punch is refused ("must be sent first").
+  - *Sending in the wrong session, or from a flag-off build (security review L6).* Before every request the session
+    user stored by the API client must equal the queue's user (fails closed when unknown), closing the account-switch
+    window. A build without the offline flag never calls the sync endpoint, even for leftovers (they stay visible and
+    the logout guard offers the explicit discard).
   - *Hammering the server / retry storms.* One request at a time (single-flight), at most 25 entries, `clientSeq` order;
-    an unanswered entry is not resent in the same run; 429 waits for `Retry-After` (60 s default) even for "Send now";
+    429 waits for `Retry-After` (60 s default, capped at 15 min) even for "Send now";
     5xx / 403 / 404 / network / timeout back off exponentially 1 s → 5 min (reset on success). A 400 or 413 for a batch
     resends one at a time and parks only the entry refused alone (never resent).
   - *Stale or slow tickets.* A fresh `offlineTicket` in the response is stored only while offline is on, with the boot

@@ -24,7 +24,11 @@ void main() {
   late FakeBootClock boot;
 
   setUp(() {
-    secure = {'rab.accessToken': 'access-1', 'rab.refreshToken': 'refresh-1'};
+    secure = {
+      'rab.accessToken': 'access-1',
+      'rab.refreshToken': 'refresh-1',
+      'rab.sessionUserId': 'user-a',
+    };
     stubSecureStorageChannel(secure);
     now = DateTime.utc(2026, 11, 21, 10);
     boot = FakeBootClock(elapsedMs: 1100000 + 60000);
@@ -447,4 +451,99 @@ void main() {
       expect(() => SyncBatchResponse.parse([]), throwsFormatException);
     },
   );
+
+  test(
+    'security review L5: the run stops at the first unanswered entry; nothing after it overtakes it',
+    () async {
+      await seed(30);
+      final s = server(
+        (entries, _) async => ok([
+          for (final e in entries)
+            if (e['clientSeq'] != 3) applied(e),
+        ]),
+      );
+      final c = await controller(s.api);
+      await c.syncNow();
+      expect(s.batches, hasLength(1), reason: 'entries 26-30 were not sent');
+      expect(c.entries.first.idempotencyKey, keyFor(3));
+      expect(c.entries.first.isPending, isTrue);
+      expect(c.entries.map((e) => e.entry.clientSeq), [3, 26, 27, 28, 29, 30]);
+    },
+  );
+
+  test(
+    'security review L5: a 400 bisect stops at the first entry left unanswered',
+    () async {
+      await seed(3);
+      final s = server((entries, _) async {
+        if (entries.length > 1) return http.Response('{"message":"bad"}', 400);
+        if (entries.single['clientSeq'] == 1) return ok([]);
+        return ok([for (final e in entries) applied(e)]);
+      });
+      final c = await controller(s.api);
+      await c.syncNow();
+      expect(s.batches.map((b) => b.length), [3, 1]);
+      expect(c.pendingCount, 3);
+    },
+  );
+
+  test(
+    'security review L6: never sends while the session belongs to another user (account-switch window)',
+    () async {
+      await seed(2);
+      secure['rab.sessionUserId'] = 'user-z';
+      final s = server(
+        (entries, _) async => ok([for (final e in entries) applied(e)]),
+      );
+      final c = await controller(s.api);
+      await c.syncNow(userInitiated: true);
+      expect(s.batches, isEmpty);
+      secure.remove('rab.sessionUserId');
+      await c.syncNow(userInitiated: true);
+      expect(s.batches, isEmpty, reason: 'no session user: fail closed');
+      secure['rab.sessionUserId'] = 'user-a';
+      await c.syncNow(userInitiated: true);
+      expect(s.batches, hasLength(1));
+    },
+  );
+
+  test(
+    'security review L6: a build without the offline flag never sends, even leftovers',
+    () async {
+      await seed(2);
+      final s = server(
+        (entries, _) async => ok([for (final e in entries) applied(e)]),
+      );
+      final c = OfflineSyncController(
+        userId: 'user-a',
+        bootClock: boot,
+        signer: FakeEntrySigner(),
+        buildFlag: false,
+        deviceNow: () => now,
+        client: OfflineSyncClient(s.api),
+      );
+      await c.ready;
+      await c.ingestActive({
+        'offline': {'enabled': true},
+      }, fetchDuration: Duration.zero);
+      await c.syncNow(userInitiated: true);
+      expect(s.batches, isEmpty);
+      expect(
+        c.hasUnsent,
+        isTrue,
+        reason: 'still visible; the logout guard offers discard',
+      );
+    },
+  );
+
+  test('security review L6: Retry-After is capped at 15 min', () async {
+    await seed(1);
+    final s = server(
+      (entries, _) async =>
+          http.Response('"slow down"', 429, headers: {'retry-after': '86400'}),
+    );
+    final c = await controller(s.api);
+    await c.syncNow();
+    expect(c.retryAfterUntil, now.add(OfflineLimits.maxRetryAfter));
+  });
 }

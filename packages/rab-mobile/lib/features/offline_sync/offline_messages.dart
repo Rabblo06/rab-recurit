@@ -38,6 +38,9 @@ abstract final class OfflineMessages {
       ? 'Your clock-out was recorded as ${hhmm(appliedAt)}, your shift end. Ask your manager if this is wrong.'
       : 'Your clock-in was recorded as ${hhmm(appliedAt)}, your shift start. Ask your manager if this is wrong.';
 
+  static const sendSavedFirst =
+      'Actions saved on this phone must be sent first. Connect to the internet and try again.';
+
   static const stillNotSent =
       'Still not sent. Connect to the internet and try again.';
 

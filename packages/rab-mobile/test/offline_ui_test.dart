@@ -58,7 +58,11 @@ void main() {
   late Map<String, String> secure;
   setUp(() {
     stubLocationStream();
-    secure = {'rab.accessToken': 'a', 'rab.refreshToken': 'r'};
+    secure = {
+      'rab.accessToken': 'a',
+      'rab.refreshToken': 'r',
+      'rab.sessionUserId': 'user-a',
+    };
     stubSecureStorageChannel(secure);
   });
   tearDown(() {

@@ -10,6 +10,7 @@ import '../../core/models/offer.dart';
 import '../../core/polling/keyset_pages.dart';
 import '../../core/services/location_service.dart';
 import '../offline_sync/offline_entry.dart';
+import '../offline_sync/offline_messages.dart';
 import '../offline_sync/offline_sync_controller.dart';
 import 'shift_team_member.dart';
 
@@ -170,6 +171,19 @@ class AttendanceProvider extends ChangeNotifier {
     );
   }
 
+  /// Security review L5: an online punch must never overtake punches still saved on this phone. When it cannot be
+  /// saved behind them (offline mode now off, ticket expired, no device key), the saved ones are sent first; if any are
+  /// still waiting, the punch is refused with a clear message instead of going online out of order.
+  Future<bool> _blockedByUnsent() async {
+    final offline = _offline;
+    if (offline == null || !offline.hasUnsent || offline.mayQueue) return false;
+    await offline.syncNow(userInitiated: true);
+    if (!offline.hasUnsent) return false;
+    errorMessage = OfflineMessages.sendSavedFirst;
+    errorCode = 'OFFLINE_UNSENT';
+    return true;
+  }
+
   /// Saves the punch on this phone (never shown as confirmed). Always returns false: only a server answer is a
   /// success. A refused capture shows why (or the original connection error when offline mode is simply off).
   Future<bool> _saveOffline(
@@ -236,6 +250,7 @@ class AttendanceProvider extends ChangeNotifier {
     notifyListeners();
     final attempt = _offlineAttempt(shiftId);
     try {
+      if (await _blockedByUnsent()) return false;
       if (attempt.saveFirst) {
         return await _saveOffline(
           attempt,
@@ -406,6 +421,7 @@ class AttendanceProvider extends ChangeNotifier {
     notifyListeners();
     final attempt = _offlineAttempt(shiftId);
     try {
+      if (await _blockedByUnsent()) return false;
       if (attempt.saveFirst) {
         return await _saveOffline(
           attempt,
@@ -465,6 +481,7 @@ class AttendanceProvider extends ChangeNotifier {
     final shiftId = clockOutShiftId;
     final attempt = _offlineAttempt(shiftId);
     try {
+      if (await _blockedByUnsent()) return false;
       if (attempt.saveFirst) {
         return await _saveOffline(
           attempt,

@@ -100,6 +100,10 @@ class OfflineSyncClient {
 
   static const path = '/attendance/me/sync';
 
+  /// The user the signed-in session belongs to (what the API client stores at login). The controller sends a queue only
+  /// when this equals the queue's user.
+  Future<String?> sessionUserId() => _api.getSessionUserId();
+
   Future<SyncBatchResponse> postBatch(List<OfflineEntry> entries) async {
     final data = await _api.post(
       path,
