@@ -174,7 +174,7 @@ Helm chart, with the Crewflow controls kept where Twenty has none:
    Then render the files you will start, e.g. `$P config -q`.
 5. **Start:** `$P up -d --wait --wait-timeout 1200`. `db` becomes healthy first (its first start creates the CA and the server certificate). `db-setup` runs the bootstrap child (`[owner-bootstrap] crewflow_owner is ready (created).`, then `db-setup: done`) and exits 0; `$P logs db-setup` shows it. The API then builds the `crewflow_owner` URL, runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks), registers the job schedulers, and serves only after it succeeds; a first-install failure never serves. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The API has a 900 s `start_period`. The Worker follows a healthy API and Redis.
 6. **First platform admin (email only, activation link).**
-   - **At API start (2026-11-19, no command).** Set `BOOTSTRAP_ADMIN_EMAIL` on rab-api (optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `_LAST_NAME`, `_ORG_SLUG`, `_ORG_NAME`) in `compose.env` or as the platform's rab-api variables, never in `database.env` / `runtime.env` (they reach rab-worker too; the lint refuses them there). This needs rab-api's compose service to pass the variables through, and `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true` on rab-api (otherwise the API logs a refusal and creates nothing). An existing account is granted only when it is active, email-verified and has a manager profile; otherwise use `grant-platform-admin`. If no platform admin exists, the API creates it on start through the `bootstrap-admin` code path and queues ONE activation email to that address (the link expires after 24 hours). Two replicas starting together create one admin and send one email. Log lines (context `PlatformAdminBootstrap`): `First platform administrator created from BOOTSTRAP_ADMIN_EMAIL, pending activation. ...` on success; `A platform administrator already exists: nothing was done and no email was sent. BOOTSTRAP_ADMIN_EMAIL can be removed from rab-api.` on every later start; `The first platform administrator was not created at boot (reason: <label>). ...` on failure. A failure never stops the API. Remove the variable once the admin has signed in. `BOOTSTRAP_ADMIN_PASSWORD` refuses the start (exit 64).
+   - **At API start (2026-11-19, no command).** Set `BOOTSTRAP_ADMIN_EMAIL` on rab-api (optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `_LAST_NAME`, `_ORG_SLUG`, `_ORG_NAME`) in `compose.env` or as the platform's rab-api variables, never in `database.env` / `runtime.env` (they reach rab-worker too; the lint refuses them there). This needs rab-api's compose service to pass the variables through, and `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true` on rab-api (otherwise the API logs a refusal and creates nothing; since owner decision 2 of 2026-11-21 `env/runtime.env.example` sets it and `docker-compose.production.yml` defaults it to true: see "Two-step sign-in (MFA) rollout" in section 7). An existing account is granted only when it is active, email-verified and has a manager profile; otherwise use `grant-platform-admin`. If no platform admin exists, the API creates it on start through the `bootstrap-admin` code path and queues ONE activation email to that address (the link expires after 24 hours). Two replicas starting together create one admin and send one email. Log lines (context `PlatformAdminBootstrap`): `First platform administrator created from BOOTSTRAP_ADMIN_EMAIL, pending activation. ...` on success; `A platform administrator already exists: nothing was done and no email was sent. BOOTSTRAP_ADMIN_EMAIL can be removed from rab-api.` on every later start; `The first platform administrator was not created at boot (reason: <label>). ...` on failure. A failure never stops the API. Remove the variable once the admin has signed in. `BOOTSTRAP_ADMIN_PASSWORD` refuses the start (exit 64).
    - **Or with the command.** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (rab-api's entrypoint builds the `crewflow_owner` URL from db-setup's files; it never sees `PG_ADMIN_URL`; `database.env` still supplies the optional `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) and the same runtime config (`runtime.env`). The command creates the admin from an email address and sends an **activation link**; it takes no password (`BOOTSTRAP_ADMIN_PASSWORD` is refused by the entrypoint, so never set it).
    - Inputs: `BOOTSTRAP_ADMIN_EMAIL` (required); optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `BOOTSTRAP_ADMIN_LAST_NAME`, `BOOTSTRAP_ADMIN_ORG_SLUG`, `BOOTSTRAP_ADMIN_ORG_NAME`.
    - The CLI requires **per-invocation command authority**: `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true`, given on this one-off run ONLY, never in any service environment or env file.
@@ -942,6 +942,37 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
   - API: 1 GB (raised from 768 MB for the migration child; the API migrates on start, O3; NOT MEASURED).
   - Worker: 1.5 GB, with the native PDF budget rule from #61 (`PDF_NATIVE_MEMORY_BUDGET_MB`).
   - Redis: 640 MB.
+
+### Two-step sign-in (MFA) rollout (owner decision 2, 2026-11-21)
+
+Enforcement means: a covered user who has no authenticator app is asked to set one up during that sign-in (nobody is
+locked out); recovery codes and a platform-admin reset (audited, with a reason, revokes the target's sessions) exist.
+Someone who enrolled voluntarily is always asked for the code on web sign-in, whatever the switches say. The switches are
+strict `true`/`false` on rab-api (anything else refuses the boot). The code default of all four is `false`; only step 1 is
+a committed production default. **Steps 2 and 3 are the owner's changes on the server, made on the dates below; agents
+never change them, and the compose defaults for them stay `false`.**
+
+- [x] **Step 1, now: platform administrators.** `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true` on rab-api.
+  `docker-compose.production.yml` defaults it to `true`; for `docker-compose.image.yml` it is the active line in
+  `env/runtime.env.example`, so copy it into `${CREWFLOW_SECRETS_DIR}/runtime.env` (an existing `runtime.env` written
+  before this change does NOT have it: add the line, lint the file, then `docker compose up -d`). The first platform admin
+  (`BOOTSTRAP_ADMIN_EMAIL` or `bootstrap-admin`) is refused without it. Check: Admin panel, Configuration, MFA shows
+  enforcement on for platform admins; a platform admin without an authenticator is asked to enrol at the next sign-in.
+- [ ] **Step 2, at the DigitalOcean move, before any real data: organisation owners and the Initial Manager.** On rab-api
+  set `AUTH_MFA_ENFORCE_ORGANISATION_OWNER=true` (role `ceo`) and `AUTH_MFA_ENFORCE_INITIAL_MANAGER=true` in the new
+  server's `runtime.env` (or the platform's rab-api variables), lint, deploy. Before the switch: tell those users they will
+  be asked to set up an authenticator app at their next sign-in, and make sure at least one platform admin (already
+  enrolled, step 1) can do an MFA reset. After: sign in as one owner and one Initial Manager in a test organisation and
+  confirm the enrol prompt, then a code prompt on the next sign-in.
+- [ ] **Step 3, about 4 weeks after step 2: every other web-console user** (managers, custom roles, organisation admins).
+  `AUTH_MFA_ENFORCE_OTHER_WEB_USERS=true` on rab-api. Only once the reset process has been used for real at least once
+  (step 2's support load). Decision 5 (payroll approval needs a 2FA check) depends on this step: a payroll approver must
+  have MFA set up.
+- [ ] **Step 4: mobile staff and Venue Managers are not forced.** `AUTH_MFA_MOBILE_POLICY` stays `exempt`: the mobile app
+  has no enrol-at-sign-in screen yet. Revisit only after mobile enrolment is built (optional follow-up of decision 2).
+
+Rollback of any step: set that switch back to `false` and redeploy. Nobody's enrolment is removed; enrolled users keep
+being asked for the code.
 
 
 ### Operations commands (containment, session backfill, HWS backfill) under the owner login

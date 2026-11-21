@@ -10354,3 +10354,22 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## MFA enforced for platform admins in production (owner decision 2, 2026-11-21; branch chore/mfa-platform-admin-production-default; no SQL, no runtime code path change)
+- **Finding:** every `AUTH_MFA_ENFORCE_*` switch was off in production, so a platform administrator (cross-organisation
+  read and admin actions, MFA reset of other users) could sign in with a password alone unless they had enrolled
+  voluntarily. A phished or reused platform-admin password was a full platform takeover.
+- **Control:** `docker-compose.production.yml` defaults `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` to `true` and
+  `env/runtime.env.example` (the image deployment's rab-api/rab-worker runtime file) sets it. A platform admin without an
+  authenticator is made to enrol during their next sign-in (`LoginSecondFactorPolicyService`), never locked out. The
+  first-admin bootstrap already refuses to run without it, so the template now matches the only supported way to create
+  the first admin. The Admin panel Security tab warns when platform admins are not forced (it used to warn when anyone
+  was forced). The code default stays `false` (development and tests); the other three enforcement switches keep their
+  `false` defaults: organisation owners and the Initial Manager are switched on by the owner at the DigitalOcean move,
+  other web users about 4 weeks later, mobile stays exempt (deploy checklist in OWNER-LOGIN-DEPLOYMENT.md section 7).
+- **Tests:** `compose-owner-login.test.cjs` pins the five production defaults (platform admin `true`, the other three
+  `false`, mobile `exempt`), that the runtime template assigns only the platform-admin switch, and that the lint accepts
+  it.
+- **Residual:** a server whose `runtime.env` was written before this change has no line, and the image compose has no
+  default, so rab-api keeps the code default (`false`) until the operator adds the line (checklist step 1). The switch
+  stays operator-settable (`false` on the server turns it off again); no gate refuses `false` today.

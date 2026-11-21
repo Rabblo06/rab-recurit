@@ -100,8 +100,11 @@ addresses behave the same:
 - **Challenge limits:** a challenge lasts `AUTH_MFA_CHALLENGE_TTL_SECONDS`=300, is single use, and allows
   `AUTH_MFA_CHALLENGE_MAX_ATTEMPTS`=5 attempts. Each user also has a burst of `AUTH_MFA_USER_ATTEMPTS_BURST`=10 per
   900 s across all challenges and step-ups. Codes cannot be replayed.
-- **Enforcement:** every flag defaults to **off**: `AUTH_MFA_ENFORCE_PLATFORM_ADMIN`, `_ORGANISATION_OWNER`,
-  `_INITIAL_MANAGER` and `_OTHER_WEB_USERS`.
+- **Enforcement:** every flag defaults to **off** in code: `AUTH_MFA_ENFORCE_PLATFORM_ADMIN`, `_ORGANISATION_OWNER`,
+  `_INITIAL_MANAGER` and `_OTHER_WEB_USERS`. Production turns `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` **on** (owner decision
+  2, 21 Nov 2026: `docker-compose.production.yml` defaults it to true and `env/runtime.env.example` sets it), and the
+  first-admin bootstrap refuses to run without it. The other three stay off until the owner's scheduled rollout
+  (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Two-step sign-in (MFA) rollout").
 - **Mobile:** mobile sign-ins are **not** challenged (`AUTH_MFA_MOBILE_POLICY`=exempt).
 - **Managing MFA:** turning it off or regenerating codes always needs the password and a current code.
 - **Step-up:** a grant lasts `AUTH_STEP_UP_WINDOW_SECONDS`=300. The older password-only step-up actions still accept

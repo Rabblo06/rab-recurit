@@ -113,7 +113,7 @@ function adminRoutes(state) {
       return json(200, {
         switches: [
           { label: 'Users may turn on 2FA', variable: 'AUTH_MFA_ENROLMENT_ENABLED', state: 'On', recommended: 'On', tone: 'ok' },
-          { label: 'Force 2FA for any role (4 settings)', variable: 'AUTH_MFA_ENFORCE_*', state: 'Off', recommended: 'Off: 2FA is optional (owner policy)', tone: 'neutral' },
+          { label: 'Force 2FA for any role (4 settings)', variable: 'AUTH_MFA_ENFORCE_*', state: 'On (1)', recommended: 'Platform admins on (owner decision); other roles in stages', tone: 'ok' },
           { label: 'Ask for the code on mobile once turned on', variable: 'AUTH_MFA_MOBILE_POLICY', state: 'require', recommended: 'require (after mobile 2FA screens ship)', tone: 'ok' },
           { label: 'Host routing for workspace addresses', variable: 'WORKSPACE_HOST_ROUTING_ENABLED', state: 'Off', recommended: 'When DNS is ready', tone: 'neutral' },
           { label: '__Host- cookie names', variable: 'AUTH_COOKIE_HOST_PREFIX_ENABLED', state: 'Off', recommended: 'On', tone: 'warn' },

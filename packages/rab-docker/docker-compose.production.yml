@@ -240,8 +240,12 @@ x-crewflow-optional-env: &optional-env
   AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS: ${AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS:-900}
   AUTH_LOGIN_KNOWN_IP_TTL_DAYS: ${AUTH_LOGIN_KNOWN_IP_TTL_DAYS:-30}
   # -- Two-factor authentication and step-up --
+  # Owner decision 2 (2026-11-21): platform administrators must use MFA, so production defaults it ON (the code default
+  # stays false for development and tests; the first-admin bootstrap refuses to run without it). The three other
+  # enforcement switches keep false here: turning them on is the owner's scheduled step on the server
+  # (docs/release/OWNER-LOGIN-DEPLOYMENT.md, "Two-step sign-in (MFA) rollout"), not a change to these defaults.
   AUTH_MFA_ENROLMENT_ENABLED: ${AUTH_MFA_ENROLMENT_ENABLED:-true}
-  AUTH_MFA_ENFORCE_PLATFORM_ADMIN: ${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-false}
+  AUTH_MFA_ENFORCE_PLATFORM_ADMIN: ${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}
   AUTH_MFA_ENFORCE_ORGANISATION_OWNER: ${AUTH_MFA_ENFORCE_ORGANISATION_OWNER:-false}
   AUTH_MFA_ENFORCE_INITIAL_MANAGER: ${AUTH_MFA_ENFORCE_INITIAL_MANAGER:-false}
   AUTH_MFA_ENFORCE_OTHER_WEB_USERS: ${AUTH_MFA_ENFORCE_OTHER_WEB_USERS:-false}

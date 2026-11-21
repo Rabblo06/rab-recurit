@@ -252,7 +252,9 @@ export class AdminConfigService {
     const sw = (label: string, variable: string, state: string, recommended: string, tone: SecuritySwitch['tone']): SecuritySwitch => ({ label, variable, state, recommended, tone });
     const switches: SecuritySwitch[] = [
       sw('Users may turn on 2FA', 'AUTH_MFA_ENROLMENT_ENABLED', on('AUTH_MFA_ENROLMENT_ENABLED') ? 'On' : 'Off', 'On', on('AUTH_MFA_ENROLMENT_ENABLED') ? 'ok' : 'warn'),
-      sw('Force 2FA for any role (4 settings)', 'AUTH_MFA_ENFORCE_*', anyEnforced.length ? `On (${anyEnforced.length})` : 'Off', 'Off: 2FA is optional (owner policy)', anyEnforced.length ? 'warn' : 'neutral'),
+      // Owner decision 2 (2026-11-21): platform admins are forced now; owners, Initial Managers and other web users follow
+      // a staged rollout (OWNER-LOGIN-DEPLOYMENT.md). Platform admins not forced is the one state to warn about.
+      sw('Force 2FA for any role (4 settings)', 'AUTH_MFA_ENFORCE_*', anyEnforced.length ? `On (${anyEnforced.length})` : 'Off', 'Platform admins on (owner decision); other roles in stages', on('AUTH_MFA_ENFORCE_PLATFORM_ADMIN') ? 'ok' : 'warn'),
       sw('Ask for the code on mobile once turned on', 'AUTH_MFA_MOBILE_POLICY', String(this.env.get('AUTH_MFA_MOBILE_POLICY')), 'require (after mobile 2FA screens ship)', this.env.get('AUTH_MFA_MOBILE_POLICY') === 'require' ? 'ok' : 'neutral'),
       sw('Code also required for older confirmed actions', 'AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS', on('AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS') ? 'On' : 'Off', 'On', on('AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS') ? 'ok' : 'warn'),
       sw('Host routing for workspace addresses', 'WORKSPACE_HOST_ROUTING_ENABLED', on('WORKSPACE_HOST_ROUTING_ENABLED') ? 'On' : 'Off', 'When DNS is ready', 'neutral'),

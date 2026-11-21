@@ -1375,3 +1375,27 @@ test('owner decision 2026-11-20: CREWFLOW_ROTATE_APP_PASSWORD is a db-setup-only
     assert.equal((text.match(/^ {6}CREWFLOW_ROTATE_APP_PASSWORD: \$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}$/gm) ?? []).length, 1, `${file}: once on db-setup`);
   }
 });
+
+// Owner decision 2 (2026-11-21, MFA rollout step 1): platform administrators must use MFA now, so the production templates
+// turn AUTH_MFA_ENFORCE_PLATFORM_ADMIN on. Steps 2-3 (organisation owners, the Initial Manager, other web users) are the
+// owner's scheduled server changes, NOT template defaults: this pins all of them so a later edit is a deliberate one.
+test('decision 2: production enforces MFA for platform admins only; the other enforcement defaults stay off', () => {
+  const prod = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.production.yml'), 'utf8');
+  const expected = {
+    AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'true',
+    AUTH_MFA_ENFORCE_ORGANISATION_OWNER: 'false',
+    AUTH_MFA_ENFORCE_INITIAL_MANAGER: 'false',
+    AUTH_MFA_ENFORCE_OTHER_WEB_USERS: 'false',
+    AUTH_MFA_MOBILE_POLICY: 'exempt',
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    const lines = prod.match(new RegExp(`^\\s*${key}: \\$\\{${key}:-([^}]*)\\}$`, 'gm')) ?? [];
+    assert.equal(lines.length, 1, `${key}: exactly one line in docker-compose.production.yml`);
+    assert.equal(/:-([^}]*)\}$/.exec(lines[0].trim())[1], value, `${key}: production default`);
+  }
+  // The image deployment reads runtime.env: its template sets the platform-admin switch, and only that one.
+  const runtime = fs.readFileSync(gate.TEMPLATES.runtime, 'utf8');
+  const assigned = [...runtime.matchAll(/^(AUTH_MFA_[A-Z_]+)=(.*)$/gm)].map((m) => `${m[1]}=${m[2]}`);
+  assert.deepEqual(assigned, ['AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true']);
+  assert.deepEqual(lintEnvText('runtime', runtime).filter((msg) => /AUTH_MFA/.test(msg)), []);
+});
