@@ -1,18 +1,26 @@
 name: cd-deploy-tag
 
-# Release record: triggered by pushing a version tag (e.g. v0.1.0), never
-# automatically. It deploys nothing and pushes no image. The only job is the
-# GitHub release, whose notes name the ONE release image (O2): the API and
-# the Worker run the same image, published by publish-image.yaml under ONE
-# immutable tag, the full commit (docker.io/adhin007/adolphus:<commit>).
-# Deploy by the index digest from that run's release manifest, never by tag
+# Release record: triggered by pushing a release tag rab/vX.Y.Z (e.g. rab/v0.6.0), never automatically. It deploys
+# nothing and pushes no image. rab/vX.Y.Z is the convention every published release uses (rab/v0.1.0-beta.1 ..
+# rab/v0.6.0) and the only tag form publish-image's release guard and the `release` environment's tag policy accept. Until
+# 2026-11 this workflow listened for v*.*.* and never ran once.
+#
+# The only job is the GitHub release record, whose notes name the ONE release image (O2): the API and the Worker run the
+# same image, published by publish-image.yaml under ONE immutable tag, the full commit
+# (docker.io/adhin007/adolphus:<commit>). Deploy by the index digest from that run's release manifest, never by tag
 # (IMAGE_SECURITY_RELEASE_POLICY.md section 8), and like Twenty: ONE variable (CREWFLOW_IMAGE_TAG = that digest) and ONE
 # command, `docker compose pull && docker compose up -d`, which updates the API and the Worker together. There is no
 # API-only or Worker-only deploy.
+#
+# How this hands over to publish-image (IMAGE_SECURITY_RELEASE_POLICY.md "Cutting a release"): a release created or
+# published with this workflow's GITHUB_TOKEN triggers NO workflow, so this job never publishes. If the owner already
+# published the release (UI / their own gh), it changes nothing: publish-image started from that event. If the tag was
+# pushed with git, it creates a DRAFT; the owner publishes the draft by hand, and that event starts publish-image. A tag
+# whose commit is not on origin/main is refused first, as release_guard.py would refuse to publish it.
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - 'rab/v*.*.*'
 
 concurrency:
   group: cd-deploy-tag
@@ -25,18 +33,21 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: production
+    # No `environment:`: this job deploys nothing, and an environment would only record a misleading deployment.
     permissions:
-      contents: write # gh release create (and the generated notes); nothing else
+      contents: write # gh release view (drafts too) / gh release create --draft; nothing else
     steps:
-      # Only to read tools/create-github-release.sh; nothing pushes, so no credential is left in .git/config.
+      # tools/create-github-release.sh, and the history to decide that the tagged commit is on origin/main (the script
+      # fetches main and runs git merge-base --is-ancestor). Nothing pushes, so no credential is left in .git/config;
+      # the public repository is fetched anonymously.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # The preinstalled gh CLI instead of a third-party release action. The command is exercised on every PR by
-      # ci-security's action-pins job (tools/create-github-release.test.cjs: dry run, a recording gh, and the installed gh's
-      # own flag list), because this workflow only runs on a tag.
-      - name: Create GitHub release
+          fetch-depth: 0
+      # The preinstalled gh CLI instead of a third-party release action. The commands are exercised on every PR by
+      # ci-security's action-pins job (tools/create-github-release.test.cjs: dry run, a recording gh for the existing /
+      # missing / failed lookup, and the installed gh's own flag list), because this workflow only runs on a tag.
+      - name: Draft the GitHub release (unless one already exists)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}

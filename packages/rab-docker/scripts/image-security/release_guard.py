@@ -28,7 +28,8 @@ GATE_WORKFLOWS = {'.github/workflows/image-security-gate.yaml', '.github/workflo
 # Only these events ever export complete gated layouts (gate dispatch; publish dispatch in candidate-verify or publish
 # mode; a published release). pull_request / push runs of the gate never export layouts, so they are never candidates.
 CANDIDATE_EVENTS = {'workflow_dispatch', 'release'}
-RELEASE_TAG = re.compile(r'rab/v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?')
+# [0-9], not \d: Python's \d also matches Unicode digits (e.g. U+0661 ARABIC-INDIC DIGIT ONE), which no tag may contain.
+RELEASE_TAG = re.compile(r'rab/v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?')
 ALLOWED_POLICIES = {('main', 'branch'), ('rab/v*', 'tag')}
 
 
