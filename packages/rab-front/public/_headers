@@ -2,11 +2,14 @@
 # the build output; Vite copies public/ there unchanged). The page also sets the same policy itself (index.html
 # <meta name="referrer">), so it holds on a host that ignores this file.
 #
-# Referrer-Policy is strict-origin-when-cross-origin, deliberately NOT no-referrer or same-origin: under those two, a
-# browser sends `Origin: null` on a non-CORS POST (Fetch "append a request Origin header"), e.g. the invitation SSO form
-# POST to the API (features/auth/AcceptInvitation.tsx) or any POST through a same-origin /rest proxy, and the API's
-# Origin-only CSRF checks (cookie-csrf.util.ts) refuse `null`. strict-origin-when-cross-origin keeps the real Origin,
-# and a cross-origin Referer carries the origin only: never a path or query string (XA-08: the forgot-password
-# address in the URL never reaches a third party such as the font host).
+# Referrer-Policy is strict-origin-when-cross-origin, deliberately NOT no-referrer: under no-referrer a browser sends
+# `Origin: null` on every non-CORS POST (Fetch "append a request Origin header"), including the cross-origin step-up
+# re-authentication form POST (features/auth/stepup/StepUpHost.tsx -> POST /auth/<provider>/reauthenticate), whose
+# server-side Origin check refuses `null`. strict-origin-when-cross-origin keeps the real Origin, and a cross-origin
+# Referer carries the origin only, never a path or query string (XA-08: the forgot-password address in the URL never
+# reaches a third party such as the font host).
+#
+# Nothing in this repository deploys this file to an edge today; the <meta name="referrer"> in index.html is the
+# effective control. This file applies once the front is served by Cloudflare static assets / Pages.
 /*
   Referrer-Policy: strict-origin-when-cross-origin
