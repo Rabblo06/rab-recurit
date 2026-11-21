@@ -128,6 +128,11 @@ export const AuditAction = {
   PAYROLL_ADJUSTMENT_REJECTED: 'payroll_adjustment.rejected',
   /** Run prepare added approved adjustments to a run (`entityType` payroll_run; metadata periodId, adjustments, carriedForward). */
   PAYROLL_ADJUSTMENTS_INCLUDED: 'payroll_run.adjustments_included',
+  /**
+   * The organisation's holiday pay setting changed (owner decision 4; HolidayPayService). `entityType`
+   * `organisation_payroll_setting`. Metadata: before { mode, rateBps, isDefault }, after { mode, rateBps }.
+   */
+  PAYROLL_HOLIDAY_PAY_SETTING_CHANGED: 'payroll_setting.holiday_pay_changed',
   STAFF_REVIEW_SAVED: 'shift_review.saved',
   // Wave 5 (lane DATA) — named archive/restore actions. `entityType`/`entityId` = the archived record; staff and
   // manager rows also carry `targetUserId` so the person's timeline shows them. Metadata never carries pay or email.

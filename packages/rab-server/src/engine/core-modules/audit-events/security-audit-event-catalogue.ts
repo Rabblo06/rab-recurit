@@ -141,6 +141,8 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'payroll_adjustment.approved': c('payroll_approval', 'warning'),
   'payroll_adjustment.rejected': c('payroll_approval'),
   'payroll_run.adjustments_included': c('payroll_approval'),
+  // Holiday pay (owner decision 4): how every later approval is paid.
+  'payroll_setting.holiday_pay_changed': c('payroll_approval', 'warning'),
   // ── account deletion ────────────────────────────────────────────────────────────────────────────────────────────
   'user.deleted': c('account_deletion', 'critical'),
   /** Owner 0g: GDPR erasure of a soft-deleted account's personal fields (the row stays, anonymised). */

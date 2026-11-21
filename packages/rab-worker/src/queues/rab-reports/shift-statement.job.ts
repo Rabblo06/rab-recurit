@@ -285,6 +285,14 @@ async function loadStatementData(m: EntityManager, recordId: string): Promise<{ 
   const allocation = (await allocateRecords(m, { organisationId: r.organisation_id, workspaceId: r.workspace_id }, [{ id: r.id, startsAt }])).get(r.id);
   const period = allocation?.period ?? null;
   const late = allocation?.status === 'carried_forward' && allocation.originalPeriod ? ` (late approval — work date in ${periodLabel(allocation.originalPeriod)})` : '';
+  // Owner decision 4: the record's holiday pay as frozen at approval (Worker RLS reads it; no row or provider = no line).
+  const [hp] = await m.query(
+    `SELECT mode, rate_bps, holiday_pay_pence FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1 AND organisation_id = $2 AND workspace_id = $3`,
+    [r.id, r.organisation_id, r.workspace_id],
+  );
+  const holidayPay = hp?.mode === 'rolled_up'
+    ? { rateBps: Number(hp.rate_bps), pence: assertSafePence(Number(hp.holiday_pay_pence), 'payroll_record_holiday_pay.holiday_pay_pence') }
+    : null;
   return {
     staffUserId: r.staff_user_id,
     data: {
@@ -306,6 +314,7 @@ async function loadStatementData(m: EntityManager, recordId: string): Promise<{ 
       // exact range fails the statement closed (retried and audited as a failure) instead of printing a rounded amount.
       payRatePence: assertSafePence(Number(r.pay_rate_pence), 'payroll_record.pay_rate_pence'),
       amountPence: assertSafePence(Number(r.amount_pence), 'payroll_record.amount_pence'),
+      holidayPay,
       approvedAt: iso(r.approved_at)!,
       approvedByName: r.approved_by_name ?? null,
       payrollPeriodLabel: period ? `${periodLabel(period)}${late}` : null,

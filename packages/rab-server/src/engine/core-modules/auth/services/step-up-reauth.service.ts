@@ -92,6 +92,8 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.agent.update',
   // M5 payroll adjustments (owner decisions 3 + 5): approving a correction, bonus or expense needs a fresh proof.
   'payroll.adjustment.approve',
+  // M5 holiday pay (owner decision 4): the organisation's rolled-up rate or "payroll provider handles it".
+  'payroll.holiday_pay.update',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 

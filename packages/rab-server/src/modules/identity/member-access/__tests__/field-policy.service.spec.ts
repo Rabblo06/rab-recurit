@@ -108,10 +108,10 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
   const view: RunView = {
     id: 'run', status: 'finalised', period: { id: 'p', start: '2026-10-01', end: '2026-10-31', payday: '2026-11-05' } as never,
     preparedAt: '', preparedByName: null, finalisedAt: null, finalisedByName: null,
-    totals: { records: 1, staff: 1, minutes: 240, grossPence: 4800, lateCount: 0, correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 7884 },
+    totals: { records: 1, staff: 1, minutes: 240, grossPence: 4800, lateCount: 0, holidayPayPence: 579, correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 8463 },
     staff: [{
-      staffProfileId: 's', staffName: '=HYPERLINK("http://evil")', staffRef: 'STAFF 1', records: 1, minutes: 240, grossPence: 4800, lateCount: 0,
-      correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 7884, adjustments: [], payslip: null,
+      staffProfileId: 's', staffName: '=HYPERLINK("http://evil")', staffRef: 'STAFF 1', records: 1, minutes: 240, grossPence: 4800, lateCount: 0, holidayPayPence: 579,
+      correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 8463, adjustments: [], payslip: null,
     }],
   };
   const policy = (hidden: string[]) => ({ object: 'payroll_record' as const, hiddenFields: new Set(hidden), hiddenProperties: new Set<string>() });
@@ -119,21 +119,23 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
   it('all columns for a caller whose policy hides nothing', () => {
     const [header, row] = buildPayrollRunCsv(view, policy([])).split('\n');
     expect(header).toBe(
-      'Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Corrections (GBP),Bonuses (GBP),Expenses (GBP),Total (GBP),Late approvals,Run status',
+      'Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Holiday pay (GBP),Corrections (GBP),Bonuses (GBP),Expenses (GBP),Total (GBP),Late approvals,Run status',
     );
     // Owner decision 3: a negative correction stays a NUMBER (-1.50), never neutralised like free text ('-1.50).
-    expect(row).toContain('4.00,48.00,-1.50,20.00,12.34,78.84,0,finalised');
+    // Owner decision 4: rolled-up holiday pay is its own column, included in the total.
+    expect(row).toContain('4.00,48.00,5.79,-1.50,20.00,12.34,84.63,0,finalised');
   });
 
   it('a hidden field is ABSENT from the header and every row (never an empty column)', () => {
     const csv = buildPayrollRunCsv(view, policy(['amount']));
     const [header, row] = csv.split('\n');
     expect(header).not.toContain('Gross');
-    for (const money of ['Corrections', 'Bonuses', 'Expenses', 'Total']) expect(header).not.toContain(money);
+    for (const money of ['Holiday', 'Corrections', 'Bonuses', 'Expenses', 'Total']) expect(header).not.toContain(money);
     expect(header!.split(',')).toHaveLength(9);
     expect(row!.split(',')).toHaveLength(9);
     expect(csv).not.toContain('48.00');
-    expect(csv).not.toContain('78.84');
+    expect(csv).not.toContain('84.63');
+    expect(csv).not.toContain('5.79');
     const noHours = buildPayrollRunCsv(view, policy(['amount', 'workedTime']));
     expect(noHours).not.toContain('Hours');
     expect(noHours).not.toContain('4.00');

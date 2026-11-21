@@ -15,6 +15,8 @@ import { PayrollRunService } from './services/payroll-run.service';
 import { PayrollService } from './services/payroll.service';
 import { PayrollAssistantService } from './services/payroll-assistant.service';
 import { PayrollAdjustmentService } from './services/payroll-adjustment.service';
+import { HolidayPayService } from './services/holiday-pay.service';
+import { PayrollSettingsController } from './controllers/payroll-settings.controller';
 
 /**
  * Payroll approval (owner rule 2026-10-20). Imports nothing from other domain modules: the attendance module depends on
@@ -23,11 +25,11 @@ import { PayrollAdjustmentService } from './services/payroll-adjustment.service'
 @Module({
   // AuthModule: JwtAuthGuard's own dependencies (same as every other controller-owning domain module).
   imports: [AuthModule, NotificationModule],
-  controllers: [PayrollController, StaffShiftStatementsController, PayrollAdjustmentController],
-  providers: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService, PayrollAdjustmentService],
+  controllers: [PayrollController, StaffShiftStatementsController, PayrollAdjustmentController, PayrollSettingsController],
+  providers: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService, PayrollAdjustmentService, HolidayPayService],
   // PayrollRunService: AI Phase 1's read-only `compare_payroll_runs` tool (listPeriods + detail totals, modules/ai).
   // PayrollAssistantService: AI Phase 3 `compare_payroll_runs` (SQL totals, integer pence) and `get_timesheet_approval_queue`.
-  exports: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService],
+  exports: [PayrollService, PayrollCalendarService, PayrollRunService, PayrollAssistantService, HolidayPayService],
 })
 export class PayrollModule implements OnModuleInit {
   constructor(

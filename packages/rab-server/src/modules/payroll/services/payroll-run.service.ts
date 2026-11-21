@@ -18,6 +18,7 @@ import { FieldPolicy, FieldPolicyService } from '../../identity/member-access/fi
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
 import { activePeriods, Allocation, allocateRecords, PeriodRef, periodsById } from './payroll-allocation';
 import { AdjustmentLine, AdjustmentTotals, adjustmentTotals, PayrollAdjustmentService } from './payroll-adjustment.service';
+import { HolidayPayService } from './holiday-pay.service';
 
 type Flag = typeof PermissionFlag.PAYROLL_VIEW | typeof PermissionFlag.PAYROLL_CALCULATE | typeof PermissionFlag.PAYROLL_APPROVE | typeof PermissionFlag.PAYROLL_MARK_PAID;
 
@@ -31,8 +32,11 @@ export type RunAdjustmentLine = Pick<AdjustmentLine, 'id' | 'kind' | 'amountPenc
 
 export interface RunStaffRow extends AdjustmentTotals {
   staffProfileId: string; staffName: string; staffRef: string | null;
-  /** grossPence = approved shift pay only; totalPence = grossPence + adjustmentsPence (corrections + bonuses + expenses). */
-  records: number; minutes: number; grossPence: number; lateCount: number; totalPence: number;
+  /**
+   * grossPence = approved shift pay only; holidayPayPence = the lines' frozen rolled-up holiday pay (owner decision 4; 0
+   * when the provider handles it); totalPence = grossPence + holidayPayPence + adjustmentsPence.
+   */
+  records: number; minutes: number; grossPence: number; lateCount: number; holidayPayPence: number; totalPence: number;
   adjustments: RunAdjustmentLine[];
   payslip: { id: string; status: PayslipStatus; version: number; document: PayslipDocumentRef | null; netPence: number | null; netSource: 'provider_document' | null; paidAt: string | null; paymentReference: string | null } | null;
 }
@@ -40,7 +44,7 @@ export interface RunStaffRow extends AdjustmentTotals {
 export interface RunView {
   id: string; status: 'prepared' | 'finalised'; period: PeriodRef | null;
   preparedAt: string; preparedByName: string | null; finalisedAt: string | null; finalisedByName: string | null;
-  totals: { records: number; staff: number; minutes: number; grossPence: number; lateCount: number; totalPence: number } & AdjustmentTotals;
+  totals: { records: number; staff: number; minutes: number; grossPence: number; lateCount: number; holidayPayPence: number; totalPence: number } & AdjustmentTotals;
   staff: RunStaffRow[];
 }
 
@@ -59,7 +63,9 @@ export interface StaffPayslipEntry {
   shiftCount: number;
   /** Approved shift pay only. */
   grossPence: number;
-  /** The caller's own approved adjustments in this period (owner decision 3); totalPence = grossPence + adjustmentsPence. */
+  /** Frozen rolled-up holiday pay of those shifts (owner decision 4); 0 when the provider handles holiday pay. */
+  holidayPayPence: number;
+  /** The caller's own approved adjustments in this period (owner decision 3); totalPence = grossPence + holidayPayPence + adjustmentsPence. */
   adjustmentsPence: number;
   totalPence: number;
   adjustments: RunAdjustmentLine[];
@@ -111,6 +117,8 @@ const RUN_CSV_COLUMNS: readonly RunCsvColumn[] = [
   { header: 'Shifts', value: (s) => String(s.records) },
   { header: 'Hours', field: 'workedTime', value: (s) => (s.minutes / 60).toFixed(2) },
   { header: 'Gross (GBP)', field: 'amount', value: (s) => (s.grossPence / 100).toFixed(2) },
+  // Owner decision 4: rolled-up holiday pay as its own column (0.00 when the provider handles it).
+  { header: 'Holiday pay (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.holidayPayPence) },
   // Owner decision 3: each adjustment kind as its own column (the provider pays expenses differently from pay), then the total.
   { header: 'Corrections (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.correctionsPence) },
   { header: 'Bonuses (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.bonusesPence) },
@@ -149,6 +157,10 @@ export class PayrollRunService {
   /** Owner decision 3: approved adjustments join the run at prepare and are locked at finalise (same transaction). */
   @Inject(PayrollAdjustmentService)
   private readonly adjustments!: PayrollAdjustmentService;
+
+  /** Owner decision 4: frozen holiday pay per record (snapshotted at approval; back-filled at prepare for older records). */
+  @Inject(HolidayPayService)
+  private readonly holidayPay!: HolidayPayService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -242,6 +254,12 @@ export class PayrollRunService {
         }
       }
       const adjustmentsAdded = (await this.adjustments.includeInRun(m, ctx, run.id, periodId)).added;
+      // Owner decision 4: every line of this (still prepared) run gets its frozen holiday pay. Records approved after holiday
+      // pay shipped already have one (approval); older records get the organisation's CURRENT setting here (flagged).
+      const unfrozen: Array<{ payroll_record_id: string }> = await m.query(
+        `SELECT l.payroll_record_id FROM ${t.payroll_run_line} l
+          WHERE l.run_id = $1 AND NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h WHERE h.payroll_record_id = l.payroll_record_id)`, [run.id]);
+      await this.holidayPay.snapshotRecords(m, ctx, unfrozen.map((u) => u.payroll_record_id));
       await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_PREPARED, { entityType: 'payroll_run', entityId: run.id, metadata: { periodId, linesAdded: added, lateLines: late, adjustmentsAdded } });
       return this.view(m, ctx, run.id);
     });
@@ -406,6 +424,12 @@ export class PayrollRunService {
           `SELECT id, period_id, status FROM ${t.payroll_run} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`, [adjustmentOnlyRuns, ctx.workspaceId]);
         for (const r of extra) runRows.push({ run_id: r.id, period_id: r.period_id, run_status: r.status, shifts: 0, gross: '0' });
       }
+      // Owner decision 4: the frozen holiday pay of the caller's own lines, per run (RLS: their own snapshot rows).
+      const holidayRows: Array<{ run_id: string; holiday: string }> = await m.query(
+        `SELECT l.run_id, sum(h.holiday_pay_pence)::text AS holiday FROM ${t.payroll_run_line} l
+           JOIN core.payroll_record_holiday_pay h ON h.payroll_record_id = l.payroll_record_id AND h.staff_user_id = $3
+          WHERE l.staff_profile_id = $1 AND l.workspace_id = $2 GROUP BY l.run_id`, [profile.id, ctx.workspaceId, ctx.userId]);
+      const holidayByRun = new Map(holidayRows.map((h) => [h.run_id, assertSafePence(Number(h.holiday), 'payslip holiday pay')]));
       const slips: Array<Record<string, unknown>> = await m.query(
         `SELECT ps.id, ps.run_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, d.file_id, d.uploaded_at,
                 (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id AND f.status = 'AVAILABLE') AS filename
@@ -418,6 +442,7 @@ export class PayrollRunService {
           WHERE pr.staff_profile_id = $1 AND pr.workspace_id = $2 AND pr.status IN ('approved','processing','paid')
             AND NOT EXISTS (SELECT 1 FROM ${t.payroll_run_line} l WHERE l.payroll_record_id = pr.id)`, [profile.id, ctx.workspaceId]);
       const alloc = await allocateRecords(m, { organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId! }, pending.map((p) => ({ id: p.id, startsAt: p.starts_at })));
+      const pendingHoliday = await this.holidayPay.forRecords(m, ctx, pending.map((p) => p.id));
       const periods = await periodsById(m, ctx.organisationId!, runRows.map((r) => r.period_id));
       const entries: StaffPayslipEntry[] = [];
       for (const r of runRows) {
@@ -428,17 +453,18 @@ export class PayrollRunService {
         const adjustments = adjByRun.get(r.run_id) ?? [];
         const grossPence = assertSafePence(Number(r.gross), 'payslip gross');
         const adjustmentsPence = adjustmentTotals(adjustments).adjustmentsPence;
+        const holidayPayPence = holidayByRun.get(r.run_id) ?? 0;
         entries.push({
           payslipId: (s?.id as string) ?? null, runId: r.run_id, period: { id: p.id, start: p.start, end: p.end }, payday: p.payday,
-          status: s?.paid_at ? 'paid' : document ? 'available' : 'processing', shiftCount: r.shifts, grossPence,
-          adjustmentsPence, totalPence: assertSafePence(grossPence + adjustmentsPence, 'payslip total'), adjustments,
+          status: s?.paid_at ? 'paid' : document ? 'available' : 'processing', shiftCount: r.shifts, grossPence, holidayPayPence,
+          adjustmentsPence, totalPence: assertSafePence(grossPence + holidayPayPence + adjustmentsPence, 'payslip total'), adjustments,
           netPence: s?.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s?.net_source as 'provider_document') ?? null, document, paidAt: iso(s?.paid_at),
         });
       }
       const upcoming = new Map<string, StaffPayslipEntry>();
       const upcomingFor = (a: Allocation): StaffPayslipEntry => upcoming.get(a.period!.id) ?? {
         payslipId: null, runId: a.runId, period: { id: a.period!.id, start: a.period!.start, end: a.period!.end }, payday: a.period!.payday,
-        status: 'upcoming' as PayslipStatus, shiftCount: 0, grossPence: 0, adjustmentsPence: 0, totalPence: 0, adjustments: [],
+        status: 'upcoming' as PayslipStatus, shiftCount: 0, grossPence: 0, holidayPayPence: 0, adjustmentsPence: 0, totalPence: 0, adjustments: [],
         netPence: null, netSource: null, document: null, paidAt: null,
       };
       let unallocatedShifts = 0;
@@ -451,6 +477,7 @@ export class PayrollRunService {
         const e = upcomingFor(a);
         e.shiftCount += 1;
         e.grossPence = assertSafePence(e.grossPence + assertSafePence(Number(p.amount_pence), 'payroll_record.amount_pence'), 'upcoming gross');
+        e.holidayPayPence = assertSafePence(e.holidayPayPence + (pendingHoliday.get(p.id)?.holidayPayPence ?? 0), 'upcoming holiday pay');
         upcoming.set(a.period.id, e);
       }
       for (const u of own.upcoming) {
@@ -465,14 +492,15 @@ export class PayrollRunService {
         upcoming.set(u.allocation.period.id, e);
       }
       for (const e of upcoming.values()) {
-        e.totalPence = assertSafePence(e.grossPence + e.adjustmentsPence, 'upcoming total');
+        e.totalPence = assertSafePence(e.grossPence + e.holidayPayPence + e.adjustmentsPence, 'upcoming total');
         const merged = entries.find((x) => x.period.id === e.period.id);
         if (merged) {
           merged.shiftCount += e.shiftCount;
           merged.grossPence = assertSafePence(merged.grossPence + e.grossPence, 'payslip gross');
+          merged.holidayPayPence = assertSafePence(merged.holidayPayPence + e.holidayPayPence, 'payslip holiday pay');
           merged.adjustments.push(...e.adjustments);
           merged.adjustmentsPence = assertSafePence(merged.adjustmentsPence + e.adjustmentsPence, 'payslip adjustments');
-          merged.totalPence = assertSafePence(merged.grossPence + merged.adjustmentsPence, 'payslip total');
+          merged.totalPence = assertSafePence(merged.grossPence + merged.holidayPayPence + merged.adjustmentsPence, 'payslip total');
         } else entries.push(e);
       }
       entries.sort((a, b) => b.payday.localeCompare(a.payday));
@@ -514,9 +542,11 @@ export class PayrollRunService {
     const staff: Array<Record<string, unknown>> = await m.query(
       `SELECT l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, count(*)::int AS records, sum(l.worked_minutes)::int AS minutes,
               sum(l.amount_pence) AS gross, count(*) FILTER (WHERE l.late_approval)::int AS late,
+              COALESCE(sum(h.holiday_pay_pence), 0) AS holiday,
               ps.id AS payslip_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, ps.payment_reference, d.file_id, d.uploaded_at,
               (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id) AS filename
          FROM ${t.payroll_run_line} l JOIN ${t.staff_profile} sp ON sp.id = l.staff_profile_id JOIN core."user" u ON u.id = sp.user_id
+         LEFT JOIN core.payroll_record_holiday_pay h ON h.payroll_record_id = l.payroll_record_id
          LEFT JOIN ${t.payslip} ps ON ps.run_id = l.run_id AND ps.staff_profile_id = l.staff_profile_id
          LEFT JOIN ${t.payslip_document} d ON d.payslip_id = ps.id AND d.version = ps.version
         WHERE l.run_id = $1
@@ -530,7 +560,7 @@ export class PayrollRunService {
     const adjustmentOnly = [...adjByStaff.keys()].filter((id) => !lineStaff.has(id));
     if (adjustmentOnly.length) {
       const extra: Array<Record<string, unknown>> = await m.query(
-        `SELECT sp.id AS staff_profile_id, u.first_name, u.last_name, sp.staff_ref, 0 AS records, 0 AS minutes, 0 AS gross, 0 AS late,
+        `SELECT sp.id AS staff_profile_id, u.first_name, u.last_name, sp.staff_ref, 0 AS records, 0 AS minutes, 0 AS gross, 0 AS late, 0 AS holiday,
                 ps.id AS payslip_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, ps.payment_reference, d.file_id, d.uploaded_at,
                 (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id) AS filename
            FROM ${t.staff_profile} sp JOIN core."user" u ON u.id = sp.user_id
@@ -545,10 +575,11 @@ export class PayrollRunService {
       const adjustments = adjByStaff.get(s.staff_profile_id as string) ?? [];
       const adj = adjustmentTotals(adjustments);
       const grossPence = assertSafePence(Number(s.gross), 'run staff gross');
+      const holidayPayPence = assertSafePence(Number(s.holiday), 'run staff holiday pay');
       return {
         staffProfileId: s.staff_profile_id as string, staffName: `${s.first_name} ${s.last_name}`, staffRef: (s.staff_ref as string) ?? null,
-        records: Number(s.records), minutes: Number(s.minutes), grossPence, lateCount: Number(s.late),
-        ...adj, totalPence: assertSafePence(grossPence + adj.adjustmentsPence, 'run staff total'), adjustments,
+        records: Number(s.records), minutes: Number(s.minutes), grossPence, lateCount: Number(s.late), holidayPayPence,
+        ...adj, totalPence: assertSafePence(grossPence + holidayPayPence + adj.adjustmentsPence, 'run staff total'), adjustments,
         payslip: s.payslip_id ? {
           id: s.payslip_id as string, status: s.paid_at ? 'paid' : document ? 'available' : 'processing', version: Number(s.version), document,
           netPence: s.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s.net_source as 'provider_document') ?? null,
@@ -563,6 +594,7 @@ export class PayrollRunService {
       totals: {
         records: rows.reduce((n, r) => n + r.records, 0), staff: rows.length, minutes: rows.reduce((n, r) => n + r.minutes, 0),
         grossPence: sum((r) => r.grossPence, 'run gross total'), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
+        holidayPayPence: sum((r) => r.holidayPayPence, 'run holiday pay total'),
         correctionsPence: sum((r) => r.correctionsPence, 'run corrections total'), bonusesPence: sum((r) => r.bonusesPence, 'run bonuses total'),
         expensesPence: sum((r) => r.expensesPence, 'run expenses total'), adjustmentsPence: sum((r) => r.adjustmentsPence, 'run adjustments total'),
         totalPence: sum((r) => r.totalPence, 'run total'),

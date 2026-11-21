@@ -10396,3 +10396,36 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   (b) holiday pay is not added on adjustments (decision 4 PR states the rule); (c) the second approver must also pass
   P1's MFA-enrolment rule once decision 5 lands (today: a recent step-up, which includes the code when the approver has
   MFA).
+
+## Rolled-up holiday pay: per-organisation setting and a frozen per-record line (Lane P2, M5, owner decision 4 / assumption A3, branch feat/payroll-holiday-pay, 2026-11-21; NEW SQL: PayrollHolidayPay1786723110000, DRAFT for owner review)
+- **Asset / actors:** the holiday pay added to every approved shift, and the rule that decides it. Attackers considered: a
+  manager switching the organisation to "provider handles it" (or a tiny rate) to under-pay staff, or to a high rate to
+  over-pay; a stale or stolen session doing it; a Venue Manager or staff member reading or writing it; another
+  organisation; a later setting change silently repricing approved or already-paid work; a figure stored that does not
+  follow the stated rounding rule.
+- **Controls:** the setting (`core.organisation_payroll_setting`, ENABLE + FORCE RLS) is read by the organisation's
+  non-venue managers and written only by its CURRENT Initial Manager naming themselves (RLS WITH CHECK), the same
+  authority as the agency payment calendar; layer 2 re-checks payroll.calculate, the Venue Manager exclusion and the
+  Initial Manager, after a recent step-up checked FIRST (`payroll.holiday_pay.update`); every change is audited with
+  before / after (shipped as `payroll_approval`, warning). The snapshot (`core.payroll_record_holiday_pay`, ENABLE + FORCE
+  RLS) is written in the APPROVAL transaction by the approving workspace payroll manager, one row per record, INSERT-only
+  for the runtime login (no UPDATE / DELETE grant; the owner login refused by the grant-parity guard), and a CHECK
+  re-derives `holiday_pay_pence = (base * rate + 5000) / 10000` (nearest penny, half up), equal to `@rab/shared`
+  `rolledUpHolidayPayPence` (BigInt, never a float). A setting change only affects later approvals; run views, the export
+  and the staff timeline read the frozen rows, so a finalised run never changes. Staff read only their own rows; the
+  Worker reads them for the statement PDF; Venue Managers and other organisations read nothing.
+- **Payslips:** the Approved Shift Statement itemises "Rolled-up holiday pay (rate)" as its own line and a total including
+  it (rolled-up holiday pay is only lawful when itemised); "provider handles it" prints no line, exactly as before.
+- **Not chosen / trade-off:** a workspace table (owner decision 48's approach); a snapshot at record creation (the
+  finaliser may be a Venue Manager, who must never write pay rows). Records approved before this feature have no row;
+  run prepare back-fills them at the CURRENT setting (flagged).
+- **Tests:** `payroll-holiday-pay.integration.spec.ts` (zero rows without tenant context on both tables; default 12.07%;
+  non-Initial manager, Venue Manager, other organisation 403; stale session STEP_UP_REQUIRED with nothing written;
+  mass assignment 400; RLS WITH CHECK refusals; snapshot equals the shared function; UPDATE / DELETE refused; a figure
+  breaking the rounding rule refused even to the superuser; per-role reads; provider = zero line; earlier records never
+  recalculated; prepare back-fill; locked run unchanged after a later setting change; staff timeline), worker
+  `shift-statement.integration.spec.ts` (the PDF line), `holiday-pay.service.spec.ts`, `payroll-holiday-pay-sql.spec.ts`,
+  `approved-shift-statement.view-model.spec.ts`, shared `money.spec.ts` (rounding edges), `lane-d-step-up-adoption`.
+- **Residual / flagged for the owner:** decision 4's own caveat (rolled-up pay is lawful only for irregular-hours and
+  part-year workers, leave years from 1 April 2024; to confirm with the payroll adviser); holiday pay is not added to
+  adjustments; the provider's official payslip must itemise it too (outside Crewflow).

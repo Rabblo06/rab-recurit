@@ -25,6 +25,7 @@ import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
 import { ListPayrollRecordsDto } from '../dto/payroll-record.dto';
 import { publicStatementState, ShiftStatementState } from '../constants/shift-statement';
 import { Allocation, allocateRecords, AllocationStatus } from './payroll-allocation';
+import { HolidayPayService } from './holiday-pay.service';
 
 /** Statuses in which the gross pay counts as approved (staff History shows the shift; `payrollApprovedPence` is set). */
 export const PAYROLL_APPROVED_STATUSES: readonly PayrollRecordStatusType[] = [
@@ -285,6 +286,10 @@ export class PayrollService {
   /** C1b realtime outbox — property-injected so the constructor signature is unchanged. */
   @Inject(RealtimeEventService)
   private readonly realtimeEvents!: RealtimeEventService;
+
+  /** Owner decision 4: the holiday pay of each record is frozen in its approval transaction (property-injected). */
+  @Inject(HolidayPayService)
+  private readonly holidayPay!: HolidayPayService;
 
   /**
    * C1b realtime (inside the caller's transaction): payroll.record_changed → ONLY workspace members who may read payroll
@@ -582,6 +587,8 @@ export class PayrollService {
       [ids, ctx.workspaceId, PayrollRecordStatus.APPROVED, ctx.userId, PayrollRecordStatus.PENDING_APPROVAL],
     )) as [unknown, number];
     if (updated !== ids.length) throw new ConflictException('Payroll changed while you were approving it. Refresh and try again.');
+    // Owner decision 4: freeze each record's holiday pay (organisation setting now, nearest penny half up), same transaction.
+    await this.holidayPay.snapshotRecords(manager, ctx, ids);
     // J1b: registered now, published only after the outermost commit (never on rollback); one per transaction.
     this.statementWake?.afterCommit(manager);
     // C1b realtime (review F8): the payroll audience is the same for every record of this workspace — resolved at most
