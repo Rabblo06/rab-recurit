@@ -1,18 +1,29 @@
 import { Injectable } from '@nestjs/common';
 
-import { EnvironmentService } from '../environment/environment.service';
 import { SecretEncryptionService } from '../secret-encryption/secret-encryption.service';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { PushDevice } from './entities/push-device.entity';
 import { deactivateAllPushDevicesForUser, deactivatePushDeviceForUser } from './push-device-deactivation';
-import { pushTokenFingerprint, pushTokenFingerprintKey } from './push-token-fingerprint';
 
 export interface RegisterDeviceParams {
   deviceId: string;
   platform: 'ios' | 'android';
   pushToken: string;
   appVersion?: string;
+}
+
+/**
+ * C1 review F2: registrations of one provider token are serialised by a transaction-scoped advisory lock (two-key form,
+ * namespace `hashtext('crewflow_push_token_fingerprint')`, second key = the first 4 bytes of the active-kid fingerprint),
+ * so two concurrent registrations of the same token by two accounts cannot both stay active. A collision between two
+ * different tokens only serialises them.
+ */
+export const PUSH_TOKEN_LOCK_SQL =
+  "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('crewflow_push_token_fingerprint'), $1::int4)";
+
+export function pushTokenLockKey(fingerprint: Buffer): number {
+  return fingerprint.readInt32BE(0);
 }
 
 /**
@@ -25,15 +36,10 @@ export interface RegisterDeviceParams {
  */
 @Injectable()
 export class PushDeviceService {
-  private readonly fingerprintKey: Buffer;
-
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly secretEncryption: SecretEncryptionService,
-    env: EnvironmentService,
-  ) {
-    this.fingerprintKey = pushTokenFingerprintKey(env.get('APP_SECRET'));
-  }
+  ) {}
 
   /**
    * Upserts on `(userId, deviceId)` — a registration refresh/replacement (a rotated FCM token,
@@ -43,7 +49,12 @@ export class PushDeviceService {
   async register(ctx: AuthContext, params: RegisterDeviceParams): Promise<{ id: string }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const encrypted = this.secretEncryption.encrypt(params.pushToken);
-      const fingerprint = pushTokenFingerprint(this.fingerprintKey, params.pushToken);
+      // C1 review F2: the active-kid fingerprint is stored; the candidates (every configured kid) are matched, so a row
+      // fingerprinted before a key rotation is still found.
+      const fingerprint = this.secretEncryption.pushTokenFingerprint(params.pushToken);
+      const fingerprintCandidates = this.secretEncryption.pushTokenFingerprintCandidates(params.pushToken);
+      // Serialise registrations of this token BEFORE anything is read (see PUSH_TOKEN_LOCK_SQL).
+      await manager.query(PUSH_TOKEN_LOCK_SQL, [pushTokenLockKey(fingerprint)]);
       const existing = await manager.findOne(PushDevice, { where: { userId: ctx.userId, deviceId: params.deviceId } });
       const now = new Date();
       // CF-35: one physical device delivers for one account at a time. When B signs in on a phone A used, A's
@@ -58,13 +69,18 @@ export class PushDeviceService {
       // C1 review F2: the same provider token registered by ANOTHER account of this organisation (a shared or second-hand
       // phone reinstalled with a new installation id, so the device-id rule above does not match). The provider delivers a
       // token to one phone, so the other account's row would send its notifications to whoever holds the phone now.
-      // Matched by keyed fingerprint (no decryption); organisation-scoped by FORCE RLS like the rule above. A token reused in
-      // ANOTHER organisation is not visible here (residual, THREAT-MODEL).
+      // Matched by keyed fingerprint under every configured kid (no decryption). Organisation-scoped twice: the explicit
+      // predicate from the verified context (layer 3) and FORCE RLS (layer 4). A token reused in ANOTHER organisation is not
+      // visible here (residual, THREAT-MODEL).
       await manager
         .createQueryBuilder()
         .update(PushDevice)
         .set({ active: false, deactivatedAt: now, deactivatedReason: 'token_registered_by_another_account' })
-        .where('token_fingerprint = :fingerprint AND user_id <> :userId AND active = true', { fingerprint, userId: ctx.userId })
+        .where('organisation_id = :organisationId AND token_fingerprint IN (:...fingerprints) AND user_id <> :userId AND active = true', {
+          organisationId: ctx.organisationId,
+          fingerprints: fingerprintCandidates,
+          userId: ctx.userId,
+        })
         .execute();
 
       // C1b (D5): the SAME user's other active row carrying this exact provider token is the same phone under an older

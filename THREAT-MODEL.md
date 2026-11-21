@@ -10309,14 +10309,23 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   `push-device.service.ts` `register()` superseded another account's row only by `device_id` (CF-35) and the same
   user's rows by decrypting tokens. Tokens are AES-GCM with a random IV, so equal tokens never match in SQL.
 - **Fix:** `core.push_device.token_fingerprint bytea` (NULL or exactly 32 bytes, CHECK) holds HMAC-SHA256 of the
-  provider token under a key HKDF-derived from APP_SECRET with its own label (`crewflow:push-token-fingerprint:v1`),
-  separate from the encryption, JWT and auth-cache keys. `register()` writes it on every insert and refresh and
-  deactivates any OTHER account's active row with the same fingerprint (`token_registered_by_another_account`), inside
-  the same tenant transaction. Partial index `(organisation_id, token_fingerprint) WHERE active AND token_fingerprint IS
-  NOT NULL`, not UNIQUE (two concurrent registrations must not fail a sign-in; the later one wins). The column is
+  provider token under the ACTIVE encryption kid's fingerprint key: keyring.util `derivePurposeKey(secret,
+  'push-token-fingerprint', kid)`, one key per `APP_ENCRYPTION_KEYRING` kid plus the implicit `legacy` kid from
+  APP_SECRET, separate from the encryption, JWT and auth-cache keys. `register()` writes it on every insert and refresh
+  and deactivates any OTHER account's active row whose fingerprint matches under ANY configured kid
+  (`token_registered_by_another_account`), inside the same tenant transaction. Key lifecycle (review of #303): a
+  fingerprint lives exactly as long as the key that can decrypt its token. Rotating the active kid keeps old rows
+  matchable while the old kid is configured, and SecretRotationService rewrites the fingerprint under the new kid
+  together with the ciphertext. A kid can only be dropped after that rotation; a row whose kid is gone can no longer be
+  decrypted, so it cannot deliver anything. Registrations of one token are serialised by `pg_advisory_xact_lock(
+  hashtext('crewflow_push_token_fingerprint'), <first 4 bytes of the fingerprint>)`, taken before anything is read, so
+  concurrent registrations by two accounts leave one active row. Partial index `(organisation_id, token_fingerprint)
+  WHERE active AND token_fingerprint IS NOT NULL`, not UNIQUE: a sign-in never fails on it. The migration's ACCESS
+  EXCLUSIVE statements run with `lock_timeout` 5s (transaction-local, the previous value restored). The column is
   `select: false`, never returned or logged.
-- **Layers:** organisation from the verified `AuthContext` only (unchanged); RLS `push_device_tenant` (ENABLE + FORCE,
-  USING + WITH CHECK on organisation_id) scopes the supersede UPDATE to the caller's organisation. Policy and grants are
+- **Layers:** organisation from the verified `AuthContext` only (unchanged); the supersede UPDATE carries an explicit
+  `organisation_id = ctx.organisationId` predicate (layer 3), and RLS `push_device_tenant` (ENABLE + FORCE, USING + WITH
+  CHECK on organisation_id) scopes it again (layer 4). Policy and grants are
   unchanged, and the column inherits them.
 - **Abuse check:** deactivating another account's row needs that phone's provider token, a secret held only by the
   device. CF-35 already supersedes by the client-generated, non-secret `device_id`, so this adds no weaker path. A
@@ -10325,8 +10334,13 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   Closing it needs a cross-tenant SECURITY DEFINER lookup, which is not proposed. (2) Rows registered before the migration
   carry NULL until their device registers again (the apps re-register on start and on token refresh). There is no backfill,
   because it would need the server secret inside the database. (3) Rotating APP_SECRET changes every fingerprint, so old
-  rows stop matching until re-registration: a missed supersede, never a wrong one.
-- **Tests:** `push-token-fingerprint.spec.ts` (deterministic, 32 bytes, keyed per secret, not plain SHA-256, separate from
-  the encryption key, refuses empty input); `push-session-deactivation.integration.spec.ts` (e): another account's
-  same token supersedes the first row and the stored value is the 32-byte fingerprint; a different token and a self
-  refresh are untouched; the same token in another organisation never touches this organisation's row.
+  rows stop matching until re-registration. Those rows are also undecryptable under the new APP_SECRET, so they cannot
+  deliver: a missed supersede, never a leak.
+- **Tests:** `secret-encryption.push-token-fingerprint.spec.ts` (derivePurposeKey per kid; legacy kid; after rotating the
+  active kid an old-kid fingerprint is still a candidate; a removed kid is not; not plain SHA-256 and not the
+  encryption key; refuses empty input). `push-device.service.f2.spec.ts` (the lock comes first; the supersede predicate
+  carries organisation_id from the context and every candidate; the fingerprint is written on the insert and the
+  refresh path). `push-session-deactivation.integration.spec.ts` (e): another account's same token supersedes the first
+  row (32-byte fingerprint); a different token and a self refresh are untouched; the same token in another
+  organisation never touches this organisation's row; an old-kid row is superseded after rotation; three parallel
+  registrations of one token leave exactly one active row; a refresh fills a NULL fingerprint.

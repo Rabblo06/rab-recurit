@@ -14,12 +14,15 @@ import { createHmac, hkdfSync } from 'node:crypto';
  *   - encryption        APP_ENCRYPTION_KEYRING (unchanged derivation `rab-secret-encryption:<kid>`; legacy
  *                       `rab-secret-encryption` from APP_SECRET for existing ciphertext).
  *   - QR tokens         HKDF(APP_SECRET, 'rab-qr-token-v1') in modules/attendance — unchanged (printed QR codes).
+ *   - `push-token-fingerprint` (C1 review F2) one key per APP_ENCRYPTION_KEYRING kid (and the implicit `legacy` kid from
+ *                       APP_SECRET), held by SecretEncryptionService next to that kid's encryption key, so a push token's
+ *                       fingerprint lives exactly as long as the key that can decrypt the token (rotation re-fingerprints).
  *
  * Primitives: node:crypto HKDF-SHA256 (RFC 5869) and HMAC-SHA256 only. The `info` label carries the purpose AND the kid,
  * so two purposes (or two kids) never derive the same key from the same input, and a key for one purpose reveals nothing
  * about another or about the input secret.
  */
-export type KeyPurpose = 'jwt-access' | 'auth-cache-hmac';
+export type KeyPurpose = 'jwt-access' | 'auth-cache-hmac' | 'push-token-fingerprint';
 
 export const KEY_PURPOSE_LABEL_PREFIX = 'crewflow:key-purpose:v1';
 const DERIVED_KEY_LENGTH = 32;

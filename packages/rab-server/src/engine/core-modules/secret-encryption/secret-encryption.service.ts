@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes } from 'node:crypto';
 
 import { EnvironmentService } from '../environment/environment.service';
-import { parseKeyringEnvVar } from './keyring.util';
+import { derivePurposeKey, parseKeyringEnvVar } from './keyring.util';
 
 const IV_LENGTH = 12; // AES-GCM standard nonce size
 const AUTH_TAG_LENGTH = 16;
@@ -45,6 +45,8 @@ interface KeyringEntry {
 @Injectable()
 export class SecretEncryptionService {
   private readonly keyring: Map<string, Buffer>;
+  /** C1 review F2: one push-token fingerprint key per kid of the keyring above (purpose `push-token-fingerprint`). */
+  private readonly fingerprintKeys: Map<string, Buffer>;
   private readonly activeKid: string;
 
   constructor(env: EnvironmentService) {
@@ -55,6 +57,7 @@ export class SecretEncryptionService {
     const legacyKey = Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), 'rab-secret-encryption', KEY_LENGTH));
 
     this.keyring = new Map<string, Buffer>([[LEGACY_KID, legacyKey]]);
+    this.fingerprintKeys = new Map<string, Buffer>([[LEGACY_KID, derivePurposeKey(secret, 'push-token-fingerprint', LEGACY_KID)]]);
 
     const rawKeyring = env.get('APP_ENCRYPTION_KEYRING');
     if (rawKeyring) {
@@ -65,6 +68,7 @@ export class SecretEncryptionService {
           );
         }
         this.keyring.set(entry.kid, deriveKey(entry.secret, entry.kid));
+        this.fingerprintKeys.set(entry.kid, derivePurposeKey(entry.secret, 'push-token-fingerprint', entry.kid));
       }
 
       const activeKid = env.get('APP_ENCRYPTION_ACTIVE_KID');
@@ -88,6 +92,27 @@ export class SecretEncryptionService {
     const authTag = cipher.getAuthTag();
     const kidBuf = Buffer.from(this.activeKid, 'utf8');
     return Buffer.concat([VERSIONED_MAGIC, Buffer.from([kidBuf.length]), kidBuf, iv, authTag, ciphertext]);
+  }
+
+  /**
+   * C1 review F2: the keyed fingerprint (HMAC-SHA256, 32 bytes) of a push provider token under the ACTIVE kid's
+   * fingerprint key: what a registration (and a rotation) stores in `core.push_device.token_fingerprint`. Deterministic, so
+   * equal tokens match in SQL, unlike the random-IV ciphertext; useless without the server key material.
+   */
+  pushTokenFingerprint(pushToken: string): Buffer {
+    return fingerprintUnder(this.fingerprintKeys.get(this.activeKid)!, pushToken);
+  }
+
+  /**
+   * Every fingerprint the same token can carry: under the active kid first, then every other configured kid. A row
+   * fingerprinted before a key rotation (and not yet rotated) is still found. A kid removed from the keyring can no longer
+   * decrypt its rows either, and the rotation that must run first re-fingerprints them (SecretRotationService), so every
+   * row that can still deliver a notification is matchable.
+   */
+  pushTokenFingerprintCandidates(pushToken: string): Buffer[] {
+    const active = this.pushTokenFingerprint(pushToken);
+    const others = [...this.fingerprintKeys.entries()].filter(([kid]) => kid !== this.activeKid).map(([, key]) => fingerprintUnder(key, pushToken));
+    return [active, ...others];
   }
 
   /** The active kid new encrypt() calls use — exposed read-only so SecretRotationService can tell "already on the active key" apart from "needs rotation" without a second source of truth. */
@@ -172,6 +197,11 @@ export class SecretEncryptionService {
   getKeyringSummary(): { activeKid: string; kids: string[] } {
     return { activeKid: this.activeKid, kids: [...this.keyring.keys()] };
   }
+}
+
+function fingerprintUnder(key: Buffer, value: string): Buffer {
+  if (!value) throw new Error('push token fingerprint: the token must not be empty.');
+  return createHmac('sha256', key).update(value, 'utf8').digest();
 }
 
 /** Distinct `info` per kid: two different kids never derive the same key even given the same raw secret by mistake. */

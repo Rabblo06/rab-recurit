@@ -36,7 +36,8 @@ export class PushDevice {
   pushTokenEncrypted!: Buffer;
 
   /**
-   * C1 review F2: keyed HMAC-SHA256 of the provider token (push-token-fingerprint.ts), so a registration finds another
+   * C1 review F2: keyed HMAC-SHA256 of the provider token under the active encryption kid's fingerprint key
+   * (SecretEncryptionService.pushTokenFingerprint, purpose `push-token-fingerprint`), so a registration finds another
    * active row carrying the same token without decrypting every row. `select: false`, never returned or logged. NULL on
    * rows registered before PushDeviceTokenFingerprint1786722800000 until their device registers again.
    */
