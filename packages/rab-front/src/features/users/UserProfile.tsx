@@ -107,17 +107,38 @@ const TABS: { key: Tab; label: string; Icon: React.FC<any> }[] = [
   { key: 'emails',   label: 'Emails',   Icon: IconMail     },
 ];
 
-// ── Notes stored in localStorage per user ─────────────────────────────────────
+// ── Notes: held in component memory only (CF-23) ─────────────────────────────
+// Notes about a person are never written to localStorage/sessionStorage: browser
+// storage outlives the session and is readable by the next account on a shared
+// device. Until a server-side, RLS-scoped notes store backs this page, a note
+// lives only while this page is open and is gone on navigation or reload.
 type Note = { id: string; text: string; createdAt: string };
 
+// Builds before CF-23 persisted notes under this prefix. They are purged on
+// mount so a shared device stops carrying another account's notes.
+const LEGACY_NOTES_KEY_PREFIX = 'user-notes-';
+
+function purgeLegacyNotes() {
+  try {
+    const stale: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(LEGACY_NOTES_KEY_PREFIX)) stale.push(k);
+    }
+    stale.forEach(k => localStorage.removeItem(k));
+  } catch {
+    // Storage unavailable (private mode, blocked): nothing was persisted there.
+  }
+}
+
 function useNotes(userId: string) {
-  const key = `user-notes-${userId}`;
-  const [notes, setNotes] = useState<Note[]>(() => {
-    try { return JSON.parse(localStorage.getItem(key) ?? '[]'); } catch { return []; }
-  });
-  const save = (next: Note[]) => { setNotes(next); localStorage.setItem(key, JSON.stringify(next)); };
-  const add = (text: string) => save([{ id: crypto.randomUUID(), text, createdAt: new Date().toISOString() }, ...notes]);
-  const remove = (id: string) => save(notes.filter(n => n.id !== id));
+  const [state, setState] = useState<{ userId: string; notes: Note[] }>({ userId, notes: [] });
+  useEffect(() => { purgeLegacyNotes(); }, []);
+  // Never show one person's notes on another person's page.
+  const notes = state.userId === userId ? state.notes : [];
+  const add = (text: string) =>
+    setState({ userId, notes: [{ id: crypto.randomUUID(), text, createdAt: new Date().toISOString() }, ...notes] });
+  const remove = (id: string) => setState({ userId, notes: notes.filter(n => n.id !== id) });
   return { notes, add, remove };
 }
 
@@ -346,6 +367,9 @@ export default function UserProfile() {
             {/* ── Notes ── */}
             {tab === 'notes' && (
               <div>
+                <p style={{ fontSize: 12, color: 'var(--font-tertiary)', marginBottom: 12 }}>
+                  Notes on this page are not saved. They are cleared when you leave or reload the page.
+                </p>
                 {addingNote && (
                   <div style={{ marginBottom: 20, border: '1px solid var(--border-medium)', borderRadius: 8, overflow: 'hidden' }}>
                     <textarea
@@ -360,7 +384,7 @@ export default function UserProfile() {
                       <button className="btn btn-outline" onClick={() => { setAddingNote(false); setNoteText(''); }}>Cancel</button>
                       <button className="btn btn-dark" style={{ gap: 6 }} onClick={submitNote}>
                         <IconSend size={13}/>
-                        Save note
+                        Add note
                       </button>
                     </div>
                   </div>

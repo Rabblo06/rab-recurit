@@ -10300,3 +10300,27 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## CF-23 — notes on the user profile page no longer persist to browser storage (branch fix/cf23-staff-notes-no-browser-storage, 2026-11-21; no SQL, no server change)
+- **Finding (CF-23, LOW):** `packages/rab-front/src/features/users/UserProfile.tsx` (`/users/:id`) kept notes about a
+  person in `localStorage` under `user-notes-<userId>`. Browser storage outlives logout and is shared by every account
+  that signs in on the same browser profile, so a note written by one console user was shown to the next one on a shared
+  device and stayed readable in devtools indefinitely. It was also fake persistence: nothing reached the server.
+- **Control:** notes on that page live in React component memory only, keyed by the profile's user id (a note added on
+  one person's page is never shown on another's), and are lost on navigation or reload. The page says so ("Notes on
+  this page are not saved...") and the button reads "Add note", not "Save note". On mount the page removes every
+  `user-notes-*` key an older build left in `localStorage` (other keys untouched); storage errors (private mode,
+  blocked storage) are swallowed because nothing was stored there. No new table, endpoint or SQL.
+- **Assumption (data retention, flagged):** purging the legacy `user-notes-*` keys deletes notes a console user may
+  believe they saved. They existed only on that one browser, never on the server, and keeping them is the leak this
+  finding is about, so they are deleted rather than migrated. Veto if those notes must be kept.
+- **Note:** the server has no `/users/:id` route today (staff and manager notes go through the RLS-scoped
+  `/staff/:id/notes`, `/managers/:id/notes`, `/venue-managers/:id/notes` endpoints used by `UserDetailPanel`), so this
+  page currently renders "User not found" and the notes tab is unreachable in a live console. The fix still applies so
+  the page cannot leak if it is wired up again, and the purge cleans devices used with older builds.
+- **Tests:** `packages/rab-front/src/features/users/UserProfile.spec.tsx`: adding a note shows it while
+  `Storage.prototype.setItem` and `sessionStorage.setItem` are never called and both storages stay empty; notes seeded
+  under `user-notes-*` by an older build are not shown and are removed on mount, an unrelated key survives; a note added
+  on user A's page is not shown after navigating to user B's page.
+- **Residual:** notes on this page are not saved at all until a server-side, RLS-scoped notes store backs it (a new
+  table = owner SQL review).
