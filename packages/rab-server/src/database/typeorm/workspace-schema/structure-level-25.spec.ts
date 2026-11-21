@@ -67,8 +67,9 @@ describe('M4 §11: attendance_tenant gains a staff-own-or-manager predicate (str
   });
 
   it('release 0.7.0 registers it as level 25 (after #243 = 24), with its provision literal mapped to 25', () => {
-    expect(WORKSPACE_UPGRADE_COMMANDS['0-7']![WORKSPACE_UPGRADE_COMMANDS['0-7']!.length - 1]).toBe(ATTENDANCE_STAFF_SCOPE);
-    expect(codeWorkspaceStructureLevel()).toBe(25);
+    expect(WORKSPACE_UPGRADE_COMMANDS['0-7']).toContain(ATTENDANCE_STAFF_SCOPE);
+    // 26 since the attendance_correction insert-only command: this spec pins only that level 25 is this command's.
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(25);
     expect(declaredProvisionLiterals()['db:provision_workspace@AttendanceStaffScopeRls1786722100000']).toBe(25);
     expect(ATTENDANCE_STAFF_SCOPE.structure?.mayDrop).toBeUndefined();
     expect(ATTENDANCE_STAFF_SCOPE.precheck).toBeUndefined();

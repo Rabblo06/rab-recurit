@@ -962,7 +962,7 @@ table|ai_usage_daily|crewflow_app|S,I
 table|ai_usage_daily|crewflow|S,I,U,D,T,R,G
 table|ai_usage|crewflow_app|S
 table|ai_usage|crewflow|S,I,U,D,T,R,G
-table|attendance_correction|crewflow_app|S,I,U,D
+table|attendance_correction|crewflow_app|S,I
 table|attendance_correction|crewflow|S,I,U,D,T,R,G
 table|attendance|crewflow_app|S,I,U,D
 table|attendance|crewflow|S,I,U,D,T,R,G
@@ -1158,7 +1158,7 @@ worker-delta|execute|worker_claim_statement_dispatch(integer)|true
 worker-delta|execute|worker_delete_expired_invited_user(uuid)|true
 worker-delta|execute|worker_expire_account_invites(integer)|true
 worker-delta|execute|worker_release_dispatch_claim(text,uuid,uuid,integer)|true
-ws|acl|attendance_correction|crewflow_app|DELETE,INSERT,SELECT,UPDATE
+ws|acl|attendance_correction|crewflow_app|INSERT,SELECT
 ws|acl|attendance_correction|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
 ws|acl|attendance|crewflow_app|DELETE,INSERT,SELECT,UPDATE
 ws|acl|attendance|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
@@ -1496,7 +1496,7 @@ ws|schema|acl|rab_secure_owner|CREATE,USAGE
 ws|schema|crewflow_app|usage=true|create=false
 ws|schema|crewflow|usage=true|create=true
 ws|schema|owner|rab_secure_owner
-ws|table|attendance_correction|crewflow_app|S,I,U,D
+ws|table|attendance_correction|crewflow_app|S,I
 ws|table|attendance_correction|crewflow|S,I,U,D,T,R,G
 ws|table|attendance|crewflow_app|S,I,U,D
 ws|table|attendance|crewflow|S,I,U,D,T,R,G
@@ -1538,6 +1538,9 @@ ws|table|venue_role_rate|crewflow_app|S,I,U,D
 ws|table|venue_role_rate|crewflow|S,I,U,D,T,R,G
 ws|table|venue|crewflow_app|S,I,U,D
 ws|table|venue|crewflow|S,I,U,D,T,R,G
+ws|trigger|attendance_correction|attendance_correction_insert_only_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_correction|attendance_correction_insert_only_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_correction|attendance_correction_insert_only_update|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|attendance|attendance_post_shift_reset|enabled=O|core.reset_attendance_post_shift()
 ws|trigger|payroll_record|_payroll_record_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|payroll_record|_payroll_record_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
