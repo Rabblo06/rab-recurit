@@ -34,6 +34,7 @@ const EXPECTED_IDS = [
   'crewflow:crewflow-scan-reports:payroll-period-attention',
   'crewflow:crewflow-scan-reports:shift-report-scheduler',
   'crewflow:crewflow-scan-reports:shift-statement-dispatch',
+  'crewflow:crewflow-scan-reports:staff-document-expiry',
   'crewflow:crewflow-scan-shifts:attendance-monitor',
   'crewflow:crewflow-scan-shifts:late-clock-in',
   'crewflow:crewflow-scan-shifts:shift-cancellation-followup',

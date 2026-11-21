@@ -94,6 +94,10 @@ const WORKER_ACTOR_TYPE_ALLOWLIST: Allowlist = {
     sites: 1,
     why: 'payroll period attention notices: candidates from the worker discovery scan; no human actor behind the job',
   },
+  'queues/rab-reports/staff-document-expiry.job.ts': {
+    sites: 1,
+    why: 'staff document expiry alerts: candidates from the worker discovery scan; no human actor behind the job',
+  },
   'queues/rab-reports/shift-statement.job.ts': {
     sites: 1,
     why: 'pay statement generation (`workerCtx`): scope from the claimed payroll row / discovery, never from the payload alone',

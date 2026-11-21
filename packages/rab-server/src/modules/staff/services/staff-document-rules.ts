@@ -1,6 +1,7 @@
 import {
+  calendarDaysBetween,
   DEFAULT_REQUIRED_STAFF_DOCUMENT_TYPES,
-  getLondonDateParts,
+  londonCalendarDate,
   REQUIRABLE_STAFF_DOCUMENT_TYPES,
   StaffDocumentScanStatus,
   StaffDocumentStatus,
@@ -15,18 +16,10 @@ import { EntityManager } from 'typeorm';
  */
 
 /** Today's date in Europe/London as YYYY-MM-DD (expiry dates are calendar dates, not instants). */
-export function londonDate(instant: Date): string {
-  const p = getLondonDateParts(instant);
-  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
-}
+export const londonDate = londonCalendarDate;
 
-/** Whole days from `from` to `to` (YYYY-MM-DD, calendar arithmetic in UTC so DST never shifts a day). */
-export function daysBetween(from: string, to: string): number {
-  return Math.round(
-    (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /
-      86_400_000,
-  );
-}
+/** Whole days from `from` to `to` (YYYY-MM-DD). */
+export const daysBetween = calendarDaysBetween;
 
 /** ASSUMPTION (flagged): a document is valid up to AND including its expiry date; expired from the day after. */
 export function isExpiredOn(expiresOn: string | null, onDate: string): boolean {

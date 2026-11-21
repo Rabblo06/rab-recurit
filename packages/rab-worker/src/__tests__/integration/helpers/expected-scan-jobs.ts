@@ -34,6 +34,8 @@ export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
   'crewflow:crewflow-scan-maintenance:ai-stale-turn-sweep',
   // Phase D-Q4a: the combined shift scan (registered only with WORKER_SHIFT_SCAN_MODE=combined, instead of its four members).
   'crewflow:crewflow-scan-shifts:shift-scan-combined',
+  // Lane D: staff document expiry alerts (appended last).
+  'crewflow:crewflow-scan-reports:staff-document-expiry',
 ]);
 
 /** Phase D-Q4a: the scan registered only in WORKER_SHIFT_SCAN_MODE=combined (the default, separate, never schedules it). */

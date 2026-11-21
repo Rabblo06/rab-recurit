@@ -38,7 +38,7 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
   const env = { get: (k: string) => (validated as unknown as Record<string, number>)[k]! };
 
   it('has exactly the 19 jobs-process loops, in main.ts order, plus the AI retention scan, with the same names, intervals and stats keys', () => {
-    expect(SCAN_JOBS).toHaveLength(23); // Phase D-Q2 appends ai-stale-turn-sweep, Phase D-Q4a shift-scan-combined (below)
+    expect(SCAN_JOBS).toHaveLength(24); // Phase D-Q2 appends ai-stale-turn-sweep, Phase D-Q4a shift-scan-combined, Lane D staff-document-expiry (below)
     SCAN_JOBS.slice(0, PRE_MIGRATION_MAIN_TS.length).forEach((def, i) => {
       const [name, interval, lastRunAt, failures] = PRE_MIGRATION_MAIN_TS[i]!;
       expect(def.name).toBe(name);
@@ -73,11 +73,18 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
   });
 
   it('Phase D-Q4a: the combined shift scan is appended last — shifts queue, tick = gcd of its members (default 300 s), only with WORKER_SHIFT_SCAN_MODE=combined', () => {
-    expect(SCAN_JOBS.slice(22).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy, d.shiftScanMode])).toEqual([
+    expect(SCAN_JOBS.slice(22, 23).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy, d.shiftScanMode])).toEqual([
       ['shift-scan-combined', 'crewflow-scan-shifts', { kind: 'combined-shift-scan' }, 'lastShiftScanCombinedAt', 'shiftScanCombinedFailures', true, undefined, 'combined'],
     ]);
     expect(resolveIntervalMs(SCAN_JOBS[22]!, env)).toBe(5 * MIN);
     expect(SCAN_JOBS.filter((d) => d.shiftScanMode === 'separate').map((d) => d.jobName)).toEqual(['shift-monitor', 'attendance-monitor', 'shift-report-scheduler', 'final-timesheet']);
+  });
+
+  it('Lane D: the staff document expiry scan is appended last — reports queue, env-seconds (default 60 min), always on', () => {
+    expect(SCAN_JOBS.slice(23).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy])).toEqual([
+      ['staff-document-expiry', 'crewflow-scan-reports', { kind: 'env-seconds', key: 'WORKER_STAFF_DOCUMENT_EXPIRY_INTERVAL_SECONDS' }, 'lastStaffDocumentExpiryAt', 'staffDocumentExpiryFailures', false, undefined],
+    ]);
+    expect(resolveIntervalMs(SCAN_JOBS[23]!, env)).toBe(60 * MIN);
   });
 
   it('the eight `return false` cycles are flagged (dispatchers, login-handoff and storage cleanup, outbox and AI retention)', () => {
