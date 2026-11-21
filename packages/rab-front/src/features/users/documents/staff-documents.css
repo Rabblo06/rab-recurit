@@ -1,0 +1,91 @@
+/* Staff detail → Documents (Lane D). Uses the console's existing tokens only. */
+.staff-docs {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.staff-docs__muted,
+.staff-docs__meta {
+  font-size: 12px;
+  color: var(--font-tertiary);
+}
+.staff-docs__required {
+  font-size: 12px;
+  color: var(--font-secondary);
+  margin: 0;
+}
+.staff-docs__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.staff-docs__item {
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.staff-docs__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.staff-docs__chip {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: var(--background-tertiary, #f1f1f1);
+  color: var(--font-secondary);
+}
+.staff-docs__chip--verified {
+  background: #d9f0de;
+  color: #2a8e44;
+}
+.staff-docs__chip--rejected,
+.staff-docs__chip--revoked {
+  background: #fdded9;
+  color: #d93025;
+}
+.staff-docs__expiry {
+  font-size: 12px;
+}
+.staff-docs__expiry--warn {
+  color: #946c00;
+}
+.staff-docs__expiry--bad {
+  color: #d93025;
+  font-weight: 600;
+}
+.staff-docs__actions,
+.staff-docs__reject {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.staff-docs__upload {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border-light);
+  padding-top: 12px;
+}
+.staff-docs__upload h4 {
+  margin: 0;
+  font-size: 13px;
+}
+.staff-docs__upload label,
+.staff-docs__reject label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--font-secondary);
+}
