@@ -22,10 +22,10 @@ function controllerWith(env: Record<string, unknown>, registry: Partial<Realtime
   return { controller, registry, subscriber };
 }
 
-function requestFor(userId = 'u-1') {
+function requestFor(userId = 'u-1', organisationId = 'o-1') {
   const headers: Record<string, string> = {};
   return {
-    authContext: { userId, organisationId: 'o-1', workspaceId: null, sessionId: 's-1', role: '' },
+    authContext: { userId, organisationId, workspaceId: null, sessionId: 's-1', role: '' },
     cookies: {},
     headers: {},
     res: { setHeader: (name: string, value: string) => (headers[name.toLowerCase()] = value) },
@@ -155,6 +155,54 @@ describe('RealtimeGatewayController.stream', () => {
         thrown = error;
       }
       expect((thrown as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_CONNECTION_LIMIT' });
+      sub.unsubscribe();
+    });
+  });
+
+  describe('C1 review F7 — one organisation cannot take the whole instance pool', () => {
+    const SHARE = { ...ENABLED, REALTIME_MAX_CONNECTIONS_PER_USER: 3, REALTIME_MAX_CONNECTIONS_PER_INSTANCE: 4, REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: 2 };
+    const thrownBy = (fn: () => unknown): unknown => {
+      try {
+        fn();
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+
+    it('organisation A at its share is refused (429 + Retry-After) and cannot block organisation B', () => {
+      const { controller, registry } = controllerWith(SHARE);
+      const subs = [controller.stream(requestFor('a-1', 'org-a')).subscribe(), controller.stream(requestFor('a-2', 'org-a')).subscribe()];
+      const req = requestFor('a-3', 'org-a'); // a fresh account of A, below its own per-user cap, with room left on the instance
+      const refused = thrownBy(() => controller.stream(req));
+      expect((refused as HttpException).getStatus()).toBe(HttpStatus.TOO_MANY_REQUESTS);
+      expect((refused as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_ORGANISATION_LIMIT' });
+      expect(req.sentHeaders['retry-after']).toBe(String(REALTIME_CAP_RETRY_AFTER_SECONDS));
+      expect((registry as RealtimeConnectionRegistryService).countForOrganisation('org-a')).toBe(2);
+      // Organisation B still gets the rest of the pool.
+      subs.push(controller.stream(requestFor('b-1', 'org-b')).subscribe(), controller.stream(requestFor('b-2', 'org-b')).subscribe());
+      expect((registry as RealtimeConnectionRegistryService).countForOrganisation('org-b')).toBe(2);
+      expect((registry as RealtimeConnectionRegistryService).size).toBe(4);
+      subs.forEach((s) => s.unsubscribe());
+    });
+
+    it('re-checked at subscribe time: two handlers of one organisation in the same tick cannot both take its last slot', () => {
+      const { controller, registry } = controllerWith({ ...SHARE, REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: 1 });
+      const a = controller.stream(requestFor('a-1', 'org-a'));
+      const b = controller.stream(requestFor('a-2', 'org-a'));
+      const subA = a.subscribe();
+      let bError: unknown;
+      const subB = b.subscribe({ error: (e) => (bError = e) });
+      expect((bError as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_ORGANISATION_LIMIT' });
+      expect((registry as RealtimeConnectionRegistryService).countForOrganisation('org-a')).toBe(1);
+      subA.unsubscribe();
+      subB.unsubscribe();
+    });
+
+    it('an organisation share above the instance cap is clamped to the instance cap', () => {
+      const { controller } = controllerWith({ ...SHARE, REALTIME_MAX_CONNECTIONS_PER_INSTANCE: 1, REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: 50 });
+      const sub = controller.stream(requestFor('a-1', 'org-a')).subscribe();
+      expect((thrownBy(() => controller.stream(requestFor('b-1', 'org-b'))) as HttpException).getResponse()).toMatchObject({ code: 'REALTIME_INSTANCE_LIMIT' });
       sub.unsubscribe();
     });
   });

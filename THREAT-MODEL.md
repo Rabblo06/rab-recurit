@@ -10310,14 +10310,22 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Control:** `REALTIME_MAX_CONNECTIONS_PER_INSTANCE` (default 1000, 1-100000, refused at boot outside that range),
   checked before the per-user cap, before the stream opens, and re-checked with the slot reservation at subscribe time
   (two handlers in the same tick cannot both take the last slot). Over the cap: 429 + `Retry-After: 30`, code
-  `REALTIME_INSTANCE_LIMIT`. The clients already treat 429 as "wait Retry-After with jitter", and polling keeps their data
-  correct meanwhile. Both caps are documented as per instance (environment-variables.ts, the controller, rab-docs).
+  `REALTIME_INSTANCE_LIMIT`. Then `REALTIME_MAX_CONNECTIONS_PER_ORGANISATION` (default 250, applied as min(it, the
+  instance cap)), checked and re-checked the same way, code `REALTIME_ORGANISATION_LIMIT`: one tenant's accounts can never
+  take the whole instance pool and starve realtime for every other tenant on that instance (review of #301: with one
+  global pool, about 334 accounts of one organisation could). The clients already treat 429 as "wait Retry-After with
+  jitter", and polling keeps their data correct meanwhile. All three caps are documented as per instance
+  (environment-variables.ts, the controller, rab-docs) and settable in docker-compose.production.yml (empty = defaults).
 - **SECURITY TRADE-OFF (vetoable): per instance, not cluster-wide.** A cluster-wide count would need a shared Redis
   counter (sorted set with heartbeat expiry) on the connect path, and a decision on Redis being down (refuse every stream,
   or allow uncounted). Per instance fails closed without that dependency. Exposure: one user can still hold
-  N instances × 3 streams. Each stream is still authenticated, revalidated every heartbeat and limited to that user's own
+  N instances × 3 streams, and four organisations at their share can still fill one instance (the share cap stops one
+  tenant, not a coalition). Each stream is still authenticated, revalidated every heartbeat and limited to that user's own
   id-only events. `REALTIME_ENABLED` stays false in production; nothing here enables it.
-- **Assumption (flagged):** 1000 per instance is an operational default, not a measured capacity.
+- **Assumption (flagged):** 1000 per instance and 250 per organisation per instance are operational defaults, not
+  measured capacities.
 - **Tests:** `realtime-gateway.controller.spec.ts`: different users cannot exceed the instance cap (429, Retry-After,
   nothing registered); re-check at subscribe time; a closed stream frees its slot; the per-user cap still applies
-  below the instance cap. `env.validation.realtime-instance-cap.spec.ts`: default, range, refusals.
+  below the instance cap; organisation A at its share is refused and organisation B still connects; the same-tick
+  organisation race; the share is clamped to the instance cap. `env.validation.realtime-instance-cap.spec.ts`: defaults,
+  empty = unset, range, refusals.

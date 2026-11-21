@@ -49,8 +49,9 @@ export const REALTIME_CAP_RETRY_AFTER_SECONDS = 30;
  *  2. Authenticate — `JwtAuthGuard` (cookie or Bearer, unmodified) populates `request.authContext`,
  *     including a full `AuthSecuritySnapshot` (roles, permissions, account status) built from a
  *     REPEATABLE READ Postgres snapshot — the SAME one every other authenticated route gets.
- *  3. Authorise — `REALTIME_MAX_CONNECTIONS_PER_USER` and `REALTIME_MAX_CONNECTIONS_PER_INSTANCE` (review F7: both are
- *     counted per API instance, the registry is in memory) enforced from the connection registry; a
+ *  3. Authorise — `REALTIME_MAX_CONNECTIONS_PER_INSTANCE`, `REALTIME_MAX_CONNECTIONS_PER_ORGANISATION` and
+ *     `REALTIME_MAX_CONNECTIONS_PER_USER` (review F7: all counted per API instance, the registry is in memory) enforced
+ *     from the connection registry; a
  *     connection beyond the bound is refused outright, never queued. Phase C1b: refused with
  *     429 + `Retry-After` BEFORE the stream opens (the check and the slot reservation are one
  *     synchronous step, re-checked when the stream is subscribed) — never a 200 stream that closes at
@@ -130,9 +131,13 @@ export class RealtimeGatewayController {
     const connectionId = randomUUID();
     const maxPerUser = this.env.get('REALTIME_MAX_CONNECTIONS_PER_USER');
     const maxPerInstance = this.env.get('REALTIME_MAX_CONNECTIONS_PER_INSTANCE');
+    const maxPerOrganisation = Math.min(this.env.get('REALTIME_MAX_CONNECTIONS_PER_ORGANISATION'), maxPerInstance);
+    const organisationId = ctx.organisationId!;
     // C1b: refuse BEFORE any stream exists (an ordinary 429 through the exception filter, headers not yet sent).
-    // Review F7: the instance-wide bound first (it holds whatever any user opens against this process).
+    // Review F7: the instance-wide bound first (it holds whatever any user opens against this process), then one
+    // organisation's share of it (one tenant can never take the whole pool), then the user's own fan-out.
     if (this.registry.size >= maxPerInstance) throw this.instanceCapExceeded(request, maxPerInstance);
+    if (this.registry.countForOrganisation(organisationId) >= maxPerOrganisation) throw this.organisationCapExceeded(request, maxPerOrganisation);
     if (this.registry.countForUser(ctx.userId) >= maxPerUser) throw this.capExceeded(request, ctx.userId, maxPerUser);
 
     // Captured once, at connect time, from the SAME request the guard already authenticated —
@@ -185,6 +190,10 @@ export class RealtimeGatewayController {
       // on the next macrotask), so this error still reaches the exception filter as a real 429.
       if (this.registry.size >= maxPerInstance) {
         subscriber.error(this.instanceCapExceeded(request, maxPerInstance));
+        return teardown;
+      }
+      if (this.registry.countForOrganisation(organisationId) >= maxPerOrganisation) {
+        subscriber.error(this.organisationCapExceeded(request, maxPerOrganisation));
         return teardown;
       }
       if (this.registry.countForUser(ctx.userId) >= maxPerUser) {
@@ -278,6 +287,16 @@ export class RealtimeGatewayController {
     (request as unknown as { res?: { setHeader(name: string, value: string): void } }).res?.setHeader('Retry-After', String(REALTIME_CAP_RETRY_AFTER_SECONDS));
     return new HttpException(
       { statusCode: HttpStatus.TOO_MANY_REQUESTS, code: 'REALTIME_INSTANCE_LIMIT', message: 'Live updates are busy. They will reconnect shortly.' },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+
+  /** Review F7: this organisation already holds its share of this instance's streams. Same 429 + Retry-After contract. */
+  private organisationCapExceeded(request: AuthenticatedRequest, maxPerOrganisation: number): HttpException {
+    this.logger.warn(`connection refused: this organisation already holds REALTIME_MAX_CONNECTIONS_PER_ORGANISATION (${maxPerOrganisation}) streams on this instance`);
+    (request as unknown as { res?: { setHeader(name: string, value: string): void } }).res?.setHeader('Retry-After', String(REALTIME_CAP_RETRY_AFTER_SECONDS));
+    return new HttpException(
+      { statusCode: HttpStatus.TOO_MANY_REQUESTS, code: 'REALTIME_ORGANISATION_LIMIT', message: 'Live updates are busy. They will reconnect shortly.' },
       HttpStatus.TOO_MANY_REQUESTS,
     );
   }

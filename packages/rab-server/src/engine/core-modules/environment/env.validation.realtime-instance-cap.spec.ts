@@ -19,3 +19,20 @@ describe('REALTIME_MAX_CONNECTIONS_PER_INSTANCE environment variable', () => {
     expect(() => validate({ ...base, REALTIME_MAX_CONNECTIONS_PER_INSTANCE: value })).toThrow(/REALTIME_MAX_CONNECTIONS_PER_INSTANCE/);
   });
 });
+
+describe('REALTIME_MAX_CONNECTIONS_PER_ORGANISATION environment variable', () => {
+  it('defaults to 250 (a quarter of the default instance pool)', () => {
+    expect(validate({ ...base }).REALTIME_MAX_CONNECTIONS_PER_ORGANISATION).toBe(250);
+  });
+
+  it('an empty value (the production compose default) is unset', () => {
+    expect(validate({ ...base, REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: '', REALTIME_MAX_CONNECTIONS_PER_INSTANCE: '' })).toMatchObject({
+      REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: 250,
+      REALTIME_MAX_CONNECTIONS_PER_INSTANCE: 1000,
+    });
+  });
+
+  it.each(['0', '100001', '1.5', 'abc'])('refuses to boot with %p', (value) => {
+    expect(() => validate({ ...base, REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: value })).toThrow(/REALTIME_MAX_CONNECTIONS_PER_ORGANISATION/);
+  });
+});

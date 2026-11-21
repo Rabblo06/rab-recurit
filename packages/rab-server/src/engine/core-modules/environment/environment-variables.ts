@@ -1999,6 +1999,19 @@ export class EnvironmentVariables {
   REALTIME_MAX_CONNECTIONS_PER_INSTANCE: number = 1_000;
 
   /**
+   * C1 review F7 (review of #301): the most streams ONE organisation holds on one API instance, so a single tenant's
+   * accounts can never take the whole instance pool and starve realtime for every other tenant there (at the defaults one
+   * organisation can hold at most a quarter of the pool). Applied as min(this, REALTIME_MAX_CONNECTIONS_PER_INSTANCE).
+   * Per instance, like the other two caps. Default 250 is an operational assumption, not a measured capacity.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000)
+  REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: number = 250;
+
+  /**
    * Stage 6 durable push delivery. Defaults to `false` — same "disabled until its own exit gate
    * passes" rule as REALTIME_ENABLED above. When `false`, `PushDeliveryService` never creates a
    * `push_delivery` row at all (not merely "creates one that never gets picked up") — so toggling
