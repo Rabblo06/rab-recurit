@@ -8,6 +8,9 @@ import '../../core/widgets/schedule_nav_header.dart';
 import '../../navigation/app_shell.dart';
 import '../notifications/notifications_provider.dart';
 import '../notifications/notifications_screen.dart';
+import '../offline_sync/logout_guard.dart';
+import '../offline_sync/offline_sync_controller.dart';
+import '../offline_sync/saved_actions_screen.dart';
 import '../payslips/payslips_screen.dart';
 import 'security_screen.dart';
 
@@ -22,6 +25,10 @@ class ProfileScreen extends StatelessWidget {
     final user = auth.user;
     final fullName = user?.fullName.trim() ?? '';
     final unread = context.watch<NotificationsProvider>().unreadCount;
+    // M4: only when something is saved on this phone (offline mode is off today, so normally never).
+    final offline = context.watch<OfflineSyncController?>();
+    final savedCount = offline?.entries.length ?? 0;
+    final showSaved = savedCount > 0 || offline?.unreadable == true;
     final first = user?.firstName.trim() ?? '';
     final last = user?.lastName.trim() ?? '';
     final initials =
@@ -133,6 +140,14 @@ class ProfileScreen extends StatelessWidget {
                           label: 'Payslips',
                           onTap: () => push(const PayslipsScreen()),
                         ),
+                        if (showSaved)
+                          _Row(
+                            icon: Icons.cloud_off_outlined,
+                            label: 'Saved actions ($savedCount)',
+                            onTap: () => Navigator.of(
+                              context,
+                            ).push(SavedActionsScreen.route()),
+                          ),
                       ],
                     ),
                   ],
@@ -188,7 +203,9 @@ class ProfileScreen extends StatelessWidget {
                           ).textTheme.labelLarge?.fontFamily,
                         ),
                       ),
-                      onPressed: auth.logout,
+                      // D18: blocked while punches saved on this phone are unsent.
+                      onPressed: () =>
+                          logoutWithOfflineGuard(context, auth.logout),
                       child: const Text('Log out'),
                     ),
                   ),

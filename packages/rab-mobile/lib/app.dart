@@ -11,6 +11,7 @@ import 'navigation/console_entry_screen.dart';
 import 'core/theme/tokens.dart';
 import 'features/auth_flow/auth_flow_shell.dart';
 import 'features/home/attendance_provider.dart';
+import 'features/offline_sync/offline_sync_controller.dart';
 import 'features/notifications/notifications_provider.dart';
 import 'features/offers/offers_provider.dart';
 import 'navigation/app_shell.dart';
@@ -64,9 +65,19 @@ class _RabMaterialApp extends StatelessWidget {
             ChangeNotifierProvider(
               create: (_) => NotificationsProvider(auth.api),
             ),
+            // M4 offline queue, per signed-in staff member (keyed by user id, disposed with this subtree on logout or
+            // account switch). It never queues anything today: offline mode is off (owner HARD RULE) and the device
+            // key signer is a placeholder (features/offline_sync/offline_config.dart).
             if (auth.presentation == AppPresentation.staff)
               ChangeNotifierProvider(
-                create: (_) => AttendanceProvider(auth.api),
+                create: (_) => OfflineSyncController(userId: auth.user!.id),
+              ),
+            if (auth.presentation == AppPresentation.staff)
+              ChangeNotifierProvider(
+                create: (context) => AttendanceProvider(
+                  auth.api,
+                  offline: context.read<OfflineSyncController>(),
+                ),
               ),
             if (auth.presentation == AppPresentation.venueManager)
               ChangeNotifierProvider(

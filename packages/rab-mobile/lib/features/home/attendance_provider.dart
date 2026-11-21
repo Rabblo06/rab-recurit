@@ -9,6 +9,8 @@ import '../../core/models/attendance.dart';
 import '../../core/models/offer.dart';
 import '../../core/polling/keyset_pages.dart';
 import '../../core/services/location_service.dart';
+import '../offline_sync/offline_entry.dart';
+import '../offline_sync/offline_sync_controller.dart';
 import 'shift_team_member.dart';
 
 /// Real Clock In/Out state — every timestamp displayed comes from the
@@ -18,11 +20,25 @@ import 'shift_team_member.dart';
 /// called, e.g. on app resume) — this is what makes the live timer survive
 /// an app kill/reopen without resetting to `00:00:00`.
 class AttendanceProvider extends ChangeNotifier {
-  AttendanceProvider(this._api) {
+  AttendanceProvider(this._api, {OfflineSyncController? offline})
+    : _offline = offline {
     refreshActive();
   }
 
   final ApiClient _api;
+
+  /// M4 offline queue (DESIGN §3; null for every presentation but staff, and in tests that do not need it). It only
+  /// ever queues when every switch in `offline_config.dart` is on, which none is today (owner HARD RULE).
+  final OfflineSyncController? _offline;
+  OfflineSyncController? get offline => _offline;
+
+  /// The punch the last Check In / Clock In / Clock Out saved on this phone instead of sending (null after a
+  /// server-confirmed action or an error). Never treated as confirmed: no timer runs from it (D10).
+  QueuedPunch? lastQueued;
+
+  /// The shift a Clock Out applies to: the server's open attendance, else a clock-in still saved on this phone.
+  String? get clockOutShiftId =>
+      active?.shiftId ?? _offline?.pendingClockInShiftId;
 
   /// [background]: the Teams screen's timer refresh (`X-Crewflow-Background`).
   Future<List<ShiftTeamMember>> loadTeam(
@@ -84,7 +100,9 @@ class AttendanceProvider extends ChangeNotifier {
   /// The booking needs a Check In before Clock In and has none yet. Bookings
   /// made before Check In shipped (`checkInRequired: false`) keep the old flow.
   bool needsCheckIn(OfferSummary offer) =>
-      checkInRequired(offer) && checkedInAt(offer) == null;
+      checkInRequired(offer) &&
+      checkedInAt(offer) == null &&
+      _offline?.pendingFor(offer.shiftId, OfflinePunchType.checkIn) == null;
 
   /// Whether the shift's venue requires location: the check-in state first,
   /// then the offer. Null = unknown (older server) → the caller keeps the
@@ -127,6 +145,53 @@ class AttendanceProvider extends ChangeNotifier {
     errorCode = error is ApiException ? error.code : null;
   }
 
+  /// M4 (DESIGN §3.1, D17): decided once per tap, before the online request. When offline mode may queue, the tap
+  /// gets an idempotency key that the online request carries as `Idempotency-Key` and a queued fallback reuses. When
+  /// earlier punches are still waiting on this phone, this one is saved behind them instead of going online first,
+  /// so the server receives them in order. With offline mode off (today, everywhere) there is no key and no header:
+  /// the request is exactly what it was before M4.
+  _OfflineAttempt _offlineAttempt(String? shiftId) {
+    final offline = _offline;
+    if (offline == null || shiftId == null || !offline.mayQueue) {
+      return const _OfflineAttempt(null, saveFirst: false);
+    }
+    return _OfflineAttempt(
+      offline.newIdempotencyKey(),
+      saveFirst: offline.hasUnsent,
+      displayAt: trustedNow,
+    );
+  }
+
+  /// Saves the punch on this phone (never shown as confirmed). Always returns false: only a server answer is a
+  /// success. A refused capture shows why (or the original connection error when offline mode is simply off).
+  Future<bool> _saveOffline(
+    _OfflineAttempt attempt,
+    OfflinePunchType type,
+    String shiftId, {
+    String? qrToken,
+    LocationFix? location,
+  }) async {
+    final result = await _offline!.capture(
+      type: type,
+      shiftId: shiftId,
+      idempotencyKey: attempt.key!,
+      activeShiftId: active?.shiftId,
+      qrToken: qrToken,
+      location: location,
+      displayAt: attempt.displayAt,
+    );
+    if (result.queued) {
+      lastQueued = result.punch;
+      errorMessage = null;
+      errorCode = null;
+    } else {
+      lastQueued = null;
+      errorMessage = result.message ?? ApiMessages.offline;
+      errorCode = 'OFFLINE_NOT_SAVED';
+    }
+    return false;
+  }
+
   /// `GET /attendance/me/shift/:shiftId/check-in`. Silent: a failure keeps
   /// whatever was known (the offer's own fields still apply).
   Future<CheckInState?> loadCheckIn(String shiftId) async {
@@ -159,8 +224,19 @@ class AttendanceProvider extends ChangeNotifier {
     errorCode = null;
     if (_rejectFix(location)) return false;
     isBusy = true;
+    lastQueued = null;
     notifyListeners();
+    final attempt = _offlineAttempt(shiftId);
     try {
+      if (attempt.saveFirst) {
+        return await _saveOffline(
+          attempt,
+          OfflinePunchType.checkIn,
+          shiftId,
+          qrToken: qrToken,
+          location: location,
+        );
+      }
       final data =
           await _api.post(
                 '/attendance/check-in',
@@ -169,12 +245,22 @@ class AttendanceProvider extends ChangeNotifier {
                   ...?location?.toJson(),
                   'qrToken': ?qrToken,
                 },
+                headers: attempt.headers,
               )
               as Map<String, dynamic>;
       checkIns[shiftId] = CheckInState.fromJson(data);
       _anchor(data['serverNow'] as String?);
       return true;
     } catch (e) {
+      if (attempt.queueable && isNoResponseFailure(e)) {
+        return await _saveOffline(
+          attempt,
+          OfflinePunchType.checkIn,
+          shiftId,
+          qrToken: qrToken,
+          location: location,
+        );
+      }
       _fail(e);
       return false;
     } finally {
@@ -209,10 +295,22 @@ class AttendanceProvider extends ChangeNotifier {
       notifyListeners();
     }
     try {
+      final fetch = Stopwatch()..start();
       final data =
           await _api.get('/attendance/me/active', background: background)
               as Map<String, dynamic>;
+      fetch.stop();
       if (_disposed || sequence != _activeSequence) return;
+      // M4: the offline switch and ticket (DESIGN §3.1, §4.2). Off unless the server says exactly `true`.
+      final offline = _offline;
+      if (offline != null) {
+        try {
+          await offline.ingestActive(data, fetchDuration: fetch.elapsed);
+        } catch (_) {
+          // Never blocks the attendance read; capture re-checks everything.
+        }
+        if (_disposed || sequence != _activeSequence) return;
+      }
       final attendanceJson = data['attendance'] as Map<String, dynamic>?;
       active = attendanceJson == null
           ? null
@@ -296,8 +394,19 @@ class AttendanceProvider extends ChangeNotifier {
     errorCode = null;
     if (_rejectFix(location)) return false;
     isBusy = true;
+    lastQueued = null;
     notifyListeners();
+    final attempt = _offlineAttempt(shiftId);
     try {
+      if (attempt.saveFirst) {
+        return await _saveOffline(
+          attempt,
+          OfflinePunchType.clockIn,
+          shiftId,
+          qrToken: qrToken,
+          location: location,
+        );
+      }
       final data =
           await _api.post(
                 '/attendance/clock-in',
@@ -306,6 +415,7 @@ class AttendanceProvider extends ChangeNotifier {
                   'qrToken': qrToken,
                   ...?location?.toJson(),
                 },
+                headers: attempt.headers,
               )
               as Map<String, dynamic>;
       active = AttendanceSummary.fromJson(data);
@@ -313,6 +423,15 @@ class AttendanceProvider extends ChangeNotifier {
       startGeofenceMonitoring();
       return true;
     } catch (e) {
+      if (attempt.queueable && isNoResponseFailure(e)) {
+        return await _saveOffline(
+          attempt,
+          OfflinePunchType.clockIn,
+          shiftId,
+          qrToken: qrToken,
+          location: location,
+        );
+      }
       _fail(e);
       if (errorCode == 'CHECK_IN_REQUIRED') unawaited(loadCheckIn(shiftId));
       return false;
@@ -322,6 +441,8 @@ class AttendanceProvider extends ChangeNotifier {
     }
   }
 
+  /// Clock Out of [clockOutShiftId]. Offline (M4) it is saved on this phone, never applied locally: the open
+  /// attendance and its server timer stay as they are until the server confirms.
   Future<bool> clockOut({
     required String qrToken,
     LocationFix? location,
@@ -331,11 +452,24 @@ class AttendanceProvider extends ChangeNotifier {
     errorCode = null;
     if (_rejectFix(location)) return false;
     isBusy = true;
+    lastQueued = null;
     notifyListeners();
+    final shiftId = clockOutShiftId;
+    final attempt = _offlineAttempt(shiftId);
     try {
+      if (attempt.saveFirst) {
+        return await _saveOffline(
+          attempt,
+          OfflinePunchType.clockOut,
+          shiftId!,
+          qrToken: qrToken,
+          location: location,
+        );
+      }
       final result = await _api.post(
         '/attendance/clock-out',
         body: {'qrToken': qrToken, ...?location?.toJson()},
+        headers: attempt.headers,
       );
       final completed = AttendanceSummary.fromJson(
         result as Map<String, dynamic>,
@@ -346,6 +480,15 @@ class AttendanceProvider extends ChangeNotifier {
       await loadHistory();
       return true;
     } catch (e) {
+      if (attempt.queueable && isNoResponseFailure(e)) {
+        return await _saveOffline(
+          attempt,
+          OfflinePunchType.clockOut,
+          shiftId!,
+          qrToken: qrToken,
+          location: location,
+        );
+      }
       _fail(e);
       return false;
     } finally {
@@ -415,4 +558,16 @@ class AttendanceProvider extends ChangeNotifier {
     stopGeofenceMonitoring();
     super.dispose();
   }
+}
+
+/// One tap's offline decision (see `AttendanceProvider._offlineAttempt`). [key] is null when offline mode may not
+/// queue: then nothing about the request changes.
+class _OfflineAttempt {
+  const _OfflineAttempt(this.key, {required this.saveFirst, this.displayAt});
+  final String? key;
+  final bool saveFirst;
+  final DateTime? displayAt;
+  bool get queueable => key != null;
+  Map<String, String>? get headers =>
+      key == null ? null : {'Idempotency-Key': key!};
 }

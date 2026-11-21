@@ -18,7 +18,7 @@ class BootReading {
 /// The boot clock the offline queue measures elapsed time with. Never Dart's [Stopwatch]: on Android that is
 /// `CLOCK_MONOTONIC`, which stops in deep sleep, so an offline clock-in would look EARLIER than it was (more pay).
 abstract class BootClock {
-  /// Null when the platform cannot say (no channel, an unsupported platform, an error). Callers fail closed: no
+  /// Null when the platform cannot say (no channel, an unsupported platform, an error, or no answer within 2 s). Callers fail closed: no
   /// reading means nothing is queued.
   Future<BootReading?> read();
 }
@@ -33,7 +33,9 @@ class PlatformBootClock implements BootClock {
   @override
   Future<BootReading?> read() async {
     try {
-      final result = await channel.invokeMapMethod<String, Object?>('read');
+      final result = await channel
+          .invokeMapMethod<String, Object?>('read')
+          .timeout(const Duration(seconds: 2));
       final bootCount = result?['bootCount'];
       final elapsed = result?['elapsedRealtimeMs'];
       if (bootCount is! int ||

@@ -10344,3 +10344,41 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   sequence refused; unreadable queue never overwritten; update cannot add entries; sequence never reused, corrupt
   counter fails closed; concurrent appends; ticket capture window: same boot and <= 16 h only; boot clock channel fails
   closed), `test/offline_canonical_json_test.dart` (RFC 8785 sample, key order, numbers, escapes, refusals).
+
+## M4 offline clock-in, staff phone (Flutter): Clock In / Out fall back to the queue; fixed "not yet confirmed" card; logout guard (branch feat/m4-mobile-offline-wiring, on top of feat/m4-mobile-offline-queue, 2026-11-21; no SQL; offline stays OFF)
+- **What changes:** `AttendanceProvider.checkIn` / `clockIn` / `clockOut` may save the punch on the phone
+  (`OfflineSyncController.capture`) instead of showing "Connection lost", and the clock screen, Profile and logout
+  show what is saved. Whose data: the staff member's own attendance.
+- **Threats and controls:**
+  - *A dropped request recorded twice (once by the server, once from the queue).* Only a request that got NO response
+    is queued (socket / DNS / TLS / client error, or a timeout); any HTTP response, a 5xx included, is shown as an error
+    and never queued (`isNoResponseFailure`). When queueing is possible the online request carries an
+    `Idempotency-Key` and the queued entry reuses the same key (D17), so the server either reports the first attempt as
+    applied or applies it once. With offline mode off there is no key and no header: the request is byte-for-byte what
+    it was before M4 (tested).
+  - *A fake or client-driven timer (CLAUDE.md "no mock production logic"; D10).* A saved punch never sets `active` or
+    any local attendance; the clock card shows a fixed "Clocked in 09:02 · Not yet confirmed" (`OfflinePendingCard`,
+    no `Timer`, tested to stay identical after 5 s) and the server timer appears only once the server confirms. The
+    09:02 is the server-anchored estimate at the tap, display only; it is never sent and never used as a time.
+  - *Punches arriving out of order.* While anything is waiting, a new punch is saved behind it instead of going online
+    first (so a clock-out never reaches the server before its clock-in). Every entry names its shift (never "the
+    current shift"); clock-out uses the open attendance's shift or the saved clock-in's.
+  - *Losing unsent punches on logout, or leaving them at rest (D18).* Logout from Profile is blocked while punches are
+    unsent: "Stay signed in" keeps them; "Discard and log out" deletes them (never sent; the manager is not told). With
+    nothing unsent, logout deletes whatever is left (refused / too-old results, the ticket) before signing out. Session
+    expiry does not delete the queue: it stays keyed to that user and is never readable by another account.
+  - *Server text in the UI.* Refusals are shown by code through `offline_messages.dart`; server text is never shown.
+- **Still off, by construction:** the controller is created per staff session but `mayQueue` needs the build flag,
+  `offline.enabled == true` from the server, a fresh ticket from this boot and an available device key; the shipped
+  signer is a placeholder that is never available, so every punch behaves exactly as before.
+- **Not built (later):** `break_start` / `break_end` capture exists in the model but no break UI ships in this app
+  yet; geofence-exit auto clock-out is never queued (D14); the sync client is the next PR.
+- **Tests:** `test/attendance_offline_queue_test.dart` (off: dropped connection = the old error, nothing saved, no
+  header, with and without a controller, server not enabling; on: success sends one request with a key; no response
+  and 408 save with the same key; 409/500/503 never saved; next punch saved behind the first without a request;
+  clock-out keeps the open server attendance untouched; offline check-in satisfies the Check In step without a server
+  time; a stale ticket refuses with "Connect once"), `test/offline_sync_controller_test.dart` (switches, ticket fetch
+  limit, capture contents and signature, reboot / 16 h refusal, UX dependency checks, signing failure stores nothing,
+  full queue, per-user isolation, 72 h too-old, dismiss, discard, logout clear), `test/offline_ui_test.dart` (fixed card,
+  no ticking, clock-out after a saved clock-in, saved clock-out disables the action; logout guard stay / discard / no
+  queue; banner and saved-actions rows, dismiss only for refused rows).

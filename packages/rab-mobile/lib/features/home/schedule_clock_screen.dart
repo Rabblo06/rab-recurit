@@ -23,6 +23,9 @@ import '../../core/theme/schedule_tokens.dart';
 import '../../core/theme/shift_visual_style.dart';
 import '../offers/offers_provider.dart';
 import '../offers/offer_detail_ui_state.dart';
+import '../offline_sync/offline_entry.dart';
+import '../offline_sync/offline_sync_controller.dart';
+import '../offline_sync/offline_widgets.dart';
 import 'attendance_provider.dart';
 import 'location_permission_sheet.dart';
 import 'location_unavailable_dialog.dart';
@@ -403,13 +406,12 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
 
   Future<void> _clockOut() async {
     final attendance = context.read<AttendanceProvider>();
-    if (_busy ||
-        _confirming ||
-        attendance.isBusy ||
-        attendance.active == null) {
+    // The server's open attendance, or (M4 offline) a clock-in still saved on this phone.
+    final shiftId = attendance.clockOutShiftId;
+    if (_busy || _confirming || attendance.isBusy || shiftId == null) {
       return;
     }
-    final active = attendance.active!;
+    final activeId = attendance.active?.id;
     var confirmationSubmitted = false;
     setState(
       () => _confirming = true,
@@ -440,15 +442,17 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     );
     if (!mounted) return;
     setState(() => _confirming = false);
-    if (confirmed == true && attendance.active?.id == active.id) {
+    if (confirmed == true &&
+        attendance.clockOutShiftId == shiftId &&
+        attendance.active?.id == activeId) {
       setState(() => _busy = true);
       final offer = context
           .read<OffersProvider>()
           .offers
-          .where((o) => o.shiftId == active.shiftId)
+          .where((o) => o.shiftId == shiftId)
           .firstOrNull;
       final (located, fix) = await _evidence(
-        attendance.geofenceEnforced(active.shiftId, offer: offer),
+        attendance.geofenceEnforced(shiftId, offer: offer),
       );
       if (!located) {
         if (mounted) setState(() => _busy = false);
@@ -463,7 +467,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
       final ok = await attendance.clockOut(qrToken: token, location: fix);
       if (!mounted) return;
       if (ok) {
-        _completedAttendanceId = active.id;
+        _completedAttendanceId = activeId;
         await context.read<OffersProvider>().load(silent: true);
       }
     }
@@ -634,7 +638,26 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     final checkInNote = clockable && checkInRequired
         ? _CheckInNote(checkedInAt: checkedInAt)
         : null;
-    final timer = awaitingMetrics && !widget.teams
+    // M4 offline (DESIGN §3.6, D10): a punch saved on this phone and not yet confirmed shows a FIXED time, never a
+    // ticking timer, and the action follows it (a saved clock-in can be followed by a clock-out; a saved clock-out
+    // waits for the server). Without an offline controller, or with nothing saved, nothing below changes.
+    final offline = context.watch<OfflineSyncController?>();
+    final offlineShiftId = selected?.shiftId ?? active?.shiftId;
+    final pendingOut = offline?.pendingFor(
+      offlineShiftId,
+      OfflinePunchType.clockOut,
+    );
+    final pendingIn = live == null
+        ? offline?.pendingFor(offlineShiftId, OfflinePunchType.clockIn)
+        : null;
+    final pendingPunch = pendingOut ?? pendingIn;
+    final offlineBanner =
+        offline != null && (offline.entries.isNotEmpty || offline.unreadable)
+        ? const OfflineQueueBanner()
+        : null;
+    final timer = pendingPunch != null && !widget.teams
+        ? OfflinePendingCard(punch: pendingPunch)
+        : awaitingMetrics && !widget.teams
         ? const ClockStatusBadge(label: 'Clocked Out')
         : ClockShiftTimer(
             startsAt: starts,
@@ -651,7 +674,20 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                     starts != null &&
                     DateUtils.isSameDay(now.toLocal(), starts.toLocal())),
           );
-    final action = state == OfferDetailUiState.loading
+    final action = pendingOut != null
+        ? _clockButton(
+            'Saved on this phone',
+            null,
+            key: const ValueKey('clock-offline-saved'),
+          )
+        : pendingIn != null
+        ? _clockButton(
+            'Clock out',
+            busy ? null : _clockOut,
+            busy: _busy || attendance.isBusy,
+            key: const ValueKey('clock-primary'),
+          )
+        : state == OfferDetailUiState.loading
         ? const SizedBox(
             height: ScheduleTokens.actionHeight,
             child: Center(child: CircularProgressIndicator()),
@@ -697,7 +733,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
           );
     final error =
         attendance.errorMessage ??
-        (state == OfferDetailUiState.error
+        (state == OfferDetailUiState.error && pendingPunch == null
             ? attendance.activeLoadError ??
                   attendance.historyLoadError ??
                   offers.loadError ??
@@ -721,7 +757,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                 child: ClockHeader(
                   title: widget.teams
                       ? 'Teams'
-                      : live != null
+                      : live != null || pendingIn != null
                       ? 'Clock out'
                       : needsCheckIn
                       ? 'Check in'
@@ -743,6 +779,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                         error: error,
                         action: action,
                         checkInNote: checkInNote,
+                        offlineBanner: offlineBanner,
                       )
                     : LayoutBuilder(
                         builder: (context, box) => _clockBody(
@@ -763,6 +800,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                           error: error,
                           action: action,
                           checkInNote: checkInNote,
+                          offlineBanner: offlineBanner,
                         ),
                       ),
               ),
@@ -798,6 +836,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     required String? error,
     required Widget action,
     Widget? checkInNote,
+    Widget? offlineBanner,
   }) {
     final style = selected != null
         ? ShiftVisualStyle.forShift(selected.shiftId)
@@ -889,6 +928,11 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
             ),
           ),
         ),
+        if (offlineBanner != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: offlineBanner,
+          ),
         if (error != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
@@ -926,6 +970,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     required String? error,
     required Widget action,
     Widget? checkInNote,
+    Widget? offlineBanner,
   }) {
     // The photo stays behind the expanding card. Short/large-text layouts keep
     // a bounded card scroll area and the action pinned at the card's foot.
@@ -1213,6 +1258,16 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                     ),
                   ),
                   const SizedBox(height: 10),
+                  if (offlineBanner != null)
+                    ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: height * .35),
+                      child: SingleChildScrollView(
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: offlineBanner,
+                        ),
+                      ),
+                    ),
                   if (error != null)
                     ConstrainedBox(
                       constraints: BoxConstraints(maxHeight: height * .35),

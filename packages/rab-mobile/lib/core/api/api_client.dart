@@ -318,10 +318,16 @@ class ApiClient {
     final plain = RegExp(r'filename="?([^";]+)"?', caseSensitive: false).firstMatch(cd);
     return plain?.group(1)?.trim();
   }
-  Future<dynamic> post(String path, {Map<String, dynamic>? body}) async {
+  /// [headers]: extra request headers (M4: `Idempotency-Key` on a punch that may be queued offline, DESIGN D17). They
+  /// can never replace the ones this client sets (auth, platform, capabilities).
+  Future<dynamic> post(
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, String>? headers,
+  }) async {
     final pushDeviceId = pushDeviceIdForLogout;
     if (path != '/auth/logout' || pushDeviceId == null) {
-      return _request('POST', path, body: body);
+      return _request('POST', path, body: body, extraHeaders: headers);
     }
     try {
       return await _request(
@@ -369,6 +375,7 @@ class ApiClient {
     int? dispatchGeneration,
     bool rawBytes = false,
     bool background = false,
+    Map<String, String>? extraHeaders,
   }) async {
     // P0.1/#9 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): captured on the FIRST attempt only (a
     // retry passes its own already-captured value through) — before this fix, the 401-retry below
@@ -382,6 +389,7 @@ class ApiClient {
     final token = await getAccessToken();
     final uri = Uri.parse('$baseUrl$path');
     final headers = {
+      ...?extraHeaders,
       'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
       // Web moved its refresh token into an HttpOnly cookie a browser
@@ -440,6 +448,7 @@ class ApiClient {
           dispatchGeneration: generation,
           rawBytes: rawBytes,
           background: background,
+          extraHeaders: extraHeaders,
         );
       }
       await clearTokens();
