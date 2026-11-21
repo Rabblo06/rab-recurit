@@ -1,0 +1,6 @@
+# CI image, pinned by digest. Read through ../ref.sh by ci-migration-security's PG15 refusal runs (owner-bootstrap).
+# postgres:15-alpine: OCI image index (multi-arch) digest read from registry-1.docker.io on 2026-11-18 (PostgreSQL 15.20).
+# Dependabot (docker ecosystem, .github/dependabot.yml) renews the digest within this tag; the date above is when it was
+# first pinned. tools/check-image-pins.cjs (ci-security) refuses a tag without a digest and any two different digests
+# for the same tag across .github/ (an inline copy, such as a workflow `services:` image, must move with this file).
+image: postgres:15-alpine@sha256:23799e521dee9265a8b388ecf3bc0f1eaa34b95be67f5a76af4f8f6adb44c720
