@@ -1,11 +1,14 @@
 import 'dart:convert';
 
+import 'dart:io';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:rab_staff/features/offline_sync/boot_clock.dart';
 import 'package:rab_staff/features/offline_sync/canonical_json.dart';
 import 'package:rab_staff/features/offline_sync/entry_signer.dart';
+import 'package:rab_staff/features/offline_sync/integrity_signal.dart';
 import 'package:rab_staff/features/offline_sync/offline_config.dart';
 import 'package:rab_staff/features/offline_sync/offline_entry.dart';
 import 'package:rab_staff/features/offline_sync/offline_queue_store.dart';
@@ -39,6 +42,47 @@ void main() {
     },
   );
 
+  group('integrity signal (§6.4, flag only)', () {
+    test(
+      'Android with a su binary: true; without: false; other platforms: false',
+      () {
+        expect(
+          rootedSignal(
+            isAndroid: true,
+            fileExists: (p) => p == '/system/xbin/su',
+          ),
+          isTrue,
+        );
+        expect(
+          rootedSignal(isAndroid: true, fileExists: (_) => false),
+          isFalse,
+        );
+        expect(
+          rootedSignal(isAndroid: false, fileExists: (_) => true),
+          isFalse,
+        );
+        expect(
+          rootedSignal(
+            isAndroid: true,
+            fileExists: (_) => throw const FileSystemException(),
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'an entry without integrity.rootedSignal is refused when read back',
+      () {
+        final wire = sampleEntry().toWireJson()..remove('integrity');
+        expect(() => OfflineEntry.fromWireJson(wire), throwsFormatException);
+        expect(sampleEntry().toWireJson()['integrity'], {
+          'rootedSignal': false,
+        });
+      },
+    );
+  });
+
   group('entry shape (§3.2)', () {
     test(
       'never carries a server-derived field (organisationId, status, times, money)',
@@ -66,9 +110,9 @@ void main() {
           'punchBootId',
           'punchBootMs',
           'deviceWallClockAt',
-          'ticketDeviceWallClockAt',
           'qrToken',
           'location',
+          'integrity',
           'appVersion',
           'deviceKeyId',
           'sig',
