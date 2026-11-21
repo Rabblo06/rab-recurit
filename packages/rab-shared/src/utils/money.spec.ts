@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { addPence, assertSafePence, formatPence, multiplyPence, payForMinutes, subtractPence } from './money';
 
 describe('money', () => {
@@ -152,5 +154,37 @@ describe('formatPence', () => {
 
   it('refuses an unsupported currency instead of printing a wrong symbol', () => {
     expect(() => formatPence(100, 'EUR' as 'GBP')).toThrow(RangeError);
+  });
+});
+
+// One money-display table for the web, the Flutter app and the iPhone app: each suite reads money-format-cases.json, so
+// the three formatters cannot drift apart without one of the suites failing.
+describe('formatPence shared cross-platform cases (money-format-cases.json)', () => {
+  const { cases } = JSON.parse(readFileSync(join(__dirname, 'money-format-cases.json'), 'utf8')) as {
+    cases: { pence: number; text: string }[];
+  };
+  const intl = new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' });
+
+  it('has the cases the owner named', () => {
+    const byPence = new Map(cases.map((c) => [c.pence, c.text]));
+    expect(byPence.get(0)).toBe('£0.00');
+    expect(byPence.get(-1)).toBe('-£0.01');
+    expect(byPence.get(-199)).toBe('-£1.99');
+    expect(byPence.get(123456)).toBe('£1,234.56');
+    expect(byPence.get(-123456)).toBe('-£1,234.56');
+  });
+
+  it('formatPence prints every case exactly', () => {
+    for (const { pence, text } of cases) expect(formatPence(pence)).toBe(text);
+  });
+
+  it('every case is what en-GB Intl.NumberFormat currency prints, wherever its float input is exact', () => {
+    let compared = 0;
+    for (const { pence, text } of cases) {
+      if (Math.abs(pence) >= 10_000_000_000_000) continue; // pence / 100 is no longer exact as a float past £100bn
+      expect(intl.format(pence / 100)).toBe(text);
+      compared++;
+    }
+    expect(compared).toBeGreaterThan(20);
   });
 });

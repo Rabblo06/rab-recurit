@@ -29,7 +29,8 @@ jobs:
         shard: [1, 2, 3]
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -46,7 +47,7 @@ jobs:
       # migrator built. The application connects as crewflow_app (TEST_DATABASE_URL, restricted, NOBYPASSRLS); fixtures as
       # the disposable cluster's bootstrap superuser (TEST_DATABASE_URL_UNPOOLED). Every value is random and masked.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -90,7 +91,7 @@ jobs:
           npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream "--shard=${{ matrix.shard }}/3" --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server-${{ matrix.shard }}.json" || status=$?
           node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: jest-results-server-${{ matrix.shard }}
@@ -118,7 +119,8 @@ jobs:
         shard: [1, 2]
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -128,7 +130,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       HWS_RUNTIME_ENABLED: 'false'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -169,7 +171,8 @@ jobs:
         shard: [1, 2, 3]
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -179,7 +182,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -205,7 +208,7 @@ jobs:
           npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream "--shard=${{ matrix.shard }}/3" --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server-trap-${{ matrix.shard }}.json" || status=$?
           node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}`)}console.log(`jest ${f.split(/[\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: jest-results-server-trap-${{ matrix.shard }}

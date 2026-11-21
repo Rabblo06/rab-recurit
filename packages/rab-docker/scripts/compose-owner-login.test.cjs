@@ -676,10 +676,21 @@ test('raw compose text: PG_DATABASE_URL only as the committed crewflow_owner exp
     'X: ${PG_DATABASE_APP_PASSWORD:-}',
     'PG_DATABASE_URL: postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD}@db:5432/crewflow?sslmode=verify-full',
     `- PG_DATABASE_URL=${expr}`,
+    // Every Compose form of the two variables stays refused (the name match is exact, not a prefix match).
+    'X: ${PG_DATABASE_URL-x}',
+    'X: ${PG_DATABASE_URL:?x}',
+    'X: ${PG_DATABASE_URL?x}',
+    'X: ${PG_DATABASE_URL:+x}',
+    'X: ${PG_DATABASE_URL+x}',
+    'X: ${PG_DATABASE_APP_PASSWORD}',
+    'X: ${PG_DATABASE_APP_PASSWORD-x}',
   ]) {
     assertRefused(lintComposeText('x.yml', svc(line)), /interpolates \$\{PG_DATABASE_URL\.\.\.\} or \$\{PG_DATABASE_APP_PASSWORD\.\.\.\} other than as the committed line/);
   }
   assertRefused(lintComposeText('x.yml', svc('PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:?required}@db:5432/crewflow?sslmode=verify-full}')), /PG_DATABASE_APP_PASSWORD:\?\.\.\.\} demands the bundled crewflow_owner password/);
+  // Another variable whose name only STARTS with PG_DATABASE_URL (a boolean, no credential) is not PG_DATABASE_URL.
+  assert.deepEqual(lintComposeText('x.yml', svc('PG_DATABASE_URL_IS_DIRECT: ${PG_DATABASE_URL_IS_DIRECT:-}')), []);
+  assert.deepEqual(gate.databaseExpressionProblems('p.yml', svc('PG_DATABASE_URL_IS_DIRECT: ${PG_DATABASE_URL_IS_DIRECT:-}')), []);
   // A comment may name anything.
   assert.deepEqual(lintComposeText('x.yml', `# PG_DATABASE_URL: \${PG_DATABASE_URL:-}\n# crewflow-db-target was retired\n${svc(`PG_DATABASE_URL: ${expr}`)}`), []);
   for (const text of [

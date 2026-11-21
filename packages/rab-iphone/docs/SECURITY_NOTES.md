@@ -149,8 +149,13 @@ Source only, NOT compiled or run. Server contract: `docs/account-security/STEP1_
 - **Assumption:** shift times display in Europe/London regardless of the
   device zone (Flutter uses the device zone; identical for UK devices).
 - **Fixed (iPhone and Flutter together):** `formatPence` keeps the sign of a
-  negative amount under £1 (-50 → "£-0.50"; Flutter also printed -199 as
-  "£-1.01").
+  negative amount under £1 (-50 used to print "£0.50"; Flutter also printed
+  -199 as "£-1.01").
+- **Owner decision (money display):** both phone apps print money exactly
+  like the website (`@rab/shared` `formatPence`, the en-GB
+  `Intl.NumberFormat` currency output): sign before the pound sign and
+  thousands separators, `-£1,234.56`. The web, Flutter and iPhone test
+  suites all read `packages/rab-shared/src/utils/money-format-cases.json`.
 - Login in `reauthRequired` creates a new session family without revoking
   the previous one (Flutter parity); the old family ages out server-side.
   Consider a best-effort `/auth/logout` of the old family first.

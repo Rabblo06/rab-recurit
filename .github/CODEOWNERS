@@ -1,0 +1,35 @@
+# Code owners: a change to any path below asks the owner for review.
+#
+# This file only REQUESTS review. It enforces nothing until branch protection on `main` turns on "Require a pull request
+# before merging" -> "Require review from Code Owners" (an owner setting; no workflow or agent changes it). Read the
+# caveat in the PR that added this file before turning it on: a pull request cannot be approved by its own author.
+#
+# Syntax is .gitignore-style; for a path matched by several lines the LAST matching line wins, so keep every line
+# naming the same owner, or put a narrower rule after a broader one on purpose.
+
+# CI, release and supply-chain configuration: every workflow, composite action, Dependabot, the digest-pinned CI images,
+# this file itself.
+/.github/ @Rabblo06
+
+# Every repository tool: the CI gates (check-*), their tests, and the baselines / allowlists / decision registers they
+# read (import-boundaries.{approved,baseline}.json, workspace-table-qualified.baseline.json, npm-audit-decisions.json,
+# tools/lib/business-table-ref.cjs, ...), the release script, and anything added later. Weakening a gate by editing its
+# data is the same change as editing its code.
+/tools/ @Rabblo06
+
+# The image security gate and its decision registers (IMAGE_SECURITY_RELEASE_POLICY.md section 9 recommends owning them).
+/packages/rab-docker/scripts/image-security/ @Rabblo06
+
+# Database roles and the owner-login bootstrap SQL the bundled db runs on first start.
+/packages/rab-docker/postgres-init/ @Rabblo06
+
+# Threat model.
+/THREAT-MODEL.md @Rabblo06
+
+# The whole TypeORM tree: every migrations directory (never edited after merge; each carries RLS policies), the
+# core/*-sql.ts modules migrations import, core/gated-migrations/, workspace-schema/**, scripts/setup/*.sql and the
+# security-posture / semantic golden files the posture checks compare against.
+/packages/rab-server/src/database/typeorm/ @Rabblo06
+
+# Upgrade commands: data and schema changes run against existing installs on upgrade, outside the migration chain.
+/packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/ @Rabblo06
