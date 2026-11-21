@@ -44,6 +44,18 @@ class SavedActionsScreen extends StatelessWidget {
                       actionLabel: 'Dismiss',
                       onAction: offline!.discardAll,
                     ),
+                  if ((offline?.pendingCount ?? 0) > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: SchedulePrimaryButton(
+                        key: const ValueKey('offline-send-now'),
+                        label: 'Send now',
+                        busy: offline!.isSyncing,
+                        onPressed: offline.isSyncing
+                            ? null
+                            : () => offline.syncNow(userInitiated: true),
+                      ),
+                    ),
                   if (entries.isEmpty && offline?.unreadable != true)
                     const ScheduleMessageCard(
                       title: 'Nothing saved on this phone',

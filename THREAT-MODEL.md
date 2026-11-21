@@ -10382,3 +10382,34 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   full queue, per-user isolation, 72 h too-old, dismiss, discard, logout clear), `test/offline_ui_test.dart` (fixed card,
   no ticking, clock-out after a saved clock-in, saved clock-out disables the action; logout guard stay / discard / no
   queue; banner and saved-actions rows, dismiss only for refused rows).
+
+## M4 offline clock-in, staff phone (Flutter): sync client for POST /attendance/me/sync (branch feat/m4-mobile-offline-sync, on top of feat/m4-mobile-offline-wiring, 2026-11-21; no SQL; offline stays OFF; the endpoint is not built yet)
+- **What is new:** `OfflineSyncClient` + `OfflineSyncController.syncNow` send saved punches to the DESIGN §7.2 contract
+  (`{entries: [...]}` → `{serverNow, results[], offlineTicket}`). Exercised only in tests against a mocked server; with
+  offline off nothing is ever saved, so nothing is ever sent.
+- **Threats and controls:**
+  - *Deleting a punch the server never recorded.* An entry is deleted only on a per-item `applied` / `duplicate` /
+    `replayed` (without a code) for a key that was in that request. A rejected entry is kept (with its code) until the
+    staff member dismisses it; an unanswered entry, an unknown outcome, a malformed 200 body, or any error keeps the
+    entry pending. A rejection code that is not `^[A-Z][A-Z_]{2,48}$` is stored as `UNKNOWN` (server text is never
+    shown).
+  - *Sending someone else's punches / sending across sessions.* The controller only reads the signed-in user's queue
+    (keyed by user id); the shared `ApiClient` attaches the current session's token, refreshes once on a 401 and never
+    replays a request across a logout (CF-36 / P0.1 generation checks). A dead session stops the run with every entry
+    kept for that user only.
+  - *Hammering the server / retry storms.* One request at a time (single-flight), at most 25 entries, `clientSeq` order;
+    an unanswered entry is not resent in the same run; 429 waits for `Retry-After` (60 s default) even for "Send now";
+    5xx / 403 / 404 / network / timeout back off exponentially 1 s → 5 min (reset on success). A 400 or 413 for a batch
+    resends one at a time and parks only the entry refused alone (never resent).
+  - *Stale or slow tickets.* A fresh `offlineTicket` in the response is stored only while offline is on, with the boot
+    reading at receipt, and only if the request took ≤ 10 s.
+  - *Too-late punches.* Entries older than 72 h are marked too old before every run and never sent (the server also
+    refuses with `SYNC_TOO_LATE`).
+  - *Logout without sending (D18).* The guard now offers "Send now": logout proceeds only when nothing is left unsent;
+    otherwise the staff member stays signed in and is told.
+- **Tests:** `test/offline_sync_client_test.dart` (order and 25-entry batches, forbidden fields never sent; partial
+  success; replayed refusal; 400 bisect and park; 429 Retry-After honoured by "Send now"; backoff 1 s / 2 s / capped at
+  5 min, nothing lost, reset on success; malformed body deletes nothing; 401 refresh-and-retry and dead session; fresh
+  ticket stored; > 72 h never sent; D3 notice; another user's queue never sent; single-flight; /me/active triggers
+  sync; response parsing), `test/attendance_offline_queue_test.dart` (the real attendance is re-read only after the
+  server acknowledges), `test/offline_ui_test.dart` (logout guard "Send now" success and failure).

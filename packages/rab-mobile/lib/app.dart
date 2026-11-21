@@ -11,6 +11,7 @@ import 'navigation/console_entry_screen.dart';
 import 'core/theme/tokens.dart';
 import 'features/auth_flow/auth_flow_shell.dart';
 import 'features/home/attendance_provider.dart';
+import 'features/offline_sync/offline_sync_client.dart';
 import 'features/offline_sync/offline_sync_controller.dart';
 import 'features/notifications/notifications_provider.dart';
 import 'features/offers/offers_provider.dart';
@@ -70,7 +71,10 @@ class _RabMaterialApp extends StatelessWidget {
             // key signer is a placeholder (features/offline_sync/offline_config.dart).
             if (auth.presentation == AppPresentation.staff)
               ChangeNotifierProvider(
-                create: (_) => OfflineSyncController(userId: auth.user!.id),
+                create: (_) => OfflineSyncController(
+                  userId: auth.user!.id,
+                  client: OfflineSyncClient(auth.api),
+                ),
               ),
             if (auth.presentation == AppPresentation.staff)
               ChangeNotifierProvider(

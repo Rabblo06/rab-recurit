@@ -22,7 +22,15 @@ import 'shift_team_member.dart';
 class AttendanceProvider extends ChangeNotifier {
   AttendanceProvider(this._api, {OfflineSyncController? offline})
     : _offline = offline {
+    // M4: once the server acknowledges saved punches, re-read the real attendance (server timer, history).
+    offline?.onApplied = _onOfflineApplied;
     refreshActive();
+  }
+
+  void _onOfflineApplied() {
+    if (_disposed) return;
+    unawaited(refreshActive(silent: true));
+    unawaited(loadHistory(silent: true));
   }
 
   final ApiClient _api;
@@ -555,6 +563,7 @@ class AttendanceProvider extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    if (_offline?.onApplied == _onOfflineApplied) _offline?.onApplied = null;
     stopGeofenceMonitoring();
     super.dispose();
   }

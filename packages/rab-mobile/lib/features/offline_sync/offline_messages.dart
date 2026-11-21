@@ -32,6 +32,15 @@ abstract final class OfflineMessages {
 
   static String hhmm(DateTime at) => DateFormat('HH:mm').format(at.toLocal());
 
+  /// D3 notice after the server clamped a time to the schedule (§3.6 "Applied").
+  static String clamped(OfflinePunchType type, DateTime appliedAt) =>
+      type == OfflinePunchType.clockOut
+      ? 'Your clock-out was recorded as ${hhmm(appliedAt)}, your shift end. Ask your manager if this is wrong.'
+      : 'Your clock-in was recorded as ${hhmm(appliedAt)}, your shift start. Ask your manager if this is wrong.';
+
+  static const stillNotSent =
+      'Still not sent. Connect to the internet and try again.';
+
   /// The amber banner (§3.6 "Queued").
   static String queuedBanner(QueuedPunch punch) =>
       "No connection. ${action(punch.entry.type)} saved on this phone at ${hhmm(punch.displayAt)}. "

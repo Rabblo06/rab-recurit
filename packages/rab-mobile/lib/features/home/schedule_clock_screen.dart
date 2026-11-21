@@ -652,7 +652,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         : null;
     final pendingPunch = pendingOut ?? pendingIn;
     final offlineBanner =
-        offline != null && (offline.entries.isNotEmpty || offline.unreadable)
+        offline != null && offline.hasSomethingToShow
         ? const OfflineQueueBanner()
         : null;
     final timer = pendingPunch != null && !widget.teams

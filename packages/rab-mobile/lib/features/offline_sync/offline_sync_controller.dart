@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../../core/api/api_client.dart';
+import '../../core/polling/single_flight.dart';
 import '../../core/push/push_device_store.dart';
 import '../../core/services/location_service.dart';
 import 'boot_clock.dart';
@@ -13,6 +14,7 @@ import 'offline_config.dart';
 import 'offline_entry.dart';
 import 'offline_messages.dart';
 import 'offline_queue_store.dart';
+import 'offline_sync_client.dart';
 import 'offline_ticket.dart';
 
 /// True when a request failed BEFORE any response arrived (DESIGN §3.1): no connectivity, DNS, socket or TLS failure,
@@ -59,7 +61,9 @@ class OfflineSyncController extends ChangeNotifier {
     OfflineEntrySigner? signer,
     bool? buildFlag,
     DateTime Function()? deviceNow,
-  }) : _store = store ?? OfflineQueueStore(),
+    OfflineSyncClient? client,
+  }) : _client = client,
+       _store = store ?? OfflineQueueStore(),
        _bootClock = bootClock ?? const PlatformBootClock(),
        _signer = signer ?? const UnavailableEntrySigner(),
        _buildFlag = buildFlag ?? kOfflineAttendanceBuildFlag,
@@ -73,6 +77,26 @@ class OfflineSyncController extends ChangeNotifier {
   final OfflineEntrySigner _signer;
   final bool _buildFlag;
   final DateTime Function() _deviceNow;
+
+  /// Null: nothing is ever sent (tests of capture only).
+  final OfflineSyncClient? _client;
+  final SingleFlight _flight = SingleFlight();
+  int _failures = 0;
+  DateTime? _backoffUntil;
+  DateTime? _retryAfterUntil;
+
+  /// Called after a sync in which the server acknowledged at least one entry, so the attendance state is re-read
+  /// from the server (the card switches to the server timer only then).
+  VoidCallback? onApplied;
+
+  /// One-off server notices for the staff member (the D3 "recorded as your shift start" line). Display only.
+  final List<String> notices = [];
+
+  bool get isSyncing => _flight.isRunning;
+
+  /// Something for the banner to show.
+  bool get hasSomethingToShow =>
+      _entries.isNotEmpty || unreadable || notices.isNotEmpty;
 
   /// Completes once the stored queue and ticket have been read.
   late final Future<void> ready;
@@ -155,6 +179,8 @@ class OfflineSyncController extends ChangeNotifier {
     // A build without the offline flag does nothing here at all: no platform call, no storage write.
     if (!_buildFlag) {
       serverEnabled = false;
+      // Only entries a flag-on build left behind could exist; they are still sent (the server decides).
+      if (_entries.any((e) => e.isPending)) unawaited(syncNow());
       return;
     }
     final reading = await _bootClock.read();
@@ -168,27 +194,37 @@ class OfflineSyncController extends ChangeNotifier {
           await _store.deleteTicket(userId);
         }
       } else {
-        final token = data['offlineTicket'];
-        if (token is String &&
-            token.isNotEmpty &&
-            token.length <= 4096 &&
-            reading != null &&
-            fetchDuration <= OfflineLimits.maxTicketFetch) {
-          final ticket = StoredOfflineTicket(
-            token: token,
-            bootId: reading.bootId,
-            ticketBootMs: reading.elapsedMs,
-            deviceWallClockAt: deviceWallClockIso(_deviceNow()),
-          );
-          await _store.saveTicket(userId, ticket);
-          _ticket = ticket;
-        }
+        await _saveTicket(data['offlineTicket'], reading, fetchDuration);
       }
       await markTooOld();
     } catch (_) {
       // A storage failure leaves the in-memory state as it was; capture re-checks everything.
     }
     _notify();
+    // DESIGN §3.5: a successful read (the 30 s reconcile, app resume, any read after a failure) triggers a sync.
+    if (_entries.any((e) => e.isPending)) unawaited(syncNow());
+  }
+
+  /// Stores a fresh ticket (from `/me/active` or a sync response) with the boot reading taken when it arrived.
+  /// Ignored unless offline is on, the token looks sane, the boot clock answered, and the fetch took <= 10 s.
+  Future<void> _saveTicket(
+    Object? token,
+    BootReading? reading,
+    Duration fetchDuration,
+  ) async {
+    if (!_buildFlag || !serverEnabled) return;
+    if (token is! String || token.isEmpty || token.length > 4096) return;
+    if (reading == null || fetchDuration > OfflineLimits.maxTicketFetch) {
+      return;
+    }
+    final ticket = StoredOfflineTicket(
+      token: token,
+      bootId: reading.bootId,
+      ticketBootMs: reading.elapsedMs,
+      deviceWallClockAt: deviceWallClockIso(_deviceNow()),
+    );
+    await _store.saveTicket(userId, ticket);
+    _ticket = ticket;
   }
 
   /// Saves a punch that could not reach the server. Refused (nothing stored) unless every switch is on, the ticket is
@@ -351,9 +387,190 @@ class OfflineSyncController extends ChangeNotifier {
     return true;
   }
 
+  /// Sends pending entries to `POST /attendance/me/sync` (DESIGN §3.5): `clientSeq` order, at most 25 per request,
+  /// one request at a time (single-flight; a call during a run shares it).
+  ///
+  /// - 200: per item, `applied` / `duplicate` / `replayed` entries are deleted, `rejected` ones are kept (with their
+  ///   code) until dismissed, and an entry the response does not mention stays pending.
+  /// - 400 / 413 for a whole batch (a client bug): resent one at a time; an entry refused alone is parked
+  ///   ("Could not send. Contact support") and never resent.
+  /// - 401: the shared [ApiClient] already refreshed the token and retried once; a second 401 means the session
+  ///   ended, so this stops (entries stay, keyed to this user).
+  /// - 429: waits for `Retry-After` (60 s when absent), even for "Send now".
+  /// - anything else (5xx, 403, 404, network, timeout, a malformed body): exponential backoff from 1 s to 5 min.
+  ///   [userInitiated] ("Send now") skips this backoff, never the 429 wait.
+  Future<void> syncNow({bool userInitiated = false}) =>
+      _flight.join(() => _drain(userInitiated));
+
+  Future<void> _drain(bool userInitiated) async {
+    final client = _client;
+    if (client == null) return;
+    await ready;
+    if (_disposed || unreadable) return;
+    final now = _deviceNow();
+    if (_retryAfterUntil != null && now.isBefore(_retryAfterUntil!)) return;
+    if (!userInitiated &&
+        _backoffUntil != null &&
+        now.isBefore(_backoffUntil!)) {
+      return;
+    }
+    try {
+      await markTooOld();
+    } catch (_) {
+      return;
+    }
+    _notify(); // isSyncing
+    var acknowledged = false;
+    // An entry the server left unanswered is not resent in the same run.
+    final tried = <String>{};
+    try {
+      while (!_disposed) {
+        final batch = pending
+            .where((e) => !tried.contains(e.idempotencyKey))
+            .take(OfflineLimits.maxBatch)
+            .toList();
+        if (batch.isEmpty) break;
+        tried.addAll(batch.map((e) => e.idempotencyKey));
+        final progressed = await _send(
+          client,
+          batch,
+          () => acknowledged = true,
+        );
+        if (!progressed) break;
+      }
+      _failures = 0;
+      _backoffUntil = null;
+    } on _StopSync {
+      // The wait (backoff or Retry-After) is already set; entries stay as they are.
+    }
+    _notify();
+    if (acknowledged && !_disposed) onApplied?.call();
+  }
+
+  /// Sends one batch. True when at least one entry left the pending state.
+  Future<bool> _send(
+    OfflineSyncClient client,
+    List<QueuedPunch> batch,
+    void Function() onAcknowledged,
+  ) async {
+    try {
+      final fetch = Stopwatch()..start();
+      final response = await client.postBatch([for (final p in batch) p.entry]);
+      fetch.stop();
+      final reading = await _bootClock.read();
+      await _saveTicket(response.offlineTicket, reading, fetch.elapsed);
+      return await _applyResults(batch, response, onAcknowledged);
+    } on ApiException catch (e) {
+      if (e.statusCode == 400 || e.statusCode == 413) {
+        if (batch.length == 1) {
+          await _setState(batch.single, QueuedPunchState.parked);
+          return true;
+        }
+        var progressed = false;
+        for (final punch in batch) {
+          if (_disposed) break;
+          if (await _send(client, [punch], onAcknowledged)) progressed = true;
+        }
+        return progressed;
+      }
+      if (e.statusCode == 429) {
+        _retryAfterUntil = _deviceNow().add(
+          e.retryAfter ?? const Duration(seconds: 60),
+        );
+        throw const _StopSync();
+      }
+      if (e.statusCode == 401) throw const _StopSync();
+      _backOff();
+      throw const _StopSync();
+    } on _StopSync {
+      rethrow;
+    } catch (_) {
+      // Network, timeout, malformed body, storage: keep everything, try later.
+      _backOff();
+      throw const _StopSync();
+    }
+  }
+
+  void _backOff() {
+    _failures++;
+    final exponent = (_failures - 1).clamp(0, 16);
+    final wait = OfflineLimits.minBackoff * (1 << exponent);
+    _backoffUntil = _deviceNow().add(
+      wait > OfflineLimits.maxBackoff ? OfflineLimits.maxBackoff : wait,
+    );
+  }
+
+  /// The current wait before an automatic retry (tests and diagnostics).
+  DateTime? get nextAutomaticAttemptAt => _backoffUntil;
+  DateTime? get retryAfterUntil => _retryAfterUntil;
+
+  Future<void> _setState(QueuedPunch punch, QueuedPunchState state) async {
+    _entries = await _store.update(
+      userId,
+      (all) => [
+        for (final e in all)
+          e.idempotencyKey == punch.idempotencyKey ? e.withState(state) : e,
+      ],
+    );
+  }
+
+  Future<bool> _applyResults(
+    List<QueuedPunch> batch,
+    SyncBatchResponse response,
+    void Function() onAcknowledged,
+  ) async {
+    final sent = {for (final p in batch) p.idempotencyKey};
+    final byKey = {
+      for (final r in response.results)
+        if (sent.contains(r.idempotencyKey)) r.idempotencyKey: r,
+    };
+    var progressed = false;
+    final newNotices = <String>[];
+    _entries = await _store.update(userId, (all) {
+      final next = <QueuedPunch>[];
+      for (final e in all) {
+        final result = e.isPending ? byKey[e.idempotencyKey] : null;
+        if (result == null) {
+          next.add(e);
+        } else if (result.acknowledged) {
+          progressed = true;
+          onAcknowledged();
+          final at = result.appliedAt;
+          if (result.flags.contains('clamped_to_schedule') && at != null) {
+            newNotices.add(OfflineMessages.clamped(e.entry.type, at));
+          }
+        } else if (result.rejected) {
+          progressed = true;
+          next.add(
+            e.withState(
+              QueuedPunchState.rejected,
+              code: result.code,
+              qrReason: result.reason,
+            ),
+          );
+        } else {
+          next.add(e); // an outcome this build does not know: keep it pending
+        }
+      }
+      return next;
+    });
+    notices.addAll(newNotices);
+    return progressed;
+  }
+
+  void dismissNotice(String notice) {
+    notices.remove(notice);
+    _notify();
+  }
+
   @override
   void dispose() {
     _disposed = true;
     super.dispose();
   }
+}
+
+/// Ends one sync run (the wait is already recorded).
+class _StopSync implements Exception {
+  const _StopSync();
 }

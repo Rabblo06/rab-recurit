@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'offline_messages.dart';
 import 'offline_sync_controller.dart';
+
+enum _GuardChoice { stay, send, discard }
 
 /// D18: logout is blocked while punches saved on this phone have not been sent, until they sync or the staff member
 /// explicitly discards them. Discarded = never sent; the manager is not told.
@@ -19,7 +22,7 @@ Future<void> logoutWithOfflineGuard(
   if (await offline.clearForLogout()) return logout();
   if (!context.mounted) return;
   final count = offline.pendingCount;
-  final discard = await showDialog<bool>(
+  final choice = await showDialog<_GuardChoice>(
     context: context,
     builder: (dialog) => AlertDialog(
       key: const ValueKey('offline-logout-guard'),
@@ -32,18 +35,36 @@ Future<void> logoutWithOfflineGuard(
       actions: [
         TextButton(
           key: const ValueKey('offline-logout-stay'),
-          onPressed: () => Navigator.pop(dialog, false),
+          onPressed: () => Navigator.pop(dialog, _GuardChoice.stay),
           child: const Text('Stay signed in'),
         ),
         TextButton(
+          key: const ValueKey('offline-logout-send'),
+          onPressed: () => Navigator.pop(dialog, _GuardChoice.send),
+          child: const Text('Send now'),
+        ),
+        TextButton(
           key: const ValueKey('offline-logout-discard'),
-          onPressed: () => Navigator.pop(dialog, true),
+          onPressed: () => Navigator.pop(dialog, _GuardChoice.discard),
           child: const Text('Discard and log out'),
         ),
       ],
     ),
   );
-  if (discard != true) return;
-  await offline.discardAll();
-  await logout();
+  switch (choice) {
+    case _GuardChoice.discard:
+      await offline.discardAll();
+      await logout();
+    case _GuardChoice.send:
+      await offline.syncNow(userInitiated: true);
+      if (await offline.clearForLogout()) {
+        await logout();
+      } else if (context.mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text(OfflineMessages.stillNotSent)),
+        );
+      }
+    case _GuardChoice.stay || null:
+      return;
+  }
 }

@@ -9,6 +9,7 @@ import 'package:rab_staff/core/models/offer.dart';
 import 'package:rab_staff/features/home/attendance_provider.dart';
 import 'package:rab_staff/features/offline_sync/offline_entry.dart';
 import 'package:rab_staff/features/offline_sync/offline_messages.dart';
+import 'package:rab_staff/features/offline_sync/offline_sync_client.dart';
 import 'package:rab_staff/features/offline_sync/offline_sync_controller.dart';
 
 import 'support/biometric_test_support.dart';
@@ -288,4 +289,69 @@ void main() {
       expect(provider.errorMessage, OfflineMessages.needsTicket);
     });
   });
+
+  test(
+    'once the server acknowledges a saved clock-in, the real attendance is re-read (server timer only then)',
+    () async {
+      var synced = false;
+      final api = ApiClient(
+        httpClient: MockClient((request) async {
+          final path = request.url.path;
+          if (path.endsWith('/attendance/me/active')) {
+            return http.Response(
+              jsonEncode({
+                'attendance': synced ? attendanceJson() : null,
+                'serverNow': '2026-11-21T09:30:00.000Z',
+                'offline': {'enabled': true},
+                'offlineTicket': 'tkt',
+              }),
+              200,
+            );
+          }
+          if (path.endsWith('/attendance/me/history')) {
+            return http.Response('[]', 200);
+          }
+          if (path.endsWith('/attendance/me/sync')) {
+            synced = true;
+            final entries =
+                ((jsonDecode(request.body) as Map)['entries'] as List)
+                    .cast<Map<String, dynamic>>();
+            return http.Response(
+              jsonEncode({
+                'results': [
+                  for (final e in entries)
+                    {
+                      'idempotencyKey': e['idempotencyKey'],
+                      'outcome': 'applied',
+                    },
+                ],
+              }),
+              200,
+            );
+          }
+          throw http.ClientException('Connection refused');
+        }),
+      );
+      final offline = OfflineSyncController(
+        userId: 'user-a',
+        bootClock: FakeBootClock(),
+        signer: FakeEntrySigner(),
+        buildFlag: true,
+        client: OfflineSyncClient(api),
+      );
+      final provider = AttendanceProvider(api, offline: offline);
+      await provider.refreshActive();
+      await provider.clockIn('shift-1', qrToken: 'qr');
+      expect(provider.active, isNull);
+      expect(offline.hasUnsent, isTrue);
+      await offline.syncNow(userInitiated: true);
+      // onApplied re-reads /me/active; let it land.
+      await provider.refreshActive(silent: true);
+      expect(offline.entries, isEmpty);
+      expect(
+        provider.active?.clockInAt,
+        DateTime.parse('2026-11-21T09:00:00.000Z'),
+      );
+    },
+  );
 }

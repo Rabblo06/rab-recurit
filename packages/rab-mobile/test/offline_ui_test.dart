@@ -16,7 +16,9 @@ import 'package:rab_staff/features/home/schedule_clock_screen.dart';
 import 'package:rab_staff/features/offers/offers_provider.dart';
 import 'package:rab_staff/features/offline_sync/logout_guard.dart';
 import 'package:rab_staff/features/offline_sync/offline_entry.dart';
+import 'package:rab_staff/features/offline_sync/offline_messages.dart';
 import 'package:rab_staff/features/offline_sync/offline_queue_store.dart';
+import 'package:rab_staff/features/offline_sync/offline_sync_client.dart';
 import 'package:rab_staff/features/offline_sync/offline_sync_controller.dart';
 import 'package:rab_staff/features/offline_sync/offline_widgets.dart';
 import 'package:rab_staff/features/offline_sync/saved_actions_screen.dart';
@@ -64,12 +66,14 @@ void main() {
     clearSecureStorageChannel();
   });
 
-  OfflineSyncController controller() => OfflineSyncController(
-    userId: 'user-a',
-    bootClock: FakeBootClock(),
-    signer: FakeEntrySigner(),
-    buildFlag: true,
-  );
+  OfflineSyncController controller({OfflineSyncClient? client}) =>
+      OfflineSyncController(
+        userId: 'user-a',
+        bootClock: FakeBootClock(),
+        signer: FakeEntrySigner(),
+        buildFlag: true,
+        client: client,
+      );
 
   group('clock screen', () {
     final now = _noon();
@@ -234,8 +238,10 @@ void main() {
       );
     }
 
-    Future<OfflineSyncController> withPending() async {
-      final c = controller();
+    Future<OfflineSyncController> withPending({
+      OfflineSyncClient? client,
+    }) async {
+      final c = controller(client: client);
       await c.ingestActive({
         'offline': {'enabled': true},
         'offlineTicket': 'tkt',
@@ -281,6 +287,55 @@ void main() {
       expect(c.entries, isEmpty);
       expect(secure.containsKey(OfflineQueueStore.queueKey('user-a')), isFalse);
     });
+
+    OfflineSyncClient syncServer({required bool up}) => OfflineSyncClient(
+      ApiClient(
+        httpClient: MockClient((request) async {
+          if (!up) throw http.ClientException('Network is unreachable');
+          final entries = ((jsonDecode(request.body) as Map)['entries'] as List)
+              .cast<Map<String, dynamic>>();
+          return http.Response(
+            jsonEncode({
+              'results': [
+                for (final e in entries)
+                  {'idempotencyKey': e['idempotencyKey'], 'outcome': 'applied'},
+              ],
+            }),
+            200,
+          );
+        }),
+      ),
+    );
+
+    testWidgets('"Send now" sends, then logs out once nothing is left', (
+      tester,
+    ) async {
+      final c = await withPending(client: syncServer(up: true));
+      var logouts = 0;
+      await pumpGuard(tester, c, (n) => logouts = n);
+      await tester.tap(find.text('Log out'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('offline-logout-send')));
+      await tester.pumpAndSettle();
+      expect(logouts, 1);
+      expect(c.entries, isEmpty);
+    });
+
+    testWidgets(
+      '"Send now" with no connection: stays signed in, says so, keeps the punch',
+      (tester) async {
+        final c = await withPending(client: syncServer(up: false));
+        var logouts = 0;
+        await pumpGuard(tester, c, (n) => logouts = n);
+        await tester.tap(find.text('Log out'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('offline-logout-send')));
+        await tester.pumpAndSettle();
+        expect(logouts, 0);
+        expect(c.hasUnsent, isTrue);
+        expect(find.text(OfflineMessages.stillNotSent), findsOneWidget);
+      },
+    );
 
     testWidgets('nothing unsent, or no controller: logs out straight away', (
       tester,

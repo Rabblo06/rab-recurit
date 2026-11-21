@@ -81,7 +81,17 @@ class OfflineQueueBanner extends StatelessWidget {
       );
     }
     final latest = offline.pending.lastOrNull;
-    if (latest == null) return const SizedBox.shrink();
+    if (latest == null) {
+      final notice = offline.notices.firstOrNull;
+      if (notice == null) return const SizedBox.shrink();
+      return ScheduleMessageCard(
+        key: const ValueKey('offline-notice-banner'),
+        title: 'Sent',
+        message: notice,
+        actionLabel: 'OK',
+        onAction: () => offline.dismissNotice(notice),
+      );
+    }
     return ScheduleMessageCard(
       key: const ValueKey('offline-queued-banner'),
       title: offline.pendingCount == 1
