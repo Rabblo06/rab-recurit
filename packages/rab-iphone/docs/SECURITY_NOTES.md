@@ -144,7 +144,41 @@ Source only, NOT compiled or run. Server contract: `docs/account-security/STEP1_
 - The update-required screen offers a store button only for an allowlisted HTTPS `apps.apple.com` URL from the server.
 - Debug-only canned backend `TwoFactorUITestStub` (`#if DEBUG`, needs `-CrewflowUITesting` + `-CrewflowTwoFactorStub`).
 
-## 7. Open items / flagged assumptions
+## 7. Offline punch queue (M4 Lane B, NOT enabled anywhere)
+
+Design: `docs/plans/m4-offline/DESIGN.md` (owner-approved 2026-11-21). **HARD RULE:** offline clocking stays off
+everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has been pen-tested. Code:
+`Crewflow/Features/Staff/OfflineSync/`.
+
+- **Off by construction.** An action is saved on the phone only when ALL hold: the build switch Info.plist
+  `CrewflowOfflineAttendance` = YES (the key is in no configuration, so it is off in every build); a device-key signer
+  exists (none does: `POST /attendance/me/device-key` is not on the server, and `StaffOfflineAttendance.live` passes
+  `signer: nil`); the last `/attendance/me/active` said `offline.enabled: true` and carried an `offlineTicket`; and the
+  ticket arrived in this boot less than 16 h ago. Anything else (an older server without the fields, a reboot, a
+  malformed ticket, a ticket whose fetch took > 10 s) leaves it off.
+- **Storage.** Per user, Keychain items through the existing `SecureStore` in `<bundle id>.device`
+  (`AfterFirstUnlockThisDeviceOnly`, not synchronizable): `rab.offline.queue.<userId>` (the queue, JSON),
+  `rab.offline.ticket.<userId>` (the ticket + the boot reading when it arrived + its `serverNow`),
+  `rab.offline.installId`, `rab.offline.seq.<installId>`. Never UserDefaults or a plain file. Another user on the same
+  phone never reads, sends or overwrites the queue (keyed by user id; the server would also refuse it: ticket subject).
+  `FreshInstallGuard` wipes it on reinstall. An unreadable stored queue is never overwritten: capture is refused and
+  sign-out still asks first.
+- **Limits (D5, §3.4).** 30 entries and 48 KB per user; no capture more than 16 h after the ticket; an entry captured
+  more than 72 h ago (server-anchored clock, never the wall clock) is never sent and stays visible until dismissed.
+- **Entry (§3.2) and time.** Exactly the DESIGN members, nothing else (forbidNonWhitelisted). Never
+  `organisationId`, `workspaceId`, `staffProfileId`, `status`, `clockInAt`/`clockOutAt` or money. Time evidence is the
+  boot clock only: `CLOCK_MONOTONIC` (counts sleep) + sysctl `kern.bootsessionuuid`, never
+  `ProcessInfo.systemUptime` (stops in sleep: earlier punch, more pay). `deviceWallClockAt` is diagnostics for the
+  server's skew flags. The phone never computes paid time; the server anchors and bounds every time (§4).
+- **Signature.** Each entry is signed over its RFC 8785 canonical JSON (every member except `sig`;
+  `OfflineCanonicalJSON`, tested against the RFC number samples). The signer is a protocol only (`OfflineEntrySigning`):
+  the Secure Enclave P-256 key and its registration wait for the server's device-key route.
+- **Integrity signal.** `rootedSignal` is a weak client-asserted jailbreak path check, a flag on the receipt only (D11).
+- **Residual.** A jailbroken, hooked app can sign lies within the server's bounds (DESIGN §2 trade-off: schedule clamp,
+  no untrusted clock-out, manager review). Keychain `ThisDeviceOnly` items are restored by an encrypted backup to the
+  SAME device, so a restore can bring back an old queue; the server refuses it after 72 h (`SYNC_TOO_LATE`).
+
+## 8. Open items / flagged assumptions
 
 - **Assumption:** shift times display in Europe/London regardless of the
   device zone (Flutter uses the device zone; identical for UK devices).
