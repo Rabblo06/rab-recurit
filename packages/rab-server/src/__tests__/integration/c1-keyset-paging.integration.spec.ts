@@ -433,7 +433,8 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
         const res = await http().get(path).query({ limit: 3, page }).set(auth(fx.managerToken));
         expect(res.status).toBe(200);
         ids.push(...res.body.data.map((r: { id: string }) => r.id).filter((id: string) => keep.includes(id)));
-        if (page * 3 >= res.body.total) break;
+        // A short page ends the walk; `total` is only on page 1 for lists that count once (owner decision 60).
+        if (res.body.data.length < 3 || (typeof res.body.total === 'number' && page * 3 >= res.body.total)) break;
       }
       return ids;
     };
@@ -444,6 +445,43 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
     expect(await pages('/rest/v1/shifts', shiftIds)).toEqual(await idOrder('shift', 'ASC', shiftIds));
     expect(await pages('/rest/v1/offers', offerIds)).toEqual(await idOrder('job_offer', 'DESC', offerIds));
     expect(await pages('/rest/v1/attendance', attendanceIds)).toEqual(await idOrder('attendance', 'DESC', attendanceIds));
+  });
+
+  it('GET /attendance counts the exact total on page 1 only; later pages answer total null and hasMore (owner decision 60)', async () => {
+    const fx = await seedWorkspace('c1-att-total');
+    const staff = await staffOf(fx, 'c1-att-total');
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) ids.push(await seedAttendance(fx, staff.profileId, new Date(Date.parse('2027-05-01T09:00:00Z') + i * DAY)));
+    const get = (query: Record<string, unknown>) => http().get('/rest/v1/attendance').query(query).set(auth(fx.managerToken));
+
+    const first = await get({ limit: 3 });
+    expect(first.status).toBe(200);
+    expect(first.body.total).toBe(7);
+    expect(first.body.data).toHaveLength(3);
+    expect(first.body.hasMore).toBe(true);
+    // An explicit page=1 is the same first page: counted.
+    expect((await get({ limit: 3, page: 1 })).body.total).toBe(7);
+
+    const second = await get({ limit: 3, page: 2 });
+    expect(second.status).toBe(200);
+    expect(second.body.total).toBeNull();
+    expect(second.body.data).toHaveLength(3);
+    expect(second.body.hasMore).toBe(true);
+
+    const last = await get({ limit: 3, page: 3 });
+    expect(last.body.total).toBeNull();
+    expect(last.body.data).toHaveLength(1);
+    expect(last.body.hasMore).toBe(false);
+
+    // The extra row fetched for hasMore never leaks into the page: every row exactly once across the three pages.
+    const walked = [...first.body.data, ...second.body.data, ...last.body.data].map((r: { id: string }) => r.id);
+    expect(new Set(walked)).toEqual(new Set(ids));
+    expect(walked).toHaveLength(7);
+
+    // An exactly full last page says no more follow.
+    expect((await get({ limit: 7 })).body.hasMore).toBe(false);
+    // Filters still narrow the count on page 1 (scope is the first condition, unchanged).
+    expect((await get({ limit: 3, status: 'approved' })).body).toMatchObject({ total: 0, data: [], hasMore: false });
   });
 
   it('default page size is 50 and the maximum is 200 on an ordinary list endpoint', async () => {
