@@ -30,8 +30,12 @@ export interface BreakRecordInput {
   /** null while the break is still open; treated as ending at clockOutAt. */
   endedAt: Date | null;
   isPaid: boolean;
-  /** 'offline' when the break's start or end was recorded offline (D7 floor). Default 'online'. */
-  source?: 'online' | 'offline';
+  /**
+   * REQUIRED (security re-review of #307: an optional field defaulting to 'online' would fail open). 'offline' when the
+   * break's start or end was recorded offline (attendance_break start_source / end_source 'offline_sync'), which applies the
+   * D7 floor; 'online' otherwise. TypeScript forces every caller to map it.
+   */
+  source: 'online' | 'offline';
 }
 
 export interface WorkedMinutesInput {
