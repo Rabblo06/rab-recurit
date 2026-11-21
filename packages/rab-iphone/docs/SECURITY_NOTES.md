@@ -180,7 +180,8 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
   entry; `rejected` keeps it visible with the server's code (only `^[A-Z][A-Z_]{2,48}$` is stored; the words shown come
   from a client table, never server text); a missing or unknown outcome leaves it pending (never assumed received)
   and ends the run, so no later batch overtakes an unanswered earlier punch. The signed-in user must equal the queue's
-  owner before every request; `Retry-After` is capped at 15 min. Size limits apply to appends only (recording an
+  owner before every request, and the request itself is bound to that user id (`RequestOptions.requiredSessionUserId`,
+  checked where the bearer token is read, so an account switch cannot slip in between); `Retry-After` is capped at 15 min. Size limits apply to appends only (recording an
   outcome can never be refused for size). A
   whole-batch 400/413/422 is resent one entry at a time and the refused one is parked as undeliverable. 429 waits for
   `Retry-After` whatever the trigger; network, timeout, 5xx, 403, 404 and undecodable answers back off 1 s to 5 min
