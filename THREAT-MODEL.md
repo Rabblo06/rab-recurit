@@ -10337,13 +10337,16 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   server derives is sent. An entry is deleted only on an explicit `applied` / `duplicate` / `replayed` for its own
   idempotency key; an unknown outcome, a result for another key, an undecodable answer or a timeout keeps it pending
   (fail closed: never assumed received), and a resend is safe because the server answers `replayed` for a seen key.
-  Rejection codes are stored only when they match the receipt CHECK shape; staff text comes from a client table, never
-  from the server. 400/413/422 for a batch: one-by-one resend, the offender parked as undeliverable (still blocks
-  sign-out). 429 honours `Retry-After` for every trigger; failures back off 1 s to 5 min. A ticket in the answer renews
+  An unanswered entry ends the run, so no later batch can overtake it. The signed-in user must equal the queue's owner
+  before every request. Rejection codes are stored only when they match the receipt CHECK shape (at most 49
+  characters); staff text comes from a client table, never from the server. Size limits apply to appends only.
+  400/413/422 for a batch: one-by-one resend, the offender parked as undeliverable (still blocks sign-out). 429 honours
+  `Retry-After` (capped at 15 min) for every trigger; failures back off 1 s to 5 min. A ticket in the answer renews
   an open gate only (10 s rule), so the sync route can never switch offline on.
 - **Tests:** `CrewflowTests/Staff/OfflineSync/OfflineSyncEngineTests.swift` with a mocked URLProtocol through the real
   APIClient: partial success; 25-entry batches in order with no forbidden member; whole-batch 400; 429 for automatic and
-  manual triggers; exponential backoff and its 5-minute cap; 404/500/503; timeout then `replayed` with the same keys; a
+  manual triggers; `Retry-After` cap; no later batch after an unanswered entry; owner mismatch sends nothing;
+  exponential backoff and its 5-minute cap; 404/500/503; timeout then `replayed` with the same keys; a
   replayed rejection keeps its code; unknown outcome and malformed code; undecodable 200; 72 h entries never sent;
   ticket renewal only on an open gate; single flight.
 - **Residual:** a server that answers `applied` for an entry it did not apply would make the phone drop it; the server

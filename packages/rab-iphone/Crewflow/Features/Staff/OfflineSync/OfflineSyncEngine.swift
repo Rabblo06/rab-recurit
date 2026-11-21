@@ -96,13 +96,17 @@ enum OfflineSyncMessages {
 ///
 /// - `applied`, `duplicate` and `replayed` entries are deleted; `rejected`
 ///   ones stay visible (with the server's code) until dismissed.
-/// - A missing or unknown per-item outcome leaves the entry pending. A batch
-///   that settles nothing stops the run (never a tight loop).
+/// - A missing or unknown per-item outcome leaves the entry pending and ENDS
+///   the run: no later batch is sent while an earlier entry is unanswered, so
+///   a later punch never overtakes an earlier one (and never a tight loop).
 /// - 400 / 413 / 422 for the whole batch (a client bug): resent one at a
 ///   time, and the entry the server still refuses is parked as undeliverable.
 /// - 401: the API client already refreshed and retried once; the session has
 ///   ended, so the run stops and the queue is kept.
-/// - 429: nothing is sent before `Retry-After`, whatever the trigger.
+/// - 429: nothing is sent before `Retry-After` (capped at 15 min, so a bad
+///   header cannot park the queue for days), whatever the trigger.
+/// - Before every request the signed-in user must still be the queue's
+///   owner; otherwise nothing is sent (another account never sends it).
 /// - Network failure, timeout, 5xx, 403, 404 (a server without the route) or
 ///   an undecodable answer: exponential backoff, 1 s to 5 min, for the
 ///   automatic triggers; the entries stay pending. A resend is always safe:
@@ -132,12 +136,14 @@ final class OfflineSyncEngine {
 
     static let minBackoffMs: Int64 = 1_000
     static let maxBackoffMs: Int64 = 300_000
+    static let maxRetryAfterSeconds = 900
 
     private let queue: OfflinePunchQueue
     private let send: Send
     private let bootClock: OfflineBootClock
     private let monotonicMs: () -> Int64
     private let onTicket: TicketHandler
+    private let isOwnerSignedIn: () -> Bool
 
     private(set) var isRunning = false
     private(set) var consecutiveFailures = 0
@@ -151,12 +157,14 @@ final class OfflineSyncEngine {
         bootClock: OfflineBootClock,
         monotonicMs: @escaping () -> Int64 = { Int64(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000) },
         onTicket: @escaping TicketHandler = { _, _, _ in },
+        isOwnerSignedIn: @escaping () -> Bool = { true },
         send: @escaping Send
     ) {
         self.queue = queue
         self.bootClock = bootClock
         self.monotonicMs = monotonicMs
         self.onTicket = onTicket
+        self.isOwnerSignedIn = isOwnerSignedIn
         self.send = send
     }
 
@@ -180,10 +188,10 @@ final class OfflineSyncEngine {
             let batch = Array(queue.pending.prefix(max(1, limits.maxBatch)))
             if batch.isEmpty { break }
             switch await sendBatch(batch) {
-            case .settled(let r, let j, let resolved):
+            case .settled(let r, let j, let complete):
                 received += r
                 rejected += j
-                if resolved == 0 { return .sent(received: received, rejected: rejected) }
+                if !complete { return .sent(received: received, rejected: rejected) }
             case .refusedAsRequest:
                 if batch.count == 1 {
                     queue.settle(remove: [], undeliverable: [batch[0].id])
@@ -201,12 +209,14 @@ final class OfflineSyncEngine {
     }
 
     private enum BatchOutcome {
-        case settled(received: Int, rejected: Int, resolved: Int)
+        /// `complete`: every entry of the batch got a known outcome.
+        case settled(received: Int, rejected: Int, complete: Bool)
         case refusedAsRequest
         case stop
     }
 
     private func sendBatch(_ batch: [OfflineQueuedPunch]) async -> BatchOutcome {
+        guard isOwnerSignedIn() else { return .stop }
         let started = bootClock.reading()
         do {
             let response = try await send(OfflineSyncRequestBody(entries: batch.map(\.entry)))
@@ -220,7 +230,7 @@ final class OfflineSyncEngine {
             case .http(let status, _) where status == 413:
                 return .refusedAsRequest
             case .rateLimited(let seconds, _):
-                retryAfterUntilMs = monotonicMs() + Int64(max(1, seconds)) * 1_000
+                retryAfterUntilMs = monotonicMs() + Int64(min(max(1, seconds), Self.maxRetryAfterSeconds)) * 1_000
                 return .stop
             case .unauthorized, .sessionChanged, .cancelled:
                 return .stop
@@ -240,9 +250,10 @@ final class OfflineSyncEngine {
         for punch in batch {
             guard queue.pending.contains(where: { $0.id == punch.id }) else { continue }
             switch await sendBatch([punch]) {
-            case .settled(let r, let j, _):
+            case .settled(let r, let j, let complete):
                 received += r
                 rejected += j
+                if !complete { return (received, rejected, true) }
             case .refusedAsRequest:
                 queue.settle(remove: [], undeliverable: [punch.id])
             case .stop:
@@ -259,8 +270,12 @@ final class OfflineSyncEngine {
         }
         var remove = Set<String>()
         var rejected: [String: String] = [:]
+        var complete = true
         for punch in batch {
-            guard let result = byKey[punch.id], let outcome = result.outcome else { continue }
+            guard let result = byKey[punch.id], let outcome = result.outcome else {
+                complete = false
+                continue
+            }
             switch outcome {
             case .applied, .duplicate:
                 remove.insert(punch.id)
@@ -277,7 +292,7 @@ final class OfflineSyncEngine {
             }
         }
         queue.settle(remove: remove, rejected: rejected)
-        return .settled(received: remove.count, rejected: rejected.count, resolved: remove.count + rejected.count)
+        return .settled(received: remove.count, rejected: rejected.count, complete: complete)
     }
 
     /// Only a well-formed code is kept (the receipt CHECK's shape); anything
