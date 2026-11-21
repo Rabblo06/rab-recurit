@@ -10326,3 +10326,15 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   "R if R is in the window"); this keeps D3 for both trust levels and can only lower pay.
 - **Not changed.** No endpoint, no SQL, no app behaviour: nothing calls the offline functions yet and offline mode stays OFF
   (HARD RULE, DESIGN.md / ROLLOUT-CHECKLIST.md).
+
+## Attendance monitor flags an abandoned break (branch feat/m4-monitor-on-break, stacked on #307, 2026-11-21; no SQL)
+- **Gap closed (M4 design §1 / §8.2, A10 fail closed).** The monitor flagged only `status = 'clocked_in'`, so once breaks
+  exist a staff member who starts a break and never clocks out would never be flagged and the attendance would stay open
+  for ever (no missing-clock-out recovery, no manager notification, the report could never be reviewed cleanly).
+- **Change.** Discovery, the per-scope candidate query and the per-candidate re-check accept `clocked_in` and `on_break`
+  (`OPEN_ATTENDANCE_STATUSES`); the status change uses the new `on_break -> missing_clock_out` edge through
+  `assertTransition`. Same grace (`QR_POST_SHIFT_GRACE_MINUTES` after the staff member's own end), same worker_event
+  idempotency, same notification and audit; clock-out time, worked minutes and pay are never touched. No row is `on_break`
+  today (breaks ship later), so nothing changes until then.
+- **Tests.** `worker-event-idempotency.integration.spec.ts`: an `on_break` attendance past the grace is flagged once
+  (worker_event completed, status missing_clock_out, clock-out still null); one still on a break inside the grace is left alone.
