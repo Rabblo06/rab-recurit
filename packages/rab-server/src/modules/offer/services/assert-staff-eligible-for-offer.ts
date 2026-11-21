@@ -8,6 +8,7 @@ import { ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
+import { assertNoExpiredRequiredDocument } from '../../staff/services/assert-no-expired-required-document';
 
 /**
  * DOM-01 — the single canonical "can this staff member receive/hold an offer
@@ -56,6 +57,8 @@ export async function assertStaffEligibleForOffer(
   if (!staffUser || staffUser.status !== UserStatus.ACTIVE) {
     throw new ConflictException('This staff member is not an active account.');
   }
+
+  await assertNoExpiredRequiredDocument(manager, staffProfile, window.startsAt); // Lane D: expired REQUIRED document (409)
 
   const existing = await manager.findOne(ShiftAssignment, { where: { shiftId, staffProfileId } });
   if (existing) throw new ConflictException('This staff member has already been offered this shift.');
