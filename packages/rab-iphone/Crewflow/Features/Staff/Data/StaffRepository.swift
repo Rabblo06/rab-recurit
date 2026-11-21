@@ -114,8 +114,11 @@ struct StaffRepository {
     /// owns the backoff, and a later resend is safe because the server answers
     /// `replayed` for a key it has already seen. The server route is not
     /// merged yet and nothing calls this while offline mode is off.
-    func syncOffline(_ body: OfflineSyncRequestBody) async throws -> OfflineSyncResponse {
-        try await api.post("/attendance/me/sync", body: body, options: Self.nonRepeatable, as: OfflineSyncResponse.self)
+    /// `ownerUserId` binds the request to the queue's owner: it is never sent
+    /// under another account's token (`RequestOptions.requiredSessionUserId`).
+    func syncOffline(_ body: OfflineSyncRequestBody, ownerUserId: String? = nil) async throws -> OfflineSyncResponse {
+        let options = RequestOptions(retry: .never, requiredSessionUserId: ownerUserId)
+        return try await api.post("/attendance/me/sync", body: body, options: options, as: OfflineSyncResponse.self)
     }
 
     func team(shiftId: String, background: Bool = false) async throws -> [StaffTeamMember] {

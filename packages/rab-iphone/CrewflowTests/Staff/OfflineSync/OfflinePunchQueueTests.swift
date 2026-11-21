@@ -215,6 +215,65 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertEqual(offline.queue.unsentCount, 1, "the sign-out guard keeps showing")
     }
 
+    @MainActor
+    func testAFailedKeychainReadIsNeverTakenForAnEmptyQueue() throws {
+        let key = OfflinePunchStorage.queueKey(OfflineFixtures.userId)
+        let keychain = FailingReadSecureStore([key: "[stored punches]"], failingPrefixes: [key])
+        let clock = FakeBootClock()
+        let offline = makeOfflineAttendance(store: keychain, clock: clock)
+        enableOffline(offline, clock: clock)
+        XCTAssertTrue(offline.queue.unreadable, "a failed read is unreadable, not empty")
+        XCTAssertEqual(offline.queue.unsentCount, 1, "the sign-out guard shows")
+        XCTAssertThrowsError(try offline.capture(.make(.clockIn), context: OfflineAttendanceContext())) {
+            XCTAssertEqual($0 as? OfflineCaptureRefusal, .notSaved)
+        }
+        XCTAssertFalse(offline.queue.discardAll())
+        XCTAssertEqual(keychain.inner.string(for: key), "[stored punches]", "never overwritten, never deleted")
+
+        // Reads recover (first unlock): the queue is read again before any write.
+        keychain.failingPrefixes = []
+        offline.queue.reload()
+        XCTAssertTrue(offline.queue.unreadable, "the stored text itself is not a queue: still never overwritten")
+    }
+
+    @MainActor
+    func testAQueueThatBecomesUnreadableAfterLoadingIsNotOverwritten() throws {
+        let key = OfflinePunchStorage.queueKey(OfflineFixtures.userId)
+        let keychain = FailingReadSecureStore(failingPrefixes: [])
+        let clock = FakeBootClock()
+        let offline = makeOfflineAttendance(store: keychain, clock: clock)
+        enableOffline(offline, clock: clock)
+        try offline.capture(.make(.checkIn), context: OfflineAttendanceContext())
+        let stored = keychain.inner.string(for: key)
+        keychain.failingPrefixes = [key]
+        XCTAssertThrowsError(try offline.capture(.make(.clockIn), context: OfflineAttendanceContext())) {
+            XCTAssertEqual($0 as? OfflineCaptureRefusal, .notSaved)
+        }
+        XCTAssertEqual(keychain.inner.string(for: key), stored)
+        XCTAssertTrue(offline.queue.unreadable)
+    }
+
+    @MainActor
+    func testAFailedCounterOrInstallIdReadRefusesCapture() {
+        for prefix in ["rab.offline.seq.", OfflinePunchStorage.installIdKey] {
+            let keychain = FailingReadSecureStore(failingPrefixes: [prefix])
+            let clock = FakeBootClock()
+            let offline = makeOfflineAttendance(store: keychain, clock: clock)
+            enableOffline(offline, clock: clock)
+            XCTAssertThrowsError(try offline.capture(.make(.clockIn), context: OfflineAttendanceContext()), prefix) {
+                XCTAssertEqual($0 as? OfflineCaptureRefusal, .notSaved, "clientSeq is never numbered from a guess")
+            }
+            XCTAssertTrue(offline.queue.items.isEmpty)
+        }
+        let corrupt = InMemorySecureStore([OfflinePunchStorage.installIdKey: "install-1", OfflinePunchStorage.sequenceKey("install-1"): "not a number"])
+        let clock = FakeBootClock()
+        let offline = makeOfflineAttendance(store: corrupt, clock: clock)
+        enableOffline(offline, clock: clock)
+        XCTAssertThrowsError(try offline.capture(.make(.clockIn), context: OfflineAttendanceContext())) {
+            XCTAssertEqual($0 as? OfflineCaptureRefusal, .notSaved)
+        }
+    }
+
     // MARK: Limits (D5, §3.4)
 
     @MainActor

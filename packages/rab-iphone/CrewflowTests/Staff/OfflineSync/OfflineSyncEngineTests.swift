@@ -149,6 +149,40 @@ final class OfflineSyncEngineTests: XCTestCase {
     }
 
     @MainActor
+    func testTheEngineTellsANoAnswerStopFromAnAnswer() async throws {
+        let clock = FakeBootClock()
+        let offline = try makeOffline(1, clock: clock)
+        let answer = StubFlag(false)
+        server.setHandler { _ in answer.value ? .json(500, "") : .failure(.notConnectedToInternet) }
+        let engine = makeEngine(offline)
+        _ = await engine.run(trigger: .manual, trustedNow: nil)
+        XCTAssertTrue(engine.lastRunEndedWithoutAnswer)
+        answer.value = true
+        _ = await engine.run(trigger: .manual, trustedNow: nil)
+        XCTAssertFalse(engine.lastRunEndedWithoutAnswer, "a 500 is an answer")
+    }
+
+    @MainActor
+    func testTheSyncRequestIsBoundToTheQueuesOwner() async throws {
+        server.setHandler { request in SyncStub.applyAll(request) }
+        let (client, tokens) = makeClient()
+        try tokens.store(accessToken: "access-b", refreshToken: "refresh-b")
+        try tokens.setSessionUserId(OfflineFixtures.otherUserId)
+        let repository = StaffRepository(api: client)
+        let body = OfflineSyncRequestBody(entries: [])
+        do {
+            _ = try await repository.syncOffline(body, ownerUserId: OfflineFixtures.userId)
+            XCTFail("sent under another account")
+        } catch {
+            XCTAssertEqual(error as? APIError, .sessionChanged)
+        }
+        XCTAssertTrue(SyncStub.calls().isEmpty, "nothing reaches the server under the wrong identity")
+        _ = try await repository.syncOffline(body, ownerUserId: OfflineFixtures.otherUserId)
+        XCTAssertEqual(SyncStub.calls().count, 1)
+        XCTAssertEqual(SyncStub.calls().first?.bearer, "Bearer access-b")
+    }
+
+    @MainActor
     func testRetryAfterIsCappedAtFifteenMinutes() async throws {
         let clock = FakeBootClock()
         let offline = try makeOffline(1, clock: clock)

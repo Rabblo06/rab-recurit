@@ -151,6 +151,11 @@ final class OfflineSyncEngine {
     private(set) var notBeforeMs: Int64?
     /// Every run waits until this monotonic instant (ms) after a 429.
     private(set) var retryAfterUntilMs: Int64?
+    /// The last run stopped because a request got NO HTTP answer at all
+    /// (offline, DNS, TLS, connection lost, client timeout). Only then may a
+    /// new punch be held back behind the saved ones; any answer (4xx, 429,
+    /// 5xx, an unknown outcome, an undecodable 200) lets it go online.
+    private(set) var lastRunEndedWithoutAnswer = false
 
     init(
         queue: OfflinePunchQueue,
@@ -172,6 +177,7 @@ final class OfflineSyncEngine {
     /// 72 h as too old before anything is sent; nil judges nothing.
     func run(trigger: Trigger, trustedNow: Date?) async -> RunResult {
         guard !isRunning else { return .deferred }
+        lastRunEndedWithoutAnswer = false
         queue.markTooOld(now: trustedNow)
         guard queue.hasPending else { return .nothingToSend }
         let now = monotonicMs()
@@ -233,6 +239,10 @@ final class OfflineSyncEngine {
                 retryAfterUntilMs = monotonicMs() + Int64(min(max(1, seconds), Self.maxRetryAfterSeconds)) * 1_000
                 return .stop
             case .unauthorized, .sessionChanged, .cancelled:
+                return .stop
+            case .offline, .timeout:
+                lastRunEndedWithoutAnswer = true
+                backOff()
                 return .stop
             default:
                 backOff()

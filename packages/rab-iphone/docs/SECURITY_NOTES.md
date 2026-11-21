@@ -161,13 +161,15 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
   `rab.offline.ticket.<userId>` (the ticket + the boot reading when it arrived + its `serverNow`),
   `rab.offline.installId`, `rab.offline.seq.<installId>`. Never UserDefaults or a plain file. Another user on the same
   phone never reads, sends or overwrites the queue (keyed by user id; the server would also refuse it: ticket subject).
-  `FreshInstallGuard` wipes it on reinstall. An unreadable stored queue is never overwritten: capture is refused and
-  sign-out still asks first.
+  `FreshInstallGuard` wipes it on reinstall. Reads are three-way (`SecureStore.read`: value / absent / failed with the
+  OSStatus): a FAILED Keychain read (e.g. before first unlock) is "unreadable", never an empty queue, so it is never
+  overwritten or discarded, and is re-checked right before every write; a failed or corrupt counter / install-id read
+  refuses capture (clientSeq is never numbered from a guess). An unreadable queue blocks capture and sign-out asks first.
 - **Limits (D5, §3.4).** 30 entries and 48 KB per user; no capture more than 16 h after the ticket; an entry captured
   more than 72 h ago (server-anchored clock, never the wall clock) is never sent and stays visible until dismissed.
 - **Entry (§3.2) and time.** Exactly the DESIGN members, nothing else (forbidNonWhitelisted). Never
   `organisationId`, `workspaceId`, `staffProfileId`, `status`, `clockInAt`/`clockOutAt` or money. Time evidence is the
-  boot clock only: `CLOCK_MONOTONIC` (counts sleep) + sysctl `kern.bootsessionuuid`, never
+  boot clock only: `CLOCK_MONOTONIC_RAW` (counts sleep, unaffected by time/frequency adjustment) + sysctl `kern.bootsessionuuid`, never
   `ProcessInfo.systemUptime` (stops in sleep: earlier punch, more pay). `deviceWallClockAt` is diagnostics for the
   server's skew flags. The phone never computes paid time; the server anchors and bounds every time (§4).
 - **Signature.** Each entry is signed over its RFC 8785 canonical JSON (every member except `sig`;
@@ -178,7 +180,8 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
   entry; `rejected` keeps it visible with the server's code (only `^[A-Z][A-Z_]{2,48}$` is stored; the words shown come
   from a client table, never server text); a missing or unknown outcome leaves it pending (never assumed received)
   and ends the run, so no later batch overtakes an unanswered earlier punch. The signed-in user must equal the queue's
-  owner before every request; `Retry-After` is capped at 15 min. Size limits apply to appends only (recording an
+  owner before every request, and the request itself is bound to that user id (`RequestOptions.requiredSessionUserId`,
+  checked where the bearer token is read, so an account switch cannot slip in between); `Retry-After` is capped at 15 min. Size limits apply to appends only (recording an
   outcome can never be refused for size). A
   whole-batch 400/413/422 is resent one entry at a time and the refused one is parked as undeliverable. 429 waits for
   `Retry-After` whatever the trigger; network, timeout, 5xx, 403, 404 and undecodable answers back off 1 s to 5 min

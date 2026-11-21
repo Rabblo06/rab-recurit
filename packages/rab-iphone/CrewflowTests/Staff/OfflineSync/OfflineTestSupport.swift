@@ -32,6 +32,34 @@ final class FakeSigner: OfflineEntrySigning {
     }
 }
 
+/// A secure store whose reads FAIL (as the Keychain does before first
+/// unlock) for keys starting with any of `failingPrefixes`. Writes and
+/// removals still reach the inner store, so a test can prove nothing was
+/// overwritten or deleted.
+final class FailingReadSecureStore: SecureStore, @unchecked Sendable {
+    let inner: InMemorySecureStore
+    var failingPrefixes: [String]
+
+    init(_ initial: [String: String] = [:], failingPrefixes: [String]) {
+        inner = InMemorySecureStore(initial)
+        self.failingPrefixes = failingPrefixes
+    }
+
+    private func fails(_ key: String) -> Bool { failingPrefixes.contains { key.hasPrefix($0) } }
+
+    func read(_ key: String) -> SecureStoreRead {
+        fails(key) ? .failed(-25308) : inner.read(key)
+    }
+
+    func string(for key: String) -> String? {
+        fails(key) ? nil : inner.string(for: key)
+    }
+
+    func set(_ value: String, for key: String) throws { try inner.set(value, for: key) }
+    func remove(_ key: String) { inner.remove(key) }
+    func removeAll() { inner.removeAll() }
+}
+
 enum OfflineFixtures {
     /// A syntactically valid compact JWS (the phone never verifies it).
     static let ticket = "eyJhbGciOiJIUzI1NiJ9.eyJ0IjoxfQ.c2lnbmF0dXJl"

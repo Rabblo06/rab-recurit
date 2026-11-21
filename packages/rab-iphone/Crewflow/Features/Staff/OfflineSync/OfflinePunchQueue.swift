@@ -86,6 +86,9 @@ final class OfflinePunchStorage {
     enum StorageError: Error, Equatable {
         case encoding
         case write
+        /// The secure store could not be READ (not "absent"): nothing is
+        /// written over it and nothing is numbered from a guess.
+        case read
     }
 
     let userId: String
@@ -96,8 +99,15 @@ final class OfflinePunchStorage {
         self.userId = userId
     }
 
+    /// A failed read is `.unreadable`, never an empty queue: an empty queue
+    /// would let the next save overwrite punches that are still stored.
     func loadQueue() -> LoadResult {
-        guard let text = store.string(for: Self.queueKey(userId)) else { return .loaded([]) }
+        let text: String
+        switch store.read(Self.queueKey(userId)) {
+        case .absent: return .loaded([])
+        case .failed: return .unreadable
+        case .value(let stored): text = stored
+        }
         guard let items = try? CrewflowJSON.makeDecoder().decode([OfflineQueuedPunch].self, from: Data(text.utf8)) else {
             return .unreadable
         }
@@ -151,7 +161,11 @@ final class OfflinePunchStorage {
 
     /// A random id for this install (made once, kept in the secure store).
     func installId() throws -> String {
-        if let existing = store.string(for: Self.installIdKey), !existing.isEmpty { return existing }
+        switch store.read(Self.installIdKey) {
+        case .value(let existing) where !existing.isEmpty: return existing
+        case .failed: throw StorageError.read
+        case .value, .absent: break
+        }
         let made = UUID().uuidString.lowercased()
         do {
             try store.set(made, for: Self.installIdKey)
@@ -166,7 +180,15 @@ final class OfflinePunchStorage {
     /// the queue) keeps it increasing even if the counter item was lost.
     func nextClientSeq(atLeast floor: Int64) throws -> Int64 {
         let key = Self.sequenceKey(try installId())
-        let stored = store.string(for: key).flatMap { Int64($0) } ?? 0
+        let stored: Int64
+        switch store.read(key) {
+        case .absent: stored = 0
+        case .failed: throw StorageError.read
+        case .value(let text):
+            // A corrupt counter is never guessed at (it could go backwards).
+            guard let parsed = Int64(text) else { throw StorageError.read }
+            stored = parsed
+        }
         let next = max(stored, floor) + 1
         do {
             try store.set(String(next), for: key)
@@ -312,6 +334,12 @@ final class OfflinePunchQueue: ObservableObject {
     }
 
     private func commit(_ next: [OfflineQueuedPunch], or failure: AppendError) throws {
+        // Re-check right before writing: a stored queue that has become
+        // unreadable since it was loaded is never overwritten.
+        if case .unreadable = storage.loadQueue() {
+            unreadable = true
+            throw failure
+        }
         do {
             try storage.saveQueue(next)
         } catch {
