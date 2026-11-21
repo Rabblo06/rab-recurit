@@ -1,7 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { Organisation, User } from '../../../modules/identity/entities';
+import { Organisation, User } from '../identity/entities';
 import { ManagerProfile } from '../../../modules/manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../../../modules/manager-workspace/entities/manager-workspace.entity';
 import { Venue } from '../../../modules/venue/entities/venue.entity';

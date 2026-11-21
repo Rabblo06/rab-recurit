@@ -16,8 +16,10 @@ import { stripComments } from '../helpers/strip-comments';
  *      gains or loses a site (exact counts, so the list can neither grow silently nor go stale). Every allowed site
  *      today is the literal `'worker'`, which is asserted separately;
  *   2. the GUC is written directly — `set_config('rab.actor_type', ...)` (any schema prefix, either quote) or
- *      `SET [LOCAL|SESSION] rab.actor_type` / `"rab.actor_type"` — anywhere but TenantContextService, apart from the
- *      listed maintenance-tool sites that predate this spec.
+ *      `SET [LOCAL|SESSION] rab.actor_type` / `"rab.actor_type"` — anywhere but TenantContextService. No exception is left:
+ *      the three maintenance-tool sites that predated this spec (HWS backfill, the workspace -> core orphan check, the
+ *      account-invite cleanup's level-22 pass) bind it through tenant-context.service.ts since (bindCoreIdentityGucs /
+ *      bindMaintenanceSessionGucs), and are listed under the actorType allowlists instead.
  * Comments are stripped first with the TypeScript parser (strings, templates and regexes are kept as code): several
  * files explain the rule by naming the forbidden form.
  *
@@ -46,8 +48,17 @@ const count = (text: string, re: RegExp) => (text.match(new RegExp(re.source, re
 const ACTOR_TYPE_ASSIGNMENT = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)|[{,]\s*actorType\s*[,}]/g;
 /** An assignment of the literal value `'worker'`. A shorthand site has no literal, so it is counted above and never here. */
 const ACTOR_TYPE_WORKER = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)\s*['"`]worker['"`]/g;
-/** `set_config('rab.actor_type'` with any prefix (`pg_catalog.`) and either quote; `SET [LOCAL|SESSION] ["]rab.actor_type`. */
-const RAW_ACTOR_TYPE_GUC = /set_config\s*\(\s*['"]rab\.actor_type['"]|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b/gi;
+/**
+ * A write of the GUC, in any of these forms:
+ *   - `set_config('rab.actor_type'` with any prefix (`pg_catalog.`), either quote, an escape-string `E'...'`, a dollar-quoted
+ *     string (`$$rab.actor_type$$`, `$tag$rab.actor_type$tag$`), and the name wrapped in any number of parentheses
+ *     (`set_config(('rab.actor_type'), ...)`);
+ *   - `SET [LOCAL|SESSION] ["]rab.actor_type`;
+ *   - `UPDATE [pg_catalog.]pg_settings ... rab.actor_type` within one statement (no `;` in between): the pg_settings view's
+ *     UPDATE rule is a set_config call.
+ */
+const RAW_ACTOR_TYPE_GUC =
+  /set_config\s*\(\s*(?:\(\s*)*(?:E?['"]rab\.actor_type['"]|\$\w*\$rab\.actor_type\$\w*\$)|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b|\bUPDATE\s+(?:"?pg_catalog"?\.)?"?pg_settings"?(?![\w])[^;]{0,400}?rab\.actor_type/gi;
 
 type Allowlist = Record<string, { sites: number; why: string }>;
 
@@ -62,6 +73,18 @@ const SERVER_ACTOR_TYPE_ALLOWLIST: Allowlist = {
     why:
       'AI conversation/usage retention: invoked only by the Worker job (rab-worker ai.processors.ts), one organisation at ' +
       'a time with no human actor; the purge itself runs through the SECURITY DEFINER core.ai_purge_expired_conversations',
+  },
+  'database/typeorm/workspace-schema/backfill/hws-backfill.service.ts': {
+    sites: 1,
+    why:
+      'HWS backfill ops command, read identity (bindReadIdentity): one workspace from core.worker_list_workspaces at a ' +
+      'time, bound through TenantContextService.bindCoreIdentityGucs; no human actor behind the copy',
+  },
+  'database/typeorm/workspace-schema/workspace-core-orphans.ts': {
+    sites: 1,
+    why:
+      'workspace -> core orphan check (Worker, BEGIN READ ONLY, counts only, SECURITY TRADE-OFF 0a-T2): one READY ' +
+      'workspace from core.worker_list_workspaces at a time, bound through bindMaintenanceSessionGucs',
   },
   'engine/core-modules/secret-encryption/secret-rotation.service.ts': {
     sites: 2,
@@ -94,6 +117,12 @@ const WORKER_ACTOR_TYPE_ALLOWLIST: Allowlist = {
     sites: 1,
     why: 'payroll period attention notices: candidates from the worker discovery scan; no human actor behind the job',
   },
+  'queues/rab-maintenance/account-invite-cleanup.job.ts': {
+    sites: 1,
+    why:
+      'level-22 cleanup (withLevel22Visibility): the worker scan plus the workspace owner for one workspace of the ' +
+      "candidate's own organisation (owner decision 0a-T2), bound through bindMaintenanceSessionGucs and bound back after",
+  },
   'queues/rab-reports/shift-statement.job.ts': {
     sites: 1,
     why: 'pay statement generation (`workerCtx`): scope from the claimed payroll row / discovery, never from the payload alone',
@@ -104,28 +133,13 @@ const WORKER_ACTOR_TYPE_ALLOWLIST: Allowlist = {
 const TENANT_CONTEXT_SERVICE = 'engine/core-modules/tenant/tenant-context.service.ts';
 
 /**
- * Raw writes of the GUC outside TenantContextService that predate this spec. All are maintenance tools on their own
- * connection or savepoint (not the request path) and documented in place. Listed so a NEW raw site fails; whether they
- * should move behind TenantContextService is an owner decision, not made here.
+ * Raw writes of the GUC outside TenantContextService: none. The three maintenance-tool sites that predated this spec moved
+ * behind tenant-context.service.ts (owner decision, 2026-11-18), so ANY raw `set_config('rab.actor_type', ...)` / `SET
+ * rab.actor_type` anywhere else in rab-server or rab-worker now fails this spec. Kept as (empty) lists so a future,
+ * owner-approved exception has an obvious, reviewed place to go.
  */
-const SERVER_RAW_GUC_ALLOWLIST: Allowlist = {
-  'database/typeorm/workspace-schema/backfill/hws-backfill.service.ts': {
-    sites: 1,
-    why: 'HWS backfill ops command, read identity on the crewflow connection (bindReadIdentity; see the class doc comment)',
-  },
-  'database/typeorm/workspace-schema/workspace-core-orphans.ts': {
-    sites: 1,
-    why: 'workspace -> core orphan check on a raw pg Client, BEGIN READ ONLY, counts only (SECURITY TRADE-OFF 0a-T2)',
-  },
-};
-const WORKER_RAW_GUC_ALLOWLIST: Allowlist = {
-  'queues/rab-maintenance/account-invite-cleanup.job.ts': {
-    sites: 2,
-    why:
-      'level-22 cleanup (withLevel22Visibility): sets worker + the workspace owner, then restores the previous values ' +
-      '(the second site); same binding as the orphan check, owner decision 0a-T2',
-  },
-};
+const SERVER_RAW_GUC_ALLOWLIST: Allowlist = {};
+const WORKER_RAW_GUC_ALLOWLIST: Allowlist = {};
 
 interface Scanned {
   files: string[];
@@ -203,11 +217,33 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
       `SET LOCAL "rab.actor_type" = 'worker'`,
       `set session rab.actor_type to 'worker'`,
       `SET rab.actor_type = 'worker'`,
+      // Security review follow-ups (#241): an escape string, a parenthesised name, and the pg_settings view.
+      `SELECT set_config(E'rab.actor_type', 'worker', true)`,
+      `SELECT pg_catalog.set_config( e'rab.actor_type', $1, true)`,
+      `SELECT set_config(('rab.actor_type'), 'worker', true)`,
+      `SELECT set_config( ( ( E'rab.actor_type' ) )::text, 'worker', true)`,
+      // Recheck follow-up: dollar quoting, plain and tagged.
+      'SELECT set_config($$rab.actor_type$$, $$worker$$, true)',
+      'SELECT pg_catalog.set_config( ($q$rab.actor_type$q$), $1, true)',
+      `UPDATE pg_settings SET setting = 'worker' WHERE name = $n$rab.actor_type$n$`,
+      `UPDATE pg_settings SET setting = 'worker' WHERE name = 'rab.actor_type'`,
+      `update pg_catalog.pg_settings set setting = $1 where name = 'rab.actor_type'`,
+      `UPDATE "pg_catalog"."pg_settings"\n   SET setting = 'worker'\n WHERE name = E'rab.actor_type'`,
     ]) {
       expect([form, count(form, RAW_ACTOR_TYPE_GUC)]).toEqual([form, 1]);
     }
     // Reading the marker is what the policies do; it is not a write.
-    expect(count(`current_setting('rab.actor_type'::text, true) = 'worker'::text`, RAW_ACTOR_TYPE_GUC)).toBe(0);
+    for (const read of [
+      `current_setting('rab.actor_type'::text, true) = 'worker'::text`,
+      `current_setting(E'rab.actor_type', true)`,
+      `current_setting(('rab.actor_type'), true)`,
+      'current_setting($$rab.actor_type$$, true)',
+      `SELECT setting FROM pg_settings WHERE name = 'rab.actor_type'`,
+      // An UPDATE of pg_settings for another name, then a later statement that only reads the marker.
+      `UPDATE pg_settings SET setting = 'x' WHERE name = 'rab.role'; SELECT current_setting('rab.actor_type', true)`,
+    ]) {
+      expect([read, count(read, RAW_ACTOR_TYPE_GUC)]).toEqual([read, 0]);
+    }
   });
 
   it('comment stripping keeps strings: a "/*" inside a string or template cannot hide a later violation', () => {
@@ -268,11 +304,11 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
     expect(count(text, ACTOR_TYPE_ASSIGNMENT)).toBe(0);
   });
 
-  it('rab-server: no raw set_config / SET of rab.actor_type outside TenantContextService (bar the listed maintenance tools)', () => {
+  it('rab-server: no raw set_config / SET of rab.actor_type outside TenantContextService', () => {
     expect(sitesOf(SERVER, RAW_ACTOR_TYPE_GUC)).toEqual(expected({ [TENANT_CONTEXT_SERVICE]: { sites: 1 }, ...SERVER_RAW_GUC_ALLOWLIST }));
   });
 
-  it('rab-worker: no raw set_config / SET of rab.actor_type (bar the listed maintenance tool)', () => {
+  it('rab-worker: no raw set_config / SET of rab.actor_type anywhere', () => {
     expect(sitesOf(WORKER, RAW_ACTOR_TYPE_GUC)).toEqual(expected(WORKER_RAW_GUC_ALLOWLIST));
   });
 

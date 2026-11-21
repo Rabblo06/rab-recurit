@@ -4,7 +4,7 @@ import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
-import { EmailOutbox, PasswordResetToken } from '../../../../../modules/identity/entities';
+import { EmailOutbox, PasswordResetToken } from '../../../identity/entities';
 
 const DEFAULT_TTL_MS = 48 * 60 * 60 * 1000; // 48h — matches the offer-expiry convention elsewhere in this app
 

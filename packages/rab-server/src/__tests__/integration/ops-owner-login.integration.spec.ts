@@ -170,7 +170,7 @@ function userOf(url: string): string {
     );
     userSessions = new UserSessionBackfillCommand(new UserSessionBackfillService(), dataSource, tenantContext, moduleRef.get(AuditService));
     hws = new HwsBackfillCommand(
-      new HwsBackfillService(dataSource, moduleRef.get(SchemaResolverService)),
+      new HwsBackfillService(dataSource, moduleRef.get(SchemaResolverService), tenantContext),
       moduleRef.get(EnvironmentService),
       dataSource,
       tenantContext,

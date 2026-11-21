@@ -7,23 +7,8 @@
   ],
   "rules": {
     "engine-to-modules": {
-      "packages/rab-server/src/engine/core-modules/audit/audit.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/guards/must-reset-password.guard.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/services/account-invite.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/services/account-lifecycle.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/services/auth.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/services/organisation-auth-providers.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/services/security-version.service.ts": 4,
-      "packages/rab-server/src/engine/core-modules/auth/token/services/password-reset-token.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/auth/token/services/refresh-token.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/email/email-outbox.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/entity-cache/core-entity-cache.service.ts": 4,
-      "packages/rab-server/src/engine/core-modules/permissions/permissions.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/platform-admin/admin-inspect.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/platform-admin/admin-panel.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/platform-admin/organisation-suspension.service.ts": 1,
-      "packages/rab-server/src/engine/core-modules/resource-scope/resource-scope.service.ts": 2,
-      "packages/rab-server/src/engine/core-modules/user-deletion/user-deletion.service.ts": 1
+      "packages/rab-server/src/engine/core-modules/entity-cache/core-entity-cache.service.ts": 3,
+      "packages/rab-server/src/engine/core-modules/resource-scope/resource-scope.service.ts": 1
     },
     "worker-deep-import": {
       "packages/rab-worker/src/core/database/scoped-job.ts": 1,
