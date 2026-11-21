@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Gate self-tests (policy logic, PDF oracle, publish fail-closed paths with a fake registry client)
@@ -110,7 +110,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: ${{ env.CANDIDATE_RUN != '' }}
         with:
           persist-credentials: false
@@ -144,7 +144,7 @@ jobs:
     env:
       PLATFORM: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Paths
@@ -168,7 +168,7 @@ jobs:
         run: command -v skopeo || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends skopeo; }
       - name: Download the candidate layout
         if: ${{ env.CANDIDATE_RUN != '' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gated-image-layout
           path: ${{ runner.temp }}/candidate/image-layout
@@ -198,7 +198,7 @@ jobs:
         run: python3 "$GATE" slim "$OUT/image-layout" "$RUNNER_TEMP/meta/image"
       - name: Upload layout metadata
         if: ${{ !cancelled() && env.CANDIDATE_RUN == '' && steps.build.outputs.image-id != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-layout-meta-${{ env.ARCH }}
           path: ${{ runner.temp }}/meta
@@ -206,7 +206,7 @@ jobs:
           if-no-files-found: error
       - name: Upload the complete layout (export only; input to the gated index)
         if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && env.CANDIDATE_RUN == '' && steps.gates.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-layout-image-${{ env.ARCH }}
           path: ${{ steps.build.outputs.image-layout }}
@@ -229,7 +229,7 @@ jobs:
             --expected image-config,image-container,image-fs,image-attest,image-scan,image-vulns,image-secrets,image-pdf
       - name: Upload evidence (results, scanner output, SBOMs, provenance, scanner versions and DB timestamps, PDF)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-gate-evidence-${{ env.ARCH }}
           path: |
@@ -251,34 +251,58 @@ jobs:
     outputs:
       image-index-digest: ${{ steps.merge.outputs.image-index-digest }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Download layout metadata
         if: ${{ env.CANDIDATE_RUN == '' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: image-layout-meta-*
           path: ${{ runner.temp }}/meta
       - name: Download complete per-platform layouts (export only)
         if: ${{ env.CANDIDATE_RUN == '' && env.EXPORT_LAYOUTS == 'true' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: image-layout-image-*64
           path: ${{ runner.temp }}/full
       - name: Download the candidate layout
         if: ${{ env.CANDIDATE_RUN != '' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gated-image-layout
           path: ${{ runner.temp }}/candidate/image-layout
           run-id: ${{ inputs.candidate-run-id }}
           github-token: ${{ github.token }}
       - name: Download per-platform evidence (release manifest)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: image-gate-evidence-*64
           path: ${{ runner.temp }}/evidence
+      # download-artifact v5+ extracts a `pattern:` download that matches exactly ONE artifact straight into `path` (v4
+      # always used path/<artifact name>/). With one platform (PR mode: amd64 only) put that artifact back under its name,
+      # so the merge and the release manifest read the same layout as with two. Several matches are already nested;
+      # nothing downloaded stays empty; with two platforms expected, a lone flattened artifact is left as it is, and the
+      # merge below fails on both (fail closed).
+      - name: A one-platform download keeps the path/<artifact name>/ layout
+        run: |
+          set -euo pipefail
+          # A command substitution, not `< <(...)`: under set -e a python failure stops the step here.
+          list="$(python3 -c 'import json,os; [print(p.split("/", 1)[1]) for p in json.loads(os.environ["PLATFORMS"])]')"
+          mapfile -t archs <<< "$list"
+          if [ "${#archs[@]}" -ne 1 ]; then echo "${#archs[@]} platforms: already path/<artifact name>/"; exit 0; fi
+          a="${archs[0]}"
+          for pair in "meta:image-layout-meta-$a" "full:image-layout-image-$a" "evidence:image-gate-evidence-$a"; do
+            root="$RUNNER_TEMP/${pair%%:*}"
+            name="${pair#*:}"
+            if [ ! -d "$root" ] || [ -z "$(ls -A "$root")" ] || [ -d "$root/$name" ]; then continue; fi
+            tmp="$(mktemp -d "$RUNNER_TEMP/one-artifact.XXXXXX")"
+            mv "$root" "$tmp/$name"
+            mkdir -p "$root"
+            mv "$tmp/$name" "$root/$name"
+            rmdir "$tmp"
+            echo "$root/$name"
+          done
       # Every EXPECTED platform is an input, whether or not its artifact arrived: a missing platform fails here.
       - name: Merge (or verify the candidate) and check the index (platforms, configs, attestations, revision)
         id: merge
@@ -319,7 +343,7 @@ jobs:
         run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected manifest --title "Image gate - multi-platform manifest"
       - name: Upload the gated multi-platform layout (what publish-image pushes, or a later candidate verify reads)
         if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && steps.merge.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gated-image-layout
           path: ${{ env.IMAGE_GATED_LAYOUT }}
@@ -328,7 +352,7 @@ jobs:
           if-no-files-found: error
       - name: Upload the release manifest (candidate, not published)
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-manifest-candidate
           path: ${{ runner.temp }}/merged/release-manifest.json
@@ -336,7 +360,7 @@ jobs:
           if-no-files-found: error
       - name: Upload manifest evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-gate-evidence-manifest
           path: |

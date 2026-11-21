@@ -32,6 +32,7 @@ on:
       - 'yarn.lock'
       - '.github/actions/yarn-install/**'
       - '.github/actions/disposable-postgres/**'
+      - '.github/ci-images/**'
       - '.github/workflows/ci-migration-security.yaml'
       - 'packages/rab-docker/postgres-init/owner-login/**'
   push:
@@ -52,7 +53,7 @@ jobs:
       NODE_ENV: test
       NX_DAEMON: 'false'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -133,7 +134,7 @@ jobs:
       NODE_ENV: test
       NX_DAEMON: 'false'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -150,7 +151,8 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/owl-pg"
           printf '%s' "${su_pass}" > "${RUNNER_TEMP}/owl-pg/su_pass"
           chmod 644 "${RUNNER_TEMP}/owl-pg/su_pass"
-          docker run -d --name owner-login-postgres -p 127.0.0.1:5432:5432             -v "${RUNNER_TEMP}/owl-pg/su_pass:/run/disposable/su_pass:ro"             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres             "postgres:${{ matrix.pg }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
+          pg_image="$(bash .github/ci-images/ref.sh "postgres-${{ matrix.pg }}")" # index digest, Dependabot-renewed
+          docker run -d --name owner-login-postgres -p 127.0.0.1:5432:5432             -v "${RUNNER_TEMP}/owl-pg/su_pass:/run/disposable/su_pass:ro"             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres             "${pg_image}" -c crewflow.disposable_cluster=on > /dev/null
           for i in $(seq 1 90); do
             docker exec owner-login-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break
             sleep 1
@@ -202,7 +204,7 @@ jobs:
       NODE_ENV: test
       NX_DAEMON: 'false'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -217,10 +219,11 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/obc-pg"
           printf '%s' "${su_pass}" > "${RUNNER_TEMP}/obc-pg/su_pass"
           chmod 644 "${RUNNER_TEMP}/obc-pg/su_pass"
+          pg_image="$(bash .github/ci-images/ref.sh "postgres-${{ matrix.pg }}")" # index digest, Dependabot-renewed
           docker run -d --name owner-bootstrap-postgres -p 127.0.0.1:5432:5432 \
             -v "${RUNNER_TEMP}/obc-pg/su_pass:/run/disposable/su_pass:ro" \
             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres \
-            "postgres:${{ matrix.pg }}-alpine" \
+            "${pg_image}" \
             -c crewflow.disposable_cluster=on -c log_statement=all -c log_connections=on > /dev/null
           for i in $(seq 1 90); do
             docker exec owner-bootstrap-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break
@@ -239,7 +242,7 @@ jobs:
           OWNER_BOOTSTRAP_PG_CONTAINER: owner-bootstrap-postgres
       - name: Report (fixed text and SQLSTATEs only; no secret)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: owner-bootstrap-pg${{ matrix.pg }}
           path: ${{ runner.temp }}/owner-bootstrap-pg${{ matrix.pg }}.json
