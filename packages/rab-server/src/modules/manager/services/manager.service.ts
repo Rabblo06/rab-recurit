@@ -503,9 +503,12 @@ export class ManagerService {
    * per-Manager private ownership for the Manager roster itself), so the
    * authorization re-derivation here is simpler than Staff's: any id in
    * `dto.userIds` that resolves to a real `ManagerProfile` in the caller's
-   * own organisation is included, anything else silently dropped. Same
-   * durable-outbox path as every other email in this app — see
-   * `StaffService.bulkEmail`'s own doc comment for the full rationale.
+   * own organisation is included, anything else silently dropped. With the
+   * Venue Manager route's flag (`venue_manager.create`) the reach is only the
+   * Venue Managers of the caller's own workspace; every other id is skipped
+   * and counted (owner decision 1, 2026-11-21). Same durable-outbox path as
+   * every other email in this app — see `StaffService.bulkEmail`'s own doc
+   * comment for the full rationale.
    */
   async bulkEmail(
     ctx: AuthContext,
@@ -522,10 +525,22 @@ export class ManagerService {
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, requiredPermission))) {
         throw new ForbiddenException('Sending email is not permitted.');
       }
-      const profiles = await manager.find(ManagerProfile, {
-        where: { organisationId: ctx.organisationId!, id: In(dto.userIds) },
-        relations: { user: true },
-      });
+      // Owner decision 1 (2026-11-21, #248 review L-2): with the Venue Manager route's flag only Venue Managers of the
+      // caller's own workspace are in reach (the filter VenueManagerService.bulkEmail applies before delegating, repeated
+      // here for direct callers: jobs, CLI commands, other services). Any other id (an Internal Manager, a CEO, another
+      // workspace's Venue Manager, an unknown id) is SKIPPED and only counted: never emailed, the batch is not refused, and
+      // nothing says which ids exist. No workspace in the context: nothing is in reach, so every id is skipped (never an
+      // unfiltered query: an undefined workspaceId would drop that predicate).
+      const venueRoute = requiredPermission === PermissionFlag.VENUE_MANAGER_CREATE;
+      const profiles =
+        venueRoute && !ctx.workspaceId
+          ? []
+          : await manager.find(ManagerProfile, {
+              where: venueRoute
+                ? { organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE, id: In(dto.userIds) }
+                : { organisationId: ctx.organisationId!, id: In(dto.userIds) },
+              relations: { user: true },
+            });
       const outboxRows = await Promise.all(
         profiles
           .filter((p) => p.user)
