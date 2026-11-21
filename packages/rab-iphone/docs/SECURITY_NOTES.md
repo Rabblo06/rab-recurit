@@ -173,6 +173,15 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
 - **Signature.** Each entry is signed over its RFC 8785 canonical JSON (every member except `sig`;
   `OfflineCanonicalJSON`, tested against the RFC number samples). The signer is a protocol only (`OfflineEntrySigning`):
   the Secure Enclave P-256 key and its registration wait for the server's device-key route.
+- **Sync (`OfflineSyncEngine`, `POST /attendance/me/sync`, DESIGN §3.5 / §7).** `clientSeq` order, at most 25 per
+  request, one request at a time. Per-item outcomes by idempotency key: `applied` / `duplicate` / `replayed` delete the
+  entry; `rejected` keeps it visible with the server's code (only `^[A-Z][A-Z_]{2,48}$` is stored; the words shown come
+  from a client table, never server text); a missing or unknown outcome leaves it pending (never assumed received). A
+  whole-batch 400/413/422 is resent one entry at a time and the refused one is parked as undeliverable. 429 waits for
+  `Retry-After` whatever the trigger; network, timeout, 5xx, 403, 404 and undecodable answers back off 1 s to 5 min
+  (Send now skips the backoff, never `Retry-After`). A timeout is an uncertain outcome: the entry is kept and resent
+  with the same key (the server answers `replayed`). A ticket in a sync answer only renews an open gate, never opens a
+  closed one, and obeys the same 10 s rule. Never auto-retried by the transport (`RetryPolicy.never`).
 - **Integrity signal.** `rootedSignal` is a weak client-asserted jailbreak path check, a flag on the receipt only (D11).
 - **Residual.** A jailbroken, hooked app can sign lies within the server's bounds (DESIGN §2 trade-off: schedule clamp,
   no untrusted clock-out, manager review). Keychain `ThisDeviceOnly` items are restored by an encrypted backup to the

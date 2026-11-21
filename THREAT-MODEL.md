@@ -10329,3 +10329,22 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   schedule clamp D3, untrusted clock-out never applied D4, manager review before payroll). An encrypted backup restored
   to the same device can bring back an old queue; the server refuses it after 72 h. The Secure Enclave signer and its
   registration are not built (server route missing).
+
+## iPhone offline sync client for POST /attendance/me/sync, partial success and backoff (branch feat/iphone-offline-sync-client, 2026-11-21; M4 Lane B iPhone 2/3, stacked on feat/iphone-offline-queue; no SQL, no server code)
+- **Surface:** the iPhone app's client for the DESIGN §7 contract (route not merged on the server; nothing calls it
+  while offline mode is off). It sends the caller's own saved attendance actions and reads per-item outcomes.
+- **Controls:** body is `{entries}` only, 1-25 entries in `clientSeq` order, one request at a time; no identifier the
+  server derives is sent. An entry is deleted only on an explicit `applied` / `duplicate` / `replayed` for its own
+  idempotency key; an unknown outcome, a result for another key, an undecodable answer or a timeout keeps it pending
+  (fail closed: never assumed received), and a resend is safe because the server answers `replayed` for a seen key.
+  Rejection codes are stored only when they match the receipt CHECK shape; staff text comes from a client table, never
+  from the server. 400/413/422 for a batch: one-by-one resend, the offender parked as undeliverable (still blocks
+  sign-out). 429 honours `Retry-After` for every trigger; failures back off 1 s to 5 min. A ticket in the answer renews
+  an open gate only (10 s rule), so the sync route can never switch offline on.
+- **Tests:** `CrewflowTests/Staff/OfflineSync/OfflineSyncEngineTests.swift` with a mocked URLProtocol through the real
+  APIClient: partial success; 25-entry batches in order with no forbidden member; whole-batch 400; 429 for automatic and
+  manual triggers; exponential backoff and its 5-minute cap; 404/500/503; timeout then `replayed` with the same keys; a
+  replayed rejection keeps its code; unknown outcome and malformed code; undecodable 200; 72 h entries never sent;
+  ticket renewal only on an open gate; single flight.
+- **Residual:** a server that answers `applied` for an entry it did not apply would make the phone drop it; the server
+  is the authority and keeps the receipt.
