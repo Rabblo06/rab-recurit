@@ -2,8 +2,6 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { Organisation, User } from '../identity/entities';
-import { ManagerProfile } from '../../../modules/manager/entities/manager-profile.entity';
-import { ManagerWorkspace } from '../../../modules/manager-workspace/entities/manager-workspace.entity';
 import { Venue } from '../../../modules/venue/entities/venue.entity';
 import { EnvironmentService } from '../environment/environment.service';
 import { AuthCacheRedisClientProvider } from '../auth/services/auth-cache-redis-client.provider';
@@ -135,50 +133,11 @@ export interface OrganisationDisplayProjection {
   timezone: string;
 }
 
-export interface ManagerProfileSummaryProjection {
-  id: string;
-  userId: string;
-  organisationId: string;
-  workspaceId: string | null;
-  type: string;
-}
-
-export interface ManagerWorkspaceDisplayProjection {
-  id: string;
-  organisationId: string;
-  ownerUserId: string;
-  name: string;
-  subdomain: string;
-  logoFileId: string | null;
-  status: string;
-  /** P2.9C — `core.manager_workspace.schema_status`, invalidated on every write to this row (see this file's own doc comment on why TTL is never load-bearing for correctness here). */
-  schemaStatus: string | null;
-  /** ISO 8601. */
-  createdAt: string;
-  /** ISO 8601, or null — matches `ManagerWorkspace.onboardingCompletedAt`'s own nullability. */
-  onboardingCompletedAt: string | null;
-}
-
 export interface VenueSummaryProjection {
   id: string;
   organisationId: string;
   workspaceId: string | null;
   name: string;
-}
-
-function toManagerWorkspaceProjection(row: ManagerWorkspace): ManagerWorkspaceDisplayProjection {
-  return {
-    id: row.id,
-    organisationId: row.organisationId,
-    ownerUserId: row.ownerUserId,
-    name: row.name,
-    subdomain: row.subdomain,
-    logoFileId: row.logoFileId ?? null,
-    status: row.status,
-    schemaStatus: row.schemaStatus ?? null,
-    createdAt: row.createdAt.toISOString(),
-    onboardingCompletedAt: row.onboardingCompletedAt?.toISOString() ?? null,
-  };
 }
 
 @Injectable()
@@ -356,36 +315,6 @@ export class CoreEntityCacheService {
       const row = await manager.findOne(Organisation, { where: { id: organisationId } });
       if (!row) return null;
       return { id: row.id, name: row.name, slug: row.slug, logoFileId: row.logoFileId ?? null, timezone: row.timezone };
-    });
-  }
-
-  async getManagerProfileSummary(manager: EntityManager, managerProfileId: string): Promise<ManagerProfileSummaryProjection | null> {
-    return this.getOrFetch('manager_profile', managerProfileId, async () => {
-      const row = await manager.findOne(ManagerProfile, { where: { id: managerProfileId } });
-      if (!row) return null;
-      return { id: row.id, userId: row.userId, organisationId: row.organisationId, workspaceId: row.workspaceId ?? null, type: row.type };
-    });
-  }
-
-  async getManagerWorkspaceDisplay(manager: EntityManager, workspaceId: string): Promise<ManagerWorkspaceDisplayProjection | null> {
-    return this.getOrFetch('manager_workspace', workspaceId, async () => {
-      const row = await manager.findOne(ManagerWorkspace, { where: { id: workspaceId } });
-      return row ? toManagerWorkspaceProjection(row) : null;
-    });
-  }
-
-  /**
-   * `ManagerWorkspace` has a second unique access path — `ownerUserId` (every Manager owns at
-   * most one workspace; `manager_workspace_owner_user_id_key` is a UNIQUE constraint) — used by
-   * `ManagerWorkspaceService.ownWorkspace()`/`getMine()`, which never has the workspace's own id
-   * in hand until after this lookup. A distinct cache `kind` keyed by `ownerUserId`, not a second
-   * dimension bolted onto `getManagerWorkspaceDisplay`'s id-keyed cache — callers that mutate the
-   * row must invalidate both kinds (see `ManagerWorkspaceService`'s own invalidation calls).
-   */
-  async getManagerWorkspaceByOwner(manager: EntityManager, ownerUserId: string): Promise<ManagerWorkspaceDisplayProjection | null> {
-    return this.getOrFetch('manager_workspace_by_owner', ownerUserId, async () => {
-      const row = await manager.findOne(ManagerWorkspace, { where: { ownerUserId } });
-      return row ? toManagerWorkspaceProjection(row) : null;
     });
   }
 

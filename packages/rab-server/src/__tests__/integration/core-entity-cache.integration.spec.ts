@@ -17,6 +17,7 @@ import { CoreEntityCacheService } from '../../engine/core-modules/entity-cache/c
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { Organisation, User } from '../../modules/identity/entities';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
+import { managerWorkspaceByOwnerCached } from '../../modules/manager-workspace/services/manager-workspace-display-cache';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
@@ -324,19 +325,19 @@ describeIfDb('Core Entity Cache (integration)', () => {
       const manager = await factory.createInternalManager(org, { label: 'cache-mws-owner' });
 
       const first = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: null, userId: manager.userId, role: '' }, (m) =>
-        entityCache.getManagerWorkspaceByOwner(m, manager.userId),
+        managerWorkspaceByOwnerCached(entityCache, m, manager.userId),
       );
       expect(first?.ownerUserId).toBe(manager.userId);
 
       await adminDataSource.manager.update(ManagerWorkspace, { ownerUserId: manager.userId }, { name: 'Renamed Workspace' });
       const stale = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: null, userId: manager.userId, role: '' }, (m) =>
-        entityCache.getManagerWorkspaceByOwner(m, manager.userId),
+        managerWorkspaceByOwnerCached(entityCache, m, manager.userId),
       );
       expect(stale?.name).not.toBe('Renamed Workspace');
 
       await entityCache.invalidate('manager_workspace_by_owner', manager.userId);
       const fresh = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: null, userId: manager.userId, role: '' }, (m) =>
-        entityCache.getManagerWorkspaceByOwner(m, manager.userId),
+        managerWorkspaceByOwnerCached(entityCache, m, manager.userId),
       );
       expect(fresh?.name).toBe('Renamed Workspace');
     });
