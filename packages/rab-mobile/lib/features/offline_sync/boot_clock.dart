@@ -23,26 +23,34 @@ abstract class BootClock {
   Future<BootReading?> read();
 }
 
-/// Android: `SystemClock.elapsedRealtime()` (counts deep sleep) and `Settings.Global.BOOT_COUNT`, from the
-/// `rab/boot_clock` channel in `MainActivity.kt`. Every other platform (and a missing handler) answers null.
+/// Android: `SystemClock.elapsedRealtime()` (counts deep sleep) and the kernel's per-boot random UUID
+/// (`/proc/sys/kernel/random/boot_id`), from the `rab/boot_clock` channel in `MainActivity.kt`. The boot identity must be
+/// one nobody can write: `Settings.Global.BOOT_COUNT` is NOT used, because `adb shell settings put global boot_count N`
+/// rewrites it without root, which would let a reboot pass as the same boot session (security review M1). Anything
+/// but a well-formed UUID, every other platform, and a missing handler answer null (nothing can be queued).
 class PlatformBootClock implements BootClock {
   const PlatformBootClock();
 
   static const channel = MethodChannel('rab/boot_clock');
 
+  static final _kernelBootId = RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    caseSensitive: false,
+  );
+
   @override
   Future<BootReading?> read() async {
     try {
       final result = await channel.invokeMapMethod<String, Object?>('read');
-      final bootCount = result?['bootCount'];
+      final bootId = result?['bootId'];
       final elapsed = result?['elapsedRealtimeMs'];
-      if (bootCount is! int ||
-          bootCount < 0 ||
+      if (bootId is! String ||
+          !_kernelBootId.hasMatch(bootId) ||
           elapsed is! int ||
           elapsed < 0) {
         return null;
       }
-      return BootReading(bootId: 'boot-$bootCount', elapsedMs: elapsed);
+      return BootReading(bootId: bootId.toLowerCase(), elapsedMs: elapsed);
     } catch (_) {
       return null;
     }
