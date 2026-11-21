@@ -20,14 +20,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # --base reads the base branch's register with git show and diffs from the merge-base
       - uses: ./.github/actions/yarn-install
       # Same `yarn npm audit --severity high --all --recursive`. A High/Critical advisory passes only with a valid entry
-      # in tools/npm-audit-decisions.json (one GHSA id + one package, owner decision, <= 30 days), only while NO fix
-      # exists (no first_patched_version, no non-vulnerable release in any major) and only while the package is not in
-      # the production closure (yarn.lock walk minus runtime-deps.cjs RUNTIME_PRUNE). Fails closed on a broken lookup.
+      # in tools/npm-audit-decisions.json (one GHSA id + one package, decided severity, owner decision, <= 30 days), only
+      # while NO fix exists (no first_patched_version, no non-vulnerable release in any major) and only while the package
+      # is not in the production closure (yarn.lock walk minus runtime-deps.cjs RUNTIME_PRUNE). Fails closed on a broken
+      # lookup, on a yarn audit ignore list and on a yarn that cannot run. On a PR the decisions come from the BASE
+      # branch's register (a PR cannot approve itself), except in a decision-only PR (register + THREAT-MODEL.md), whose
+      # new entries must cite that PR; the register may not change together with dependencies, yarn config, the tool or
+      # this workflow (rules in the script header). The weekly run is .github/workflows/npm-audit-weekly.yaml.
       - name: The check's own tests
         run: node --test tools/check-npm-audit.test.cjs
-      - name: yarn npm audit (high+), dev/build-only owner exceptions applied
+      - name: yarn npm audit (high+), owner exceptions from the base branch
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # the GitHub advisory lookup (first_patched_version)
+        run: node tools/check-npm-audit.cjs --base "origin/${GITHUB_BASE_REF}"
+      - name: yarn npm audit (high+), owner exceptions from the checkout
+        if: github.event_name != 'pull_request'
         env:
           GITHUB_TOKEN: ${{ github.token }} # the GitHub advisory lookup (first_patched_version)
         run: node tools/check-npm-audit.cjs

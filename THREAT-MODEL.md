@@ -10143,6 +10143,129 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Callers checked:** every money display in both apps goes through `formatPence` / `payRateLabel` /
   `estimatedPayLabel`; none pre-formats an amount or concatenates its own sign.
 
+## CI audit — owner exceptions read from the base ref; audit ignore lists, broken yarn, missing tree versions and re-scored advisories fail (branch ci/npm-audit-decisions-harden, 2026-11-18; review F1, F3-F8 of #229; register prerequisite: branch fix/npm-audit-register-severity)
+- **Re-checked first (2026-11-18), so the exception is still the only option:** GHSA-fc5q-39xc-vjpf has
+  `first_patched_version: null` (range `<= 4.0.7`); the registry's picomatch list ends at 4.0.7 with no prerelease ever
+  published; micromatch/picomatch#194 is open; the latest tinyglobby 0.2.17, anymatch 3.1.3, micromatch 4.0.8, jest-util
+  30.5.1, vite 8.3.8 and @nx/js / @nx/workspace 24.0.6 all still require picomatch. No `resolutions` target exists.
+- **F1 (Medium) — a PR could approve itself:** CI ran the PR's own `tools/npm-audit-decisions.json`, so a PR could add
+  an entry and the dependency it covers in one diff. Actor: anyone opening a PR → adds a register entry next to a
+  vulnerable dependency → the required audit passes on that PR's say-so. Fix (the #225 import-boundary pattern):
+  - `--base <ref>` (ci-security passes `origin/${GITHUB_BASE_REF}` on every PR) reads the decisions with
+    `git show <ref>:tools/npm-audit-decisions.json`. Fail closed: an unknown ref, a shallow clone (no merge-base) or any
+    git failure throws (exit 1); only git's "path does not exist in <ref>" means "no decisions". git runs without a
+    shell with `LC_ALL=C` and no `LANGUAGE`; `--base` accepts a plain ref plus `~N` / `^N` only. The head copy is
+    validated as well. The audit job checks out with `fetch-depth: 0`.
+  - Decision-only PR: when the merge-base diff touches only the register and THREAT-MODEL.md, the head decisions are
+    used, and every entry that is NEW OR CHANGED against the base (deep equality by id) must have `owner_decision_ref`
+    equal to this PR's `pull_request.html_url` from `$GITHUB_EVENT_PATH` (unreadable payload = fail). Removing an entry
+    needs no reference. **Owner to confirm:** the review asked for this on NEW entries; it is applied to CHANGED ones
+    too, because otherwise a register-only PR could move `decided_on` / `expires` of an existing entry (a renewal)
+    while still citing the old PR.
+  - CHANGED TOGETHER: `--base` fails when the diff adds or changes a register entry together with `yarn.lock`, any
+    `package.json`, `.yarnrc.yml`, anything under `.yarn/` or `.github/actions/yarn-install/`,
+    `tools/check-npm-audit.cjs`, `packages/rab-docker/rab/runtime-deps.cjs` (its `RUNTIME_PRUNE` decides the
+    production-closure condition), `ci-security.yaml` or `npm-audit-weekly.yaml` (the last four beyond the review's
+    list). A pure removal may go with any of them.
+  - No `--base` (push to main, the weekly run, local): the checked-out register decides; a `pull_request` event without
+    `--base` is refused.
+- **F3 (Low):** before auditing, `yarn config get npmAuditIgnoreAdvisories --json` and `npmAuditExcludePackages` must
+  both be `[]` and no `YARN_NPM_AUDIT_*` variable may be set; otherwise exit 1 without auditing.
+- **F4 (Low):** a yarn that cannot be spawned (`error`), is killed (`signal`) or exits outside {0, 1} for the audit
+  (outside {0} for `config get` / `npm info`) fails. `main(argv, deps)` takes `yarn`, `env`, `root`, `today`,
+  `fetchAdvisory` and `production` so this is tested.
+- **F5 (Low):** a finding with an empty `Tree Versions` cannot be checked for a fix: undecided ("cannot evaluate").
+- **F6 (Low):** each entry records the decided `severity` (`high` | `critical`); a finding rated above it is undecided
+  (a re-scored advisory needs a new owner decision); unknown severities are undecided. The picomatch entry records
+  `high` (prerequisite branch, merged first because CHANGED TOGETHER refuses register + tool in one PR).
+- **F7 (Info):** `decided_on` / `expires` must round-trip through `Date` (2026-02-30, 2026-11-31 refused).
+- **F8 (Info):** `.github/workflows/npm-audit-weekly.yaml` runs the same check every Monday 06:17 UTC (and on demand)
+  against main; any run prints `::warning::` when an in-force entry has 7 days or fewer left (expiry day = 0).
+- **Security review of #238 (2026-11-18):**
+  - **G1 (Low):** a register change mixed with a path that is NOT on the CHANGED TOGETHER list (e.g. `src/x.ts`) was
+    neither CHANGED TOGETHER nor decision-only: the base decided for that PR, but the new entry merged unbound and was
+    in force from the next PR on. Fix: outside a decision-only PR, `selectRegister` fails when the head has entries that
+    are new or changed against the MERGE-BASE (what this PR itself changed, so a base that moved on does not flag an
+    untouched entry); pure removals stay allowed anywhere.
+  - **G3:** the weekly run passes `--fail-on-expiring`, so it fails (and notifies) at 7 days or fewer left instead of
+    only warning; ci-security still only warns, so PRs stay green until the real expiry. Read-only token, no issue.
+  - **G4:** `npmAuditRegistry` must be unset (`null`) and `npmRegistryServer` `https://registry.yarnpkg.com` or
+    `https://registry.npmjs.org`; `YARN_NPM_REGISTRY_SERVER` is refused like every `YARN_NPM_AUDIT_*` variable. An audit
+    pointed at a server that reports nothing can no longer pass.
+  - **Re-review follow-ups (2026-11-18, approved at 11f52617):** (1) CHANGED TOGETHER binds only additions and
+    changes: a pure removal may go with yarn.lock / package.json / anything (the upgrade PR that drops an entry, as its
+    `drop_when` says); an addition next to yarn.lock still fails. (2) The audit's connection is pinned as well as its
+    URL: `httpsProxy`, `httpProxy`, `httpsCaFilePath` unset, `enableStrictSsl` true, `networkSettings` empty (yarn
+    prints `undefined` when unset), and `YARN_HTTPS_PROXY`, `YARN_HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, `NODE_OPTIONS`,
+    `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_TLS_REJECT_UNAUTHORIZED=0` refused (the last three variables since the
+    22487db0 spot-check). **Plugins (corrected after the 22487db0 spot-check, Low):** the first version trusted
+    `yarn plugin runtime --json`, but yarn marks `builtin` by the plugin's DECLARED name, so a `.yarn/plugins/x.cjs`
+    that calls itself `@yarnpkg/plugin-npm-cli` (or `@@core`) and is listed under `plugins:` ran its `factory` inside
+    yarn while the runtime list looked identical to a clean run (reproduced locally with yarn 4.13). The control now
+    checks where plugins come from: no `plugins` key (even `[]`) in any `.yarnrc.yml` yarn reads (the project folder,
+    every ancestor folder, the home folder), no `YARN_RC_FILENAME`, and `.yarn/plugins/` absent or empty; the runtime
+    list stays as a supplementary check only. **Key allowlist (final check at 6d5365da, Low):** a `plugins` key
+    hidden under `__proto__:` (yarn's js-yaml makes it a prototype assignment, so yarn loads the plugin, while a
+    JS-object view of the file shows no `plugins` key), or the same under the legacy `# yarn lockfile v1` header (yarn
+    then uses its v1 parser), still loaded a plugin. Instead of chasing parser tricks the rc check is now fail-closed:
+    each `.yarnrc.yml` is read as a YAML DOCUMENT (keys as written, never through a JS object); its top-level keys must
+    all be in `RC_ALLOWED_KEYS` (the seven the repository uses today: `enableConstraintsChecks`, `enableHardenedMode`,
+    `enableInlineHunks`, `nodeLinker`, `yarnPath`, `networkConcurrency`, `httpRetry`, plus the nine whose values the
+    audit-config checks verify); `plugins`, `<<` merge keys and any other key fail; `__proto__`, `constructor` and
+    `prototype` fail at any depth; a non-mapping top level, a non-scalar key, a duplicate key or any YAML error or
+    warning fails; a file starting with the legacy header (`/^(#.*\r?\n)*?#\s+yarn\s+lockfile\s+v1\r?\n/i`) fails;
+    without the `yaml` library the check reports a problem. Adding a setting to `.yarnrc.yml` now needs the allowlist
+    extended in the tool (a CHANGED TOGETHER path when it comes with a register entry, a review item otherwise). The
+    repository's real `.yarnrc.yml` passes. Order (final review at bcff7c21): the plugin-source check runs first and
+    alone, before yarn is spawned at all, because every yarn invocation (even `config get`) loads the configured
+    plugins; only a clean result goes on to the yarn-based checks. `caFilePath` is not a yarn 4 setting: yarn
+    refuses to start ("Unrecognized or legacy configuration settings") when it is in .yarnrc.yml or the environment,
+    which already fails the check, so it is not queried. The repository's real effective config passes every check.
+    Not covered: generic `HTTP(S)_PROXY` variables (yarn 4 does not read them). (3) Any argument other than
+    `--base <ref>` / `--fail-on-expiring` exits 1, so a typo cannot turn the weekly expiry failure off. (4)
+    `.github/actions/yarn-install/**` is on the CHANGED TOGETHER list. Nits: the decision-only path compares with the
+    merge-base like G1, and the merge-base is computed once.
+  - **G2 (owner decision, not built):** there is no cap on the total time an advisory may be excepted across
+    renewals; each renewal is a new decision-only PR citing itself, at most 30 days each.
+- **F9 (Info):** wording corrected on the prerequisite branch (node-gyp@13.0.1 has three production parents — argon2,
+  node-addon-api, msgpackr-extract — and one picomatch chain, node-gyp > tinyglobby > picomatch@4.0.5).
+- **Residual (accepted):** CI still runs the PR's own copy of the tool and workflow, so a PR that edits the tool can
+  change the rules for itself (CHANGED TOGETHER makes it also impossible to touch the register in that PR, but the tool
+  edit itself is a review control: owner review, no CODEOWNERS file). The register on the base is trusted as reviewed.
+  A decision-only PR's owner reference proves only that this PR is the record, not who approved it; the owner's merge
+  is the decision. A push to main runs without `--base`, so a register that landed on main is used as is. Every
+  yarn-side check (ignore lists, registry, transport, plugins, the audit's own output) trusts the yarn binary:
+  `.yarnrc.yml`'s `yarnPath` pointing at a modified yarn release (or a modified `.yarn/releases/*.cjs`) defeats all of
+  them, and CHANGED TOGETHER catches a `.yarnrc.yml` / `.yarn/**` change only when the same PR also adds or changes a
+  register entry; otherwise it is a review control. Generic `HTTP(S)_PROXY` variables are not checked (yarn 4 does
+  not read them).
+- **Tests:** `tools/check-npm-audit.test.cjs` (45). End to end in throwaway git repositories (`main(argv, deps)`): a
+  head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
+  passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
+  removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
+  (also uncommitted); an unknown ref, a non-ref argument, a missing `--base` value and a depth-1 clone throw; a base
+  without the register means no decisions; a German locale still reads a missing path as absent; the checkout decides
+  without `--base`, and a pull_request run without it exits 1; F3 ignore list (not audited) and env var exit 1; F4
+  `{error, status: null}`, a signal and exit 2 exit 1; F5 / F6 / F8 end to end; F7 dates; the workflows (`fetch-depth:
+  0`, `--base` on PRs, the weekly schedule); an invalid (expired) base entry fails a non-decision PR that drops it. G1:
+  adding or editing an entry next to `src/x.ts` exits 1, removing one next to it exits 0, an untouched entry is not
+  flagged when the base moved on. G3: `--fail-on-expiring` exits 1 at 7 days left, 0 at 8, warning only without it; the
+  weekly workflow passes it. G4: a non-default `npmAuditRegistry` / `npmRegistryServer` and both env variables are
+  refused (end to end: exit 1, not audited). Follow-ups: a removal plus yarn.lock exits 0 and an addition plus
+  yarn.lock exits 1; each transport setting, a non-built-in plugin, a failing `plugin runtime` and each env variable is
+  refused (`NODE_TLS_REJECT_UNAUTHORIZED=1` is not); unknown arguments exit 1 before auditing. Plugin sources: a
+  `plugins` key in the project, an ancestor or the home `.yarnrc.yml` (also `plugins: []`), a file in `.yarn/plugins/`,
+  `YARN_RC_FILENAME` and an unparseable `.yarnrc.yml` are refused; the repository itself passes; end to end, an
+  impostor plugin named `@yarnpkg/plugin-npm-cli` listed in `.yarnrc.yml` exits 1 before auditing even though the
+  runtime list looks clean. `NODE_OPTIONS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` refused. Allowlist: the real
+  `.yarnrc.yml` passes and each of its keys is allowlisted; `__proto__` hiding `plugins`, the legacy header (also with
+  CRLF and a leading comment), an unknown key, a `<<` merge key, a quoted `"plugins"`, a duplicate key, `constructor` /
+  `prototype` nested under `networkSettings`, a list top level and a non-scalar key are refused; end to end, the
+  `__proto__` impostor, the legacy-header file and an unknown key each exit 1 before auditing; without the `yaml`
+  library a problem is reported; a YAML warning (an unresolved `!foo` tag, also on an allowed key) fails; a planted
+  plugin exits 1 with zero yarn invocations, a clean checkout calls `config get` first. Mutation check: 50 hand-made
+  mutants of the tool (one per control), each killed by at least one test.
+
 ## CI release path — cd-deploy-tag on rab/vX.Y.Z tags, drafts only; publish-image starts from a person's publish (branch ci/release-tag-alignment, 2026-11-18, on top of ci/actions-pins-sha; no SQL, no runtime code)
 - **Finding:** cd-deploy-tag listened for `v*.*.*` while every release since rab/v0.1.0-beta.1 used `rab/vX.Y.Z`, and
   publish-image's release guard (`release_guard.py` RELEASE_TAG, review F2) and the `release` environment's tag policy
