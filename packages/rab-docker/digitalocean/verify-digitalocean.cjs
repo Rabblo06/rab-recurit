@@ -11,6 +11,9 @@
  *       the same model check on the server's REAL compose.env (env files not resolved), plus its compose.env lint.
  *   node packages/rab-docker/digitalocean/verify-digitalocean.cjs --lint-env-file <compose|database|runtime> <path>
  *   node packages/rab-docker/digitalocean/verify-digitalocean.cjs --lint-acl <path>      the real redis-users.acl
+ *   node packages/rab-docker/digitalocean/verify-digitalocean.cjs --lint-caddyfile <path> the real /etc/caddy/Caddyfile
+ *   --environment also lints ${CREWFLOW_SECRETS_DIR}/database.env, runtime.env and redis-users.acl (and, with
+ *   --caddyfile <path>, the Caddyfile and its trust pool), so one command checks every file the server uses.
  *
  * What it enforces on top of the generic gates (which keep running on this combination: compose-owner-login.cjs COMBOS
  * `digitalocean`, compose-one-image.cjs DEPLOY_COMBOS):
@@ -26,7 +29,9 @@
  *     password and the app user's command set (a `default` user with no command permissions loses BullMQ data replayed
  *     from the AOF on Redis 7.4: DOCKER_SECURITY_AND_CLEANUP_REPORT 2026-11-02 §3.5), `crewflow` with its own SHA-256
  *     password, no clear-text password, `nopass` only on the PING-only health-check user; REDIS_URL with a user and password;
- *   - decision 25.4 / the edge: the default network's fixed subnet and TRUSTED_PROXY_CIDRS exactly its gateway;
+ *   - decision 25.4 / the edge: the default network's fixed subnet and TRUSTED_PROXY_CIDRS exactly its gateway; the
+ *     Caddyfile with per-hostname Authenticated Origin Pulls (require_and_verify against OUR client CA, never Cloudflare's
+ *     shared origin-pull CA) and strict_sni_host on; every database URL query key at most once;
  *   - the M9 load test: the connection budget of runtime.env fits the 2 GiB plan's 47 connections (one API, one Worker);
  *   - AI stays off (AI_ENABLED unset or false).
  * Prints names and reasons only, never a value. Exit 0 = pass, 1 = a check failed, 2 = usage / docker compose unavailable.
@@ -45,6 +50,7 @@ const TEMPLATES = Object.freeze({
   database: path.join(__dirname, 'env/database.env.example'),
   runtime: path.join(__dirname, 'env/runtime.env.digitalocean.example'),
   acl: path.join(__dirname, 'env/redis-users.acl.example'),
+  caddyfile: path.join(__dirname, 'edge/Caddyfile.example'),
   genericRuntime: path.join(DOCKER_DIR, 'env/runtime.env.example'),
 });
 
@@ -52,8 +58,8 @@ const PROJECT_NAME = 'rab-production';
 const SERVICES = Object.freeze(['db', 'db-harden', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker']);
 const APP_SERVICES = Object.freeze(['rab-api', 'rab-worker']);
 const ADMIN_SERVICES = Object.freeze(['db-setup', 'db-harden']);
-const EDGE_SUBNET = '172.30.0.0/24';
-const EDGE_GATEWAY = '172.30.0.1';
+const EDGE_SUBNET = '172.16.30.0/24';
+const EDGE_GATEWAY = '172.16.30.1';
 const TRUSTED_PROXY = `${EDGE_GATEWAY}/32`;
 const DO_HOST_SUFFIX = '.db.ondigitalocean.com';
 const DO_DIRECT_PORT = '25060';
@@ -196,6 +202,10 @@ function doUrlProblems(value, label) {
   if (!u.hostname.endsWith(DO_HOST_SUFFIX)) problems.push(`${label}: the host is not a DigitalOcean Managed PostgreSQL host (*${DO_HOST_SUFFIX})`);
   if (u.port === DO_POOL_PORT) problems.push(`${label}: port ${DO_POOL_PORT} is the connection POOL; use the direct port ${DO_DIRECT_PORT}`);
   else if (u.port !== DO_DIRECT_PORT) problems.push(`${label}: must use the direct port ${DO_DIRECT_PORT}`);
+  // Security review of #332 (LOW): `?sslmode=verify-full&sslmode=disable` would pass a get() check while a client that
+  // reads the LAST value disables TLS. A key given more than once is refused outright.
+  const keys = [...u.searchParams.keys()];
+  for (const k of new Set(keys.filter((k, i) => keys.indexOf(k) !== i))) problems.push(`${label}: the ${k} parameter appears more than once`);
   if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${label}: sslmode must be verify-full on DigitalOcean`);
   for (const k of ['host', 'hostaddr', 'port', 'sslrootcert', 'sslcert', 'sslkey', 'options', 'target_session_attrs']) if (u.searchParams.has(k)) problems.push(`${label}: carries the ${k} parameter (the URL's own host, port and the mounted CA only)`);
   if (decodeURIComponent(u.password) === '') problems.push(`${label}: has no password`);
@@ -312,6 +322,14 @@ function lintRuntimeEnv(text, { template = false } = {}) {
   return problems;
 }
 
+/** The ONLY permission tokens the `default` and `crewflow` ACL users may carry (env/redis-users.acl.example's set). */
+const APP_ACL_ALLOWED = Object.freeze([
+  'resetkeys', '~*', 'resetchannels', '&*', '+@all', '-@admin', '-@dangerous', '+info',
+  '+client|setname', '+client|getname', '+client|id', '+client|info', '+client|list', '-flushall', '-flushdb', '-keys', '-swapdb',
+]);
+/** Denials both users must carry after `+@all`. */
+const APP_ACL_REQUIRED_DENIALS = Object.freeze(['-@admin', '-@dangerous', '-flushall', '-flushdb', '-keys', '-swapdb']);
+
 /**
  * The real redis-users.acl (decision 25.3). Lines: `user <name> <rules...>`. Never includes a value.
  */
@@ -347,8 +365,116 @@ function lintRedisAcl(text) {
   const app = users.get('crewflow');
   if (!app) problems.push('user crewflow: missing (the application user of REDIS_URL)');
   else if (!app.includes('on') || passwords(app).length !== 1) problems.push('user crewflow: must be ON with exactly one #<sha256> password');
+  // Security review of #332 (LOW): both users must carry the reviewed command set, not merely equal ones (`+@all` on both
+  // would otherwise pass). Every permission token is on the allow-list, and every denial follows the last `+@all`.
+  for (const [name, rules] of [['default', def], ['crewflow', app]]) {
+    if (!rules) continue;
+    const p = perms(rules);
+    for (const t of p) if (!APP_ACL_ALLOWED.includes(t)) problems.push(`user ${name}: permission ${t} is not allowed (only the reviewed set: +@all minus @admin, @dangerous, flushall, flushdb, keys, swapdb, plus info and five client subcommands)`);
+    const lastAll = p.lastIndexOf('+@all');
+    if (lastAll < 0) problems.push(`user ${name}: must start its command rules from +@all (the app's command set)`);
+    for (const d of APP_ACL_REQUIRED_DENIALS) {
+      const at = p.lastIndexOf(d);
+      if (at < 0) problems.push(`user ${name}: ${d} is missing`);
+      else if (at < lastAll) problems.push(`user ${name}: ${d} must come after +@all (rules apply left to right)`);
+    }
+  }
   if (def && app && JSON.stringify(perms(def)) !== JSON.stringify(perms(app))) problems.push('user default: must have exactly the crewflow user\'s command and key permissions (what AOF replay needs, and nothing more)');
   if (def && app && passwords(def).length === 1 && passwords(def)[0] === passwords(app)[0]) problems.push('user default: must not share the crewflow user\'s password');
+  return problems;
+}
+
+// ------------------------------------------------------------------------------------------------------------ Caddyfile
+
+/** Splits a Caddyfile into its top-level blocks: [{ label, body }] (comments removed). Small and strict on purpose. */
+function caddyBlocks(text) {
+  const lines = String(text).split(/\r?\n/).map((l) => l.replace(/(^|\s)#.*$/, '').trimEnd());
+  const blocks = [];
+  let depth = 0;
+  let current = null;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t === '') continue;
+    if (depth === 0) current = { label: t.replace(/\s*\{$/, '').trim(), body: [] };
+    else current.body.push(t);
+    depth += (t.match(/\{/g) ?? []).length - (t.match(/\}/g) ?? []).length;
+    if (depth < 0) return null;
+    if (depth === 0 && current) {
+      blocks.push(current);
+      current = null;
+    }
+  }
+  return depth === 0 ? blocks : null;
+}
+
+/** A trust-pool file NAMED like Cloudflare's SHARED origin-pull CA (zone-level / global Authenticated Origin Pulls). */
+const SHARED_AOP_NAME = /origin[-_ ]?pull|authenticated[-_ ]?origin|cloudflare/i;
+
+/**
+ * The real /etc/caddy/Caddyfile (security review of #332, MEDIUM): per-hostname Authenticated Origin Pulls with OUR client
+ * CA, `require_and_verify`, `strict_sni_host on`, rab-api reached on loopback only, nothing proxied over plain HTTP.
+ * `readFile` (optional) reads the trust-pool file, to refuse a Cloudflare-issued (shared) CA by its subject. No value is
+ * ever included in a problem.
+ */
+function lintCaddyfile(text, { readFile = null } = {}) {
+  const problems = [];
+  const blocks = caddyBlocks(text);
+  if (!blocks) return ['the Caddyfile braces do not balance'];
+  const global = blocks.find((b) => b.label === '');
+  const all = blocks.flatMap((b) => b.body);
+  if (!global || !global.body.includes('strict_sni_host on')) problems.push('strict_sni_host on is missing from the global servers block (the TLS server name and the Host header must match)');
+  if (all.some((l) => /^strict_sni_host\s+(?!on$)/.test(l))) problems.push('strict_sni_host is set to something other than on');
+  const https = blocks.filter((b) => /^https:\/\//.test(b.label));
+  if (https.length === 0) problems.push('no https:// site block');
+  for (const b of https) {
+    const body = b.body;
+    if (!body.includes('client_auth {')) problems.push(`${b.label}: no client_auth (per-hostname Authenticated Origin Pulls)`);
+    const modes = body.filter((l) => /^mode\s/.test(l));
+    if (modes.length === 0 || modes.some((l) => l !== 'mode require_and_verify')) problems.push(`${b.label}: client_auth mode must be exactly require_and_verify`);
+    const pools = body.filter((l) => /^trust_pool\s/.test(l));
+    if (pools.length !== 1 || !/^trust_pool file \S+$/.test(pools[0] ?? '')) problems.push(`${b.label}: exactly one "trust_pool file <our CA>" is required`);
+    for (const l of pools) {
+      const file = /^trust_pool file (\S+)$/.exec(l)?.[1];
+      if (file && SHARED_AOP_NAME.test(path.basename(file))) problems.push(`${b.label}: the trust pool is named like Cloudflare's SHARED origin-pull CA; trust only our own client CA (per-hostname AOP)`);
+      if (file && readFile) {
+        let pem = null;
+        try {
+          pem = readFile(file);
+        } catch {
+          problems.push(`${b.label}: the trust pool file cannot be read`);
+        }
+        if (pem !== null) problems.push(...trustPoolPemProblems(pem, b.label));
+      }
+    }
+    if (body.some((l) => /^(trusted_ca_cert|trusted_ca_cert_file|trusted_leaf_cert|trusted_leaf_cert_file)\b/.test(l))) problems.push(`${b.label}: use only "trust_pool file <our CA>" (no other client-trust directive)`);
+    for (const l of body.filter((x) => /^reverse_proxy\s/.test(x))) {
+      const upstreams = l.replace(/^reverse_proxy\s+/, '').replace(/\s*\{$/, '').split(/\s+/).filter(Boolean);
+      if (upstreams.length === 0 || upstreams.some((u) => !/^(https?:\/\/)?(127\.0\.0\.1|localhost):\d+$/.test(u))) problems.push(`${b.label}: reverse_proxy must target rab-api on loopback only`);
+    }
+  }
+  for (const b of blocks.filter((x) => /^http:\/\//.test(x.label))) {
+    if (b.body.some((l) => /^reverse_proxy\b/.test(l))) problems.push(`${b.label}: proxies over plain HTTP (redirect only)`);
+  }
+  return problems;
+}
+
+/** The trust-pool PEM: CA certificates, none issued by Cloudflare (the shared origin-pull CA is a Cloudflare one). */
+function trustPoolPemProblems(pem, label) {
+  const { X509Certificate } = require('node:crypto');
+  const certs = String(pem).match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
+  if (certs.length === 0) return [`${label}: the trust pool file holds no certificate`];
+  const problems = [];
+  for (const c of certs) {
+    let x;
+    try {
+      x = new X509Certificate(c);
+    } catch {
+      problems.push(`${label}: a trust pool certificate does not parse`);
+      continue;
+    }
+    if (/cloudflare|origin-pull/i.test(`${x.subject}\n${x.issuer}`)) problems.push(`${label}: the trust pool holds a Cloudflare-issued certificate (the SHARED origin-pull CA admits every Cloudflare customer); trust only our own client CA`);
+    if (!x.ca) problems.push(`${label}: a trust pool certificate is not a CA certificate`);
+  }
   return problems;
 }
 
@@ -410,6 +536,7 @@ function templateProblems() {
   for (const m of lintDatabaseEnv(database)) problems.push(`template database: ${m}`);
   for (const m of lintRuntimeEnv(runtime)) problems.push(`template runtime: ${m}`);
   for (const m of lintRedisAcl(acl)) problems.push(`template acl: ${m}`);
+  for (const m of lintCaddyfile(fs.readFileSync(TEMPLATES.caddyfile, 'utf8'))) problems.push(`template Caddyfile: ${m}`);
   return problems;
 }
 
@@ -459,35 +586,83 @@ function report(label, problems) {
   return problems.length;
 }
 
+function readOrNull(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Security review of #332 (LOW): --environment lints every file the server will use, not only compose.env: the two
+ * secret env files and the Redis ACL under CREWFLOW_SECRETS_DIR (DigitalOcean rules AND the generic lint), and the
+ * Caddyfile when given. Returns [label, problems] pairs; never includes a value.
+ */
+function environmentFileProblems(composeText, { caddyfile = null } = {}) {
+  const out = [];
+  const dir = envMap(composeText).get('CREWFLOW_SECRETS_DIR');
+  if (!dir || !path.isAbsolute(dir)) return [['secret directory', ['CREWFLOW_SECRETS_DIR: missing or not an absolute path']]];
+  for (const kind of ['database', 'runtime']) {
+    const text = readOrNull(path.join(dir, `${kind}.env`));
+    if (text === null) {
+      out.push([`${kind}.env`, [`${kind}.env: cannot read it in CREWFLOW_SECRETS_DIR`]]);
+      continue;
+    }
+    const lint = kind === 'database' ? lintDatabaseEnv : lintRuntimeEnv;
+    out.push([`${kind}.env (DigitalOcean rules + generic lint)`, [...lint(text), ...lintEnvText(kind, text)]]);
+  }
+  const acl = readOrNull(path.join(dir, 'redis-users.acl'));
+  out.push(['redis-users.acl', acl === null ? ['redis-users.acl: cannot read it in CREWFLOW_SECRETS_DIR'] : lintRedisAcl(acl)]);
+  if (caddyfile) {
+    const text = readOrNull(caddyfile);
+    out.push(['Caddyfile', text === null ? ['the Caddyfile cannot be read'] : lintCaddyfile(text, { readFile: (f) => fs.readFileSync(f, 'utf8') })]);
+  }
+  return out;
+}
+
 function main(argv) {
   if (argv[0] === '--lint-env-file') {
     const [, kind, file] = argv;
     if (!['compose', 'database', 'runtime'].includes(kind) || !file) { console.error('usage: verify-digitalocean.cjs --lint-env-file <compose|database|runtime> <path>'); return 2; }
-    let text;
-    try { text = fs.readFileSync(file, 'utf8'); } catch { console.error(`[digitalocean] cannot read ${file}`); return 2; }
+    const text = readOrNull(file);
+    if (text === null) { console.error(`[digitalocean] cannot read ${file}`); return 2; }
     const lint = { compose: lintComposeEnv, database: lintDatabaseEnv, runtime: lintRuntimeEnv }[kind];
     return report(`${kind} env file (DigitalOcean rules; names only, no value printed)`, lint(text)) ? 1 : 0;
   }
   if (argv[0] === '--lint-acl') {
-    if (!argv[1]) { console.error('usage: verify-digitalocean.cjs --lint-acl <path>'); return 2; }
-    let text;
-    try { text = fs.readFileSync(argv[1], 'utf8'); } catch { console.error(`[digitalocean] cannot read ${argv[1]}`); return 2; }
+    const text = argv[1] ? readOrNull(argv[1]) : null;
+    if (text === null) { console.error('usage: verify-digitalocean.cjs --lint-acl <readable path>'); return 2; }
     return report('redis ACL file (names only, no value printed)', lintRedisAcl(text)) ? 1 : 0;
   }
+  if (argv[0] === '--lint-caddyfile') {
+    const text = argv[1] ? readOrNull(argv[1]) : null;
+    if (text === null) { console.error('usage: verify-digitalocean.cjs --lint-caddyfile <readable path>'); return 2; }
+    return report('Caddyfile', lintCaddyfile(text, { readFile: (f) => fs.readFileSync(f, 'utf8') })) ? 1 : 0;
+  }
   if (argv[0] === '--environment') {
-    const i = argv.indexOf('--env-file');
-    const file = i > 0 ? argv[i + 1] : null;
-    if (!file) { console.error('usage: verify-digitalocean.cjs --environment --env-file <compose.env>'); return 2; }
+    const opt = (name) => {
+      const i = argv.indexOf(name);
+      return i > 0 ? argv[i + 1] ?? null : null;
+    };
+    const file = opt('--env-file');
+    if (!file) { console.error('usage: verify-digitalocean.cjs --environment --env-file <compose.env> [--caddyfile <path>]'); return 2; }
     if (!composeAvailable()) { console.error('[digitalocean] docker compose is not available'); return 2; }
-    let text;
-    try { text = fs.readFileSync(file, 'utf8'); } catch { console.error(`[digitalocean] cannot read ${file}`); return 2; }
+    const text = readOrNull(file);
+    if (text === null) { console.error(`[digitalocean] cannot read ${file}`); return 2; }
     let failed = report('compose.env (DigitalOcean rules)', lintComposeEnv(text));
+    for (const [label, problems] of environmentFileProblems(text, { caddyfile: opt('--caddyfile') })) failed += report(label, problems);
     let model;
-    try { model = render({ composeEnvPath: path.resolve(file) }); } catch (e) { console.log(`[digitalocean] FAIL docker compose config: ${String(e.stderr ?? e.message).trim().split('\n').slice(-2).join(' | ').replace(/postgres(ql)?:\/\/\S+/g, '<url>')}`); return 1; }
+    try {
+      model = render({ composeEnvPath: path.resolve(file) });
+    } catch (e) {
+      console.log(`[digitalocean] FAIL docker compose config: ${String(e.stderr ?? e.message).trim().split('\n').slice(-2).join(' | ').replace(/postgres(ql)?:\/\/\S+/g, '<url>')}`);
+      return 1;
+    }
     failed += report('image.yml + digitalocean override (this server)', checkModel(model, { expectAdminUrl: envMap(text).get('PG_ADMIN_URL') ?? null }));
     return failed ? 1 : 0;
   }
-  if (argv.length) { console.error('usage: verify-digitalocean.cjs [--environment --env-file <f> | --lint-env-file <kind> <f> | --lint-acl <f>]'); return 2; }
+  if (argv.length) { console.error('usage: verify-digitalocean.cjs [--environment --env-file <f> [--caddyfile <f>] | --lint-env-file <kind> <f> | --lint-acl <f> | --lint-caddyfile <f>]'); return 2; }
   let failed = report('DigitalOcean templates', templateProblems());
   if (!composeAvailable()) { console.error('[digitalocean] docker compose is not available (needed to render the shape)'); return 2; }
   const model = render();
@@ -496,7 +671,8 @@ function main(argv) {
 }
 
 module.exports = {
-  checkModel, lintComposeEnv, lintDatabaseEnv, lintRuntimeEnv, lintRedisAcl, connectionBudget, templateProblems, materialise,
+  checkModel, lintComposeEnv, lintDatabaseEnv, lintRuntimeEnv, lintRedisAcl, lintCaddyfile, trustPoolPemProblems, environmentFileProblems,
+  main, connectionBudget, templateProblems, materialise,
   digitalOceanRuntimeText, render, composeAvailable, BUDGET, DO_PLAN_CONNECTIONS, TEMPLATES, IMAGE_FILE, DO_FILE, SENTINEL_ADMIN_PW,
   SENTINEL_HOST, TRUSTED_PROXY, EDGE_SUBNET, EDGE_GATEWAY,
 };

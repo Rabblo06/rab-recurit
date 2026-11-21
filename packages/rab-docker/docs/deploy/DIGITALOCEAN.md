@@ -18,7 +18,7 @@ confirm** must be checked in the rehearsal (§4.10) before go-live. DigitalOcean
 | `packages/rab-docker/digitalocean/env/database.env.example` | the cluster CA path and the database name |
 | `packages/rab-docker/digitalocean/env/runtime.env.digitalocean.example` | the DigitalOcean lines to set in a copy of `env/runtime.env.example` |
 | `packages/rab-docker/digitalocean/env/redis-users.acl.example` | the Redis ACL with a password-protected `default` user |
-| `packages/rab-docker/digitalocean/edge/Caddyfile.example` | the TLS edge on the droplet host (Origin CA, Authenticated Origin Pulls, Cloudflare-only) |
+| `packages/rab-docker/digitalocean/edge/Caddyfile.example` | the TLS edge on the droplet host (Origin CA, per-hostname Authenticated Origin Pulls with our own client CA, `strict_sni_host`) |
 | `packages/rab-docker/digitalocean/verify-digitalocean.cjs` | the gate: templates, the rendered shape, and lints for the real env / ACL files |
 
 ---
@@ -27,12 +27,12 @@ confirm** must be checked in the rehearsal (§4.10) before go-live. DigitalOcean
 
 ```
  browser / phone ──HTTPS──► Cloudflare (DNS, proxy, TLS edge, Full (strict))
-                                │  HTTPS + Authenticated Origin Pulls (mTLS), from Cloudflare's ranges only
+                                │  HTTPS + per-hostname Authenticated Origin Pulls (OUR client cert, mTLS)
                                 ▼
  DigitalOcean lon1 ── Cloud Firewall: 80/443 from Cloudflare only, 22 from your IP only ──────────────────────────────
  │ Droplet (Basic 4 vCPU / 8 GB, Ubuntu 24.04 LTS)                                                                    │
- │   Caddy (host) :443 ──► 127.0.0.1:3000 ──► rab-api      ┐ docker compose, network 172.30.0.0/24                   │
- │                                            rab-worker    │ (rab-api sees Caddy as 172.30.0.1 = TRUSTED_PROXY_CIDRS) │
+ │   Caddy (host) :443 ──► 127.0.0.1:3000 ──► rab-api      ┐ docker compose, network 172.16.30.0/24                   │
+ │                                            rab-worker    │ (rab-api sees Caddy as 172.16.30.1 = TRUSTED_PROXY_CIDRS) │
  │                                            rab-redis     │ ACL, password, never published                          │
  │                                            db-setup / db-harden (one-shot, the only holders of the admin URL)     │
  │                         VPC (private) │ TLS verify-full, port 25060                                                │
@@ -51,7 +51,7 @@ The droplet holds no database. Redis holds queued jobs (AOF), so the droplet's o
 | Droplet backups, daily (30 % of the droplet) | $14.40 | same page ("20 % weekly or 30 % daily") |
 | Managed PostgreSQL, 2 GiB / 1 vCPU, single node (30-60 GiB storage, 7-day PITR) | $30.45 | digitalocean.com/pricing/managed-databases; PITR: docs …/postgresql/details/limits/ |
 | Spaces (250 GiB + 1 TiB transfer), or Cloudflare R2 (10 GB free) | $5.00 (or $0) | digitalocean.com/pricing/spaces-object-storage |
-| Cloudflare Free (DNS, proxy, Universal SSL, Origin CA, Authenticated Origin Pulls) | $0 | developers.cloudflare.com/ssl/edge-certificates/universal-ssl/ |
+| Cloudflare Free (DNS, proxy, Universal SSL, Origin CA, Authenticated Origin Pulls) | $0 | developers.cloudflare.com/ssl/edge-certificates/universal-ssl/; AOP "Free: Yes" (…/authenticated-origin-pull/; per-hostname has no separate row: **to confirm** on the Free plan) |
 | **Total** | **$97.85, about $98** (about $93 with R2 instead of Spaces) | matches decision 24 |
 
 **Two findings from the re-check that change item 24-26's assumptions (owner to note):**
@@ -84,7 +84,8 @@ Agents never create accounts, hold credentials, or change DNS. These steps are y
    `/etc/crewflow/` (§4.7), and keep an offline copy in your password manager. Never paste one into chat, a ticket, a PR
    or a commit. The secrets are: the `doadmin` URL, the `crewflow_owner` password, `APP_SECRET`, the two Redis passwords,
    the SMTP/Resend key, the bucket key, the Cloudflare Origin CA private key.
-4. **DNS and TLS:** the Cloudflare records, SSL mode, Origin CA certificate and Authenticated Origin Pulls (§4.8-4.9).
+4. **DNS and TLS:** the Cloudflare records, SSL mode, Origin CA certificate, and per-hostname Authenticated Origin Pulls
+   with a client certificate you generate (its CA key kept offline) (§4.8-4.9).
 5. **MFA flags:** set `AUTH_MFA_ENFORCE_ORGANISATION_OWNER` / `_INITIAL_MANAGER` when you are ready (decision 2, step 2);
    agents never change them.
 6. **First admin:** receive the activation email, activate, enrol your authenticator (§4.12).
@@ -134,8 +135,11 @@ Agents never create accounts, hold credentials, or change DNS. These steps are y
    - a sudo user with your SSH key; `PermitRootLogin no`, `PasswordAuthentication no` in sshd; restart sshd;
    - `apt install unattended-upgrades` (security updates on);
    - timezone UTC; NTP on (the default).
-3. **Docker Engine + Compose plugin** from Docker's own apt repository (Compose v2.24 or later; the files need
-   `env_file: required` and `depends_on: restart`). Add nobody to the `docker` group (it is root-equivalent): use `sudo`.
+3. **Docker Engine 28 or later + Compose plugin v2.24 or later** from Docker's own apt repository. Engine 28 is required:
+   before it, a port published on `127.0.0.1` could still be reached by another host on the same network by routing
+   packets for `127.0.0.1` at the droplet (Engine 28 drops them), which would let a neighbour in the VPC reach rab-api
+   around Caddy. Compose 2.24 is needed for `env_file: required` and `depends_on: restart`. Check with
+   `docker version --format '{{.Server.Version}}'`. Add nobody to the `docker` group (it is root-equivalent): use `sudo`.
 4. **Caddy 2.8+** from the official Caddy apt repository (§4.9).
 5. **Node.js 24** (only for the lints; nothing of the app runs on the host): the official binary or NodeSource.
 6. The release checkout, read-only, at the approved commit:
@@ -208,7 +212,7 @@ sudo node /opt/crewflow/release/packages/rab-docker/digitalocean/verify-digitalo
   `CREWFLOW_BUNDLED_DB=0`, the image digest, the Redis image digest.
 - database.env: optionally a deployment id (`uuidgen`), recommended so a restore-drill copy can never pass as production.
 - runtime.env: `APP_SECRET` (`openssl rand -hex 48`), `REDIS_URL=redis://crewflow:<APP_PW>@rab-redis:6379`,
-  `TRUSTED_PROXY_CIDRS=172.30.0.1/32`, the https URLs, email, the bucket (a key scoped to that one bucket),
+  `TRUSTED_PROXY_CIDRS=172.16.30.1/32`, the https URLs, email, the bucket (a key scoped to that one bucket),
   `CREWFLOW_AUDIT_SINK=stdout`, `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true` (decision 2, step 1).
 - **Workspace host routing (option B).** `WORKSPACE_BASE_DOMAIN=rabworkspaceteams.co.uk` and
   `WORKSPACE_HOST_ROUTING_ENABLED=true` are accepted runtime.env values. `WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED`, the
@@ -249,11 +253,40 @@ done
 2. SSL/TLS → Origin Server → **Create Certificate** (RSA or ECC, hostnames `api.rabworkspaceteams.co.uk`, 15 years).
    Save the certificate as `/etc/caddy/tls/origin.crt` and the private key (shown once) as `/etc/caddy/tls/origin.key`,
    both `root:caddy 0640`.
-3. SSL/TLS → Origin Server → **Authenticated Origin Pulls**: download Cloudflare's origin-pull CA (the link on
-   developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/zone-level/) to
-   `/etc/caddy/tls/cloudflare-origin-pull-ca.pem` (0644), then turn Authenticated Origin Pulls **on** for the zone.
+3. **Per-hostname Authenticated Origin Pulls with OUR OWN client certificate** (security review of #332). Never the
+   Cloudflare-provided certificate (what global and default zone-level Authenticated Origin Pulls present): it is
+   SHARED by every Cloudflare customer, so trusting its CA would admit anyone who points their own proxied zone at the
+   droplet IP (with a Host / SNI override) and lets them skip our zone's WAF, rate-limit and bot rules. The firewall and Caddy's `remote_ip` rule cannot tell zones apart either:
+   only this certificate proves "our zone". On a trusted machine (your laptop, not the droplet):
+
+   ```sh
+   umask 077
+   openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 \
+     -subj '/CN=Crewflow AOP CA' -addext 'basicConstraints=critical,CA:TRUE' \
+     -addext 'keyUsage=critical,keyCertSign,cRLSign' -keyout crewflow-aop-ca.key -out crewflow-aop-ca.pem
+   openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -subj '/CN=api.rabworkspaceteams.co.uk origin pull' \
+     -keyout aop-client.key -out aop-client.csr
+   printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > aop-client.ext
+   openssl x509 -req -in aop-client.csr -CA crewflow-aop-ca.pem -CAkey crewflow-aop-ca.key -CAcreateserial \
+     -days 825 -extfile aop-client.ext -out aop-client.crt
+   ```
+
+   - Cloudflare → SSL/TLS → Origin Server → Authenticated Origin Pulls → **Per-hostname** → Upload certificate: paste
+     `aop-client.crt` and `aop-client.key`, associate **only** `api.rabworkspaceteams.co.uk`, save. (Or the API:
+     `POST /zones/{zone_id}/origin_tls_client_auth/hostnames/certificates`, then enable the hostname.) Leave zone-level
+     Authenticated Origin Pulls OFF.
+   - Copy only `crewflow-aop-ca.pem` (the public CA certificate) to the droplet as
+     `/etc/caddy/tls/crewflow-aop-ca.pem` (root:caddy 0644). Store `crewflow-aop-ca.key` OFFLINE (password manager /
+     encrypted USB); delete `aop-client.key` from the laptop after the upload (Cloudflare holds it). Never put any of
+     them in the repository or chat.
+   - Renewal: the client certificate expires after 825 days; Cloudflare emails 30 and 14 days before. Sign a new one
+     with the same CA and upload it, then remove the old one.
 4. Copy `digitalocean/edge/Caddyfile.example` to `/etc/caddy/Caddyfile`, replace `<api-host>` with
-   `api.rabworkspaceteams.co.uk`, `sudo caddy validate --config /etc/caddy/Caddyfile`, `sudo systemctl reload caddy`.
+   `api.rabworkspaceteams.co.uk`, then:
+   `sudo caddy validate --config /etc/caddy/Caddyfile`,
+   `sudo node $R/digitalocean/verify-digitalocean.cjs --lint-caddyfile /etc/caddy/Caddyfile` (refuses a missing
+   `strict_sni_host on`, any mode but `require_and_verify`, a trust pool named like or issued by Cloudflare, a non-CA
+   trust pool, a non-loopback upstream), and `sudo systemctl reload caddy`.
 5. Check from your laptop after the cutover: `curl -sI https://api.rabworkspaceteams.co.uk/healthz` → 200 through
    Cloudflare; and directly against the droplet IP (`curl -k --resolve api.rabworkspaceteams.co.uk:443:<droplet-ip> ...`)
    → refused by the firewall (and, if the firewall were open, by the TLS client-certificate check).
@@ -263,8 +296,9 @@ done
 On a **test** cluster (created and destroyed by you; about one hour; DigitalOcean bills by the hour) or on the real
 cluster before any real data:
 
-1. The gate with the real compose.env:
-   `sudo node $R/digitalocean/verify-digitalocean.cjs --environment --env-file /etc/crewflow/compose.env`
+1. The gate with the real files (compose.env, and through its `CREWFLOW_SECRETS_DIR` database.env, runtime.env and
+   redis-users.acl, plus the Caddyfile and its trust pool):
+   `sudo node $R/digitalocean/verify-digitalocean.cjs --environment --env-file /etc/crewflow/compose.env --caddyfile /etc/caddy/Caddyfile`
 2. `C="sudo docker compose --env-file /etc/crewflow/compose.env -f $R/docker-compose.image.yml -f $R/digitalocean/docker-compose.digitalocean.yml"`;
    `$C config --quiet && $C pull && $C up -d`.
 3. Expected: `db-setup` exits 0 (creates `crewflow_owner`, pre-hashed first; **to confirm** that DigitalOcean accepts
@@ -274,10 +308,17 @@ cluster before any real data:
    complete (CREATEROLE removed). `$C ps -a`, `$C logs db-setup db-harden rab-api rab-worker | less`.
 4. A green posture: the API starts only if the semantic-posture and RLS boot gates pass, so a healthy `/healthz` is the
    posture check. **To confirm:** `/healthz` shows no `upgradeFailed`.
-5. **To confirm:** the peer address rab-api logs for a request through Caddy is `172.30.0.1` (so
-   `TRUSTED_PROXY_CIDRS=172.30.0.1/32` is right, and a sign-in rate limit applies per real client, not to everyone).
+5. **To confirm:** the peer address rab-api logs for a request through Caddy is `172.16.30.1` (so
+   `TRUSTED_PROXY_CIDRS=172.16.30.1/32` is right, and a sign-in rate limit applies per real client, not to everyone).
 6. **To confirm:** the budget check passes (the API logs its connection budget; 40 of 47 expected).
-7. The first **restore drill** (§5.2), with its RTO and RPO recorded.
+7. **Must fail: a request through ANOTHER Cloudflare zone** (proves the per-hostname client certificate is what admits
+   traffic, not "any Cloudflare edge"). In a second zone you control (or a free test zone), add a proxied A record, e.g.
+   `aop-test.<other-zone>` → the droplet IP, and an Origin Rule on it that overrides the Host header (and, if your plan
+   offers it, the SNI) to `api.rabworkspaceteams.co.uk`. Then `curl -sI https://aop-test.<other-zone>/healthz` must
+   **fail** (Cloudflare 525/526: the origin refused the TLS handshake, because that zone presents Cloudflare's shared
+   certificate, not ours; or 421 from `strict_sni_host` if the SNI and Host differ). It must never return 200. Delete
+   the test record afterwards. Also: `curl -sI https://api.rabworkspaceteams.co.uk/healthz` → 200 (our zone works).
+8. The first **restore drill** (§5.2), with its RTO and RPO recorded.
 
 ### 4.11 First production deploy
 
@@ -372,9 +413,15 @@ stored order is preserved and it should not trip; **to confirm** in the first dr
 
 - `db` → `deploy.replicas: 0`. The managed cluster is the database. compose.env must also say `CREWFLOW_BUNDLED_DB=0`;
   if it forgets, db-setup waits for a db that never starts and exits 70, so rab-api never starts (fail closed).
-- `networks.default` → subnet `172.30.0.0/24`, gateway `172.30.0.1`. Caddy on the host connects to `127.0.0.1:3000`;
-  Docker forwards that connection from the bridge gateway, so rab-api sees `172.30.0.1`. Fixing the subnet makes
-  `TRUSTED_PROXY_CIDRS=172.30.0.1/32` known before the first start. Only that peer's `CF-Connecting-IP` is believed.
+- `networks.default` → subnet `172.16.30.0/24`, gateway `172.16.30.1`. Caddy on the host connects to `127.0.0.1:3000`;
+  Docker forwards that connection from the bridge gateway, so rab-api sees `172.16.30.1`. Fixing the subnet makes
+  `TRUSTED_PROXY_CIDRS=172.16.30.1/32` known before the first start. Only that peer's `CF-Connecting-IP` is believed.
+  172.16.30.0/24 is outside Docker's default address pools (172.17.0.0/16-172.31.0.0/16, 192.168.0.0/16), so Docker
+  never gives it to another network, and outside DigitalOcean's VPC ranges (10.x).
+  **Caution:** every process on the host (and any container with `network_mode: host`, such as a monitoring agent) that
+  connects to `127.0.0.1:3000` also arrives as `172.16.30.1` and is trusted the same way: it can choose the client
+  address rab-api records and rate-limits on. Run nothing else on the droplet that sends requests to rab-api; install
+  monitoring agents that only read metrics.
 
 Everything else (non-root users, read-only roots, `cap_drop: ALL`, no-new-privileges, PID/memory/CPU limits, tmpfs, the
 env files, the `depends_on` conditions, `CREWFLOW_RUNTIME_ISOLATION=enforce`, the Redis ACL, the loopback-only API port,
@@ -397,14 +444,16 @@ the OpenShip import guard) comes from `docker-compose.image.yml`. The gates that
 
 ## 8. Operations
 
-- **Deploy:** gate (`--environment`), `$C pull && $C up -d`. Never scale rab-api; never a second stack on the same
+- **Deploy:** gate (`--environment ... --caddyfile /etc/caddy/Caddyfile`), `$C pull && $C up -d`. Never scale rab-api; never a second stack on the same
   database (except the API-only drill stack against a drill copy).
 - **Logs:** the audit sink is `stdout`, which is compliant only with an **off-host, append-only** log shipper collecting
   rab-api and rab-worker (BC-07). Choose one before go-live (Q2, §10). Container logs are capped at 10 MB × 5.
 - **Monthly:** re-check Cloudflare's IP ranges against the firewall and the Caddyfile; `apt` reboot if required; review
   the droplet and database metrics (CPU, connections, disk).
 - **Certificates:** the Origin CA certificate lasts 15 years; the Cloudflare edge certificate renews itself; the
-  cluster CA comes with the cluster (a new cluster after a restore has its own: download it).
+  per-hostname Authenticated Origin Pulls client certificate expires after 825 days (Cloudflare warns 30 and 14 days
+  before; re-sign with the offline CA and upload, §4.9 step 3); the cluster CA comes with the cluster (a new cluster
+  after a restore has its own: download it).
 - **Rotate:** crewflow_owner (`OWNER-LOGIN-DEPLOYMENT.md` "Rotate the crewflow_owner password"), Redis (new hash in the
   ACL, new `REDIS_URL`, `$C up -d --force-recreate rab-redis rab-api rab-worker`), `doadmin` (reset it in the cluster's
   Users page, update `PG_ADMIN_URL`; only db-setup / db-harden use it).
@@ -417,8 +466,12 @@ the OpenShip import guard) comes from `docker-compose.image.yml`. The gates that
 - **Containers:** the full H1-H6 hardening plus `enforce`: if Docker ever failed to apply a control, the API and the
   Worker refuse to start rather than run weakened.
 - **Redis:** never published; ACL with passwords; `noeviction` and AOF so jobs are not silently lost.
-- **Edge:** Cloudflare only (firewall + mTLS + Caddy `remote_ip`), so `CF-Connecting-IP` cannot be forged, and rab-api
-  trusts it only from `172.30.0.1`.
+- **Edge:** what proves a request came through OUR Cloudflare zone is only the per-hostname client certificate
+  (signed by our own CA; Caddy `require_and_verify` against that CA alone; `strict_sni_host on`). The Cloud Firewall and
+  Caddy's `remote_ip` rule admit every Cloudflare customer and are outer filters only; Cloudflare's provided
+  origin-pull certificate would be no better (it is shared by all customers). With the client certificate, `CF-Connecting-IP` is set by
+  our zone, and rab-api trusts it only from `172.16.30.1`. Host processes reaching `127.0.0.1:3000` are trusted too
+  (§6 caution). Docker Engine 28+ keeps the loopback-published port unreachable from neighbours (§4.4).
 
 ## 10. Open questions and assumptions (flagged, not decided here)
 

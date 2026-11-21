@@ -162,8 +162,8 @@ test('database.env: the mounted cluster CA is required; inline PEM, self-signed 
 test('runtime.env: TRUSTED_PROXY_CIDRS must be exactly the fixed gateway', () => {
   const r = v.digitalOceanRuntimeText();
   assert.deepEqual(v.lintRuntimeEnv(r), []);
-  for (const bad of ['127.0.0.1/32', '172.30.0.0/24', '0.0.0.0/0', '172.30.0.1/32,10.0.0.1/32']) {
-    assertRefused(v.lintRuntimeEnv(withKey(r, 'TRUSTED_PROXY_CIDRS', bad)), /TRUSTED_PROXY_CIDRS: must be exactly 172\.30\.0\.1\/32/);
+  for (const bad of ['127.0.0.1/32', '172.16.30.0/24', '0.0.0.0/0', '172.16.30.1/32,10.0.0.1/32']) {
+    assertRefused(v.lintRuntimeEnv(withKey(r, 'TRUSTED_PROXY_CIDRS', bad)), /TRUSTED_PROXY_CIDRS: must be exactly 172\.16\.30\.1\/32/);
   }
 });
 
@@ -250,8 +250,8 @@ const WEAKENINGS = [
   ['OpenShip import guard removed', (m) => { m.services['rab-api'].volumes = m.services['rab-api'].volumes.filter((x) => x.type !== 'tmpfs'); }, /the OpenShip import guard\) is missing/],
   ['Redis without its ACL', (m) => { const c = m.services['rab-redis'].command; c.splice(c.indexOf('--aclfile'), 2); }, /rab-redis: --aclfile/],
   ['Redis ACL writable', (m) => { m.services['rab-redis'].volumes.find((x) => /acl/.test(x.target)).read_only = false; }, /rab-redis: the ACL file is not mounted read-only/],
-  ['edge subnet removed', (m) => { delete m.networks.default.ipam; }, /network default: must have exactly subnet 172\.30\.0\.0\/24/],
-  ['edge subnet changed', (m) => { m.networks.default.ipam.config[0].gateway = '172.30.0.254'; }, /network default: must have exactly subnet/],
+  ['edge subnet removed', (m) => { delete m.networks.default.ipam; }, /network default: must have exactly subnet 172\.16\.30\.0\/24/],
+  ['edge subnet changed', (m) => { m.networks.default.ipam.config[0].gateway = '172.16.30.254'; }, /network default: must have exactly subnet/],
   ['db network not internal', (m) => { m.networks['crewflow-db'].internal = false; }, /network crewflow-db is not internal/],
   ['admin URL on rab-api', (m) => { m.services['rab-api'].environment.PG_ADMIN_URL = 'postgresql://doadmin:x@h:25060/crewflow'; }, /rab-api: receives the database admin URL/],
   ['cluster CA not mounted', (m) => { m.services['rab-worker'].volumes.find((x) => x.target === '/run/crewflow/pg-ca.crt').source = '/dev/null'; }, /rab-worker: the cluster CA/],
@@ -286,4 +286,141 @@ test('a later override that weakens isolation through Compose merging is refused
 test('a compose.env that forgets CREWFLOW_BUNDLED_DB=0 is refused by the rendered check too', { skip }, () => {
   const text = withKey(composeTemplate(), 'CREWFLOW_BUNDLED_DB', null);
   assertRefused(v.checkModel(v.render({ composeEnvText: text })), /db-setup: CREWFLOW_BUNDLED_DB must render 0/);
+});
+
+// ------------------------------------------------------------------------------- security review of #332 (fix round 1)
+
+test('ACL (review LOW): both users at +@all, or anything re-added beyond info and the five client subcommands, is refused', () => {
+  const acl = aclTemplate();
+  const both = (fn) => acl.split('\n').map((l) => (/^user (default|crewflow) /.test(l) ? fn(l) : l)).join('\n');
+  const allOnly = both((l) => l.replace(/ \+@all .*$/, ' +@all'));
+  assertRefused(v.lintRedisAcl(allOnly), /user default: -@admin is missing/);
+  assertRefused(v.lintRedisAcl(allOnly), /user crewflow: -@dangerous is missing/);
+  assertRefused(v.lintRedisAcl(allOnly), /user crewflow: -flushall is missing/);
+  assertRefused(v.lintRedisAcl(both((l) => `${l} +flushall`)), /permission \+flushall is not allowed/);
+  assertRefused(v.lintRedisAcl(both((l) => `${l} +@admin`)), /permission \+@admin is not allowed/);
+  assertRefused(v.lintRedisAcl(both((l) => `${l} +config|get`)), /permission \+config\|get is not allowed/);
+  assertRefused(v.lintRedisAcl(both((l) => `${l} allcommands`)), /permission allcommands is not allowed/);
+  assertRefused(v.lintRedisAcl(both((l) => `${l} %RW~*`)), /permission %RW~\* is not allowed/);
+  // A denial placed before +@all is undone by it (rules apply left to right).
+  assertRefused(v.lintRedisAcl(both((l) => l.replace(' -keys', '').replace(' +@all', ' -keys +@all'))), /-keys must come after \+@all/);
+});
+
+test('URLs (review LOW): a query key given twice is refused (sslmode=verify-full&sslmode=disable)', () => {
+  const t = composeTemplate();
+  assertRefused(v.lintComposeEnv(adminLine(t, (l) => `${l}&sslmode=disable`)), /PG_ADMIN_URL: the sslmode parameter appears more than once/);
+  const urlOnly = ['PG_DATABASE_APP_PASSWORD', 'PG_DATABASE_HOST', 'PG_DATABASE_PORT', 'PG_DATABASE_NAME'].reduce((s, k) => withKey(s, k, null), t);
+  const owner = `postgresql://crewflow_owner:${'a'.repeat(64)}@${v.SENTINEL_HOST}:25060/crewflow?sslmode=verify-full&sslmode=disable`;
+  assertRefused(v.lintComposeEnv(withKey(urlOnly, 'PG_DATABASE_URL', owner)), /PG_DATABASE_URL: the sslmode parameter appears more than once/);
+});
+
+test('the rendered shape refuses a duplicated sslmode in the owner URL', { skip }, () => {
+  const dup = (m) => {
+    for (const s of ['rab-api', 'rab-worker', 'db-setup', 'db-harden']) m.services[s].environment.PG_DATABASE_URL += '&sslmode=disable';
+  };
+  assertRefused(problemsAfter(dup), /the sslmode parameter appears more than once/);
+});
+
+const caddyTemplate = () => read(v.TEMPLATES.caddyfile).replace(/<api-host>/g, 'api.example.com');
+
+test('Caddyfile (review MEDIUM): the template passes; per-hostname AOP, require_and_verify and strict_sni_host are required', () => {
+  assert.deepEqual(v.lintCaddyfile(caddyTemplate()), []);
+  const c = caddyTemplate();
+  // Directive lines only (the header comments mention the same words; comments are ignored by the lint).
+  const pool = 'trust_pool file /etc/caddy/tls/crewflow-aop-ca.pem';
+  assertRefused(v.lintCaddyfile(c.replace('\t\tstrict_sni_host on\n', '')), /strict_sni_host on is missing/);
+  assertRefused(v.lintCaddyfile(c.replace('\t\tstrict_sni_host on', '\t\tstrict_sni_host insecure_off')), /strict_sni_host/);
+  for (const mode of ['request', 'require', 'verify_if_given']) assertRefused(v.lintCaddyfile(c.replace('\t\t\tmode require_and_verify', `\t\t\tmode ${mode}`)), /mode must be exactly require_and_verify/);
+  assertRefused(v.lintCaddyfile(c.replace(/\t\tclient_auth \{[\s\S]*?\n\t\t\}\n/, '')), /no client_auth/);
+  assertRefused(v.lintCaddyfile(c.replace(pool, 'trust_pool file /etc/caddy/tls/cloudflare-origin-pull-ca.pem')), /named like Cloudflare's SHARED origin-pull CA/);
+  assertRefused(v.lintCaddyfile(c.replace(pool, 'trust_pool file /etc/caddy/tls/origin_pull_ca.pem')), /SHARED origin-pull CA/);
+  assertRefused(v.lintCaddyfile(c.replace(/trust_pool file \S+/, 'trust_pool inline {\n\t\t\t\ttrust_der x\n\t\t\t}')), /exactly one "trust_pool file <our CA>"/);
+  assertRefused(v.lintCaddyfile(c.replace('reverse_proxy 127.0.0.1:3000', 'reverse_proxy 10.0.0.5:3000')), /reverse_proxy must target rab-api on loopback only/);
+  assertRefused(v.lintCaddyfile(c.replace('redir https://{host}{uri} permanent', 'reverse_proxy 127.0.0.1:3000')), /proxies over plain HTTP/);
+  assertRefused(v.lintCaddyfile(`${c}\n}`), /braces do not balance/);
+});
+
+let opensslAvailable = true;
+try {
+  execFileSync('openssl', ['version'], { stdio: 'ignore' });
+} catch {
+  opensslAvailable = false;
+}
+
+test('Caddyfile trust pool: our CA passes; a Cloudflare-issued CA or a non-CA certificate is refused', { skip: opensslAvailable ? false : 'openssl is not available' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'do-aop-'));
+  const cert = (name, subj, ca) => {
+    const key = path.join(dir, `${name}.key`);
+    const crt = path.join(dir, `${name}.crt`);
+    const args = ['req', '-x509', '-new', '-nodes', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-keyout', key, '-out', crt, '-days', '2', '-subj', subj,
+      '-addext', `basicConstraints=critical,CA:${ca ? 'TRUE' : 'FALSE'}`];
+    execFileSync('openssl', args, { stdio: 'ignore', env: { ...process.env, MSYS_NO_PATHCONV: '1' } });
+    return fs.readFileSync(crt, 'utf8');
+  };
+  const unreadable = () => {
+    throw new Error('ENOENT');
+  };
+  try {
+    assert.deepEqual(v.trustPoolPemProblems(cert('ours', '/CN=Crewflow AOP CA', true), 'site'), []);
+    assertRefused(v.trustPoolPemProblems(cert('cf', '/O=Cloudflare, Inc./OU=Origin Pull/CN=origin-pull.cloudflare.net', true), 'site'), /Cloudflare-issued certificate/);
+    assertRefused(v.trustPoolPemProblems(cert('leaf', '/CN=Crewflow AOP client', false), 'site'), /not a CA certificate/);
+    assertRefused(v.trustPoolPemProblems('no certificate here', 'site'), /holds no certificate/);
+    // Through the Caddyfile lint with a reader (what --lint-caddyfile does on the server).
+    const ours = cert('ours2', '/CN=Crewflow AOP CA', true);
+    assert.deepEqual(v.lintCaddyfile(caddyTemplate(), { readFile: () => ours }), []);
+    assertRefused(v.lintCaddyfile(caddyTemplate(), { readFile: unreadable }), /trust pool file cannot be read/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A server-shaped /etc/crewflow in a temp dir: compose.env + secrets, from the templates; `runtimeEdit` changes runtime.env. */
+function serverDir(runtimeEdit = (r) => r) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'do-env-'));
+  const secrets = path.join(dir, 'secrets');
+  fs.mkdirSync(secrets);
+  fs.writeFileSync(path.join(secrets, 'database.env'), databaseTemplate());
+  fs.writeFileSync(path.join(secrets, 'runtime.env'), runtimeEdit(v.digitalOceanRuntimeText()));
+  fs.writeFileSync(path.join(secrets, 'redis-users.acl'), aclTemplate());
+  const compose = withKey(composeTemplate(), 'CREWFLOW_SECRETS_DIR', secrets.split(path.sep).join('/'));
+  fs.writeFileSync(path.join(dir, 'compose.env'), compose);
+  return { dir, compose, composeFile: path.join(dir, 'compose.env') };
+}
+
+test('--environment (review LOW) lints database.env, runtime.env and the ACL under CREWFLOW_SECRETS_DIR', () => {
+  const good = serverDir();
+  const bad = serverDir((r) => withKey(r, 'TRUSTED_PROXY_CIDRS', '0.0.0.0/0'));
+  try {
+    for (const [, problems] of v.environmentFileProblems(good.compose)) assert.deepEqual(problems, []);
+    assertRefused(v.environmentFileProblems(bad.compose).flatMap(([, p]) => p), /TRUSTED_PROXY_CIDRS: must be exactly 172\.16\.30\.1\/32/);
+    fs.rmSync(path.join(good.dir, 'secrets', 'redis-users.acl'));
+    assertRefused(v.environmentFileProblems(good.compose).flatMap(([, p]) => p), /redis-users\.acl: cannot read it/);
+    assertRefused(v.environmentFileProblems(withKey(good.compose, 'CREWFLOW_SECRETS_DIR', 'relative/dir')).flatMap(([, p]) => p), /CREWFLOW_SECRETS_DIR: missing or not an absolute path/);
+  } finally {
+    fs.rmSync(good.dir, { recursive: true, force: true });
+    fs.rmSync(bad.dir, { recursive: true, force: true });
+  }
+});
+
+test('--environment fails (exit 1) on a bad TRUSTED_PROXY_CIDRS and passes on the templates', { skip }, () => {
+  const run = (composeFile) => {
+    try {
+      execFileSync(process.execPath, [path.join(__dirname, 'verify-digitalocean.cjs'), '--environment', '--env-file', composeFile], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      return { status: 0, out: '' };
+    } catch (e) {
+      return { status: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+    }
+  };
+  const good = serverDir();
+  const bad = serverDir((r) => withKey(r, 'TRUSTED_PROXY_CIDRS', '172.16.30.0/24'));
+  try {
+    assert.equal(run(good.composeFile).status, 0);
+    const r = run(bad.composeFile);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /FAIL runtime\.env .*TRUSTED_PROXY_CIDRS/);
+    assert.ok(!r.out.includes(v.SENTINEL_ADMIN_PW), 'a value was printed');
+  } finally {
+    fs.rmSync(good.dir, { recursive: true, force: true });
+    fs.rmSync(bad.dir, { recursive: true, force: true });
+  }
 });
