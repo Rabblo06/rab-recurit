@@ -4,6 +4,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion, useReducedMotion } from 'framer-motion';
 import { api } from '../shared/api';
+import { capabilitiesQuery } from '../shared/queries/navQueries';
 import { PageSlotsProvider } from '../shared/page-slots';
 import { DelayedFallback, PageSkeleton } from '../shared/components/RouteFallback';
 import { preloadMainPages, preloadNavTarget, whenIdle } from './consolePages';
@@ -14,7 +15,7 @@ import { hasPendingWelcome, clearPendingWelcome } from '../features/onboarding/o
 import {
   IconSettings, IconChevronDown,
   IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
-  IconCalendarMonth, IconCash, IconMapPin, IconHistory,
+  IconCalendarMonth, IconCash, IconMapPin, IconHistory, IconFileSpreadsheet,
   IconDots, IconMail, IconSend2, IconAdjustmentsHorizontal, IconHelpCircle, IconLifebuoy,
   IconSearch, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand, IconMenu2, IconX, IconLayoutGrid, IconCalendarCheck, IconSparkles, IconLayoutSidebarRightExpand, IconPencilPlus,
 } from '@tabler/icons-react';
@@ -68,6 +69,9 @@ const operationsNav: NavEntry[] = [
 
 // Audit Log is manager-only server-side (PermissionGuard(AUDIT_VIEW)); listed for the roles that hold it by default.
 const auditNav: NavEntry = { to: '/audit', label: 'Audit Log', Icon: IconHistory };
+
+// Reports (owner decision 29): shown when the server's capability hints say `report.view`; every call re-checks it.
+const reportsNav: NavEntry = { to: '/reports', label: 'Reports', Icon: IconFileSpreadsheet };
 
 // Help and support for everyone in the shell (Support shows an honest "not set up" state without a configured channel).
 const helpNav: NavEntry[] = [
@@ -224,6 +228,8 @@ function LayoutContent() {
     return next;
   });
   const canSeeAudit = !!me?.roles.some(role => ['manager', 'ceo'].includes(role));
+  const capabilities = useQuery({ ...capabilitiesQuery, enabled: !!me });
+  const canSeeReports = capabilities.data?.['report.view'] === true;
   const isOrgAdmin = !!(me?.isPlatformAdmin || me?.roles.includes('ceo'));
   const shortcuts = useNavShortcuts(me?.id ?? null, workspace?.id);
   // AI entry points (Ask AI, the AI mode) exist only for a user the server confirms as eligible right now
@@ -253,7 +259,7 @@ function LayoutContent() {
   }, []);
   // Real COUNT(*) of active offers (the same cached query the Dashboard uses); null when the caller lacks the permission.
   const { data: navSummary } = useQuery({ queryKey: ['dashboard-summary'], enabled: !!me && !isPlatformAdminOnly, queryFn: async () => (await api.get('/dashboard/summary')).data as { activeOfferCount?: number | null }, staleTime: 60_000 });
-  const activePage = [...workspaceNav, ...operationsNav, auditNav, ...helpNav, ...additionalPages].find(item => item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to));
+  const activePage = [...workspaceNav, ...operationsNav, auditNav, reportsNav, ...helpNav, ...additionalPages].find(item => item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to));
   const PageIcon = activePage?.Icon || IconUsers;
   useEffect(() => { setMobileNav(false); setWorkspaceMenu(false); }, [location.pathname]);
   useEffect(() => {
@@ -383,6 +389,7 @@ function LayoutContent() {
               <ShortcutList items={shortcuts.items} canSeeAudit={canSeeAudit} isOrgAdmin={isOrgAdmin} onRename={shortcuts.rename} onRemove={shortcuts.remove}/>
             </SidebarSection>
             <SidebarSection id="workspace" label="Workspace" collapsed={collapsedSections.includes('workspace')} onToggle={toggleSection}>
+              {canSeeReports && <SidebarLink item={reportsNav}/>}
               {canSeeAudit && <SidebarLink item={auditNav}/>}
               {helpNav.map(item => <SidebarLink key={item.to} item={item}/>)}
             </SidebarSection>

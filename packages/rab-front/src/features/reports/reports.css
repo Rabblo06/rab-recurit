@@ -1,0 +1,11 @@
+/* Reports page (owner decision 29). Uses the shell's tokens only. */
+.reports-page { background: var(--bg-secondary); }
+.reports-scroll { padding: 28px 28px 48px; display: flex; flex-direction: column; gap: 20px; }
+.reports-card { display: flex; flex-direction: column; gap: 14px; padding: 20px; border: 1px solid var(--border-light); border-radius: var(--radius-xl); background: var(--bg-primary); max-width: 960px; }
+.reports-card h2 { font-size: 15px; font-weight: 500; color: var(--font-primary); }
+.reports-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.reports-help { font-size: 12.5px; line-height: 19px; color: var(--font-secondary); }
+.reports-table td { vertical-align: middle; }
+.reports-tag { margin-left: 6px; padding: 1px 6px; border-radius: 6px; background: var(--bg-transparent-medium); font-size: 11px; color: var(--font-secondary); }
+.reports-status-failed { color: var(--color-danger, #c0392b); }
+.reports-status-pending { color: var(--font-secondary); }
