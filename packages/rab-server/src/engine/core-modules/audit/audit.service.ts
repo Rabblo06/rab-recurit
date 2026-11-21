@@ -118,6 +118,14 @@ export const AuditAction = {
   PAYSLIP_UPLOADED: 'payslip.uploaded',
   PAYSLIP_NET_RECORDED: 'payslip.net_recorded',
   PAYSLIP_MARKED_PAID: 'payslip.marked_paid',
+  // Lane D staff documents (StaffDocumentService). entityType 'staff_document'; targetUserId = the staff member. Metadata
+  // carries type, dates, status, scan state and file id — never the file name or contents.
+  STAFF_DOCUMENT_UPLOADED: 'staff_document.uploaded',
+  STAFF_DOCUMENT_UPLOAD_REJECTED: 'staff_document.upload_rejected',
+  STAFF_DOCUMENT_VERIFIED: 'staff_document.verified',
+  STAFF_DOCUMENT_REJECTED: 'staff_document.rejected',
+  STAFF_DOCUMENT_REVOKED: 'staff_document.revoked',
+  STAFF_DOCUMENT_REQUIREMENTS_CHANGED: 'staff_document.requirements_changed',
   STAFF_REVIEW_SAVED: 'shift_review.saved',
   // Wave 5 (lane DATA) — named archive/restore actions. `entityType`/`entityId` = the archived record; staff and
   // manager rows also carry `targetUserId` so the person's timeline shows them. Metadata never carries pay or email.

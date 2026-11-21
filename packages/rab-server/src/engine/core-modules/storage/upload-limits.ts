@@ -61,3 +61,27 @@ export const PAYSLIP_MAX_BYTES = 10 * 1024 * 1024;
 export const LOGO_MAX_BYTES = 10 * 1024 * 1024;
 /** Venue profile photo (JPEG/PNG/WebP). Matches FILE_KIND_RULES.VENUE_PHOTO; FileService.validateContent re-checks the bytes. */
 export const VENUE_PHOTO_MAX_BYTES = 5 * 1024 * 1024;
+
+/** Staff document (PDF / PNG / JPEG). Matches FILE_KIND_RULES.STAFF_DOCUMENT; FileService.validateContent re-checks the bytes. */
+export const STAFF_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * One file part plus up to `maxFields` short, flat text fields (a document upload's type and dates). Same CVE hardening as
+ * singleImageUploadOptions: no nested or array-indexed field names, tight per-field size, a loose outer `parts` bound
+ * (Busboy needs one part of headroom, see above). The DTO (forbidNonWhitelisted) decides which field NAMES are allowed.
+ */
+export function singleDocumentUploadOptions(maxBytes: number, maxFields: number) {
+  return {
+    storage: memoryStorage(),
+    limits: {
+      fileSize: maxBytes,
+      files: 1,
+      fields: maxFields,
+      fieldSize: 200,
+      fieldNameSize: 50,
+      parts: maxFields + 2,
+      fieldNestingDepth: 0,
+      fieldArrayIndexLimit: 0,
+    },
+  };
+}
