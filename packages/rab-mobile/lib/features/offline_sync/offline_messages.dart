@@ -39,7 +39,9 @@ abstract final class OfflineMessages {
       : 'Your clock-in was recorded as ${hhmm(appliedAt)}, your shift start. Ask your manager if this is wrong.';
 
   static const sendSavedFirst =
-      'Actions saved on this phone must be sent first. Connect to the internet and try again.';
+      "No connection. Actions saved on this phone are sent before this one. Try again when you're back online.";
+  static const discardConfirm =
+      'Discard everything saved on this phone? It will never be sent, and your manager will not be told.';
 
   static const stillNotSent =
       'Still not sent. Connect to the internet and try again.';

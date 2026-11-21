@@ -171,14 +171,23 @@ class AttendanceProvider extends ChangeNotifier {
     );
   }
 
-  /// Security review L5: an online punch must never overtake punches still saved on this phone. When it cannot be
-  /// saved behind them (offline mode now off, ticket expired, no device key), the saved ones are sent first; if any are
-  /// still waiting, the punch is refused with a clear message instead of going online out of order.
+  /// Security review L5: an online punch should not overtake punches still saved on this phone. When it cannot be
+  /// saved behind them (offline mode now off, ticket expired, no device key), the saved ones are sent first.
+  ///
+  /// Re-review M: this must never stop online punching. It holds the punch back ONLY when that send found genuinely no
+  /// connection (so the online request would fail too, and the message is clearer). A flag-off build (which never
+  /// sends), a sync route answering 5xx / 403 / 404 / 429, an entry the server left unanswered, or any other failure
+  /// lets the punch go online: the server decides, and a punch arriving out of order can only pay less (D3).
   Future<bool> _blockedByUnsent() async {
     final offline = _offline;
-    if (offline == null || !offline.hasUnsent || offline.mayQueue) return false;
+    if (offline == null ||
+        !offline.hasUnsent ||
+        offline.mayQueue ||
+        !offline.canSend) {
+      return false;
+    }
     await offline.syncNow(userInitiated: true);
-    if (!offline.hasUnsent) return false;
+    if (!offline.hasUnsent || !offline.lastSyncHadNoNetwork) return false;
     errorMessage = OfflineMessages.sendSavedFirst;
     errorCode = 'OFFLINE_UNSENT';
     return true;

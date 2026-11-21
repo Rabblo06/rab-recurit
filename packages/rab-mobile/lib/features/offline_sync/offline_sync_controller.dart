@@ -98,6 +98,15 @@ class OfflineSyncController extends ChangeNotifier {
 
   bool get isSyncing => _flight.isRunning;
 
+  /// Whether this controller can send at all (a client exists and the build has the offline flag). A flag-off build is
+  /// inert: it never sends, so it must never hold back an online punch either (re-review M).
+  bool get canSend => _client != null && _buildFlag;
+
+  /// The last run stopped because there was genuinely no connection (no response at all), as opposed to a server
+  /// answer (5xx, 403, 404, 429, an unanswered entry) or a session mismatch.
+  bool _lastSyncNoNetwork = false;
+  bool get lastSyncHadNoNetwork => _lastSyncNoNetwork;
+
   /// Something for the banner to show.
   bool get hasSomethingToShow =>
       _entries.isNotEmpty || unreadable || notices.isNotEmpty;
@@ -461,6 +470,7 @@ class OfflineSyncController extends ChangeNotifier {
     } catch (_) {
       return;
     }
+    _lastSyncNoNetwork = false;
     _notify(); // isSyncing
     var acknowledged = false;
     try {
@@ -528,8 +538,9 @@ class OfflineSyncController extends ChangeNotifier {
       throw const _StopSync();
     } on _StopSync {
       rethrow;
-    } catch (_) {
+    } catch (e) {
       // Network, timeout, malformed body, storage: keep everything, try later.
+      _lastSyncNoNetwork = isNoResponseFailure(e);
       _backOff();
       throw const _StopSync();
     }

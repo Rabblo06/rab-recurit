@@ -10,6 +10,7 @@ import 'package:rab_staff/core/models/offer.dart';
 import 'package:rab_staff/features/home/attendance_provider.dart';
 import 'package:rab_staff/features/offline_sync/offline_entry.dart';
 import 'package:rab_staff/features/offline_sync/offline_messages.dart';
+import 'package:rab_staff/features/offline_sync/offline_queue_store.dart';
 import 'package:rab_staff/features/offline_sync/offline_sync_client.dart';
 import 'package:rab_staff/features/offline_sync/offline_sync_controller.dart';
 
@@ -391,7 +392,7 @@ void main() {
 
   group('security review L5: an online punch never overtakes saved ones', () {
     Future<(AttendanceProvider, OfflineSyncController, List<String>)>
-    setUpSaved({required bool syncWorks}) async {
+    setUpSaved({required bool syncWorks, int? syncStatus}) async {
       var enabled = true;
       final posted = <String>[];
       final api = ApiClient(
@@ -412,6 +413,9 @@ void main() {
             return http.Response('[]', 200);
           }
           posted.add(path);
+          if (path.endsWith('/attendance/me/sync') && syncStatus != null) {
+            return http.Response('{"message":"x"}', syncStatus);
+          }
           if (path.endsWith('/attendance/me/sync') && syncWorks) {
             final entries =
                 ((jsonDecode(request.body) as Map)['entries'] as List)
@@ -486,8 +490,73 @@ void main() {
         final (provider, offline, posted) = await setUpSaved(syncWorks: true);
         await provider.clockOut(qrToken: 'qr-out');
         expect(offline.hasUnsent, isFalse);
-          expect(posted.last, endsWith('/attendance/clock-out'));
+        expect(posted.last, endsWith('/attendance/clock-out'));
       },
     );
+
+    for (final status in [500, 503, 403, 404]) {
+      test(
+        're-review M: a sync route answering $status never blocks online punching',
+        () async {
+          final (provider, offline, posted) = await setUpSaved(
+            syncWorks: false,
+            syncStatus: status,
+          );
+          final ok = await provider.clockOut(qrToken: 'qr-out');
+          expect(ok, isTrue);
+          expect(provider.errorMessage, isNull);
+          expect(posted.last, endsWith('/attendance/clock-out'));
+          expect(
+            offline.hasUnsent,
+            isTrue,
+            reason: 'the saved punch stays for the next sync',
+          );
+        },
+      );
+    }
   });
+
+  test(
+    're-review M: a flag-off build with leftover saved punches can still clock in online',
+    () async {
+      await OfflineQueueStore().append('user-a', samplePunch());
+      final posted = <String>[];
+      final api = ApiClient(
+        httpClient: MockClient((request) async {
+          final path = request.url.path;
+          if (path.endsWith('/attendance/me/active')) {
+            return http.Response(
+              jsonEncode({
+                'attendance': null,
+                'serverNow': '2026-11-21T09:30:00.000Z',
+              }),
+              200,
+            );
+          }
+          if (path.endsWith('/attendance/me/history')) {
+            return http.Response('[]', 200);
+          }
+          posted.add(path);
+          if (path.endsWith('/attendance/clock-in')) {
+            return http.Response(jsonEncode(attendanceJson()), 201);
+          }
+          return http.Response('{"message":"x"}', 500);
+        }),
+      );
+      final offline = OfflineSyncController(
+        userId: 'user-a',
+        bootClock: FakeBootClock(),
+        signer: FakeEntrySigner(),
+        buildFlag: false,
+        client: OfflineSyncClient(api),
+      );
+      final provider = AttendanceProvider(api, offline: offline);
+      await provider.refreshActive();
+      expect(offline.hasUnsent, isTrue);
+      final ok = await provider.clockIn('shift-1', qrToken: 'qr');
+      expect(ok, isTrue);
+      expect(posted.single, endsWith('/attendance/clock-in'));
+      expect(posted.where((p) => p.endsWith('/attendance/me/sync')), isEmpty);
+    },
+  );
 }

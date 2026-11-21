@@ -487,6 +487,41 @@ void main() {
       },
     );
   });
+
+  testWidgets(
+    're-review M: Saved actions has a visible "Discard saved actions" button that asks first',
+    (tester) async {
+      await OfflineQueueStore().append('user-a', samplePunch());
+      final c = controller();
+      await c.ready;
+      await tester.pumpWidget(
+        ChangeNotifierProvider<OfflineSyncController>.value(
+          value: c,
+          child: const MaterialApp(home: SavedActionsScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('offline-discard-all')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('offline-discard-confirm')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('offline-discard-cancel')));
+      await tester.pumpAndSettle();
+      expect(c.hasUnsent, isTrue, reason: 'cancel keeps everything');
+
+      await tester.tap(find.byKey(const ValueKey('offline-discard-all')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('offline-discard-confirm-yes')),
+      );
+      await tester.pumpAndSettle();
+      expect(c.entries, isEmpty);
+      expect(secure.containsKey(OfflineQueueStore.queueKey('user-a')), isFalse);
+      expect(find.byKey(const ValueKey('offline-discard-all')), findsNothing);
+    },
+  );
 }
 
 /// A store whose first [load] fails (secure storage unavailable at start-up), then works.

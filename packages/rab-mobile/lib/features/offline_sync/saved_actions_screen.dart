@@ -70,6 +70,17 @@ class SavedActionsScreen extends StatelessWidget {
                             : () => offline!.dismiss(punch.idempotencyKey),
                       ),
                     ),
+                  if (entries.isNotEmpty)
+                    Center(
+                      child: TextButton(
+                        key: const ValueKey('offline-discard-all'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: ScheduleTokens.errorText,
+                        ),
+                        onPressed: () => _confirmDiscard(context, offline!),
+                        child: const Text('Discard saved actions'),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -103,5 +114,43 @@ class _SavedActionRow extends StatelessWidget {
       actionLabel: onDismiss == null ? null : 'Dismiss',
       onAction: onDismiss,
     );
+  }
+}
+
+/// Re-review M: a visible way out when saved actions can never be sent. Asks first; discarded = never sent, and the
+/// manager is not told (D18).
+Future<void> _confirmDiscard(
+  BuildContext context,
+  OfflineSyncController offline,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialog) => AlertDialog(
+      key: const ValueKey('offline-discard-confirm'),
+      title: const Text('Discard saved actions?'),
+      content: const Text(OfflineMessages.discardConfirm),
+      actions: [
+        TextButton(
+          key: const ValueKey('offline-discard-cancel'),
+          onPressed: () => Navigator.pop(dialog, false),
+          child: const Text('Keep them'),
+        ),
+        TextButton(
+          key: const ValueKey('offline-discard-confirm-yes'),
+          onPressed: () => Navigator.pop(dialog, true),
+          child: const Text('Discard'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+  try {
+    await offline.discardAll();
+  } catch (_) {
+    if (context.mounted) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text(OfflineMessages.unreadable)),
+      );
+    }
   }
 }

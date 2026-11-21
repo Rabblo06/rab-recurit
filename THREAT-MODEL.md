@@ -10422,7 +10422,11 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   - *Punches overtaking each other (security review L5).* The run stops at the first entry a response leaves
     unanswered (also inside a 400 one-at-a-time resend), so nothing later in `clientSeq` order is sent before it. An
     online punch never overtakes saved ones: when it cannot be saved behind them (offline now off, ticket expired, no
-    device key), the saved ones are sent first, and if any are still waiting the punch is refused ("must be sent first").
+    device key), the saved ones are sent first. That never stops online punching (re-review M): the punch is held back
+    only when the send found genuinely no connection (the online request would fail too). A flag-off build, a sync
+    route answering 5xx / 403 / 404 / 429, or an unanswered entry lets the punch go online (the server decides; out of
+    order can only pay less, D3). Saved actions has a visible "Discard saved actions" button, with confirmation, as
+    the way out when saved actions can never be sent.
   - *Sending in the wrong session, or from a flag-off build (security review L6).* Before every request the session
     user stored by the API client must equal the queue's user (fails closed when unknown), closing the account-switch
     window. A build without the offline flag never calls the sync endpoint, even for leftovers (they stay visible and
