@@ -9,7 +9,6 @@ import android.os.Environment
 import android.os.PersistableBundle
 import android.os.SystemClock
 import android.provider.MediaStore
-import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -60,17 +59,19 @@ class MainActivity : FlutterFragmentActivity() {
         }
         // M4 offline clock-in (docs/plans/m4-offline/DESIGN.md §3.3): the boot clock the offline queue measures elapsed
         // time with. elapsedRealtime counts deep sleep (System.nanoTime / Dart's Stopwatch do not, which would make an
-        // offline punch look earlier than it was). BOOT_COUNT tells two boot sessions apart; when the device does not
-        // expose it the reading is refused and nothing can be queued (fail closed). No identifier or secret crosses this
-        // channel, and offline mode itself is off (owner HARD RULE).
+        // offline punch look earlier than it was). The boot session is the kernel's random per-boot UUID
+        // (/proc/sys/kernel/random/boot_id), which no user, app or adb shell can write. NOT Settings.Global.BOOT_COUNT:
+        // `adb shell settings put global boot_count N` rewrites it without root (security review M1). When boot_id cannot
+        // be read the reading is refused and nothing can be queued (fail closed). No secret crosses this channel, and
+        // offline mode itself is off (owner HARD RULE).
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "rab/boot_clock").setMethodCallHandler { call, result ->
             if (call.method != "read") {
                 result.notImplemented()
                 return@setMethodCallHandler
             }
             try {
-                val bootCount = Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT)
-                result.success(mapOf("bootCount" to bootCount, "elapsedRealtimeMs" to SystemClock.elapsedRealtime()))
+                val bootId = java.io.File("/proc/sys/kernel/random/boot_id").readText().trim()
+                result.success(mapOf("bootId" to bootId, "elapsedRealtimeMs" to SystemClock.elapsedRealtime()))
             } catch (e: Exception) {
                 result.success(null)
             }

@@ -79,9 +79,11 @@ class OfflineQueueStore {
     }
   }
 
-  /// The encoded document, refused when it breaks a §3.4 limit.
-  static String encode(List<QueuedPunch> entries) {
-    if (entries.length > OfflineLimits.maxEntries) {
+  /// The encoded document. With [enforceLimits] (a new capture) it is refused when it breaks a §3.4 limit. Sync
+  /// outcomes and dismissals ([update]) never enforce them: they can only remove entries or set a short, capped code,
+  /// and refusing them would jam a near-full queue (security review L4).
+  static String encode(List<QueuedPunch> entries, {bool enforceLimits = true}) {
+    if (enforceLimits && entries.length > OfflineLimits.maxEntries) {
       throw const OfflineQueueFullException('too_many_entries');
     }
     final sorted = [...entries]
@@ -90,18 +92,25 @@ class OfflineQueueStore {
       'v': _docVersion,
       'entries': [for (final e in sorted) e.toStoreJson()],
     });
-    if (utf8.encode(encoded).length > OfflineLimits.maxBytes) {
+    if (enforceLimits && utf8.encode(encoded).length > OfflineLimits.maxBytes) {
       throw const OfflineQueueFullException('too_large');
     }
     return encoded;
   }
 
-  Future<void> _save(String userId, List<QueuedPunch> entries) async {
+  Future<void> _save(
+    String userId,
+    List<QueuedPunch> entries, {
+    bool enforceLimits = true,
+  }) async {
     if (entries.isEmpty) {
       await _storage.delete(key: queueKey(userId));
       return;
     }
-    await _storage.write(key: queueKey(userId), value: encode(entries));
+    await _storage.write(
+      key: queueKey(userId),
+      value: encode(entries, enforceLimits: enforceLimits),
+    );
   }
 
   /// Adds one captured punch. Refused (nothing written) when the queue is full, too large, unreadable, or already
@@ -140,11 +149,25 @@ class OfflineQueueStore {
     if (next.any((e) => !keys.contains(e.idempotencyKey))) {
       throw StateError('update() may not add entries');
     }
-    await _save(userId, next);
+    await _save(userId, next, enforceLimits: false);
     return List.unmodifiable(
       next..sort((a, b) => a.entry.clientSeq.compareTo(b.entry.clientSeq)),
     );
   });
+
+  /// Logout once nothing is waiting: under the lock, re-reads the stored queue and deletes the queue and ticket only
+  /// when it holds no pending entry and is readable. Returns null when it cleared, otherwise what is stored (nothing is
+  /// deleted). A storage error propagates (the caller refuses to log out silently).
+  Future<OfflineQueueSnapshot?> clearIfNothingUnsent(String userId) =>
+      _locked(() async {
+        final snapshot = await _load(userId);
+        if (snapshot.unreadable || snapshot.entries.any((e) => e.isPending)) {
+          return snapshot;
+        }
+        await _storage.delete(key: queueKey(userId));
+        await _storage.delete(key: ticketKey(userId));
+        return null;
+      });
 
   /// Deletes this user's queue and ticket (explicit discard, or logout once nothing is waiting to send).
   Future<void> clear(String userId) => _locked(() async {

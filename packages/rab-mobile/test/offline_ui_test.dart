@@ -337,6 +337,37 @@ void main() {
       },
     );
 
+    testWidgets(
+      'security review L3: start-up could not read the store; logout shows the guard and keeps the stored queue',
+      (tester) async {
+        await withPending();
+        final c = OfflineSyncController(
+          userId: 'user-a',
+          store: _FailsFirstLoad(),
+          bootClock: FakeBootClock(),
+          signer: FakeEntrySigner(),
+          buildFlag: true,
+        );
+        await c.ready;
+        expect(c.entries, isEmpty);
+        var logouts = 0;
+        await pumpGuard(tester, c, (n) => logouts = n);
+        await tester.tap(find.text('Log out'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('offline-logout-guard')),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const ValueKey('offline-logout-stay')));
+        await tester.pumpAndSettle();
+        expect(logouts, 0);
+        expect(
+          secure.containsKey(OfflineQueueStore.queueKey('user-a')),
+          isTrue,
+        );
+      },
+    );
+
     testWidgets('nothing unsent, or no controller: logs out straight away', (
       tester,
     ) async {
@@ -419,4 +450,17 @@ void main() {
       },
     );
   });
+}
+
+/// A store whose first [load] fails (secure storage unavailable at start-up), then works.
+class _FailsFirstLoad extends OfflineQueueStore {
+  var _failed = false;
+  @override
+  Future<OfflineQueueSnapshot> load(String userId) {
+    if (!_failed) {
+      _failed = true;
+      return Future.error(StateError('secure storage unavailable'));
+    }
+    return super.load(userId);
+  }
 }

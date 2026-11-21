@@ -287,9 +287,15 @@ class QueuedPunch {
     entry: entry,
     displayAt: displayAt,
     state: state,
-    code: code,
-    qrReason: qrReason,
+    code: _cap(code, maxCodeLength),
+    qrReason: _cap(qrReason, maxReasonLength),
   );
+
+  /// Server-supplied strings are capped before they are stored, so sync results can never grow the queue much.
+  static const int maxCodeLength = 49;
+  static const int maxReasonLength = 32;
+  static String? _cap(String? value, int max) =>
+      value == null || value.length <= max ? value : value.substring(0, max);
 
   Map<String, Object?> toStoreJson() => {
     'entry': entry.toWireJson(),

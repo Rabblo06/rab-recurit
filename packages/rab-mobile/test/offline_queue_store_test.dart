@@ -301,6 +301,52 @@ void main() {
     );
 
     test(
+      'security review L4: sync results on a near-full queue never jam it; codes and reasons are capped',
+      () async {
+        // Fill the queue to just under 48 KB.
+        var i = 0;
+        while (true) {
+          i++;
+          try {
+            await store.append(
+              'u',
+              samplePunch(key: keyFor(i), seq: i, qrToken: 'q' * 3000),
+            );
+          } on OfflineQueueFullException {
+            break;
+          }
+        }
+        final before = (await store.load('u')).entries;
+        expect(before.length, greaterThan(5));
+        final next = await store.update(
+          'u',
+          (all) => [
+            for (final e in all)
+              e.withState(
+                QueuedPunchState.rejected,
+                code: 'A' * 500,
+                qrReason: 'r' * 500,
+              ),
+          ],
+        );
+        expect(next, hasLength(before.length));
+        expect(next.first.code!.length, QueuedPunch.maxCodeLength);
+        expect(next.first.qrReason!.length, QueuedPunch.maxReasonLength);
+        expect(
+          (await store.load(
+            'u',
+          )).entries.every((e) => e.state == QueuedPunchState.rejected),
+          isTrue,
+        );
+        // A new capture is still refused by the limits.
+        await expectLater(
+          store.append('u', samplePunch(key: keyFor(999), seq: 999)),
+          throwsA(isA<OfflineQueueFullException>()),
+        );
+      },
+    );
+
+    test(
       'clientSeq is strictly increasing, persisted before use, never reused',
       () async {
         final a = await store.nextClientSeq();
@@ -407,35 +453,65 @@ void main() {
 
   group('boot clock channel', () {
     const channel = MethodChannel('rab/boot_clock');
+    const bootA = '6f1c2b0e-3d4a-4b5c-8d9e-0a1b2c3d4e5f';
+    const bootB = 'a0b1c2d3-e4f5-4a6b-9c7d-8e9f0a1b2c3d';
+    void answer(Object? value) => TestDefaultBinaryMessengerBinding
+        .instance
+        .defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async => value);
     tearDown(
       () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, null),
     );
 
-    test('reads BOOT_COUNT and elapsedRealtime', () async {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-            channel,
-            (call) async => {'bootCount': 12, 'elapsedRealtimeMs': 345},
-          );
+    test('reads the kernel boot_id and elapsedRealtime', () async {
+      answer({'bootId': bootA.toUpperCase(), 'elapsedRealtimeMs': 345});
       final reading = await const PlatformBootClock().read();
-      expect(reading?.bootId, 'boot-12');
+      expect(reading?.bootId, bootA);
       expect(reading?.elapsedMs, 345);
     });
 
     test(
-      'no handler, null, or a malformed answer: no reading (fail closed)',
+      'no handler, null, a malformed answer, or the old writable BOOT_COUNT shape: no reading (fail closed)',
       () async {
         expect(await const PlatformBootClock().read(), isNull);
-        for (final answer in <Object?>[
+        for (final value in <Object?>[
           null,
-          {'bootCount': 'x', 'elapsedRealtimeMs': 1},
-          {'bootCount': 1, 'elapsedRealtimeMs': -5},
+          {'bootCount': 12, 'elapsedRealtimeMs': 1},
+          {'bootId': '12', 'elapsedRealtimeMs': 1},
+          {'bootId': '', 'elapsedRealtimeMs': 1},
+          {'bootId': bootA, 'elapsedRealtimeMs': -5},
+          {'bootId': bootA, 'elapsedRealtimeMs': '1'},
         ]) {
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-              .setMockMethodCallHandler(channel, (call) async => answer);
-          expect(await const PlatformBootClock().read(), isNull);
+          answer(value);
+          expect(
+            await const PlatformBootClock().read(),
+            isNull,
+            reason: '$value',
+          );
         }
+      },
+    );
+
+    test(
+      'security review M1: after a reboot, a reading whose uptime has caught up with the ticket is still refused',
+      () async {
+        // Ticket received 1 h after boot A.
+        answer({'bootId': bootA, 'elapsedRealtimeMs': 3600000});
+        final atTicket = await const PlatformBootClock().read();
+        final ticket = StoredOfflineTicket(
+          token: 't',
+          bootId: atTicket!.bootId,
+          ticketBootMs: atTicket.elapsedMs,
+          deviceWallClockAt: '2026-11-21T08:00:00+00:00',
+        );
+        // The phone reboots and runs 1 h 1 min. With BOOT_COUNT rewritten (`adb shell settings put global boot_count`)
+        // this looked like "1 minute after the ticket, same boot", anchoring a late clock-in near the ticket time. The
+        // kernel boot_id cannot be rewritten, so the boot change is always visible.
+        answer({'bootId': bootB, 'elapsedRealtimeMs': 3660000});
+        final later = await const PlatformBootClock().read();
+        expect(later!.bootId, isNot(ticket.bootId));
+        expect(ticket.canCaptureAt(later), isFalse);
       },
     );
   });
