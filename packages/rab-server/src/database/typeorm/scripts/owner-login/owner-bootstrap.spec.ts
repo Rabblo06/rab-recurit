@@ -343,6 +343,8 @@ const QUIET_LOGGING: Record<string, string | null> = {
   auto_explain_log_parameter_max_length: null,
   pg_stat_statements_track: null,
   pgaudit_log_parameter: null,
+  log_min_messages: 'warning',
+  auto_explain_log_verbose: null,
 };
 
 /** The last statement of a run, ignoring the migration-lock release that follows a removal's COMMIT / ROLLBACK. */
@@ -2600,6 +2602,23 @@ describe('owner decision 2026-11-20: the plain-text fallback (first deploy in on
     }
   });
 
+  it('DENIAL owner decision F6 a on a grant-only run: the missing grant is added and committed, then the opt-in is still a REFUSAL (64)', async () => {
+    // The password already logs in, but the database grant is missing: db-setup runs a grant-only transaction first.
+    const noGrant: OwnerFacts = { ...existing, oHasDbGrant: false };
+    const { io, texts, lines } = fakeIo([noGrant, noGrant, existing], [{ ok: true }], { rotate: true, schemaComplete: false });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.rotateNothingToDo);
+    expect(failureResult(error).exitCode).toBe(64);
+    const t = texts();
+    expect(t).toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(t).toContain(OWNER_BOOTSTRAP_COMMIT);
+    expect(t.lastIndexOf(OWNER_BOOTSTRAP_COMMIT)).toBeGreaterThan(t.lastIndexOf(OWNER_BOOTSTRAP_BEGIN));
+    // The password was not changed (rotateNothingToDo is reached only when nothing was set) and never sent in plain text.
+    expect(t).not.toContain(OWNER_BOOTSTRAP_Q4C_DO_PLAIN);
+    expect(lines).not.toContain(OWNER_BOOTSTRAP_MESSAGES.rotateDone);
+  });
+
   it('DENIAL owner decision F6 a: the opt-in with a password that already logs in is a REFUSAL (64, the opt-in cannot stay on); nothing written', async () => {
     const { io, texts, lines } = fakeIo([existing], [{ ok: true }], { rotate: true, schemaComplete: false });
     const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
@@ -2870,10 +2889,22 @@ describe('owner decision 2026-11-20, F1 a: send anyway, but warn by name', () =>
     ['pg_stat_statements.track = top', { pg_stat_statements_track: 'top' }, []],
     ['pgaudit.log_parameter = on', { pgaudit_log_parameter: 'on' }, ['pgaudit.log_parameter']],
     ['pgaudit.log_parameter = off', { pgaudit_log_parameter: 'off' }, []],
+    // HANDOFF 20 Nov follow-up: a debug log_min_messages (Q1 lowers it only for a superuser) and a verbose auto_explain.
+    ['log_min_messages = debug1 (non-superuser admin: Q1 could not raise it)', { log_min_messages: 'debug1' }, ['log_min_messages']],
+    ['log_min_messages = DEBUG5 (case-insensitive)', { log_min_messages: 'DEBUG5' }, ['log_min_messages']],
+    ['log_min_messages = info / notice / warning (no statement debug output)', { log_min_messages: 'notice' }, []],
+    ['log_min_messages unreadable (null)', { log_min_messages: null }, []],
+    [
+      'auto_explain on and verbose, parameters off: the verbose plan still prints the value',
+      { auto_explain_log_min_duration: '0', auto_explain_log_parameter_max_length: '0', auto_explain_log_verbose: 'on' },
+      ['auto_explain.log_verbose'],
+    ],
+    ['auto_explain verbose but off (log_min_duration = -1)', { auto_explain_log_min_duration: '-1', auto_explain_log_verbose: 'on' }, []],
+    ['auto_explain on, verbose off, parameters off', { auto_explain_log_min_duration: '0', auto_explain_log_parameter_max_length: '0', auto_explain_log_verbose: 'off' }, []],
     [
       'everything at once, in a fixed order',
-      { log_statement: 'all', log_min_duration_statement: '0', log_min_duration_sample: '0', log_transaction_sample_rate: '1', auto_explain_log_min_duration: '0', pg_stat_statements_track: 'all', pgaudit_log_parameter: 'on' },
-      ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'auto_explain.log_min_duration', 'pg_stat_statements.track', 'pgaudit.log_parameter'],
+      { log_statement: 'all', log_min_duration_statement: '0', log_min_duration_sample: '0', log_transaction_sample_rate: '1', auto_explain_log_min_duration: '0', pg_stat_statements_track: 'all', pgaudit_log_parameter: 'on', log_min_messages: 'debug2', auto_explain_log_verbose: 'on' },
+      ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'auto_explain.log_min_duration', 'pg_stat_statements.track', 'pgaudit.log_parameter', 'log_min_messages', 'auto_explain.log_verbose'],
     ],
   ])('%s', (_label, over, want) => {
     expect(risks(over)).toEqual(want);
@@ -2929,10 +2960,10 @@ describe('owner decision 2026-11-20, F1 a: send anyway, but warn by name', () =>
   it('W1 is one read-only SELECT of fixed names (extension settings with missing_ok), no parameter', () => {
     expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS.startsWith('SELECT ')).toBe(true);
     expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).not.toMatch(/\$\d|set_config|FROM/);
-    for (const ext of ['auto_explain.log_min_duration', 'auto_explain.log_parameter_max_length', 'pg_stat_statements.track', 'pgaudit.log_parameter']) {
+    for (const ext of ['auto_explain.log_min_duration', 'auto_explain.log_parameter_max_length', 'pg_stat_statements.track', 'pgaudit.log_parameter', 'auto_explain.log_verbose']) {
       expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).toContain(`pg_catalog.current_setting('${ext}', true)`);
     }
-    for (const core of ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'log_parameter_max_length']) {
+    for (const core of ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_min_messages']) {
       expect(OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS).toContain(`pg_catalog.current_setting('${core}') AS ${core}`);
     }
   });

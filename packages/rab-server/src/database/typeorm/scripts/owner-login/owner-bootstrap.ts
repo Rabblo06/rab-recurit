@@ -1032,7 +1032,11 @@ function parametersOn(v: unknown): boolean {
  *     the bind parameters are logged unless log_parameter_max_length = 0;
  *   auto_explain.log_min_duration >= 0: its parameters are logged unless auto_explain.log_parameter_max_length = 0;
  *   pg_stat_statements.track = all: the nested role statement is stored with the value;
- *   pgaudit.log_parameter = on: pgaudit logs the parameters.
+ *   pgaudit.log_parameter = on: pgaudit logs the parameters;
+ *   log_min_messages = debug1-debug5: the server's debug messages about this session's statements (Q1 raises it to warning
+ *     only for a superuser admin, so this is the non-superuser case);
+ *   auto_explain.log_verbose = on while auto_explain.log_min_duration >= 0: the verbose plan prints the statement's
+ *     expressions (a custom plan folds the bound value in), whatever auto_explain.log_parameter_max_length says.
  */
 export function plainLoggingRisks(row: Record<string, unknown>): string[] {
   const out: string[] = [];
@@ -1048,6 +1052,8 @@ export function plainLoggingRisks(row: Record<string, unknown>): string[] {
   if (durationOn(row.auto_explain_log_min_duration) && aeParams) out.push('auto_explain.log_min_duration');
   if (str('pg_stat_statements_track') === 'all') out.push('pg_stat_statements.track');
   if (['on', 'true', 'yes', '1'].includes(str('pgaudit_log_parameter'))) out.push('pgaudit.log_parameter');
+  if (/^debug[1-5]$/.test(str('log_min_messages'))) out.push('log_min_messages');
+  if (durationOn(row.auto_explain_log_min_duration) && ['on', 'true', 'yes', '1'].includes(str('auto_explain_log_verbose'))) out.push('auto_explain.log_verbose');
   return out;
 }
 
