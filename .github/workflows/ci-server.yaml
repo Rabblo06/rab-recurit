@@ -105,6 +105,26 @@ jobs:
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
 
+  # The committed OpenAPI document (packages/rab-server/openapi/crewflow-api.openapi.json) must be exactly what the code
+  # generates: a route, parameter or request-DTO change without the regenerated file fails here. Reflection only (no
+  # database, no Redis, nothing listens); @nestjs/swagger is a devDependency used by this build-time script alone and is
+  # never served (src/__tests__/static/openapi-build-time-only.spec.ts). The live-API side of the contract runs in the
+  # test job (openapi-contract.integration.spec.ts).
+  openapi:
+    needs: changed
+    if: needs.changed.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - name: Build the workspace libraries the server imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - name: The committed OpenAPI document matches the code
+        run: npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/__tests__/contract/openapi/generate-openapi.ts --check
+
   # Part C1 (OWNER-DB-ULTIMATE.md Part C): HWS runtime routing is ON by default outside production, so the job above runs
   # it on. This job keeps the legacy OFF mode (business rows in the core copies, production's mode until C3) covered until
   # C4 deletes the off path. Same database build; only HWS_RUNTIME_ENABLED differs.
@@ -224,7 +244,7 @@ jobs:
   # filter output(s) (server) said there was nothing to run; when the filter said run, every job must succeed.
   ci-server-gate:
     name: ci-server gate
-    needs: [changed, test, test-hws-off, test-search-path-trap]
+    needs: [changed, test, openapi, test-hws-off, test-search-path-trap]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

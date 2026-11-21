@@ -54,6 +54,11 @@
     "nx/smol-toml": "1.9.1",
     "nx/brace-expansion": "5.0.12"
   },
+  "dependenciesMeta": {
+    "@scarf/scarf": {
+      "built": false
+    }
+  },
   "scripts": {
     "start": "npx concurrently --kill-others \"npx nx run-many -t start -p rab-server rab-front\" \"npx wait-on tcp:3000 && npx nx run rab-worker:start\"",
     "mobile": "npx nx start rab-mobile",
