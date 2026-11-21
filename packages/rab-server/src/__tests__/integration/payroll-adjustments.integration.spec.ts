@@ -24,7 +24,7 @@ import { insertMembership, TestIdentity, TestIdentityFactory } from './helpers/t
 
 /**
  * Payroll adjustments (owner decision 3, PayrollAdjustmentSchema1786723100000). Real HTTP + PostgreSQL with RLS as the
- * runtime login (crewflow_app), no mocks. One world, scenarios in order:
+ * runtime login (no superuser, no BYPASSRLS; the grant-parity guards hold the owner login to crewflow_app's grants), no mocks. One world, scenarios in order:
  *  - add (corrections / bonuses / expenses), approve and reject as named actions; the approver is never the creator
  *    (decision 5's rule) and needs a recent step-up of the session; Venue Managers, staff and another organisation get
  *    403 / 404; a body carrying organisationId / status / createdBy is a 400;
@@ -165,8 +165,9 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
   it('with no tenant context bound, the table returns zero rows (runtime login, before and after rows exist)', async () => {
     const before = await dataSource.query(`SELECT count(*)::int AS n FROM core.payroll_adjustment`);
     expect(before[0].n).toBe(0);
-    const [{ who, bypass }] = await dataSource.query(`SELECT current_user AS who, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass`);
-    expect({ who, bypass }).toEqual({ who: 'crewflow_app', bypass: false });
+    // The runtime login (crewflow_owner in CI, crewflow_app in older installs): never a superuser, never BYPASSRLS.
+    const [{ sup, bypass }] = await dataSource.query(`SELECT rolsuper AS sup, rolbypassrls AS bypass FROM pg_roles WHERE rolname = current_user`);
+    expect({ sup, bypass }).toEqual({ sup: false, bypass: false });
   });
 
   it('add a bonus and an expense: named actions, pending, audited; mass-assignment and wrong callers refused', async () => {

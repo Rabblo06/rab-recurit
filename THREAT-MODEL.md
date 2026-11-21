@@ -10384,7 +10384,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Not chosen / trade-off:** a workspace table (owner decision 48's approach: core table, no foreign key to
   staff_profile / payroll_record / payroll_run, integrity by service checks; those rows are never hard-deleted by the
   application). Staff do not see the free-text reason (it may name other people); they see kind and amount.
-- **Tests:** `payroll-adjustments.integration.spec.ts` (zero rows without tenant context as crewflow_app without
+- **Tests:** `payroll-adjustments.integration.spec.ts` (zero rows without tenant context as the runtime login without
   BYPASSRLS; HTTP abuse cases: mass assignment of organisationId / status / createdBy / staffUserId / workspaceId = 400,
   no deduction route, Venue Manager and staff 403, other organisation 404, creator 403, stale session 403 with the
   refusal audited; RLS per role; CHECK and guard denials as the runtime login; locked rows refused even to the table
