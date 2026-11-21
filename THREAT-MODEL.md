@@ -10300,3 +10300,20 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Global search — statement timeout answered 422, offer candidates scoped and capped (branch fix/search-timeout-4xx-candidate-cap, 2026-11-21; runtime SQL, no migration)
+- **Finding (M9 load test §4.4, availability):** a term matching every record made the offer search join and rank all
+  119,581 offers to return 20 (1.1-1.2 s idle); under load it ran into the search's own 5 s `statement_timeout`, which
+  surfaced as an unhandled 500 (the 11 manager-read errors of the final peak) and was retried once by the console.
+- **Control:** a 57014 from the search transaction is `SearchTooBroadException` (422, code `SEARCH_TOO_BROAD`, fixed
+  message, never the term or a row); every other error propagates unchanged. Each offer-search match branch now applies
+  the SAME organisation / workspace pin and `offerReadScopeCondition` as the final query, then stops after
+  `OFFER_SEARCH_CANDIDATE_CAP` (500) matches; the final query keeps its own scope. Scoping inside the branch is what makes
+  the cap safe: out-of-scope rows (still RLS-visible in the tenant, e.g. another manager's offers) can never fill the cap
+  and hide the caller's own matches, and nothing the caller could not list becomes searchable (search stays tighter than
+  or equal to the list, SF-6).
+- **Assumption (product, not payroll/compliance):** for a term matching more than 500 in-scope offers through one branch,
+  ranking runs over the first 500 found, not over all matches; a real name matches far fewer and is ranked as before.
+- **Tests:** `search-load-bounds.spec.ts`: 57014 (pg error and QueryFailedError) -> 422 body; 42501 / pool timeout
+  propagate; both branches carry the organisation pin, the owner and the venue scope and `LIMIT <cap>`; the final query
+  keeps its scope and the per-type limit. Existing `sf6-search-scope` / `w5-search` integration suites cover the rows.

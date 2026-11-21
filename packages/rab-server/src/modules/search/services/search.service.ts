@@ -9,6 +9,7 @@ import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/me
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { SearchDto } from '../dto/search.dto';
+import { isStatementTimeout, SearchTooBroadException } from '../exceptions/search.exceptions';
 import { buildSearchQuery, SearchQuery } from './search-query';
 import { offerReadScopeCondition } from '../../offer/services/offer.service';
 
@@ -22,6 +23,13 @@ export interface SearchResult {
 
 const DEFAULT_LIMIT_PER_TYPE = 8;
 const MAX_LIMIT_PER_TYPE = 20;
+/**
+ * M9 load test §4.4: the most candidates one match branch of the offer search may contribute before ranking. A term that
+ * matches every record (every offer of the workspace: 119,581 in the test) was joined and ranked in full to return 20
+ * (1.1-1.2 s, then the 5 s timeout under load). The branch stops after this many in-scope matches instead. A term with
+ * fewer matches (any real name) is ranked exactly as before; a broader one is ranked over the first matches found.
+ */
+export const OFFER_SEARCH_CANDIDATE_CAP = 500;
 
 /**
  * SQL fragments shared by every branch. They are SERVER CONSTANTS: the only client-derived values are bound parameters
@@ -105,6 +113,16 @@ export class SearchService {
     const query = buildSearchQuery(dto.q);
     if (!query.tsquery) return [];
 
+    try {
+      return await this.runSearch(ctx, query, limit);
+    } catch (error) {
+      // M9 load test §4.4: the search's own statement_timeout (below) is a "too broad" answer, not a server error.
+      if (isStatementTimeout(error)) throw new SearchTooBroadException();
+      throw error;
+    }
+  }
+
+  private runSearch(ctx: AuthContext, query: SearchQuery, limit: number): Promise<SearchResult[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Transaction-local (is_local = true): RLS policy functions inflate the planner's cost estimates far past
       // jit_above_cost, so JIT compilation (seconds) dwarfed the sub-second query itself in the 50k benchmark
@@ -376,20 +394,27 @@ export class SearchService {
     // OfferService.list()'s own scope condition (assigned venues, or offers the caller sent), plus organisation / workspace pins.
     let where = `o.organisation_id = ${p.push(ctx.organisationId)} AND ${offerReadScopeCondition(scope, ctx, (v) => p.push(v))}`;
     if (scope.kind === 'owner') where += ` AND o.workspace_id = ${p.push(ctx.workspaceId)}`;
+    const cap = p.push(OFFER_SEARCH_CANDIDATE_CAP);
     const lim = p.push(limit);
-    const rows = await manager.query(
-      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-      `WITH cand AS (
-         SELECT o.id FROM ${t.job_offer} o
-           JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
-           JOIN core."user" u ON u.id = sp.user_id
-          WHERE ${this.userMatch(q, 'u')}
-         UNION
-         SELECT o.id FROM ${t.job_offer} o
+    // Each match branch applies the SAME scope as the final query and stops after `cap` matches (M9 §4.4), so the cap can
+    // never fill up with rows the caller could not see. Joined like the final query (an offer without its assignment,
+    // shift, venue, profile or user was never a result), so the candidates are the result rows, just bounded.
+    const branch = (match: string) =>
+      // sql-injection-reviewed: tables from businessTables; `where` / `match` are code-constant fragments with $n placeholders (values pushed to params); `cap` is a $n placeholder.
+      `SELECT o.id FROM ${t.job_offer} o
            JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
            JOIN ${t.shift} s ON s.id = sa.shift_id
            JOIN ${t.venue} v ON v.id = s.venue_id
-          WHERE ${this.venueMatch(q, 'v', true)}
+           JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
+           JOIN core."user" u ON u.id = sp.user_id
+          WHERE ${where} AND ${match}
+          LIMIT ${cap}`;
+    const rows = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+      `WITH cand AS (
+         (${branch(this.userMatch(q, 'u'))})
+         UNION
+         (${branch(this.venueMatch(q, 'v', true))})
        )
        SELECT o.id, v.name AS venue_name, u.first_name, u.last_name,
               (${userName('u')} = ${NORM_TEXT} OR ${venueName('v')} = ${NORM_TEXT}) AS exact,
