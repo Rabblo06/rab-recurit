@@ -60,7 +60,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: ${{ env.PUBLISH == 'true' }}
         with:
           persist-credentials: false
@@ -125,7 +125,7 @@ jobs:
             echo "::error::Docker Hub credentials are missing: create the variable DOCKERHUB_USERNAME and the secret DOCKERHUB_PUSH_TOKEN in the GitHub environment 'release' (policy section 9). Nothing was pushed."
             exit 1
           fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       # Review F1, repeated at the point of use: a candidate from another run is published only if that run proves its
@@ -139,12 +139,12 @@ jobs:
           python3 packages/rab-docker/scripts/image-security/release_guard.py candidate \
             --repo "$GITHUB_REPOSITORY" --run-id "$CANDIDATE_RUN" --sha "$GITHUB_SHA"
       - name: Download the gated layout
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: gated-image-layout
           path: ${{ runner.temp }}/gated/image
       - name: Download the candidate release manifest
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-manifest-candidate
           path: ${{ runner.temp }}/release
@@ -195,7 +195,7 @@ jobs:
             echo "- Image (API + Worker): \`$REGISTRY_REPO@$IMAGE_DIGEST\` (tag \`$commit\`)"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the release manifest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-manifest
           path: ${{ runner.temp }}/release/release-manifest.json

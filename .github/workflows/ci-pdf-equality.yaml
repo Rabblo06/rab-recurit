@@ -42,7 +42,7 @@ jobs:
       # an unavailable native renderer or a NOT CONVERTED document is a failure, never a skip.
       PDF_EQUALITY_REQUIRE_NATIVE: '1'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -85,7 +85,7 @@ jobs:
           f="${RUNNER_TEMP}/jest-pdf-equality.json"
           [ -f "$f" ] || { echo "no Jest JSON report at $f"; exit 0; }
           node -e 'const r=require(process.argv[1]); console.log(`suites failed ${r.numFailedTestSuites}, tests failed ${r.numFailedTests}`); for (const s of r.testResults) for (const t of s.assertionResults) if (t.status === "failed") console.log(`FAILED: ${t.fullName}\n${String(t.failureMessages.join("\n")).slice(0, 3000)}`)' "$f"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
           name: pdf-equality
