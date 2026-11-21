@@ -10300,3 +10300,25 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Front Referrer-Policy at the final edge (X6.2b, branch fix/x62b-referrer-policy-edge; no SQL, no server code)
+- **Gap:** `Referrer-Policy` was set only by `packages/rab-front/vercel.json` (the temporary deploy). The final front
+  edge (Cloudflare static assets) and any other host sent none, so the browser default applied: an older browser
+  (`no-referrer-when-downgrade`) sends the full page URL, query string included, to every third-party request
+  (fonts.googleapis.com, fonts.gstatic.com). XA-08: the forgot-password page carries the email address in its query.
+- **Control:** two layers, the same value. `index.html` `<meta name="referrer" content="strict-origin-when-cross-origin">`
+  (before any stylesheet or script, holds on every host) and `public/_headers` `Referrer-Policy:
+  strict-origin-when-cross-origin` for `/*` (Cloudflare reads it from the build output). A cross-origin Referer is the
+  origin only, never a path or query.
+- **Why not `no-referrer` (vercel.json) or `same-origin`:** under either policy a browser sends `Origin: null` on a
+  non-CORS POST (Fetch, "append a request Origin header"): the invitation SSO form POST to the API
+  (`AcceptInvitation.tsx`) and every POST through a same-origin `/rest` proxy. The API's CSRF checks trust `Origin`
+  only and refuse `null` (`cookie-csrf.util.ts`), so the stricter value would break sign-in paths, not harden them.
+- **Finding for the temporary deploy (not changed, the Vercel deploy is out of scope):** `vercel.json` sends
+  `Referrer-Policy: no-referrer`, so on that deploy the invitation SSO form POST carries `Origin: null`. The new meta
+  tag now overrides the header there too (a later `<meta name="referrer">` updates the document's policy).
+- **Tests:** `rab-front/src/shared/lib/referrer-policy.spec.ts`: exactly one meta with the value, before fonts and
+  scripts; `_headers` has `/*` with exactly that policy; `no-referrer`, `same-origin`, `unsafe-url`,
+  `no-referrer-when-downgrade` refused in both files.
+- **Residual:** the API's own responses keep helmet's default (`no-referrer`); they are JSON, not documents, so no
+  subresource request inherits it.
