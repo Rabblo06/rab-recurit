@@ -10331,6 +10331,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   - *Deep-sleep clock drift inflating pay.* Elapsed time comes from a `rab/boot_clock` channel
     (`SystemClock.elapsedRealtime()`, counts deep sleep, + `Settings.Global.BOOT_COUNT`), never Dart's `Stopwatch`
     (stops in deep sleep, which would make a punch look earlier). No reading = no capture.
+  - *A rooted phone.* Each entry carries `integrity.rootedSignal` (DESIGN §3.2, §6.4): a cheap `su`-binary check on
+    Android (`integrity_signal.dart`), client-asserted, recorded by the server as a flag and never used to block.
 - **Still off, by construction:** nothing can be queued unless (1) the build was made with
   `--dart-define=OFFLINE_ATTENDANCE=true` (default false), (2) the server's last `GET /attendance/me/active` said
   `offline.enabled == true`, (3) a ticket from this boot, received under 16 h ago, is held, and (4) a registered device

@@ -55,6 +55,23 @@ class OfflineLocation {
       );
 }
 
+/// DESIGN §3.2 `integrity`: `rootedSignal` is a client-asserted hint (a rooted phone can hide it), recorded as a flag
+/// on the receipt and never used to block (§6.4).
+@immutable
+class OfflineIntegrity {
+  const OfflineIntegrity({required this.rootedSignal});
+  final bool rootedSignal;
+
+  Map<String, Object?> toJson() => {'rootedSignal': rootedSignal};
+
+  factory OfflineIntegrity.fromJson(Object? json) {
+    if (json is! Map || json['rootedSignal'] is! bool) {
+      throw const FormatException('Missing integrity.rootedSignal');
+    }
+    return OfflineIntegrity(rootedSignal: json['rootedSignal'] as bool);
+  }
+}
+
 /// Fields that must NEVER appear in an entry (DESIGN §3.2): the server derives all of them, and a body carrying any
 /// of them is a 400 (`forbidNonWhitelisted`). Tests assert none is ever written.
 const Set<String> kForbiddenEntryFields = {
@@ -87,7 +104,7 @@ class OfflineEntry {
     required this.punchBootId,
     required this.punchBootMs,
     required this.deviceWallClockAt,
-    this.ticketDeviceWallClockAt,
+    required this.integrity,
     this.qrToken,
     this.location,
     required this.appVersion,
@@ -116,10 +133,12 @@ class OfflineEntry {
   final String punchBootId;
   final int punchBootMs;
 
-  /// The phone's wall clock at the punch and when the ticket was received (ISO-8601 with offset). Diagnostics only:
-  /// the server uses them for the `clock_skew` / `clock_changed` flags (§4.5), NEVER as a time.
+  /// The phone's wall clock at the punch (ISO-8601 with offset). Diagnostics only: the server uses it for the
+  /// `clock_skew` flag (§4.5), NEVER as a time.
   final String deviceWallClockAt;
-  final String? ticketDeviceWallClockAt;
+
+  /// Client-asserted integrity signal (D11, §6.4): a flag on the receipt only, never a block.
+  final OfflineIntegrity integrity;
 
   /// The scanned QR text verbatim (clock_in / clock_out; optional for check_in). The phone cannot verify it.
   final String? qrToken;
@@ -144,9 +163,9 @@ class OfflineEntry {
     'punchBootId': punchBootId,
     'punchBootMs': punchBootMs,
     'deviceWallClockAt': deviceWallClockAt,
-    'ticketDeviceWallClockAt': ?ticketDeviceWallClockAt,
     'qrToken': ?qrToken,
     if (location != null) 'location': location!.toJson(),
+    'integrity': integrity.toJson(),
     'appVersion': appVersion,
     'deviceKeyId': ?deviceKeyId,
   };
@@ -168,7 +187,7 @@ class OfflineEntry {
     punchBootId: punchBootId,
     punchBootMs: punchBootMs,
     deviceWallClockAt: deviceWallClockAt,
-    ticketDeviceWallClockAt: ticketDeviceWallClockAt,
+    integrity: integrity,
     qrToken: qrToken,
     location: location,
     appVersion: appVersion,
@@ -194,7 +213,7 @@ class OfflineEntry {
       punchBootId: json['punchBootId'] as String,
       punchBootMs: _int(json['punchBootMs']),
       deviceWallClockAt: json['deviceWallClockAt'] as String,
-      ticketDeviceWallClockAt: json['ticketDeviceWallClockAt'] as String?,
+      integrity: OfflineIntegrity.fromJson(json['integrity']),
       qrToken: json['qrToken'] as String?,
       location: location == null
           ? null
