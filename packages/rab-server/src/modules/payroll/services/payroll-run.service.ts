@@ -61,6 +61,17 @@ export interface StaffPayslipEntry {
 const iso = (v: unknown): string | null => (v ? new Date(v as string).toISOString() : null);
 
 /**
+ * Owner decision 51 (2026-11-21): nobody administers their OWN pay record. Upload, net pay and mark-paid all refuse a
+ * payslip whose staff member is the caller (403: the caller holds payroll rights and may see the row exists; they
+ * categorically may not act on it). Checked here (layer 2) for every caller, then by payslip RLS.
+ */
+const OWN_PAY_MESSAGES = {
+  upload: 'You cannot upload a payslip for your own pay.',
+  net: 'You cannot record net pay for your own pay.',
+  paid: 'You cannot confirm payment of your own pay.',
+} as const;
+
+/**
  * One CSV cell: quoted when needed, and spreadsheet formula injection neutralised (a staff name such as
  * `=HYPERLINK(...)` is exported as text, never evaluated). Wave 5.
  */
@@ -263,6 +274,7 @@ export class PayrollRunService {
    * Stores the provider's official payslip PDF for one staff member of a FINALISED run. PDF only (magic bytes), size
    * limit, private storage. Replacing creates a new version (old kept, audited). Re-sending identical bytes is a no-op
    * (no new version, no second notification). The staff member is notified when a new version becomes available.
+   * Never on one's own pay (decision 51), checked before the bytes are even hashed.
    */
   async uploadPayslip(ctx: AuthContext, runId: string, staffProfileId: string, buffer: Buffer): Promise<RunView> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
@@ -271,6 +283,7 @@ export class PayrollRunService {
       const run = await this.lockRun(m, ctx, runId);
       if (run.status !== 'finalised') throw new ConflictException('Payslips can be uploaded once the payroll run is finalised.');
       const slip = await this.lockPayslip(m, runId, staffProfileId);
+      if (slip.staff_user_id === ctx.userId) throw new ForbiddenException(OWN_PAY_MESSAGES.upload);
       const sha = createHash('sha256').update(buffer).digest('hex');
       const [current] = await m.query(`SELECT sha256 FROM ${t.payslip_document} WHERE payslip_id = $1 AND version = $2`, [slip.id, slip.version]);
       if (current?.sha256 === sha) return this.view(m, ctx, runId);
@@ -296,7 +309,7 @@ export class PayrollRunService {
     });
   }
 
-  /** Provider-supplied net pay, copied from the official document (or cleared). Never computed here. */
+  /** Provider-supplied net pay, copied from the official document (or cleared). Never computed here. Never on one's own pay. */
   async setNet(ctx: AuthContext, runId: string, staffProfileId: string, netPence: number | null): Promise<RunView> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_CALCULATE);
@@ -304,6 +317,7 @@ export class PayrollRunService {
       const run = await this.lockRun(m, ctx, runId);
       if (run.status !== 'finalised') throw new ConflictException('Net pay can be recorded once the payroll run is finalised.');
       const slip = await this.lockPayslip(m, runId, staffProfileId);
+      if (slip.staff_user_id === ctx.userId) throw new ForbiddenException(OWN_PAY_MESSAGES.net);
       if (netPence !== null && Number(slip.version) === 0) throw new ConflictException('Upload the provider payslip before recording its net pay.');
       await m.query(
         `UPDATE ${t.payslip} SET net_pence = $2, net_source = $3, net_recorded_by = $4, net_recorded_at = $5, updated_at = now() WHERE id = $1`,
@@ -322,7 +336,7 @@ export class PayrollRunService {
       if (run.status !== 'finalised') throw new ConflictException('A payslip can be marked paid once the payroll run is finalised.');
       const slip = await this.lockPayslip(m, runId, staffProfileId);
       if (slip.paid_at) throw new ConflictException('This payslip is already marked paid.');
-      if (slip.staff_user_id === ctx.userId) throw new ForbiddenException('You cannot confirm payment of your own pay.');
+      if (slip.staff_user_id === ctx.userId) throw new ForbiddenException(OWN_PAY_MESSAGES.paid);
       const records: Array<{ payroll_record_id: string; status: string }> = await m.query(
         `SELECT l.payroll_record_id, pr.status FROM ${t.payroll_run_line} l JOIN ${t.payroll_record} pr ON pr.id = l.payroll_record_id
           WHERE l.run_id = $1 AND l.staff_profile_id = $2 ORDER BY pr.id FOR UPDATE OF pr`, [runId, staffProfileId]);

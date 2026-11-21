@@ -10354,3 +10354,24 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Payroll: nobody administers their own pay record, upload and net pay too (decision 51, branch fix/payroll-own-pay-upload-net, 2026-11-21; no SQL)
+
+- **Who can call this:** a workspace manager holding `payroll.calculate` (payslip upload, net pay) or `payroll.mark_paid`
+  (mark paid); Venue Managers are refused categorically (unchanged).
+- **Whose data:** the staff member the payslip belongs to. The risk is a manager who is also a staff member of the same
+  workspace (multi-role) administering their OWN pay: uploading their own "official" payslip PDF, or typing their own
+  net pay, which their staff app then shows as provider-supplied.
+- **Before:** mark paid already refused the caller's own payslip (service 403 + `payslip_update` WITH CHECK on
+  `paid_by`). Upload (`PayrollRunService.uploadPayslip`) and net pay (`setNet`) did not.
+- **Control (layer 2, this PR):** both now lock the payslip and refuse with 403 when its staff member's user is the caller,
+  before any byte is hashed or stored, any row written, any notification or audit row created. Setting AND clearing
+  net pay are both refused. One message table (`OWN_PAY_MESSAGES`) for the three own-pay refusals.
+- **Why 403, not 404:** the caller holds payroll rights in this workspace and sees the payslip in the run; the refusal
+  discloses nothing they cannot already read. It is "this exists and you categorically may not act on it".
+- **Database backstop:** follows in a separate DRAFT SQL PR (payslip_update / payslip_document_insert WITH CHECK refuse the
+  caller's own payslip, for the runtime login). Until it lands, the DB still lets a payroll manager write their own
+  payslip row directly; only the service refuses (a single-layer control for upload / net until then).
+- **Tests:** `payroll-runs.integration.spec.ts` "a manager can never confirm payment of their own pay": own upload 403,
+  own net (set and clear) 403, nothing written (no document, version 0, no net, no notification, no audit row), and the
+  same manager can still record another staff member's net pay.

@@ -386,6 +386,24 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     const asManager = await factory.login(staff[0]!, { applicationTarget: 'manager_web' });
     const own = await http().post(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/mark-paid`).set(auth(asManager)).send({});
     expect(own.status).toBe(403);
+    // Decision 51: the same refusal for uploading one's own payslip and for setting (or clearing) one's own net pay.
+    const ownPdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.from('own payslip'), Buffer.alloc(100, 0x20)]);
+    const ownUpload = await http().post(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/document`).set(auth(asManager))
+      .attach('file', ownPdf, { filename: 'p.pdf', contentType: 'application/pdf' });
+    expect(ownUpload.status).toBe(403);
+    expect(ownUpload.body.message).toBe('You cannot upload a payslip for your own pay.');
+    const ownNet = await http().put(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/net`).set(auth(asManager)).send({ netPence: 1 });
+    expect(ownNet.status).toBe(403);
+    expect(ownNet.body.message).toBe('You cannot record net pay for your own pay.');
+    expect((await http().put(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/net`).set(auth(asManager)).send({ netPence: null })).status).toBe(403);
+    // Nothing was written by the refused calls: no document, no version bump, no net, no notification, no audit row.
+    const [slip0] = await adminDataSource.query(`SELECT id, version, net_pence FROM ${businessTable(a.workspaceId!, 'payslip')} WHERE run_id = $1 AND staff_profile_id = $2`, [runId, staff[0]!.profileId]);
+    expect(slip0).toMatchObject({ version: 0, net_pence: null });
+    expect(await adminDataSource.query(`SELECT 1 FROM ${businessTable(a.workspaceId!, 'payslip_document')} WHERE payslip_id = $1`, [slip0.id])).toEqual([]);
+    expect(await adminDataSource.query(`SELECT 1 FROM core.notification WHERE user_id = $1 AND type = 'payslip_available'`, [staff[0]!.userId])).toEqual([]);
+    expect(await adminDataSource.query(`SELECT 1 FROM core.audit_log WHERE action IN ('payslip.uploaded','payslip.net_recorded') AND entity_id::text = $1`, [slip0.id])).toEqual([]);
+    // The same manager may still administer someone else's payslip (the rule is about one's OWN pay only).
+    expect((await http().put(`/rest/v1/payroll/runs/${runId}/payslips/${staff[1]!.profileId}/net`).set(auth(asManager)).send({ netPence: 9000 })).status).toBe(200);
     expect((await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[0]!))).body.data[0].status).toBe('processing');
     await expect(tenantContext.runInWorkspaceContext(ctxOf(staff[0]!), (m) => m.query(
       `UPDATE ${businessTables(m).payslip} SET paid_at = now(), paid_by = $2 WHERE staff_profile_id = $1`, [staff[0]!.profileId, staff[0]!.userId]))).rejects.toMatchObject({ code: '42501' });
