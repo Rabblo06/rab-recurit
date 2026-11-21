@@ -8,11 +8,12 @@ import { SchedulingController } from './controllers/scheduling.controller';
 import { AvailabilityService } from './services/availability.service';
 import { SchedulingAssistantService } from './services/scheduling-assistant.service';
 import { SchedulingService } from './services/scheduling.service';
+import { DraftShiftBatchService } from './services/draft-shift-batch.service';
 
 @Module({
   imports: [AuthModule, NotificationModule, VenueModule, EntityCacheModule],
   controllers: [SchedulingController],
-  providers: [SchedulingService, AvailabilityService, SchedulingAssistantService],
+  providers: [SchedulingService, AvailabilityService, SchedulingAssistantService, DraftShiftBatchService],
   // SchedulingAssistantService: AI Phase 3 read tools (find_shifts, count_shifts, get_rota_coverage_gaps, get_venue_summary).
   exports: [SchedulingService, AvailabilityService, SchedulingAssistantService],
 })

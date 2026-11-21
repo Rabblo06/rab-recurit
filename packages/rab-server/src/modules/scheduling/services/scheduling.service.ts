@@ -750,8 +750,16 @@ export class SchedulingService {
    * → the INSERT (workspace inherited from the venue) → the `shift.created` audit row in the same transaction. The
    * caller's own permission flag is checked by the caller, before this runs. An INSERT value is not a status transition,
    * so `assertTransition` does not apply; only DRAFT and OPEN are accepted as the initial status.
+   * `opts.recurrenceGroupId` is set only by the server-side recurring pattern builder (a server-generated uuid); it is a
+   * separate argument, never a field of `input`, so no client DTO passed as `input` can carry it.
    */
-  async insertNewShiftTx(manager: EntityManager, ctx: AuthContext, input: NewShiftInput, initialStatus: NewShiftStatus): Promise<Shift> {
+  async insertNewShiftTx(
+    manager: EntityManager,
+    ctx: AuthContext,
+    input: NewShiftInput,
+    initialStatus: NewShiftStatus,
+    opts: { recurrenceGroupId?: string } = {},
+  ): Promise<Shift> {
     if (initialStatus !== ShiftStatus.DRAFT && initialStatus !== ShiftStatus.OPEN) throw new ConflictException('A new shift can only start as a draft or open.');
     const { venue } = await this.resolveDraftTargetsTx(manager, ctx, input.venueId, input.jobRoleId);
 
@@ -776,6 +784,7 @@ export class SchedulingService {
       notes: input.notes,
       address: input.address,
       status: initialStatus,
+      recurrenceGroupId: opts.recurrenceGroupId,
       createdBy: ctx.userId,
     });
     const saved = await manager.save(shift);

@@ -10300,3 +10300,29 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## Copy previous week — preview + confirm, new DRAFT shifts only (branch feat/scheduling-copy-previous-week, 2026-11-21; no SQL)
+- **Feature:** `POST /rest/v1/shifts/copy-previous-week/preview` and `POST /rest/v1/shifts/copy-previous-week`
+  (`DraftShiftBatchService`) copy the 7 days before an organisation-local `weekStart` into that week as new DRAFT
+  shifts, optionally for one venue. Preview writes nothing; confirm recomputes the plan server-side and writes in one
+  transaction.
+- **Threats and controls:** (1) Creating shifts without the right: PermissionGuard(SCHEDULE_CREATE) +
+  RequireWorkspaceGuard + ManagerApplication on both routes, and SCHEDULE_CREATE re-checked first inside the service
+  transaction (403 before any row is read). (2) Reading or cloning another manager's / organisation's rota: source rows
+  come only from `applyShiftReadScope` (the caller's own scope, no pending-request widening) under workspace RLS; a
+  `venueId` outside scope is a 404 (`assertVenueAccessibleTx`), never a 403. (3) Mass assignment: the DTO declares
+  only `weekStart`, `venueId`, `sourceShiftIds`; organisationId / status / pay / createdBy in the body → 400. (4)
+  Copying people or money decisions: only shift rows are inserted, through `SchedulingService.insertNewShiftTx` (venue
+  + job role scope and archive rules re-checked per target, `shift.created` audit row per shift). Assignments, offers,
+  requested staff, publication, QR and recurrence are never copied. The pay rate is resolved again for the new date
+  (`resolvePayRate`); a manual rate on the source is not carried, and no pay value appears in a preview or result.
+  (5) Unbounded work: a source week over 500 shifts is refused (400, copy per venue).
+- **Flagged assumptions (owner):** pay is re-resolved, not copied (a source's manual override is dropped so a stale
+  rate is never repeated after a rate change); the charge rate, break, notes, address and required count are copied;
+  a shift moves by 7 organisation-local days (09:00 stays 09:00 across a clock change, duration kept exactly); a live
+  shift at the same venue, role, start and end makes a row `already_exists` (a cancelled/declined one does not).
+- **Tests:** `draft-batch-plan.spec.ts` (windows in organisation time, clock-change move, every skip reason, fail
+  closed on an unchecked target); `copy-previous-week.integration.spec.ts` (flag revoked → service 403 and HTTP 403,
+  nothing written; another manager copies nothing of mine and gets 404 for my venue; another organisation's venue
+  404; Venue Manager 403; organisationId/status/pay/createdBy → 400; bad dates → 400; new rows are DRAFT with no
+  offer, seat, publication or recurrence, pay re-resolved, audited; second confirm creates nothing).
