@@ -56,7 +56,12 @@ jobs:
       # test-database harness below runs on ts-node outside Nx and imports @rab/shared and @rab/emails through their built dist.
       - name: Build the workspace libraries (the migration harness imports them)
         run: npx nx run-many -t build -p rab-shared,rab-emails
-      - run: npx nx run-many -t lint -p rab-server,rab-shared
+      # Once per run, not once per shard: the type-check is the same on every shard. Since CI audit S3 the suites are
+      # transpile-only (jest.config.ts), so this step (tsc over tsconfig.app.json AND tsconfig.spec.json) is what
+      # type-checks the server and its specs; a failure here fails shard 1 and so the ci-server gate.
+      - name: Type-check rab-server (app and specs) and rab-shared
+        if: matrix.shard == 1
+        run: npx nx run-many -t lint -p rab-server,rab-shared
       - uses: ./.github/actions/disposable-postgres
       # Owner-login architecture (owner decision 2026-11-04): the suites run on a database built the way every install is
       # now built: the provider SQL (01-crewflow-owner.sql, psql as the cluster superuser) and Agent 1's migrate child as
