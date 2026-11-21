@@ -1,7 +1,7 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 
 import { TenantContextService } from '../../tenant/tenant-context.service';
-import { User } from '../../../../modules/identity/entities';
+import { User } from '../../identity/entities';
 import { AuthenticatedRequest } from './jwt-auth.guard';
 
 /**
