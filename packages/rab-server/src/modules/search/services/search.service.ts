@@ -9,7 +9,7 @@ import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/me
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { SearchDto } from '../dto/search.dto';
-import { isStatementTimeout, SearchTooBroadException } from '../exceptions/search.exceptions';
+import { isStatementTimeout, tooBroad } from '../exceptions/search.exceptions';
 import { buildSearchQuery, SearchQuery } from './search-query';
 import { offerReadScopeCondition } from '../../offer/services/offer.service';
 
@@ -113,13 +113,7 @@ export class SearchService {
     const query = buildSearchQuery(dto.q);
     if (!query.tsquery) return [];
 
-    try {
-      return await this.runSearch(ctx, query, limit);
-    } catch (error) {
-      // M9 load test §4.4: the search's own statement_timeout (below) is a "too broad" answer, not a server error.
-      if (isStatementTimeout(error)) throw new SearchTooBroadException();
-      throw error;
-    }
+    return this.runSearch(ctx, query, limit);
   }
 
   private runSearch(ctx: AuthContext, query: SearchQuery, limit: number): Promise<SearchResult[]> {
@@ -143,15 +137,23 @@ export class SearchService {
       const shiftPolicy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
       const delegated = scope.kind === 'owner' && scope.delegated;
 
-      // Sequential on one connection (a transaction's queries are serialised anyway).
-      const staff = canViewStaff && staffPolicy.canRead ? await this.searchStaff(manager, ctx, scope, query, limit, staffPolicy) : [];
-      const managers = canViewManagers ? await this.searchManagers(manager, ctx, query, limit) : [];
-      const shifts = canViewSchedule && shiftPolicy.canRead ? await this.searchShifts(manager, ctx, scope, query, limit, shiftPolicy, venuePolicy) : [];
-      // Offers are not a workspace-member object (members' offer lists are empty too) — never searched for them.
-      const offers = canViewSchedule && !delegated ? await this.searchOffers(manager, ctx, scope, query, limit) : [];
-      const venues = canViewVenues && venuePolicy.canRead ? await this.searchVenues(manager, ctx, scope, query, limit, venuePolicy) : [];
+      // M9 load test §4.4: ONLY the search statements below map a genuine statement timeout to 422 SEARCH_TOO_BROAD. A
+      // timeout in the permission / scope lookups above, an administrator's pg_cancel_backend (also 57014) or any other
+      // failure stays what it is (5xx), so a real fault is never disguised as "type more of the name".
+      try {
+        // Sequential on one connection (a transaction's queries are serialised anyway).
+        const staff = canViewStaff && staffPolicy.canRead ? await this.searchStaff(manager, ctx, scope, query, limit, staffPolicy) : [];
+        const managers = canViewManagers ? await this.searchManagers(manager, ctx, query, limit) : [];
+        const shifts = canViewSchedule && shiftPolicy.canRead ? await this.searchShifts(manager, ctx, scope, query, limit, shiftPolicy, venuePolicy) : [];
+        // Offers are not a workspace-member object (members' offer lists are empty too) — never searched for them.
+        const offers = canViewSchedule && !delegated ? await this.searchOffers(manager, ctx, scope, query, limit) : [];
+        const venues = canViewVenues && venuePolicy.canRead ? await this.searchVenues(manager, ctx, scope, query, limit, venuePolicy) : [];
 
-      return [...staff, ...managers, ...shifts, ...offers, ...venues];
+        return [...staff, ...managers, ...shifts, ...offers, ...venues];
+      } catch (error) {
+        if (isStatementTimeout(error)) throw tooBroad(query.text.length);
+        throw error;
+      }
     }, { useReplica: true });
   }
 

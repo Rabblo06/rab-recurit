@@ -10305,8 +10305,10 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Finding (M9 load test §4.4, availability):** a term matching every record made the offer search join and rank all
   119,581 offers to return 20 (1.1-1.2 s idle); under load it ran into the search's own 5 s `statement_timeout`, which
   surfaced as an unhandled 500 (the 11 manager-read errors of the final peak) and was retried once by the console.
-- **Control:** a 57014 from the search transaction is `SearchTooBroadException` (422, code `SEARCH_TOO_BROAD`, fixed
-  message, never the term or a row); every other error propagates unchanged. Each offer-search match branch now applies
+- **Control:** a genuine statement timeout (57014 with PostgreSQL's "canceling statement due to statement timeout") raised by
+  one of the per-type search statements is `SearchTooBroadException` (422, code `SEARCH_TOO_BROAD`, fixed message, never
+  the term or a row), counted and logged (term length only). An administrator's `pg_cancel_backend` (57014 "due to user
+  request"), a timeout in the permission / scope lookups and every other error propagate unchanged (security review L). Each offer-search match branch now applies
   the SAME organisation / workspace pin and `offerReadScopeCondition` as the final query, then stops after
   `OFFER_SEARCH_CANDIDATE_CAP` (500) matches; the final query keeps its own scope. Scoping inside the branch is what makes
   the cap safe: out-of-scope rows (still RLS-visible in the tenant, e.g. another manager's offers) can never fill the cap
