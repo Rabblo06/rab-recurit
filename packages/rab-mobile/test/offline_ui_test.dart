@@ -312,6 +312,39 @@ void main() {
         );
       },
     );
+    testWidgets(
+      're-review Low: a discard that fails on a broken store still logs out',
+      (tester) async {
+        final c = OfflineSyncController(
+          userId: 'user-a',
+          store: _ClearFails(),
+          bootClock: FakeBootClock(),
+          signer: FakeEntrySigner(),
+          buildFlag: true,
+        );
+        await c.ingestActive({
+          'offline': {'enabled': true},
+          'offlineTicket': 'tkt',
+        }, fetchDuration: Duration.zero);
+        await c.capture(
+          type: OfflinePunchType.clockIn,
+          shiftId: 'shift-1',
+          idempotencyKey: c.newIdempotencyKey(),
+        );
+        var logouts = 0;
+        await pumpGuard(tester, c, (n) => logouts = n);
+        await tester.tap(find.text('Log out'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('offline-logout-discard')));
+        await tester.pumpAndSettle();
+        expect(logouts, 1);
+        expect(
+          secure.containsKey(OfflineQueueStore.queueKey('user-a')),
+          isTrue,
+          reason: 'what could not be deleted stays keyed to this user',
+        );
+      },
+    );
 
     testWidgets('nothing unsent, or no controller: logs out straight away', (
       tester,
@@ -408,4 +441,11 @@ class _FailsFirstLoad extends OfflineQueueStore {
     }
     return super.load(userId);
   }
+}
+
+/// A store whose clear always fails (broken secure storage).
+class _ClearFails extends OfflineQueueStore {
+  @override
+  Future<void> clear(String userId) =>
+      Future.error(StateError('secure storage broken'));
 }
