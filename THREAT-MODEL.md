@@ -6705,6 +6705,20 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Residual.**
   - Optional values without a default reach the containers as `""` on OpenShip. Every reader treats blank as unset
     (verified against env validation and the direct readers).
+  - Follow-up (2026-11-18, owner request): those optional keys are now committed as `${KEY:-}` (an empty default), so
+    OpenShip shows them as "fallback default" instead of "needs value", and plain Compose now passes `""` as well
+    (before: nothing). Every reader was re-checked for "" = unset (env.validation.ts drops blanks, but
+    `EnvironmentService.get` falls back to the raw `process.env` value, so each direct reader was checked too), including
+    the bundled-db CA rule in api-prestart.sh / worker-start.sh / db-setup.sh (`-z "${PG_SSL_CA_CERT_PATH:-}"`) and the
+    "both CA settings set" refusal (pg-config.ts `present()` trims and drops ""). One key stays bare: `WORKSPACE_BASE_DOMAIN`
+    (`GET /auth/config` answers `""` instead of `null`; no client reads it). The image-vs-production gate treats rab-api's
+    `PG_POOL_MAX_CONNECTIONS` `""` as "not set" (that key only); any other value is still compared exactly.
+    Refresh onto main (2026-11-20): db-harden's two CA keys get the same `${KEY:-}` as db-setup's, and
+    compose-owner-login.cjs's "PG_DATABASE_URL / PG_DATABASE_APP_PASSWORD only as the committed expression" rule now
+    matches those variable names EXACTLY (`${PG_DATABASE_URL` not followed by a name character), because the prefix match
+    refused `${PG_DATABASE_URL_IS_DIRECT:-}` (a different variable, a boolean, no credential). Every Compose form of the
+    two credential variables (`${V}`, `${V:-x}`, `${V-x}`, `${V:?x}`, `${V?x}`, `${V:+x}`, `${V+x}`) is still refused
+    outside the committed line (compose-owner-login.test.cjs denial cases).
   - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
 - **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
   wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
