@@ -9,7 +9,10 @@ import {
   CORE_ATTENDANCE_POLICY_SQL,
   CORE_ATTENDANCE_SCOPE_DEPARSED,
   CORE_ATTENDANCE_SCOPE_HASH,
+  CORE_CORRECTION_POLICY_SQL,
+  CORE_CORRECTION_SCOPE_HASH,
 } from '../../database/typeorm/workspace-schema/attendance-staff-scope-sql';
+import { ATTENDANCE_ON_BEHALF_UNVERIFIABLE_SQL } from '../../engine/core-modules/user-deletion/user-deletion.service';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
@@ -47,6 +50,8 @@ describeIfDb('M4 §11: core.attendance staff-own-or-manager RLS predicate (integ
   const att = { xA: '', xB: '', yB: '' };
   let profileB = '';
   let freeSeat = '';
+  let freeProfileId = '';
+  const corrections = { a: '', b: '' };
   let shiftX = '';
   const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
 
@@ -115,11 +120,19 @@ describeIfDb('M4 §11: core.attendance staff-own-or-manager RLS predicate (integ
     att.xB = await attend(shiftX, profileB);
     att.yB = await attend(shiftY, profileB);
     freeSeat = await seat(shiftX, freeProfile);
+    freeProfileId = freeProfile;
+    for (const [a, label] of [[att.xA, 'a'], [att.xB, 'b']] as const) {
+      corrections[label] = await one(
+        `INSERT INTO core.attendance_correction (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
+         VALUES ($1, $2, $3, 'breakMinutes', '30', '45', 'longer break agreed with the venue', $4) RETURNING id`,
+        [w.org, w.id, a, w.owner],
+      );
+    }
   });
 
   afterAll(async () => {
     // The core business rows of these fixtures only (by organisation), children first; the users and organisations stay.
-    for (const table of ['attendance', 'shift_assignment', 'shift', 'manager_venue', 'venue', 'job_role', 'staff_profile', 'manager_profile']) {
+    for (const table of ['attendance_correction', 'attendance', 'shift_assignment', 'shift', 'manager_venue', 'venue', 'job_role', 'staff_profile', 'manager_profile']) {
       await admin?.query(`DELETE FROM core.${table} WHERE organisation_id = $1`, [w?.org]).catch(() => undefined);
     }
     await app?.end();
@@ -198,6 +211,80 @@ describeIfDb('M4 §11: core.attendance staff-own-or-manager RLS predicate (integ
     expect(await visible({ user: '', actor: 'worker', workspace: other.id })).toEqual([]);
   });
 
+  it('corrections inherit the attendance scope: Staff A reads only their own correction, never those of Staff B', async () => {
+    const corr = (o: Parameters<typeof as>[0]) =>
+      as(o, async () => (await app.query(`SELECT id FROM core.attendance_correction WHERE id = ANY($1::uuid[]) ORDER BY id`, [Object.values(corrections)])).rows.map((r) => String(r.id)).sort());
+    expect(await corr({ user: users.staffA })).toEqual([corrections.a]);
+    expect(await corr({ user: users.staffB })).toEqual([corrections.b]);
+    expect(await corr({ user: users.manager })).toEqual(sorted(corrections.a, corrections.b));
+    expect(await corr({ user: users.vmY })).toEqual([]);
+    expect(await corr({ user: '', actor: 'worker' })).toEqual(sorted(corrections.a, corrections.b));
+    expect(await corr({ user: users.stranger })).toEqual([]);
+    expect(await corr({ bind: false })).toEqual([]);
+    // WITH CHECK: Staff A cannot write a correction on the attendance of Staff B.
+    await expect(
+      as({ user: users.staffA }, () =>
+        app.query(
+          `INSERT INTO core.attendance_correction (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
+           VALUES ($1, $2, $3, 'breakMinutes', '30', '0', 'no break taken at all', $4)`,
+          [w.org, w.id, att.xB, users.staffA],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('positive paths still work as the runtime login: own clock-in INSERT, own clock-out UPDATE, on-behalf punches by a Manager and the venue Venue Manager', async () => {
+    const inserted = await as({ user: users.stranger }, async () =>
+      (
+        await app.query(
+          `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, status)
+           VALUES ($1, $2, $3, $4, $5, now(), 'clocked_in') RETURNING id`,
+          [w.org, w.id, freeSeat, shiftX, freeProfileId],
+        )
+      ).rowCount,
+    );
+    expect(inserted).toBe(1);
+    const bump = (who: string, id: string) =>
+      as({ user: who }, async () => (await app.query(`UPDATE core.attendance SET clock_out_at = clock_out_at + interval '1 minute' WHERE id = $1`, [id])).rowCount);
+    expect(await bump(users.staffA, att.xA)).toBe(1);
+    expect(await bump(users.manager, att.xB)).toBe(1);
+    expect(await bump(users.vmX, att.xB)).toBe(1);
+    expect(await bump(users.vmY, att.xB)).toBe(0);
+  });
+
+  it('finalise path: a payroll_record that mirrors approved attendance can still be inserted (its policy reads attendance under the new RLS)', async () => {
+    await admin.query(`UPDATE core.attendance SET status = 'approved', worked_minutes = 480, earned_pence = 9600 WHERE id = $1`, [att.xA]);
+    try {
+      const staff = (await admin.query(`SELECT staff_profile_id FROM core.attendance WHERE id = $1`, [att.xA])).rows[0].staff_profile_id as string;
+      const insertAs = (who: string) =>
+        as({ user: who }, async () =>
+          (
+            await app.query(
+              `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+               VALUES ($1, $2, $3, $4, $5, 'pending_approval', 480, 1200, 9600) RETURNING id`,
+              [w.org, w.id, att.xA, shiftX, staff],
+            )
+          ).rowCount,
+        );
+      // The Venue Manager linked to the shift's venue finalises (payroll_record_insert's canReadShift).
+      expect(await insertAs(users.vmX)).toBe(1);
+      // A Venue Manager of another venue cannot see the attendance, so the mirror check fails closed.
+      await expect(insertAs(users.vmY)).rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await admin.query(`UPDATE core.attendance SET status = 'clocked_out', worked_minutes = NULL, earned_pence = NULL WHERE id = $1`, [att.xA]);
+    }
+  });
+
+  it('user deletion fails safe: a caller without full attendance visibility cannot conclude a manager target made no on-behalf punch', async () => {
+    const check = (caller: string, target: string) => as({ user: caller }, async () => (await app.query(ATTENDANCE_ON_BEHALF_UNVERIFIABLE_SQL, [target])).rows.length);
+    // A Venue Manager (no non-venue manager profile here) deleting another manager of this workspace: not conclusive, soft delete.
+    expect(await check(users.vmY, users.vmX)).toBe(1);
+    // The workspace Manager sees every attendance row, so the ordinary on-behalf check is conclusive.
+    expect(await check(users.manager, users.vmX)).toBe(0);
+    // A target who is not a manager of this workspace cannot have punched anyone in here.
+    expect(await check(users.vmY, users.staffA)).toBe(0);
+  });
+
   it('zero rows with no tenant context bound (runtime login)', async () => {
     expect(await visible({ bind: false })).toEqual([]);
     const { rows } = await app.query(`SELECT count(*)::int AS n FROM core.attendance`);
@@ -205,6 +292,10 @@ describeIfDb('M4 §11: core.attendance staff-own-or-manager RLS predicate (integ
   });
 
   it('core.attendance carries the predicate on both expressions, deparsed exactly as reviewed', async () => {
+    const [corr] = (await admin.query(CORE_CORRECTION_POLICY_SQL)).rows;
+    // eslint-disable-next-line no-console
+    console.log(`[att-scope-correction] using=${corr?.using_hash} check=${corr?.check_hash}`);
+    expect(corr).toMatchObject({ using_hash: CORE_CORRECTION_SCOPE_HASH, check_hash: CORE_CORRECTION_SCOPE_HASH, permissive: true, cmd: '*', to_public: true });
     const [core] = (await admin.query(CORE_ATTENDANCE_POLICY_SQL)).rows;
     const { rows } = await admin.query(
       `SELECT pg_get_expr(p.polqual, p.polrelid) AS using, pg_get_expr(p.polwithcheck, p.polrelid) AS check FROM pg_policy p

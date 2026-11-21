@@ -7,8 +7,10 @@ import {
   CORE_ATTENDANCE_REVIEWED_DRIFT,
   CORE_ATTENDANCE_SCOPE_DEPARSED,
   CORE_ATTENDANCE_SCOPE_HASH,
+  CORE_CORRECTION_SCOPE_DEPARSED,
+  CORE_CORRECTION_SCOPE_HASH,
 } from './attendance-staff-scope-sql';
-import { attendanceScopePredicate, attendanceStaffScopeSql, attendanceTenantOnlySql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
+import { attendanceCorrectionScopeSql, attendanceScopePredicate, attendanceStaffScopeSql, attendanceTenantOnlySql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 import { WORKSPACE_UPGRADE_COMMANDS } from '../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import { SEMANTIC_GOLDEN_PG16 } from '../../posture-drift/semantic-golden.pg16';
 import { SEMANTIC_GOLDEN_PG17 } from '../../posture-drift/semantic-golden.pg17';
@@ -68,7 +70,16 @@ describe('M4 §11: attendance_tenant gains a staff-own-or-manager predicate', ()
     expect(CORE_ATTENDANCE_REVIEWED_DRIFT).toEqual([
       `- policy|attendance|attendance_tenant|*|permissive=true|roles=public|using=${ATTENDANCE_TENANT_DEPARSED}|check=${ATTENDANCE_TENANT_DEPARSED}`,
       `+ policy|attendance|attendance_tenant|*|permissive=true|roles=public|using=${CORE_ATTENDANCE_SCOPE_DEPARSED}|check=${CORE_ATTENDANCE_SCOPE_DEPARSED}`,
+      `- policy|attendance_correction|attendance_correction_tenant|*|permissive=true|roles=public|using=${ATTENDANCE_TENANT_DEPARSED}|check=${ATTENDANCE_TENANT_DEPARSED}`,
+      `+ policy|attendance_correction|attendance_correction_tenant|*|permissive=true|roles=public|using=${CORE_CORRECTION_SCOPE_DEPARSED}|check=${CORE_CORRECTION_SCOPE_DEPARSED}`,
     ]);
+    expect(md5(CORE_CORRECTION_SCOPE_DEPARSED)).toBe(CORE_CORRECTION_SCOPE_HASH);
+    for (const g of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18]) {
+      expect(g.filter((l) => l.startsWith('policy|attendance_correction|attendance_correction_tenant|'))).toEqual([
+        `policy|attendance_correction|attendance_correction_tenant|PERMISSIVE|public|*|using=${CORE_CORRECTION_SCOPE_HASH}|check=${CORE_CORRECTION_SCOPE_HASH}`,
+      ]);
+    }
+    expect(attendanceCorrectionScopeSql('core')).toContain('EXISTS (SELECT 1 FROM "core".attendance a WHERE a.id = attendance_correction.attendance_id)');
   });
 
   it('the migration guard reads the catalog only', () => {

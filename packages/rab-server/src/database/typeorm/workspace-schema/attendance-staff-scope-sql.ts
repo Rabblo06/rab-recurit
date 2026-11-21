@@ -1,5 +1,5 @@
 // sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (a policy name and md5 constants); no request or row data reaches these templates.
-import { ATTENDANCE_POLICY } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
+import { ATTENDANCE_CORRECTION_POLICY, ATTENDANCE_POLICY } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 
 /**
  * DRAFT — NEW SQL, owner SQL review FIRST (M4 design §11 LOW finding). Catalog checks of migration
@@ -25,17 +25,31 @@ export const ATTENDANCE_TENANT_HASH = '1548d58f4dea2a4e9fa16034d67e1638';
 
 /** The new core expression as PostgreSQL deparses it (pg_get_expr, whitespace collapsed); its md5 is the hash below. */
 export const CORE_ATTENDANCE_SCOPE_DEPARSED =
-  "((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((current_setting('rab.actor_type'::text, true) = 'worker'::text) OR (EXISTS ( SELECT 1 FROM core.staff_profile sp WHERE ((sp.id = attendance.staff_profile_id) AND (sp.user_id = core.current_uid()) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace())))) OR (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM ((core.shift s JOIN core.manager_venue mv ON ((mv.venue_id = s.venue_id))) JOIN core.manager_profile mp ON ((mp.id = mv.manager_profile_id))) WHERE ((s.id = attendance.shift_id) AND (s.organisation_id = core.current_org()) AND (s.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()))))))";
+  "((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((current_setting('rab.actor_type'::text, true) = 'worker'::text) OR (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text)))) OR (EXISTS ( SELECT 1 FROM core.staff_profile sp WHERE ((sp.id = attendance.staff_profile_id) AND (sp.user_id = core.current_uid()) AND (sp.organisation_id = core.current_org()) AND (sp.workspace_id = core.current_workspace())))) OR (EXISTS ( SELECT 1 FROM ((core.shift s JOIN core.manager_venue mv ON ((mv.venue_id = s.venue_id))) JOIN core.manager_profile mp ON ((mp.id = mv.manager_profile_id))) WHERE ((s.id = attendance.shift_id) AND (s.organisation_id = core.current_org()) AND (s.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()))))))";
 
 /** Hash of the new core expression (USING = WITH CHECK); pinned by the semantic goldens. */
-export const CORE_ATTENDANCE_SCOPE_HASH = '41773011ff0c57fd977cfa1d2c9c9ba9';
+export const CORE_ATTENDANCE_SCOPE_HASH = '66f35009527815f49eecb9daa510da07';
+
+/** core.attendance_correction's policy: same hash query, same tenant-only hash before (security review of #305). */
+export const CORE_CORRECTION_POLICY_SQL = CORE_ATTENDANCE_POLICY_SQL.replace("'core.attendance'::pg_catalog.regclass", "'core.attendance_correction'::pg_catalog.regclass").replace(
+  `p.polname = '${ATTENDANCE_POLICY}'`,
+  `p.polname = '${ATTENDANCE_CORRECTION_POLICY}'`,
+);
+
+/** The new core correction expression as PostgreSQL deparses it; its md5 is the hash below. */
+export const CORE_CORRECTION_SCOPE_DEPARSED = "((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.attendance a WHERE (a.id = attendance_correction.attendance_id))))";
+
+/** Hash of the new core correction expression (USING = WITH CHECK); pinned by the semantic goldens. */
+export const CORE_CORRECTION_SCOPE_HASH = '3c36dbc1acd9930c2cc2bc8082e4871d';
 
 /**
- * The two privilege-drift lines migration-security-check.ts reviews for AttendanceStaffScopeRls1786722100000 (its
- * REVIEWED_MIGRATION_DRIFT entry): the core policy before and after, as that harness prints it. Expected output of a check,
- * not a query.
+ * The privilege-drift lines migration-security-check.ts reviews for AttendanceStaffScopeRls1786722100000 (its
+ * REVIEWED_MIGRATION_DRIFT entry): both core policies before and after, as that harness prints them. Expected output of a
+ * check, not a query.
  */
 export const CORE_ATTENDANCE_REVIEWED_DRIFT: readonly string[] = Object.freeze([
   `- policy|attendance|${ATTENDANCE_POLICY}|*|permissive=true|roles=public|using=${ATTENDANCE_TENANT_DEPARSED}|check=${ATTENDANCE_TENANT_DEPARSED}`,
   `+ policy|attendance|${ATTENDANCE_POLICY}|*|permissive=true|roles=public|using=${CORE_ATTENDANCE_SCOPE_DEPARSED}|check=${CORE_ATTENDANCE_SCOPE_DEPARSED}`,
+  `- policy|attendance_correction|${ATTENDANCE_CORRECTION_POLICY}|*|permissive=true|roles=public|using=${ATTENDANCE_TENANT_DEPARSED}|check=${ATTENDANCE_TENANT_DEPARSED}`,
+  `+ policy|attendance_correction|${ATTENDANCE_CORRECTION_POLICY}|*|permissive=true|roles=public|using=${CORE_CORRECTION_SCOPE_DEPARSED}|check=${CORE_CORRECTION_SCOPE_DEPARSED}`,
 ]);

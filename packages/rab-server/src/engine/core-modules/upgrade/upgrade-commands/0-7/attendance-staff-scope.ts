@@ -13,12 +13,12 @@
  * Staff A read or write Staff B's attendance in the same workspace (CLAUDE.md: the fifth enforcement layer).
  *
  * The statement: `ALTER POLICY attendance_tenant ON <schema>.attendance USING (P) WITH CHECK (P)`, P = the unchanged tenant
- * binding AND one of
+ * binding AND one of (in this order: the two uncorrelated tests first, so the planner can evaluate them once per statement)
  *   - worker: `rab.actor_type = 'worker'` (the attendance monitor, post-shift lifecycle, final timesheet, statements; the same
  *     marker staff_profile_worker_scan / shift_staff_review_worker_scan accept; bound only by TenantContextService);
- *   - staff own: the row's staff profile belongs to the caller (`sp.user_id = core.current_uid()`), as payroll_record_select;
  *   - workspace manager: a manager_profile of THIS workspace that is not a Venue Manager (Manager, CEO), as
  *     payroll_record_select's payrollManager;
+ *   - staff own: the row's staff profile belongs to the caller (`sp.user_id = core.current_uid()`), as payroll_record_select;
  *   - Venue Manager of the shift's venue (manager_venue of this workspace), as design Appendix A.1 venueManagerOfShift.
  * Every clause is narrower than the tenant-only policy it replaces, so nobody gains a row. Custom workspace members never hold
  * attendance.view (MEMBER_ROLE_ALLOWED_PERMISSIONS) and see no attendance rows (they saw none through the services either).
@@ -47,14 +47,14 @@ export function attendanceScopePredicate(schema: string): string {
     AND (
       current_setting('rab.actor_type', true) = 'worker'
       OR EXISTS (
-        SELECT 1 FROM "${s}".staff_profile sp
-        WHERE sp.id = attendance.staff_profile_id AND sp.user_id = core.current_uid()
-          AND sp.organisation_id = core.current_org() AND sp.workspace_id = core.current_workspace()
-      )
-      OR EXISTS (
         SELECT 1 FROM core.manager_profile mp
         WHERE mp.user_id = core.current_uid() AND mp.organisation_id = core.current_org()
           AND mp.workspace_id = core.current_workspace() AND mp.type <> 'venue'
+      )
+      OR EXISTS (
+        SELECT 1 FROM "${s}".staff_profile sp
+        WHERE sp.id = attendance.staff_profile_id AND sp.user_id = core.current_uid()
+          AND sp.organisation_id = core.current_org() AND sp.workspace_id = core.current_workspace()
       )
       OR EXISTS (
         SELECT 1 FROM "${s}".shift s
@@ -87,4 +87,40 @@ export function attendanceStaffScopeSql(schema: string): string {
 /** down() only: the tenant-only predicate back. */
 export function attendanceTenantOnlySql(schema: string): string {
   return alterSql(schema, TENANT);
+}
+
+/**
+ * Security review of #305 (Low): attendance_correction had only the tenant policy, so staff could read each other's
+ * corrections. The correction policy now also requires the parent attendance to be visible to the caller: the sub-select
+ * runs under the attendance policy above, so a correction inherits exactly its attendance's readers (staff own, workspace
+ * manager, Venue Manager of the shift, worker). Same expression for USING and WITH CHECK (only those who may act on the
+ * attendance may insert its correction).
+ */
+export const ATTENDANCE_CORRECTION_POLICY = 'attendance_correction_tenant';
+
+function correctionAlterSql(schema: string, predicate: string): string {
+  const s = checkedSchema(schema);
+  // sql-injection-reviewed: s is 'core' or a regex-validated `workspace_<32 hex>` name; predicate is built from constants here.
+  return `ALTER POLICY ${ATTENDANCE_CORRECTION_POLICY} ON "${s}".attendance_correction USING (
+    ${predicate}
+  ) WITH CHECK (
+    ${predicate}
+  )`;
+}
+
+export function attendanceCorrectionScopePredicate(schema: string): string {
+  const s = checkedSchema(schema);
+  // sql-injection-reviewed: s is 'core' or a regex-validated `workspace_<32 hex>` name.
+  return `${TENANT}
+    AND EXISTS (SELECT 1 FROM "${s}".attendance a WHERE a.id = attendance_correction.attendance_id)`;
+}
+
+/** tenant AND the parent attendance is visible to the caller (so the attendance predicate applies), on both expressions. */
+export function attendanceCorrectionScopeSql(schema: string): string {
+  return correctionAlterSql(schema, attendanceCorrectionScopePredicate(schema));
+}
+
+/** down() only: the tenant-only correction predicate back. */
+export function attendanceCorrectionTenantOnlySql(schema: string): string {
+  return correctionAlterSql(schema, TENANT);
 }
