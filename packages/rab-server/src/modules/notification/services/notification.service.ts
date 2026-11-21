@@ -32,6 +32,16 @@ export interface NotifyParams {
    * where no preference row exists at all.
    */
   forceEmail?: boolean;
+  /**
+   * The email's body text when it must differ from the in-app `message` (e.g. the payslip email adds "open the app to view
+   * it"). Plain text, escaped like `message`. Absent ⇒ the email carries `message`, as before.
+   */
+  emailMessage?: string;
+}
+
+/** `emailMessage` only: one escaped paragraph per blank-line-separated block of the plain text. */
+function emailHtml(text: string): string {
+  return text.split(/\n{2,}/).map((p) => `<p>${escapeHtml(p)}</p>`).join('');
 }
 
 /**
@@ -164,7 +174,10 @@ export class NotificationService {
           jobType: EmailOutboxJobType.NOTIFICATION,
           recipientEmail: user.email,
           targetUserId: params.userId,
-          rendered: { subject: params.title, html: `<p>${escapeHtml(params.message)}</p>`, text: params.message },
+          rendered:
+            params.emailMessage !== undefined
+              ? { subject: params.title, html: emailHtml(params.emailMessage), text: params.emailMessage }
+              : { subject: params.title, html: `<p>${escapeHtml(params.message)}</p>`, text: params.message },
         });
         // Phase D-Q3: after commit only (never inside this transaction); off by default.
         this.fastPublish?.afterCommitEmail(manager, { id: row.id, organisationId: row.organisationId });
