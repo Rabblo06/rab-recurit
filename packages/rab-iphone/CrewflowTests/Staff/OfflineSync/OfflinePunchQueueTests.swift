@@ -15,13 +15,18 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertFalse(offline.canCapture, "no ticket from the server yet")
         XCTAssertFalse(OfflineAttendanceBuildSwitch.isOn(), "the build switch is not set in any configuration")
 
-        let live = StaffOfflineAttendance.live(store: InMemorySecureStore(), userId: OfflineFixtures.userId)
+        let live = StaffOfflineAttendance.live(store: InMemorySecureStore(), userId: OfflineFixtures.userId, currentUserId: { OfflineFixtures.userId })
         live.updateFromServer(enabled: true, ticket: OfflineFixtures.ticket, serverNow: OfflineFixtures.serverNow, fetchStarted: live.clock.reading())
         XCTAssertFalse(live.canCapture, "the live build has no device-key signer and no build switch: it can never save offline")
         XCTAssertThrowsError(try live.capture(.make(.clockIn), context: OfflineAttendanceContext())) {
             XCTAssertEqual($0 as? OfflineCaptureRefusal, .notEnabled)
         }
         XCTAssertTrue(live.queue.items.isEmpty)
+        XCTAssertTrue(live.isOwnerSignedIn())
+        let switched = StaffOfflineAttendance.live(store: InMemorySecureStore(), userId: OfflineFixtures.userId, currentUserId: { OfflineFixtures.otherUserId })
+        XCTAssertFalse(switched.isOwnerSignedIn(), "another signed-in account is never the owner")
+        let signedOut = StaffOfflineAttendance.live(store: InMemorySecureStore(), userId: OfflineFixtures.userId, currentUserId: { nil })
+        XCTAssertFalse(signedOut.isOwnerSignedIn())
     }
 
     @MainActor

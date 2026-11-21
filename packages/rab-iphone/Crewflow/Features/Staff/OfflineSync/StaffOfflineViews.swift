@@ -38,6 +38,9 @@ enum StaffOfflinePresentation {
     }
 
     static let signOutMessage = "Connect to send them before you log out. If you discard them they are never sent and your manager is not told."
+    /// The stored queue could not be read: it is never discarded.
+    static let signOutUnreadableMessage = "They could not be read, so they cannot be discarded. If you log out they stay on this phone and are sent the next time you sign in and connect."
+    static let sendSavedFirst = "Actions saved on this phone must be sent first. Connect, then tap Send now."
 }
 
 /// The saved actions as message cards: amber while waiting to send, red (with

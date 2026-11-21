@@ -117,6 +117,91 @@ final class StaffOfflineStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testAServerOrProxy408IsAnAnswerAndIsNeverSaved() async {
+        let (offline, _) = openGate()
+        server.setHandler { request in
+            if (request.url?.path ?? "").hasSuffix("/attendance/clock-in") {
+                return .json(408, #"{"message":"Request Timeout"}"#)
+            }
+            return .failure(.notConnectedToInternet)
+        }
+        let store = makeStore(offline)
+        _ = await store.clockIn(shiftId: StaffFixtures.shiftId, qrToken: "qr", location: nil)
+        XCTAssertTrue(offline.queue.items.isEmpty, "only a real no-response failure may queue")
+        XCTAssertEqual(store.attendanceError?.message, StaffAttendanceMessages.uncertainClockIn, "still an uncertain outcome: reload, never resend")
+
+        let answered = APIError.from(status: 408, payload: ServerErrorPayload(message: "Request Timeout"))
+        XCTAssertEqual(answered.statusCode, 408)
+        XCTAssertFalse(answered.isNoResponse)
+        XCTAssertTrue(answered.isTransient)
+        XCTAssertTrue(answered.isUncertainOutcome)
+        XCTAssertEqual(answered.userMessage, APIMessages.timeout)
+        XCTAssertTrue(APIError.from(urlError: URLError(.timedOut)).isNoResponse)
+        XCTAssertTrue(APIError.from(urlError: URLError(.cannotFindHost)).isNoResponse)
+        XCTAssertTrue(APIError.from(urlError: URLError(.secureConnectionFailed)).isNoResponse)
+    }
+
+    @MainActor
+    func testAnOnlinePunchNeverOvertakesSavedOnes() async throws {
+        let (offline, _) = openGate()
+        let online = StubFlag(false)
+        server.setHandler { request in
+            guard online.value else { return .failure(.notConnectedToInternet) }
+            let path = request.url?.path ?? ""
+            // The server answers, but leaves the saved check-in unanswered.
+            if path.hasSuffix("/attendance/me/sync") { return SyncStub.results([]) }
+            if path.hasSuffix("/attendance/clock-in") {
+                return .json(201, StaffFixtures.attendanceJSON(status: "clocked_in", clockOutAt: nil, workedMinutes: nil))
+            }
+            return .json(404, #"{"message":"Not found."}"#)
+        }
+        let store = makeStore(offline)
+        _ = await store.checkIn(shiftId: StaffFixtures.shiftId, location: nil)
+        XCTAssertEqual(offline.queue.pending.map(\.type), [.checkIn])
+
+        online.value = true
+        let ok = await store.clockIn(shiftId: StaffFixtures.shiftId, qrToken: "qr", location: nil)
+
+        XCTAssertFalse(ok)
+        XCTAssertEqual(server.requests(to: "/attendance/me/sync").count, 1, "the saved check-in is sent first")
+        XCTAssertTrue(server.requests(to: "/attendance/clock-in").isEmpty, "never sent online ahead of the saved check-in")
+        XCTAssertEqual(offline.queue.pending.map(\.type), [.checkIn, .clockIn], "saved behind it, in order")
+
+        offline.updateFromServer(enabled: false, ticket: nil, serverNow: nil, fetchStarted: nil)
+        _ = await store.clockOutSavedShift(shiftId: StaffFixtures.shiftId, qrToken: "out", location: nil)
+        XCTAssertEqual(offline.queue.pending.map(\.type), [.checkIn, .clockIn], "gate shut: nothing new is saved")
+        XCTAssertNotNil(store.attendanceError)
+    }
+
+    @MainActor
+    func testWithTheGateShutAndSavedActionsWaitingAnOnlinePunchIsRefusedNotSent() async throws {
+        let (offline, _) = openGate()
+        server.setHandler { _ in .failure(.notConnectedToInternet) }
+        let store = makeStore(offline)
+        _ = await store.checkIn(shiftId: StaffFixtures.shiftId, location: nil)
+        offline.updateFromServer(enabled: false, ticket: nil, serverNow: nil, fetchStarted: nil)
+
+        let ok = await store.clockIn(shiftId: StaffFixtures.shiftId, qrToken: "qr", location: nil)
+
+        XCTAssertFalse(ok)
+        XCTAssertTrue(server.requests(to: "/attendance/clock-in").isEmpty)
+        XCTAssertEqual(store.attendanceError?.message, StaffOfflinePresentation.sendSavedFirst)
+        XCTAssertEqual(offline.queue.pending.count, 1)
+    }
+
+    @MainActor
+    func testAnUnreadableQueueIsNeverDiscardedBySignOut() async {
+        let keychain = InMemorySecureStore([OfflinePunchStorage.queueKey(OfflineFixtures.userId): "garbage"])
+        let clock = FakeBootClock()
+        let offline = makeOfflineAttendance(store: keychain, clock: clock)
+        let store = makeStore(offline)
+        XCTAssertTrue(store.savedQueueUnreadable)
+        XCTAssertEqual(store.unsentSavedCount, 1, "the sign-out guard shows")
+        XCTAssertFalse(store.discardAllSaved())
+        XCTAssertEqual(keychain.string(for: OfflinePunchStorage.queueKey(OfflineFixtures.userId)), "garbage")
+    }
+
+    @MainActor
     func testASuccessfulActiveReadSendsWhatIsSavedThenShowsTheServersState() async throws {
         let (offline, _) = openGate()
         let online = StubFlag(false)

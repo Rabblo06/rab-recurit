@@ -89,13 +89,18 @@ struct StaffProfileScreen: View {
                         titleVisibility: .visible
                     ) {
                         Button("Send now") { Task { await store.syncOffline(trigger: .manual) } }
-                        Button("Discard and log out", role: .destructive) {
-                            store.discardAllSaved()
-                            signOut()
+                        if store.savedQueueUnreadable {
+                            // Never wiped: logging out leaves it on the phone.
+                            Button("Log out and keep them") { signOut() }
+                        } else {
+                            Button("Discard and log out", role: .destructive) {
+                                // Refused (nothing cleared) if it became unreadable.
+                                if store.discardAllSaved() { signOut() }
+                            }
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: {
-                        Text(StaffOfflinePresentation.signOutMessage)
+                        Text(store.savedQueueUnreadable ? StaffOfflinePresentation.signOutUnreadableMessage : StaffOfflinePresentation.signOutMessage)
                     }
                 }
                 .padding(.horizontal, 20)

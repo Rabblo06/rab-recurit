@@ -29,7 +29,11 @@ struct StaffRootView: View {
             // M4 offline: the live instance has no device-key signer and the
             // build switch is off, so it can never save an action (HARD RULE).
             offline: environment.session.user.map {
-                StaffOfflineAttendance.live(store: environment.deviceStore, userId: $0.id)
+                StaffOfflineAttendance.live(
+                    store: environment.deviceStore,
+                    userId: $0.id,
+                    currentUserId: { [weak session = environment.session] in session?.user?.id }
+                )
             }
         ))
         _realtime = StateObject(wrappedValue: RealtimeClient(transport: APIRealtimeTransport(api: environment.api)))

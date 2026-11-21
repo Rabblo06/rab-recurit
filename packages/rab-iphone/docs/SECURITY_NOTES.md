@@ -188,7 +188,11 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
 - **Clock screen wiring (`StaffStore`, `StaffClockFlow`, `StaffClockScreen`, Profile).** Online first, always. Only
   while the gate is open does a check-in / clock-in / clock-out carry an `Idempotency-Key` (UUID v4 made at the tap);
   if that request gets no answer (offline) or times out after sending (uncertain), the action is saved with the SAME key
-  so the server applies it at most once (D17). A refusal with an answer (4xx/5xx) is never saved. With the gate shut
+  so the server applies it at most once (D17). Only a genuine no-response failure is saved (`APIError.isNoResponse`:
+  connection, DNS, TLS, connection lost, or the client's own timeout); any HTTP answer is not, and a server or proxy
+  408 now maps to `.http(408)`, kept apart from the client timeout (still an uncertain outcome that reloads, never a
+  resend). While saved actions are waiting, a new punch first sends them and, if any still wait, is saved behind them
+  (gate open) or refused (gate shut): it is never sent online ahead of them. With the gate shut
   (every build today) requests carry no header and the existing uncertain-outcome handling is unchanged. Nothing is
   optimistic: no attendance is shown until the server answers; a saved clock-in replaces the running timer with fixed
   text "Clocked in 09:02, saved on this phone, not yet confirmed" (D10; the time is the server-anchored estimate, never
@@ -199,7 +203,8 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
   `X-Client-*` or `X-Crewflow-Background`.
 - **Sign-out (D18).** While any action is unsent (pending, too old, undeliverable, or an unreadable queue), Log out
   asks first: Send now, Discard and log out (explicit; discarded actions are never sent and the manager is not told),
-  or Cancel. A forced sign-out (session ended by the server) does not discard: the queue stays in the Keychain under
+  or Cancel. An unreadable stored queue is never discarded (not even explicitly): the dialog offers "Log out and keep
+  them" instead, and the item stays under the user's id. A forced sign-out (session ended by the server) does not discard: the queue stays in the Keychain under
   that user's id and is sent after the same user signs in again (or ages out after 72 h).
 - **Integrity signal.** `rootedSignal` is a weak client-asserted jailbreak path check, a flag on the receipt only (D11).
 - **Residual.** A jailbroken, hooked app can sign lies within the server's bounds (DESIGN §2 trade-off: schedule clamp,

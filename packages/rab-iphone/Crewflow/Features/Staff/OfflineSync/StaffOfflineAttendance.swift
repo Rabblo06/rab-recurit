@@ -88,6 +88,9 @@ final class StaffOfflineAttendance: ObservableObject {
     /// server's skew flags only. Never a time.
     private let wallClock: () -> Date
     private let rootedSignal: () -> Bool
+    /// The signed-in user right now; a send is refused unless it is this
+    /// queue's owner. nil (tests only) skips the check.
+    private let currentUserId: (() -> String?)?
     private var forwarding: AnyCancellable?
 
     init(
@@ -98,7 +101,8 @@ final class StaffOfflineAttendance: ObservableObject {
         appVersion: String,
         limits: OfflineQueueLimits = .standard,
         wallClock: @escaping () -> Date = { Date() },
-        rootedSignal: @escaping () -> Bool = { OfflineIntegritySignal.rootedSignal() }
+        rootedSignal: @escaping () -> Bool = { OfflineIntegritySignal.rootedSignal() },
+        currentUserId: (() -> String?)? = nil
     ) {
         self.storage = storage
         self.clock = clock
@@ -107,6 +111,7 @@ final class StaffOfflineAttendance: ObservableObject {
         self.appVersion = appVersion
         self.wallClock = wallClock
         self.rootedSignal = rootedSignal
+        self.currentUserId = currentUserId
         self.queue = OfflinePunchQueue(storage: storage, limits: limits)
         self.ticket = storage.loadTicket()
         forwarding = queue.objectWillChange.sink { [weak self] _ in
@@ -117,14 +122,26 @@ final class StaffOfflineAttendance: ObservableObject {
     /// The production instance. `signer: nil`: there is no device key until
     /// `POST /attendance/me/device-key` exists (server M4 step 5), so this
     /// build can never save an action offline.
-    static func live(store: any SecureStore, userId: String, bundle: Bundle = .main) -> StaffOfflineAttendance {
+    static func live(
+        store: any SecureStore,
+        userId: String,
+        currentUserId: @escaping () -> String?,
+        bundle: Bundle = .main
+    ) -> StaffOfflineAttendance {
         StaffOfflineAttendance(
             storage: OfflinePunchStorage(store: store, userId: userId),
             clock: SystemOfflineBootClock(),
             signer: nil,
             buildAllows: OfflineAttendanceBuildSwitch.isOn(bundle: bundle),
-            appVersion: versionString(bundle)
+            appVersion: versionString(bundle),
+            currentUserId: currentUserId
         )
+    }
+
+    /// The signed-in user is this queue's owner (checked before every send).
+    func isOwnerSignedIn() -> Bool {
+        guard let currentUserId else { return true }
+        return currentUserId() == storage.userId
     }
 
     static func versionString(_ bundle: Bundle) -> String {
