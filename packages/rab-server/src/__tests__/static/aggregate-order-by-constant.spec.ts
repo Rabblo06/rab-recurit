@@ -16,6 +16,7 @@ import { SEMANTIC_OBJECT_SQL } from '../../database/posture-drift/semantic-postu
 const SRC = path.resolve(__dirname, '../..');
 const SKIP_DIRS = new Set(['node_modules', 'dist', '__tests__', 'migrations']); // migrations are frozen (never edited after merge)
 const isTestFile = (name: string) => /\.(spec|test)\.ts$/.test(name);
+const isScanned = (name: string) => (name.endsWith('.ts') || name.endsWith('.sql')) && !isTestFile(name);
 
 /**
  * Known, reviewed exceptions (relative to packages/rab-server/src). Each is either frozen or not a posture renderer.
@@ -36,16 +37,29 @@ function* walk(dir: string): Generator<string> {
     if (SKIP_DIRS.has(name)) continue;
     const full = path.join(dir, name);
     if (fs.statSync(full).isDirectory()) yield* walk(full);
-    else if (name.endsWith('.ts') && !isTestFile(name)) yield full;
+    else if (isScanned(name)) yield full;
   }
 }
 
-/** Positions of `ORDER BY <int>)` whose enclosing parenthesis is a function call that is not a subquery. */
-function aggregateOrderByConstant(text: string): number[] {
+/**
+ * Comments blanked to spaces (same length, so positions stay valid): `--` SQL and `//` TS line comments (not the `//` of a
+ * `scheme://`), and block comments. An apostrophe in a comment ("don't") would otherwise flip the quote tracking below.
+ */
+function blankComments(text: string): string {
+  const blank = (m: string) => m.replace(/[^\n]/g, ' ');
+  return text.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/--[^\n]*/g, blank).replace(/(^|[^:])\/\/[^\n]*/g, (m, pre: string) => pre + blank(m.slice(pre.length)));
+}
+
+/**
+ * Positions of an aggregate ORDER BY whose (first) key is an integer constant: `ORDER BY 1)`, `ORDER BY 1 DESC)`,
+ * `ORDER BY 2 NULLS FIRST)`, `ORDER BY 1, x)` ..., inside a function call that is not a subquery.
+ */
+function aggregateOrderByConstant(source: string): number[] {
+  const text = blankComments(source);
   const hits: number[] = [];
-  const re = /ORDER\s+BY\s+\d+\s*\)/gi;
+  const re = /ORDER\s+BY\s+\d+(?:\s+(?:ASC|DESC))?(?:\s+NULLS\s+(?:FIRST|LAST))?\s*[),]/gi;
   for (let m = re.exec(text); m; m = re.exec(text)) {
-    // Walk back to the '(' this ')' closes (skipping single-quoted literals).
+    // Walk back to the '(' that encloses this ORDER BY (skipping single-quoted literals).
     let depth = 0;
     let inQuote = false;
     let open = -1;
@@ -53,6 +67,8 @@ function aggregateOrderByConstant(text: string): number[] {
       const ch = text[i];
       if (ch === "'") inQuote = !inQuote;
       if (inQuote) continue;
+      // A statement or template-literal boundary: this ORDER BY is not inside a call (a top-level `ORDER BY 1, 2` is positional).
+      if (ch === '`' || ch === ';') break;
       if (ch === ')') depth += 1;
       else if (ch === '(') {
         if (depth === 0) {
@@ -77,6 +93,29 @@ describe('no aggregate ORDER BY <constant> in production SQL (restore drill MEDI
     expect(aggregateOrderByConstant(`array(SELECT pg_get_userbyid(r) FROM unnest(polroles) r ORDER BY 1)`)).toEqual([]);
     expect(aggregateOrderByConstant(`SELECT a FROM t ORDER BY 1`)).toEqual([]);
     expect(aggregateOrderByConstant(`string_agg(pr.n, ',' ORDER BY pr.n COLLATE "C")`)).toEqual([]);
+    // Security review L (PR #321): direction, NULLS and a constant first key of a list are flagged too.
+    expect(aggregateOrderByConstant(`string_agg(n, ',' ORDER BY 1 DESC)`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`array_agg(n ORDER BY 1 ASC NULLS FIRST)`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`array_agg(n ORDER BY 2 NULLS LAST)`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`string_agg(n, ',' ORDER BY 1, n)`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`array(SELECT n FROM t ORDER BY 1 DESC, n)`)).toEqual([]);
+    expect(aggregateOrderByConstant(`string_agg(n, ',' ORDER BY n, 1)`)).toEqual([]); // the first key decides; not a constant here
+    expect(aggregateOrderByConstant('q.query(`SELECT a, b FROM t ORDER BY 1, 2`, [x]);')).toEqual([]); // top-level: positional
+    expect(aggregateOrderByConstant(`f(x); SELECT a FROM t ORDER BY 1, 2;`)).toEqual([]);
+    // Apostrophes in comments no longer flip the quote tracking (SQL, TS line and block comments).
+    expect(aggregateOrderByConstant(`string_agg(n, ',' -- don't
+ ORDER BY 1)`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`string_agg(n, ',' /* it's */ ORDER BY 1)`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`// isn't
+const q = \`string_agg(n, ',' ORDER BY 1)\`;`)).toHaveLength(1);
+    expect(aggregateOrderByConstant(`-- ORDER BY 1)
+SELECT 1`)).toEqual([]); // a commented-out form is not code
+  });
+
+  it('the source scan covers .sql files as well as .ts (minus spec / test files)', () => {
+    expect(isScanned('workspace-schema-v1.sql')).toBe(true);
+    expect(isScanned('semantic-posture.ts')).toBe(true);
+    expect(isScanned('semantic-posture.spec.ts')).toBe(false);
   });
 
   it('the posture renderers sort policy roles by name', () => {
