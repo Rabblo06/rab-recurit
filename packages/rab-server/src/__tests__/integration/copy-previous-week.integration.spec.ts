@@ -136,7 +136,10 @@ describeIfDb('Copy previous week (integration)', () => {
       expect(new Date(row.starts_at).getTime() - new Date(source.starts_at).getTime()).toBe(7 * 86_400_000);
       expect(new Date(row.ends_at).getTime() - new Date(row.starts_at).getTime()).toBe(new Date(source.ends_at).getTime() - new Date(source.starts_at).getTime());
       expect(row).toMatchObject({ required_count: source.required_count, notes: source.notes, break_minutes: source.break_minutes });
-      const offers = await admin.query(`SELECT count(*)::int AS n FROM ${siblingTable(shiftTable, 'job_offer')} WHERE shift_id = $1`, [shiftId]);
+      const offers = await admin.query(
+        `SELECT count(*)::int AS n FROM ${siblingTable(shiftTable, 'job_offer')} o JOIN ${siblingTable(shiftTable, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`,
+        [shiftId],
+      );
       const seats = await admin.query(`SELECT count(*)::int AS n FROM ${siblingTable(shiftTable, 'shift_assignment')} WHERE shift_id = $1`, [shiftId]);
       expect([offers[0].n, seats[0].n]).toEqual([0, 0]);
       const audit = await admin.query(`SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND action = 'shift.created' AND entity_id = $2`, [orgId, shiftId]);
