@@ -19,8 +19,9 @@
  * owner-login guard core.owner_login_grant_parity_guard() (OwnerLoginGrantParityGuards1786721420000, unchanged). It refuses the
  * runtime login with 42501 per STATEMENT (even one that RLS leaves with no row) and lets through only crewflow,
  * rab_secure_owner and superusers: definers, the workspace migrator (SET LOCAL ROLE crewflow) and foreign-key actions, which
- * run as the table owner. So an `organisation` / `attendance` CASCADE behaves exactly as before: retention is unchanged (no new
- * business rule; turning the attendance foreign key into RESTRICT is a separate owner decision, flagged in the PR).
+ * run as the table owner. The attendance foreign key is turned into RESTRICT separately (AttendanceCorrectionEvidenceRestrict
+ * 1786722115000, owner decision 46), so deleting the parent attendance can no longer cascade the corrections away; the
+ * organisation CASCADE (tenant offboarding, LC-2) is unchanged.
  * Trigger names deliberately do not match `_%_grant_parity_%`: that is the frozen PAY-1 set, counted by its own checks.
  * Idempotent: each trigger is created only when the table has no trigger of that name. Additive only (no DROP).
  *

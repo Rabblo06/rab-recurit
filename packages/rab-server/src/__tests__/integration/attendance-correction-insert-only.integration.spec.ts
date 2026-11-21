@@ -10,8 +10,9 @@ import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
  * Security finding S11 / architecture §5.7 (DRAFT SQL, throwaway databases only): AttendanceCorrectionInsertOnly1786722110000.
  * core.attendance_correction is insert-only for the RUNTIME login (crewflow_owner, which inherits the table owner, so grants
  * never bound it): UPDATE, DELETE and TRUNCATE are refused with 42501 per statement — even a statement RLS leaves with no row,
- * even by a manager who can read the row — while INSERT and SELECT work as before. Definers / FK actions (the table owner)
- * still pass, so retention is unchanged. Enforced by the database, not by the service.
+ * even by a manager who can read the row — while INSERT and SELECT work as before. Definers and real FK actions (they run
+ * as the table owner) still pass; since AttendanceCorrectionEvidenceRestrict1786722115000 (owner decision 46) deleting the
+ * parent attendance is refused instead of cascading the corrections away. Enforced by the database, not by the service.
  */
 jest.setTimeout(300_000);
 
@@ -144,7 +145,7 @@ describeIfDb('S11: core.attendance_correction is insert-only in the database (in
     expect(inserted).toBe(1);
   });
 
-  it('definers / FK actions (the table owner, crewflow) still pass: retention is unchanged', async () => {
+  it('a definer (SET ROLE crewflow) still passes the guard', async () => {
     await admin.query('BEGIN');
     try {
       await admin.query('SET LOCAL ROLE crewflow');
@@ -158,6 +159,45 @@ describeIfDb('S11: core.attendance_correction is insert-only in the database (in
       await admin.query('ROLLBACK');
     }
     expect(await stored()).toHaveLength(1);
+  });
+
+  it('a REAL foreign-key action started by the runtime login passes the guard (FK actions run as the table owner)', async () => {
+    // Rolled back: a probe parent table and a probe CASCADE column (the only real cascade left on corrections is the
+    // organisation FK, which a populated organisation can never reach). The DELETE is issued AS crewflow_owner (the runtime
+    // login, SET ROLE from the test superuser) on the parent; PostgreSQL runs the cascade as the table owner crewflow.
+    await admin.query('BEGIN');
+    try {
+      await admin.query('CREATE TABLE core.zz_cascade_probe (id uuid PRIMARY KEY)');
+      await admin.query('GRANT SELECT, DELETE ON core.zz_cascade_probe TO crewflow_owner');
+      await admin.query('ALTER TABLE core.attendance_correction ADD COLUMN zz_probe uuid REFERENCES core.zz_cascade_probe(id) ON DELETE CASCADE');
+      const probe = (await admin.query(`INSERT INTO core.zz_cascade_probe VALUES (gen_random_uuid()) RETURNING id`)).rows[0].id as string;
+      await admin.query(`UPDATE core.attendance_correction SET zz_probe = $1 WHERE id = $2`, [probe, correctionId]); // superuser: passes the guard
+      await admin.query('SET LOCAL ROLE crewflow_owner');
+      await admin.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [
+        w.org,
+        w.id,
+        manager,
+      ]);
+      expect((await admin.query(`SELECT current_user AS u`)).rows[0].u).toBe('crewflow_owner');
+      // A direct DELETE by the runtime is refused ...
+      await admin.query('SAVEPOINT direct');
+      expect(await code(admin.query(`DELETE FROM core.attendance_correction WHERE id = $1`, [correctionId]))).toBe('42501');
+      await admin.query('ROLLBACK TO SAVEPOINT direct');
+      // ... the cascade it starts is an FK action (owner) and passes.
+      expect((await admin.query(`DELETE FROM core.zz_cascade_probe WHERE id = $1`, [probe])).rowCount).toBe(1);
+      await admin.query('RESET ROLE');
+      expect((await admin.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE id = $1`, [correctionId])).rows[0].n).toBe(0);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+    expect(await stored()).toHaveLength(1);
+  });
+
+  it('owner decision 46 (RESTRICT): the runtime cannot remove a correction by deleting its attendance; the correction stays', async () => {
+    const result = await asManager(() => code(app.query(`DELETE FROM core.attendance WHERE id = $1`, [attendanceId])));
+    expect(['23503', '23001']).toContain(result); // 23001 restrict_violation on PostgreSQL 18
+    expect(await stored()).toHaveLength(1);
+    expect((await admin.query(`SELECT count(*)::int AS n FROM core.attendance WHERE id = $1`, [attendanceId])).rows[0].n).toBe(1);
   });
 
   it('zero rows from core.attendance_correction with no tenant context bound (runtime login)', async () => {

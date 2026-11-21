@@ -10328,3 +10328,12 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   unchanged; INSERT still works; `SET ROLE crewflow` (definer / FK-action path) can still delete (rolled back); zero rows
   with no tenant context; down() / up() round trip (rolled back) and a re-run of up() is a no-op.
   `attendance-correction-insert-only-sql.spec.ts`: statement shape, end-state check, goldens.
+- **Security review fix (2026-11-21, Medium; owner decision 46).** The reviewer showed corrections still vanished through
+  `attendance_correction.attendance_id ON DELETE CASCADE` when the runtime deleted the parent attendance (core.attendance has
+  a FOR ALL policy and no delete guard; the FK action runs as the owner and passes the guard). New migration
+  AttendanceCorrectionEvidenceRestrict1786722115000 makes that key ON DELETE RESTRICT (the pay-evidence principle the owner
+  approved for breaks and receipts). Such a delete now fails (23503, or 23001 on PostgreSQL 18) and the correction stays;
+  a hard user delete that would reach it already falls back to a soft delete on a foreign-key refusal. The organisation
+  CASCADE (tenant offboarding, LC-2) is unchanged. Tests: the runtime's delete of an attendance with a correction is refused
+  and both rows remain; a real FK cascade started by the runtime login passes the guard (probe table, rolled back) while
+  its direct DELETE gets 42501. The workspace copies get the same key change with the level-26 command (#310).
