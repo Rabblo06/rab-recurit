@@ -10320,7 +10320,10 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   counter (sorted set with heartbeat expiry) on the connect path, and a decision on Redis being down (refuse every stream,
   or allow uncounted). Per instance fails closed without that dependency. Exposure: one user can still hold
   N instances × 3 streams, and four organisations at their share can still fill one instance (the share cap stops one
-  tenant, not a coalition). Each stream is still authenticated, revalidated every heartbeat and limited to that user's own
+  tenant, not a coalition).
+  **Residual, at the defaults (1000 per instance / 250 per organisation): four organisations can still fill one
+  instance.** That matters only if organisations can be created self-serve; polling keeps every client's data correct
+  meanwhile, and realtime stays off in production. Each stream is still authenticated, revalidated every heartbeat and limited to that user's own
   id-only events. `REALTIME_ENABLED` stays false in production; nothing here enables it.
 - **Assumption (flagged):** 1000 per instance and 250 per organisation per instance are operational defaults, not
   measured capacities.
