@@ -173,24 +173,48 @@ final class DateParsingTests: XCTestCase {
 }
 
 final class MoneyTests: XCTestCase {
-    func testFormatPenceMatchesFlutter() {
+    private struct SharedCases: Decodable {
+        struct Case: Decodable {
+            let pence: Int64
+            let text: String
+        }
+        let cases: [Case]
+    }
+
+    /// The money-display table shared with the web (`@rab/shared` formatPence)
+    /// and the Flutter app: packages/rab-shared/src/utils/money-format-cases.json,
+    /// copied into the test bundle by project.yml.
+    func testFormatPenceMatchesTheSharedWebCases() throws {
+        let shared = try JSONDecoder().decode(SharedCases.self, from: Fixture.data("money-format-cases"))
+        XCTAssertGreaterThan(shared.cases.count, 20)
+        for testCase in shared.cases {
+            XCTAssertEqual(Money.formatPence(testCase.pence), testCase.text, "pence \(testCase.pence)")
+        }
+    }
+
+    /// Owner decision: exactly the website's en-GB currency output, sign before
+    /// the pound sign, thousands separators.
+    func testFormatPenceOwnerNamedCases() {
         XCTAssertEqual(Money.formatPence(0), "£0.00")
         XCTAssertEqual(Money.formatPence(5), "£0.05")
         XCTAssertEqual(Money.formatPence(1250), "£12.50")
-        XCTAssertEqual(Money.formatPence(123_456), "£1234.56") // no thousands separator (parity)
-        XCTAssertEqual(Money.formatPence(-150), "£-1.50")
+        XCTAssertEqual(Money.formatPence(123_450), "£1,234.50")
+        XCTAssertEqual(Money.formatPence(123_456), "£1,234.56")
+        XCTAssertEqual(Money.formatPence(-150), "-£1.50")
+        XCTAssertEqual(Money.formatPence(-123_450), "-£1,234.50")
     }
 
     /// A negative amount under £1 used to lose its sign (pounds truncate to 0).
     func testFormatPenceKeepsTheSignOfNegativeAmounts() {
-        XCTAssertEqual(Money.formatPence(-50), "£-0.50")
-        XCTAssertEqual(Money.formatPence(-5), "£-0.05")
-        XCTAssertEqual(Money.formatPence(-1), "£-0.01")
-        XCTAssertEqual(Money.formatPence(-99), "£-0.99")
-        XCTAssertEqual(Money.formatPence(-100), "£-1.00")
-        XCTAssertEqual(Money.formatPence(-199), "£-1.99")
-        XCTAssertEqual(Money.formatPence(-123_456), "£-1234.56")
-        XCTAssertEqual(Money.formatPence(Int64.min), "£-92233720368547758.08")
+        XCTAssertEqual(Money.formatPence(-50), "-£0.50")
+        XCTAssertEqual(Money.formatPence(-5), "-£0.05")
+        XCTAssertEqual(Money.formatPence(-1), "-£0.01")
+        XCTAssertEqual(Money.formatPence(-99), "-£0.99")
+        XCTAssertEqual(Money.formatPence(-100), "-£1.00")
+        XCTAssertEqual(Money.formatPence(-199), "-£1.99")
+        XCTAssertEqual(Money.formatPence(-123_456), "-£1,234.56")
+        XCTAssertEqual(Money.formatPence(Int64.min), "-£92,233,720,368,547,758.08")
+        XCTAssertEqual(Money.formatPence(Int64.max), "£92,233,720,368,547,758.07")
     }
 
     func testPayRateLabel() {

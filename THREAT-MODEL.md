@@ -6705,6 +6705,20 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Residual.**
   - Optional values without a default reach the containers as `""` on OpenShip. Every reader treats blank as unset
     (verified against env validation and the direct readers).
+  - Follow-up (2026-11-18, owner request): those optional keys are now committed as `${KEY:-}` (an empty default), so
+    OpenShip shows them as "fallback default" instead of "needs value", and plain Compose now passes `""` as well
+    (before: nothing). Every reader was re-checked for "" = unset (env.validation.ts drops blanks, but
+    `EnvironmentService.get` falls back to the raw `process.env` value, so each direct reader was checked too), including
+    the bundled-db CA rule in api-prestart.sh / worker-start.sh / db-setup.sh (`-z "${PG_SSL_CA_CERT_PATH:-}"`) and the
+    "both CA settings set" refusal (pg-config.ts `present()` trims and drops ""). One key stays bare: `WORKSPACE_BASE_DOMAIN`
+    (`GET /auth/config` answers `""` instead of `null`; no client reads it). The image-vs-production gate treats rab-api's
+    `PG_POOL_MAX_CONNECTIONS` `""` as "not set" (that key only); any other value is still compared exactly.
+    Refresh onto main (2026-11-20): db-harden's two CA keys get the same `${KEY:-}` as db-setup's, and
+    compose-owner-login.cjs's "PG_DATABASE_URL / PG_DATABASE_APP_PASSWORD only as the committed expression" rule now
+    matches those variable names EXACTLY (`${PG_DATABASE_URL` not followed by a name character), because the prefix match
+    refused `${PG_DATABASE_URL_IS_DIRECT:-}` (a different variable, a boolean, no credential). Every Compose form of the
+    two credential variables (`${V}`, `${V:-x}`, `${V-x}`, `${V:?x}`, `${V?x}`, `${V:+x}`, `${V+x}`) is still refused
+    outside the committed line (compose-owner-login.test.cjs denial cases).
   - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
 - **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
   wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
@@ -9076,16 +9090,22 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   No dependent can drop it either: the current release of every one still requires picomatch (@nx/js and
   @nx/workspace 24.0.6 `^4.0.7`, vite 8.3.8 `^4.0.7`, jest-util / jest-haste-map / jest-message-util 30.5.1 `^4.0.3`,
   tinyglobby 0.2.17 `^4.0.4`, anymatch 3.1.3 `^2.0.4`, micromatch 4.0.8 `^2.3.1`; node-gyp 13.1.0 via tinyglobby).
-- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`:
-  `@rab/server > argon2 > node-gyp@13.0.1 > tinyglobby > picomatch@4.0.5` and `@rab/worker > bullmq > msgpackr >
-  msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5` (install-time native build tool, never imported at
-  runtime). Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
+- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`
+  (node-gyp@13.0.1, an install-time native build tool, never imported at runtime). node-gyp has THREE production
+  parents, each with an injected `node-gyp: npm:latest` edge: `argon2` directly (`@rab/server > argon2`),
+  `node-addon-api` (`@rab/server > argon2 > node-addon-api`) and `msgpackr-extract` (`@rab/worker > bullmq > msgpackr >
+  msgpackr-extract`). Below node-gyp there is exactly ONE picomatch chain: `node-gyp > tinyglobby > picomatch@4.0.5`.
+  (Corrected on branch fix/npm-audit-register-severity, 2026-11-18: the text above previously listed only the argon2
+  and msgpackr-extract parents.) Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
   `jest-environment-jsdom`, `jest-haste-map > anymatch` (2.3.2, 4.0.5), rab-front `vite` (4.0.5), rab-server/worker
   `ts-node-dev > chokidar > anymatch/readdirp` (2.3.2). No first-party code imports a glob matcher; the rab-front
   production bundle contains no picomatch (built and grepped).
 - **Control (`tools/check-npm-audit.cjs` + `tools/npm-audit-decisions.json`, schema 2):** same
   `yarn npm audit --severity high --all --recursive`; a finding passes only with an entry that is
   - *scoped:* exactly one GHSA id + one package (`package`, a `packages` list is refused), `accepted-risk` only;
+    the entry also records the advisory `severity` it decided (`high` for this one, added on branch
+    fix/npm-audit-register-severity; the check binds it from the follow-up hardening PR on: a finding rated above
+    the recorded severity is not covered, so a re-scored advisory needs a new owner decision);
   - *owned and explained:* owner_decision_ref (issue/PR of this repo, no placeholder), decided_by, decided_on,
     `reason`, `drop_when`;
   - *time-boxed:* at most 30 days; expired / over-long / duplicate entries fail; no date override;
@@ -10114,3 +10134,223 @@ Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and
   it; the extended forms each tested), `tenant-binder-callers.spec.ts`, `worker-shared-reexports.spec.ts`; `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
   `account-invite-cleanup*.integration.spec.ts` and `phase-d-account-invite-cleanup-worker.integration.spec.ts` (level-22
   pass), `tenant-context.service.spec.ts` (binding statement text unchanged).
+
+## CI supply chain — actions pinned to verified commit SHAs, release via gh, Dependabot covers composite actions (branch ci/actions-pins-sha, 2026-11-18; replaces Dependabot #222, #223, #224; no SQL, no runtime code)
+- **Threat:** *whoever can move a tag or push to an action's repository* (a compromised maintainer, a hijacked release, a
+  fork commit served through the parent's API) → has their code run in our jobs with the job's GITHUB_TOKEN and secrets
+  → for cd-deploy-tag that token held `contents: write` on the whole workflow and was handed to a third-party action
+  (softprops/action-gh-release). A SHA pin only helps if the SHA is a commit of the named repository: dorny/paths-filter
+  was pinned to `15192bc0…`, the annotated **tag object** `v3`, not a commit (it resolved to the v3.0.4 commit
+  `0e4a8c6e…`, which is now the pin; same code).
+- **Control (`tools/check-action-pins.cjs`, ci-security `action-pins`, in the gate's `needs`):** every `uses:` under
+  `.github/workflows/**` and `.github/actions/**` must be `owner/repo[/path]@<40 lowercase hex> # vX.Y.Z`; only
+  `./.github/actions/` and `./.github/workflows/` local references are exempt (any other `./` path fails); `docker://`
+  needs `@sha256:<64 hex>`. Two readings must agree (independent review of #236: an escaped quoted key `"uses"`, an
+  explicit `? uses` key and a fake block scalar inside an open `{` each hid an unpinned `uses` from a line scanner
+  alone): (1) a line scanner, which also refuses those three forms, flow mappings, aliases and a value on the next
+  line, and ignores `uses:` text inside `run: |` blocks and comments; (2) the real YAML parser (root devDependency
+  `yaml`; missing = fail): every mapping key `uses`, aliases and `<<` merges resolved, duplicate keys and parse errors
+  fail. The multiset of `uses` values must be identical. Before either reading, a file containing NEL / U+2028 /
+  U+2029, a bare CR or any other C0 control character (tab, LF, CR excepted) is refused: YAML 1.1 / libyaml-family
+  parsers may break a line there (`# c<U+2028>      - uses: evil/act@main` is a comment to a 1.2 parser, possibly a
+  step to Actions; re-review of #236). The parser must be yaml 2.x. `--remote` (GITHUB_TOKEN) asks the
+  API, per distinct repository@SHA: `git/commits/<sha>` must exist (else `git/tags/<sha>` tells a tag object apart and the
+  error names the commit to pin), and the comment's tag (`git/ref/tags/<tag>`, through tag objects) must resolve to
+  exactly that commit — this also refuses a fork-only "impostor" commit, which no tag of the parent points at. Any
+  lookup that cannot complete fails the job (fail closed). Limitation: the check proves the pin matches the named release
+  today; it does not review what that release does (Dependabot's 14-day cooldown and code review do).
+- **Release path:** cd-deploy-tag now runs `tools/create-github-release.sh` (`gh release create <tag> --repo …
+  --verify-tag --title <tag> --generate-notes --notes-file <our notes>`); workflow `permissions: {}`, the job
+  `contents: write` only, checkout `persist-credentials: false`. Behaviour changes, both fail closed: a tag that does not
+  exist on GitHub is never created, and an existing release for the tag is an error (softprops updated it silently).
+  The workflow only runs on a tag, so `tools/create-github-release.test.cjs` runs the script on every PR: exact argv
+  and notes through a recording `gh`, a dry run, refused inputs (no gh call), the installed gh's own flag list, and the
+  workflow's permissions/checkout wiring.
+- **Bumps:** actions/upload-artifact v4.6.2 → v7.0.2 (`cf430e03…`), actions/download-artifact v4.3.0 → v8.0.2
+  (`9000827c…`) together (v8 fails on an artifact digest mismatch instead of warning; since v5 a `pattern:` download
+  that matches ONE artifact lands in `path/` instead of `path/<name>/`, so image-security-gate's manifest job puts a
+  one-platform download back under its name before the merge; caught by this PR's own PR-mode gate), actions/setup-node v4.4.0 →
+  v7.1.0 (`949feb24…`, also in the yarn-install composite action; v5's automatic cache applies only to npm since v6, so
+  nothing changes for Yarn). Every SHA checked against `gh api repos/<owner>/<repo>/tags`. Version comments of the
+  unchanged checkout/cache pins corrected from `# v4` to the exact release (`v4.4.0`, `v4.3.0`).
+- **Dependabot:** `directories: ['/', '/.github/actions/*']` (composite actions were never scanned, so yarn-install's
+  setup-node pin could not be renewed) and `cooldown: default-days: 14` for github-actions; security updates are not
+  delayed by it. The docker ecosystem entry is unchanged.
+
+## Phone apps print money exactly like the website (branch fix/mobile-money-format-en-gb, not merged)
+
+Display only. No payroll, rate-resolution, rounding or pay-date rule changes; no endpoint, table, migration, role, grant
+or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting.swift`) and Flutter (`formatPence`,
+`lib/core/theme/money.dart`) formatters print the web's en-GB `Intl.NumberFormat` currency output, matching `@rab/shared`
+`formatPence`: sign before the pound sign and comma thousands separators (`-£1,234.56`; before: `£-1234.56`).
+
+- **Asset:** pay amounts shown to staff and venue managers (pay rates, estimated pay, earned pay, payslip net and
+  statement amounts).
+- **Risk addressed (Low, integrity of what a person reads):** the same amount printed differently on the website and on
+  a phone (`£-1.50` vs `-£1.50`, `£1234.56` vs `£1,234.56`) invites misreading a deduction or a total. Both apps still
+  format from integer pence with integer arithmetic (never a float, never the device locale), and the sign comes from
+  the value itself, so `Int64.min` / the most negative Dart int print correctly.
+- **Drift control:** one table, `packages/rab-shared/src/utils/money-format-cases.json`, is read by the web
+  (`money.spec.ts`, which also checks every case against `Intl.NumberFormat('en-GB', GBP)` where the float input is
+  exact), Flutter (`test/money_format_test.dart`) and iPhone (`MoneyTests`, bundled via `project.yml`) test suites.
+  `ci-iphone` now also runs when that file changes; `ci-mobile` already runs on any `packages/rab-shared/**` change.
+- **Callers checked:** every money display in both apps goes through `formatPence` / `payRateLabel` /
+  `estimatedPayLabel`; none pre-formats an amount or concatenates its own sign.
+
+## CI audit — owner exceptions read from the base ref; audit ignore lists, broken yarn, missing tree versions and re-scored advisories fail (branch ci/npm-audit-decisions-harden, 2026-11-18; review F1, F3-F8 of #229; register prerequisite: branch fix/npm-audit-register-severity)
+- **Re-checked first (2026-11-18), so the exception is still the only option:** GHSA-fc5q-39xc-vjpf has
+  `first_patched_version: null` (range `<= 4.0.7`); the registry's picomatch list ends at 4.0.7 with no prerelease ever
+  published; micromatch/picomatch#194 is open; the latest tinyglobby 0.2.17, anymatch 3.1.3, micromatch 4.0.8, jest-util
+  30.5.1, vite 8.3.8 and @nx/js / @nx/workspace 24.0.6 all still require picomatch. No `resolutions` target exists.
+- **F1 (Medium) — a PR could approve itself:** CI ran the PR's own `tools/npm-audit-decisions.json`, so a PR could add
+  an entry and the dependency it covers in one diff. Actor: anyone opening a PR → adds a register entry next to a
+  vulnerable dependency → the required audit passes on that PR's say-so. Fix (the #225 import-boundary pattern):
+  - `--base <ref>` (ci-security passes `origin/${GITHUB_BASE_REF}` on every PR) reads the decisions with
+    `git show <ref>:tools/npm-audit-decisions.json`. Fail closed: an unknown ref, a shallow clone (no merge-base) or any
+    git failure throws (exit 1); only git's "path does not exist in <ref>" means "no decisions". git runs without a
+    shell with `LC_ALL=C` and no `LANGUAGE`; `--base` accepts a plain ref plus `~N` / `^N` only. The head copy is
+    validated as well. The audit job checks out with `fetch-depth: 0`.
+  - Decision-only PR: when the merge-base diff touches only the register and THREAT-MODEL.md, the head decisions are
+    used, and every entry that is NEW OR CHANGED against the base (deep equality by id) must have `owner_decision_ref`
+    equal to this PR's `pull_request.html_url` from `$GITHUB_EVENT_PATH` (unreadable payload = fail). Removing an entry
+    needs no reference. **Owner to confirm:** the review asked for this on NEW entries; it is applied to CHANGED ones
+    too, because otherwise a register-only PR could move `decided_on` / `expires` of an existing entry (a renewal)
+    while still citing the old PR.
+  - CHANGED TOGETHER: `--base` fails when the diff adds or changes a register entry together with `yarn.lock`, any
+    `package.json`, `.yarnrc.yml`, anything under `.yarn/` or `.github/actions/yarn-install/`,
+    `tools/check-npm-audit.cjs`, `packages/rab-docker/rab/runtime-deps.cjs` (its `RUNTIME_PRUNE` decides the
+    production-closure condition), `ci-security.yaml` or `npm-audit-weekly.yaml` (the last four beyond the review's
+    list). A pure removal may go with any of them.
+  - No `--base` (push to main, the weekly run, local): the checked-out register decides; a `pull_request` event without
+    `--base` is refused.
+- **F3 (Low):** before auditing, `yarn config get npmAuditIgnoreAdvisories --json` and `npmAuditExcludePackages` must
+  both be `[]` and no `YARN_NPM_AUDIT_*` variable may be set; otherwise exit 1 without auditing.
+- **F4 (Low):** a yarn that cannot be spawned (`error`), is killed (`signal`) or exits outside {0, 1} for the audit
+  (outside {0} for `config get` / `npm info`) fails. `main(argv, deps)` takes `yarn`, `env`, `root`, `today`,
+  `fetchAdvisory` and `production` so this is tested.
+- **F5 (Low):** a finding with an empty `Tree Versions` cannot be checked for a fix: undecided ("cannot evaluate").
+- **F6 (Low):** each entry records the decided `severity` (`high` | `critical`); a finding rated above it is undecided
+  (a re-scored advisory needs a new owner decision); unknown severities are undecided. The picomatch entry records
+  `high` (prerequisite branch, merged first because CHANGED TOGETHER refuses register + tool in one PR).
+- **F7 (Info):** `decided_on` / `expires` must round-trip through `Date` (2026-02-30, 2026-11-31 refused).
+- **F8 (Info):** `.github/workflows/npm-audit-weekly.yaml` runs the same check every Monday 06:17 UTC (and on demand)
+  against main; any run prints `::warning::` when an in-force entry has 7 days or fewer left (expiry day = 0).
+- **Security review of #238 (2026-11-18):**
+  - **G1 (Low):** a register change mixed with a path that is NOT on the CHANGED TOGETHER list (e.g. `src/x.ts`) was
+    neither CHANGED TOGETHER nor decision-only: the base decided for that PR, but the new entry merged unbound and was
+    in force from the next PR on. Fix: outside a decision-only PR, `selectRegister` fails when the head has entries that
+    are new or changed against the MERGE-BASE (what this PR itself changed, so a base that moved on does not flag an
+    untouched entry); pure removals stay allowed anywhere.
+  - **G3:** the weekly run passes `--fail-on-expiring`, so it fails (and notifies) at 7 days or fewer left instead of
+    only warning; ci-security still only warns, so PRs stay green until the real expiry. Read-only token, no issue.
+  - **G4:** `npmAuditRegistry` must be unset (`null`) and `npmRegistryServer` `https://registry.yarnpkg.com` or
+    `https://registry.npmjs.org`; `YARN_NPM_REGISTRY_SERVER` is refused like every `YARN_NPM_AUDIT_*` variable. An audit
+    pointed at a server that reports nothing can no longer pass.
+  - **Re-review follow-ups (2026-11-18, approved at 11f52617):** (1) CHANGED TOGETHER binds only additions and
+    changes: a pure removal may go with yarn.lock / package.json / anything (the upgrade PR that drops an entry, as its
+    `drop_when` says); an addition next to yarn.lock still fails. (2) The audit's connection is pinned as well as its
+    URL: `httpsProxy`, `httpProxy`, `httpsCaFilePath` unset, `enableStrictSsl` true, `networkSettings` empty (yarn
+    prints `undefined` when unset), and `YARN_HTTPS_PROXY`, `YARN_HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, `NODE_OPTIONS`,
+    `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_TLS_REJECT_UNAUTHORIZED=0` refused (the last three variables since the
+    22487db0 spot-check). **Plugins (corrected after the 22487db0 spot-check, Low):** the first version trusted
+    `yarn plugin runtime --json`, but yarn marks `builtin` by the plugin's DECLARED name, so a `.yarn/plugins/x.cjs`
+    that calls itself `@yarnpkg/plugin-npm-cli` (or `@@core`) and is listed under `plugins:` ran its `factory` inside
+    yarn while the runtime list looked identical to a clean run (reproduced locally with yarn 4.13). The control now
+    checks where plugins come from: no `plugins` key (even `[]`) in any `.yarnrc.yml` yarn reads (the project folder,
+    every ancestor folder, the home folder), no `YARN_RC_FILENAME`, and `.yarn/plugins/` absent or empty; the runtime
+    list stays as a supplementary check only. **Key allowlist (final check at 6d5365da, Low):** a `plugins` key
+    hidden under `__proto__:` (yarn's js-yaml makes it a prototype assignment, so yarn loads the plugin, while a
+    JS-object view of the file shows no `plugins` key), or the same under the legacy `# yarn lockfile v1` header (yarn
+    then uses its v1 parser), still loaded a plugin. Instead of chasing parser tricks the rc check is now fail-closed:
+    each `.yarnrc.yml` is read as a YAML DOCUMENT (keys as written, never through a JS object); its top-level keys must
+    all be in `RC_ALLOWED_KEYS` (the seven the repository uses today: `enableConstraintsChecks`, `enableHardenedMode`,
+    `enableInlineHunks`, `nodeLinker`, `yarnPath`, `networkConcurrency`, `httpRetry`, plus the nine whose values the
+    audit-config checks verify); `plugins`, `<<` merge keys and any other key fail; `__proto__`, `constructor` and
+    `prototype` fail at any depth; a non-mapping top level, a non-scalar key, a duplicate key or any YAML error or
+    warning fails; a file starting with the legacy header (`/^(#.*\r?\n)*?#\s+yarn\s+lockfile\s+v1\r?\n/i`) fails;
+    without the `yaml` library the check reports a problem. Adding a setting to `.yarnrc.yml` now needs the allowlist
+    extended in the tool (a CHANGED TOGETHER path when it comes with a register entry, a review item otherwise). The
+    repository's real `.yarnrc.yml` passes. Order (final review at bcff7c21): the plugin-source check runs first and
+    alone, before yarn is spawned at all, because every yarn invocation (even `config get`) loads the configured
+    plugins; only a clean result goes on to the yarn-based checks. `caFilePath` is not a yarn 4 setting: yarn
+    refuses to start ("Unrecognized or legacy configuration settings") when it is in .yarnrc.yml or the environment,
+    which already fails the check, so it is not queried. The repository's real effective config passes every check.
+    Not covered: generic `HTTP(S)_PROXY` variables (yarn 4 does not read them). (3) Any argument other than
+    `--base <ref>` / `--fail-on-expiring` exits 1, so a typo cannot turn the weekly expiry failure off. (4)
+    `.github/actions/yarn-install/**` is on the CHANGED TOGETHER list. Nits: the decision-only path compares with the
+    merge-base like G1, and the merge-base is computed once.
+  - **G2 (owner decision, not built):** there is no cap on the total time an advisory may be excepted across
+    renewals; each renewal is a new decision-only PR citing itself, at most 30 days each.
+- **F9 (Info):** wording corrected on the prerequisite branch (node-gyp@13.0.1 has three production parents — argon2,
+  node-addon-api, msgpackr-extract — and one picomatch chain, node-gyp > tinyglobby > picomatch@4.0.5).
+- **Residual (accepted):** CI still runs the PR's own copy of the tool and workflow, so a PR that edits the tool can
+  change the rules for itself (CHANGED TOGETHER makes it also impossible to touch the register in that PR, but the tool
+  edit itself is a review control: owner review, no CODEOWNERS file). The register on the base is trusted as reviewed.
+  A decision-only PR's owner reference proves only that this PR is the record, not who approved it; the owner's merge
+  is the decision. A push to main runs without `--base`, so a register that landed on main is used as is. Every
+  yarn-side check (ignore lists, registry, transport, plugins, the audit's own output) trusts the yarn binary:
+  `.yarnrc.yml`'s `yarnPath` pointing at a modified yarn release (or a modified `.yarn/releases/*.cjs`) defeats all of
+  them, and CHANGED TOGETHER catches a `.yarnrc.yml` / `.yarn/**` change only when the same PR also adds or changes a
+  register entry; otherwise it is a review control. Generic `HTTP(S)_PROXY` variables are not checked (yarn 4 does
+  not read them).
+- **Tests:** `tools/check-npm-audit.test.cjs` (45). End to end in throwaway git repositories (`main(argv, deps)`): a
+  head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
+  passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
+  removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
+  (also uncommitted); an unknown ref, a non-ref argument, a missing `--base` value and a depth-1 clone throw; a base
+  without the register means no decisions; a German locale still reads a missing path as absent; the checkout decides
+  without `--base`, and a pull_request run without it exits 1; F3 ignore list (not audited) and env var exit 1; F4
+  `{error, status: null}`, a signal and exit 2 exit 1; F5 / F6 / F8 end to end; F7 dates; the workflows (`fetch-depth:
+  0`, `--base` on PRs, the weekly schedule); an invalid (expired) base entry fails a non-decision PR that drops it. G1:
+  adding or editing an entry next to `src/x.ts` exits 1, removing one next to it exits 0, an untouched entry is not
+  flagged when the base moved on. G3: `--fail-on-expiring` exits 1 at 7 days left, 0 at 8, warning only without it; the
+  weekly workflow passes it. G4: a non-default `npmAuditRegistry` / `npmRegistryServer` and both env variables are
+  refused (end to end: exit 1, not audited). Follow-ups: a removal plus yarn.lock exits 0 and an addition plus
+  yarn.lock exits 1; each transport setting, a non-built-in plugin, a failing `plugin runtime` and each env variable is
+  refused (`NODE_TLS_REJECT_UNAUTHORIZED=1` is not); unknown arguments exit 1 before auditing. Plugin sources: a
+  `plugins` key in the project, an ancestor or the home `.yarnrc.yml` (also `plugins: []`), a file in `.yarn/plugins/`,
+  `YARN_RC_FILENAME` and an unparseable `.yarnrc.yml` are refused; the repository itself passes; end to end, an
+  impostor plugin named `@yarnpkg/plugin-npm-cli` listed in `.yarnrc.yml` exits 1 before auditing even though the
+  runtime list looks clean. `NODE_OPTIONS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` refused. Allowlist: the real
+  `.yarnrc.yml` passes and each of its keys is allowlisted; `__proto__` hiding `plugins`, the legacy header (also with
+  CRLF and a leading comment), an unknown key, a `<<` merge key, a quoted `"plugins"`, a duplicate key, `constructor` /
+  `prototype` nested under `networkSettings`, a list top level and a non-scalar key are refused; end to end, the
+  `__proto__` impostor, the legacy-header file and an unknown key each exit 1 before auditing; without the `yaml`
+  library a problem is reported; a YAML warning (an unresolved `!foo` tag, also on an allowed key) fails; a planted
+  plugin exits 1 with zero yarn invocations, a clean checkout calls `config get` first. Mutation check: 50 hand-made
+  mutants of the tool (one per control), each killed by at least one test.
+
+## CI release path — cd-deploy-tag on rab/vX.Y.Z tags, drafts only; publish-image starts from a person's publish (branch ci/release-tag-alignment, 2026-11-18, on top of ci/actions-pins-sha; no SQL, no runtime code)
+- **Finding:** cd-deploy-tag listened for `v*.*.*` while every release since rab/v0.1.0-beta.1 used `rab/vX.Y.Z`, and
+  publish-image's release guard (`release_guard.py` RELEASE_TAG, review F2) and the `release` environment's tag policy
+  accept only `rab/v*`. The workflow had never run (zero runs). Had it run, the release it created with GITHUB_TOKEN
+  would not have started publish-image: events caused by GITHUB_TOKEN start no workflow (only `workflow_dispatch` /
+  `repository_dispatch` are exempt). Releases were in fact cut by the owner in GitHub, whose `release: published`
+  event started publish-image directly (rab/v0.4.0); for rab/v0.6.0 the image was published by a dispatch from `main`
+  first, and the release-event run was rejected at the `release` approval.
+- **Control:** cd-deploy-tag triggers on `rab/v*.*.*`. `tools/create-github-release.sh` accepts exactly RELEASE_TAG
+  (a test compares the two on accepted and refused samples, in JS and through the real Python module). It refuses a tag
+  whose commit is not on `origin/main` (`git fetch --no-tags origin main` + `git merge-base --is-ancestor`, full-history
+  checkout), the rule release_guard.py applies before publishing, so a tag on an unreviewed branch commit gets no
+  release record at all (review of #250). It then looks the release up (`gh release view`, drafts
+  included) and, if one exists, changes nothing. Otherwise it creates a **draft** (`--draft`, `--prerelease` for a
+  `-suffix` tag, `--verify-tag`), never a published release, and its job summary tells the owner to publish the draft.
+  Publishing is a person's event, so publish-image starts on the tag and the `release` environment approval (required
+  reviewers) still gates the push. Fail closed: a failed fetch or merge-base, and any lookup error other than gh's exact
+  `release not found`, fail the job and create nothing; a release created between lookup and create makes
+  `gh release create` fail, never overwrite. The job has no `environment:` (it deploys nothing; `production` only
+  recorded a misleading deployment). RELEASE_TAG itself now uses `[0-9]`, not `\d`: Python's `\d` matched Unicode
+  digits (`rab/v\u0661.2.3`, U+0661 ARABIC-INDIC DIGIT ONE), which the guard accepted and the environment's tag
+  policy would then have had to stop.
+- **Not chosen:** a PAT or GitHub App token for cd-deploy-tag (a long-lived credential that could publish releases and
+  so start the image push, held by a tag-triggered workflow) and `gh workflow run publish-image --ref <tag>` with
+  `actions: write` (the guard allows dispatches only from `main`; widening it to tags is a change to review F2 and is
+  not needed when a person publishes the release anyway). The job keeps `contents: write` only.
+- **Tests:** `tools/create-github-release.test.cjs` (ci-security `action-pins`): a fake `git` (off-main -> refused
+  before any gh call; failed fetch / merge-base -> fail closed); missing release -> exact git calls, then `view` and
+  `create --draft` argv, notes and summary; prerelease tag; existing published / draft release -> no create;
+  lookup error -> fail, no create; dry run calls nothing; refused inputs (bare `v1.2.3`, `+build`, ...) call nothing;
+  RELEASE_TAG alignment including Unicode-digit samples (`test_release_guard.py` refuses them too); the installed gh's flags (`--draft`, `--prerelease`, `view --json isDraft`); the workflow's
+  trigger, permissions and wiring; publish-image still starts on `release: published`.
+- **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
+  drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.

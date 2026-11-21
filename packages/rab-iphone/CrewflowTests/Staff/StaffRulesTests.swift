@@ -289,7 +289,7 @@ final class StaffRulesTests: XCTestCase {
     // MARK: Money and dates (Europe/London, overnight, DST)
 
     func testMoneyFormatting() {
-        XCTAssertEqual(Money.formatPence(123_456), "£1234.56")
+        XCTAssertEqual(Money.formatPence(123_456), "£1,234.56")
         XCTAssertEqual(Money.payRateLabel(1250), "£12.50/h")
         XCTAssertEqual(Money.payRateLabel(0), "Rate not set")
         XCTAssertEqual(Money.estimatedPayLabel(ratePence: 1250, estimatedPence: 10000), "£100.00 estimated pay")
