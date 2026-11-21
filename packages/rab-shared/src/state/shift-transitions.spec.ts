@@ -59,8 +59,11 @@ describe('OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS (M4 D6, offline sync only)', () =>
         return /\.(ts|tsx|js|cjs|mjs)$/.test(n) && !/\.(spec|test)\.[cm]?[jt]sx?$/.test(n) ? [p] : [];
       });
     };
-    const users = ['rab-server/src', 'rab-worker/src', 'rab-front/src', 'rab-ui/src']
-      .flatMap((d) => walk(join(PACKAGES, d)))
+    const scanned = ['rab-server/src', 'rab-worker/src', 'rab-front/src', 'rab-ui/src'].map((d) => walk(join(PACKAGES, d)));
+    // Not vacuous: every package path must exist and hold source files (a wrong path would scan nothing and pass).
+    for (const files of scanned) expect(files.length).toBeGreaterThan(0);
+    const users = scanned
+      .flat()
       .filter((p) => readFileSync(p, 'utf8').includes('OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS'))
       .map((p) => relative(PACKAGES, p).split(sep).join('/'));
     expect(users.filter((u) => !ALLOWED.has(u))).toEqual([]);

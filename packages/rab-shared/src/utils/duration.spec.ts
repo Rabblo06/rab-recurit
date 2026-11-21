@@ -1,4 +1,4 @@
-import { computeWorkedDuration, computeWorkedMinutes } from './duration';
+import { BreakRecordInput, computeWorkedDuration, computeWorkedMinutes } from './duration';
 
 describe('computeWorkedMinutes', () => {
   it('deducts the scheduled unpaid break by default when no break was recorded', () => {
@@ -35,6 +35,7 @@ describe('computeWorkedMinutes', () => {
           startedAt: new Date('2026-08-10T10:00:00Z'),
           endedAt: new Date('2026-08-10T10:45:00Z'),
           isPaid: false,
+          source: 'online',
         },
       ],
     });
@@ -52,6 +53,7 @@ describe('computeWorkedMinutes', () => {
           startedAt: new Date('2026-08-10T10:00:00Z'),
           endedAt: new Date('2026-08-10T10:20:00Z'),
           isPaid: true,
+          source: 'online',
         },
       ],
     });
@@ -64,7 +66,7 @@ describe('computeWorkedMinutes', () => {
     const result = computeWorkedMinutes({
       clockInAt: new Date('2026-08-10T06:00:00Z'),
       clockOutAt: new Date('2026-08-10T14:00:00Z'),
-      breaks: [{ startedAt: new Date('2026-08-10T13:30:00Z'), endedAt: null, isPaid: false }],
+      breaks: [{ startedAt: new Date('2026-08-10T13:30:00Z'), endedAt: null, isPaid: false, source: 'online' }],
     });
 
     expect(result.unpaidBreakMinutes).toBe(30);
@@ -98,8 +100,8 @@ describe('computeWorkedMinutes', () => {
       clockInAt: at('06:00:00'),
       clockOutAt: at('14:00:00'),
       breaks: [
-        { startedAt: at('09:00:00'), endedAt: at('09:29:30'), isPaid: false },
-        { startedAt: at('12:00:00'), endedAt: at('12:29:30'), isPaid: false },
+        { startedAt: at('09:00:00'), endedAt: at('09:29:30'), isPaid: false, source: 'online' },
+        { startedAt: at('12:00:00'), endedAt: at('12:29:30'), isPaid: false, source: 'online' },
       ],
     });
     expect(result.unpaidBreakMinutes).toBe(59);
@@ -111,8 +113,8 @@ describe('computeWorkedMinutes', () => {
       clockInAt: at('06:00:00'),
       clockOutAt: at('14:00:00'),
       breaks: [
-        { startedAt: at('05:50:00'), endedAt: at('06:10:00'), isPaid: false },
-        { startedAt: at('13:50:00'), endedAt: at('14:30:00'), isPaid: false },
+        { startedAt: at('05:50:00'), endedAt: at('06:10:00'), isPaid: false, source: 'online' },
+        { startedAt: at('13:50:00'), endedAt: at('14:30:00'), isPaid: false, source: 'online' },
       ],
     });
     expect(result.unpaidBreakMinutes).toBe(20);
@@ -123,7 +125,7 @@ describe('computeWorkedMinutes', () => {
     const result = computeWorkedMinutes({
       clockInAt: at('06:00:00'),
       clockOutAt: at('14:00:00'),
-      breaks: [{ startedAt: at('15:00:00'), endedAt: at('15:30:00'), isPaid: false }],
+      breaks: [{ startedAt: at('15:00:00'), endedAt: at('15:30:00'), isPaid: false, source: 'online' }],
     });
     expect(result.unpaidBreakMinutes).toBe(0);
     expect(result.workedMinutes).toBe(480);
@@ -135,8 +137,8 @@ describe('computeWorkedMinutes', () => {
         clockInAt: at('06:00:00'),
         clockOutAt: at('14:00:00'),
         breaks: [
-          { startedAt: at('10:00:00'), endedAt: at('10:30:00'), isPaid: false },
-          { startedAt: at('10:29:00'), endedAt: at('10:40:00'), isPaid: true },
+          { startedAt: at('10:00:00'), endedAt: at('10:30:00'), isPaid: false, source: 'online' },
+          { startedAt: at('10:29:00'), endedAt: at('10:40:00'), isPaid: true, source: 'online' },
         ],
       }),
     ).toThrow(RangeError);
@@ -145,8 +147,8 @@ describe('computeWorkedMinutes', () => {
         clockInAt: at('06:00:00'),
         clockOutAt: at('14:00:00'),
         breaks: [
-          { startedAt: at('10:00:00'), endedAt: null, isPaid: false },
-          { startedAt: at('11:00:00'), endedAt: at('11:10:00'), isPaid: false },
+          { startedAt: at('10:00:00'), endedAt: null, isPaid: false, source: 'online' },
+          { startedAt: at('11:00:00'), endedAt: at('11:10:00'), isPaid: false, source: 'online' },
         ],
       }),
     ).toThrow('breaks must not overlap');
@@ -154,8 +156,8 @@ describe('computeWorkedMinutes', () => {
       clockInAt: at('06:00:00'),
       clockOutAt: at('14:00:00'),
       breaks: [
-        { startedAt: at('10:00:00'), endedAt: at('10:30:00'), isPaid: false },
-        { startedAt: at('10:30:00'), endedAt: at('10:40:00'), isPaid: false },
+        { startedAt: at('10:00:00'), endedAt: at('10:30:00'), isPaid: false, source: 'online' },
+        { startedAt: at('10:30:00'), endedAt: at('10:40:00'), isPaid: false, source: 'online' },
       ],
     });
     expect(touching.unpaidBreakMinutes).toBe(40);
@@ -166,7 +168,7 @@ describe('computeWorkedMinutes', () => {
       computeWorkedMinutes({
         clockInAt: at('06:00:00'),
         clockOutAt: at('14:00:00'),
-        breaks: [{ startedAt: at('10:30:00'), endedAt: at('10:00:00'), isPaid: false }],
+        breaks: [{ startedAt: at('10:30:00'), endedAt: at('10:00:00'), isPaid: false, source: 'online' }],
       }),
     ).toThrow(RangeError);
   });
@@ -178,12 +180,12 @@ describe('computeWorkedMinutes', () => {
     // The same short break recorded online: A4, the recorded break wins (12 minutes).
     const onlineShort = computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false, source: 'online' }] });
     expect(onlineShort.unpaidBreakMinutes).toBe(12);
-    expect(computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false }] }).unpaidBreakMinutes).toBe(12);
+    expect(computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false, source: 'online' }] }).unpaidBreakMinutes).toBe(12);
     // One offline break among online ones still floors the total; a longer recorded total stands.
     const mixed = computeWorkedMinutes({
       ...base,
       breaks: [
-        { startedAt: at('09:00:00'), endedAt: at('09:05:00'), isPaid: false },
+        { startedAt: at('09:00:00'), endedAt: at('09:05:00'), isPaid: false, source: 'online' },
         { startedAt: at('12:00:00'), endedAt: at('12:10:00'), isPaid: false, source: 'offline' },
       ],
     });
@@ -225,7 +227,7 @@ describe('computeWorkedMinutes', () => {
       ['06:00:20', '13:59:50', '10:00:40', '10:29:30'],
       ['06:00:31', '06:59:29', '06:10:29', '06:20:31'],
     ]) {
-      const r = computeWorkedMinutes({ clockInAt: at(inAt!), clockOutAt: at(outAt!), breaks: [{ startedAt: at(bStart!), endedAt: at(bEnd!), isPaid: false }] });
+      const r = computeWorkedMinutes({ clockInAt: at(inAt!), clockOutAt: at(outAt!), breaks: [{ startedAt: at(bStart!), endedAt: at(bEnd!), isPaid: false, source: 'online' }] });
       expect(r.grossMinutes - r.unpaidBreakMinutes).toBe(r.workedMinutes);
     }
   });
@@ -241,7 +243,7 @@ describe('computeWorkedMinutes', () => {
     const input = {
       clockInAt: at('06:00:00'),
       clockOutAt: at('09:10:45'),
-      breaks: [{ startedAt: at('07:00:00'), endedAt: at('07:20:15'), isPaid: false }],
+      breaks: [{ startedAt: at('07:00:00'), endedAt: at('07:20:15'), isPaid: false, source: 'online' as const }],
     };
     const ms = computeWorkedDuration(input);
     expect(ms).toEqual({ grossMs: 11_445_000, unpaidBreakMs: 1_215_000, workedMs: 10_230_000 });
@@ -251,5 +253,13 @@ describe('computeWorkedMinutes', () => {
   it('refuses invalid dates', () => {
     expect(() => computeWorkedMinutes({ clockInAt: new Date('nope'), clockOutAt: at('14:00:00') })).toThrow(RangeError);
   });
-});
 
+  it('source is REQUIRED: a break record without it does not compile, so no caller can skip the D7 offline floor', () => {
+    const base = { clockInAt: at('06:00:00'), clockOutAt: at('14:00:00'), scheduledBreakMinutes: 30 };
+    // @ts-expect-error -- `source` is required on BreakRecordInput (security re-review of #307).
+    const missing: BreakRecordInput = { startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false };
+    expect(missing).toBeDefined();
+    expect(computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false, source: 'offline' }] }).unpaidBreakMinutes).toBe(30);
+    expect(computeWorkedMinutes({ ...base, breaks: [{ startedAt: at('10:00:00'), endedAt: at('10:12:00'), isPaid: false, source: 'online' }] }).unpaidBreakMinutes).toBe(12);
+  });
+});
