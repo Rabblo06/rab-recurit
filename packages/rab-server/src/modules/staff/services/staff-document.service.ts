@@ -3,6 +3,7 @@ import {
   PermissionFlag,
   STAFF_DOCUMENT_TRANSITIONS,
   STAFF_DOCUMENT_TYPE_LABELS,
+  STAFF_DOCUMENT_TYPES,
   StaffDocumentScanStatus,
   StaffDocumentStatus,
   StaffDocumentStatusType,
@@ -549,7 +550,9 @@ export class StaffDocumentService {
     issuedOn?: string;
     expiresOn?: string;
   }): StaffDocumentTypeType {
-    if (!(input.documentType in STAFF_DOCUMENT_TYPE_LABELS))
+    if (
+      !(STAFF_DOCUMENT_TYPES as readonly string[]).includes(input.documentType)
+    )
       throw new BadRequestException('Unknown document type.');
     for (const [name, value] of [
       ['issuedOn', input.issuedOn],
