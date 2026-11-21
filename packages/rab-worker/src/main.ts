@@ -55,14 +55,16 @@ import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
 import { resolveSchemaWaitMs, waitForWorkerSchemaOn } from './core/runtime/schema-wait';
 import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
 import { resolveInProcessProvisioningInterval } from './workspace-provisioner.config';
-import { WorkerRuntime } from './core/runtime/worker-runtime';
+import { WORKER_SCAN_CONCURRENCY, WorkerRuntime } from './core/runtime/worker-runtime';
+import { describeWorkerPoolDemand, workerPoolDemand } from './core/runtime/pool-demand';
+import { WORKSPACE_DISCOVERY_CONCURRENCY } from './core/database/workspace-discovery';
 import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
 import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
-import { assertQueueRegistryValid } from './core/scheduler/queue-registry';
+import { assertQueueRegistryValid, CONSUMER_QUEUES } from './core/scheduler/queue-registry';
 import { buildSchedulerPlan, resolveWorkerSchedulerRole } from './core/scheduler/scheduler-plan';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { SCAN_JOBS } from './core/scheduler/scan-jobs';
@@ -500,6 +502,21 @@ async function bootstrap(): Promise<void> {
     logger,
     (def) => (def.key !== 'timerTriggers' || timerTriggers.mode !== 'off') && (def.key !== 'auditEvents' || auditSinkMode !== 'none'),
   );
+  // XP-08 / XD-06: the pool against the most database work this process can start at once — one boot line, no behaviour
+  // change (measure the `db pool primary: … waiting=` line under a burst before resizing; see pool-demand.ts).
+  try {
+    const demandInput = {
+      consumers: [...consumers.keys()].map((key) => ({ name: CONSUMER_QUEUES[key].name, concurrency: CONSUMER_QUEUES[key].concurrency })),
+      scanSlots: WORKER_SCAN_CONCURRENCY,
+      perScanParallel: WORKSPACE_DISCOVERY_CONCURRENCY,
+      poolMax: pg.pool.max,
+    };
+    const demand = workerPoolDemand(demandInput);
+    (demand.exceedsPool ? logger.warn.bind(logger) : logger.log.bind(logger))(describeWorkerPoolDemand(demandInput, demand));
+  } catch (error) {
+    // A diagnostic line never stops the Worker.
+    logger.warn(`db pool demand: not computed (${error instanceof Error ? error.message : String(error)})`);
+  }
 
   const runtime = new WorkerRuntime(redis, {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).
