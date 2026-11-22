@@ -10434,7 +10434,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   status pending, attempts 0 and clears every build column (an owner-login runtime is not bound by the INSERT column grant).
 - **Low — size budget:** enforced while building: every report query fetches at most 100,000 rows (+1 to detect more) and
   the CSV is built line by line against the 10 MB budget, failing `too_large` before a partial file exists.
-- **Low — one export cannot block the queue:** the notice and audit run in their own savepoint (a failure is logged by error
+- **Low — one export cannot block the queue (superseded by the re-review below: audit is no longer contained):** the notice and audit run in their own savepoint (a failure is logged by error
   name and rolled back alone); an unexpected error on one export is logged and the cycle moves on (the row is retried next
   cycle under the attempt limit).
 - **Residual (retention):** deleting the file after 24 h removes the row; the old row version stays in dead tuples until
@@ -10446,3 +10446,28 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   fresh pending row; object flags 403 at request / link / download without burning the link); Worker spec (a failing notice
   neither undoes the build nor blocks the next export; the file row gone after 24 h); `report-builders.spec.ts` (row cap,
   byte budget while building, quoted cells).
+
+## Reports export and CSV cells — re-review follow-ups (branches feat/reports-async-export and fix/csv-cell-formula-hardening, 2026-11-22; CHANGED SQL, DRAFT)
+- **CSV cells:** a value (or split piece) that is entirely a plain decimal number (`^-?\d+(\.\d+)?$` after NFKC and the
+  leading-space strip, e.g. `-12.34`) is no longer prefixed, so a negative amount stays a number in Excel; `-1+2`, `-A1`,
+  `+12` and `-1e5` are still prefixed. Every cell stays quoted.
+- **File table tenant predicate:** the definer-only policy on `core.report_export_file` is now `CURRENT_USER =
+  rab_secure_owner AND organisation_id = core.current_org() AND workspace_id = core.current_workspace()` (USING and WITH
+  CHECK), so even a definer bound to another organisation sees nothing.
+- **File tied to its export:** a composite FK `(export_id, organisation_id, workspace_id, requested_by)` → `core.report_export
+  (id, organisation_id, workspace_id, requested_by)`; `report_export_file_put` with an unknown export or a different requester
+  fails (23503). Purging clears the content and keeps a tombstone (`purged_at`), so the PK allows one file per export, ever.
+  The "status pending" condition is not expressible as a constraint without a crewflow-owned lookup that R4/R6 forbid; it is
+  held by the Worker (row locked `FOR UPDATE SKIP LOCKED` while pending, put in the same transaction) plus put-once.
+- **Accurate claim (BC-01):** the runtime login holds no privilege on the file table, so normal code paths cannot read the
+  content or touch the link. The owner login `crewflow_owner` is a member of `rab_secure_owner` (INHERIT / SET): arbitrary
+  SQL in that session (injection) could `SET ROLE rab_secure_owner` or alter the policies. Same, owner-accepted posture as
+  every other rab_secure_owner table; it protects normal paths, not an attacker who already runs SQL.
+- **Audit is evidence (fail closed):** the `report_export.ready` / `.failed` / `.file_deleted` audit rows are written in the
+  export's own transaction; an audit failure rolls back that export's state change (it stays pending / ready) and the cycle
+  logs the error name and moves on. Only the in-app notice runs in a contained savepoint.
+- **Tests:** `field-policy.service.spec.ts` (`-12.34`, ` -12.34`, `-0.5` not prefixed; `-1+2`, `-A1`, `-12.34;=1+1`, `+12`,
+  `-1e5` prefixed); `report-exports.integration.spec.ts` (put with an unknown export or another requester → 23503, a second put
+  → 23505; take with another organisation bound → NULL and the link still usable); Worker spec (a failing audit write leaves
+  the export pending, logs `AuditDown` without the message, the next export still builds, and it builds next cycle; the
+  expired file leaves a content-less tombstone).

@@ -4,8 +4,8 @@ import { withCrewflowCoreCreate } from '../core-schema-create-scope';
 
 /**
  * Owner decision 29 (21 Nov 2026), reports page v1: background CSV exports. DRAFT: owner SQL review first.
- * Revised after the independent security review (22 Nov): the file and its one-time link live in a separate table no
- * runtime login can read, served only by SECURITY DEFINER functions.
+ * Revised after the independent security review (22 Nov): the file and its one-time link live in a separate table the
+ * runtime login holds no privilege on, served only by SECURITY DEFINER functions.
  *
  * 1. `core.report_export` (owner crewflow): one row per export a user asked for — what, for which period / venue / run,
  *    the scope and pay / hours decision stored at request time, and the build status. NO file content, NO link.
@@ -21,16 +21,23 @@ import { withCrewflowCoreCreate } from '../core-schema-create-scope';
  *    Owner-login parity: `_report_export_grant_parity_update` (allow-list = the UPDATE columns) and
  *    `_report_export_grant_parity_delete` (the existing core.owner_login_grant_parity_guard()).
  * 2. `core.report_export_file` (owner rab_secure_owner, NOLOGIN): the CSV and its one-time link. ENABLE + FORCE RLS with
- *    ONE owner-only PERMISSIVE policy (CURRENT_USER = rab_secure_owner, true only inside the definers below) and a
- *    RESTRICTIVE deny-all for crewflow / crewflow_app. No table privilege for anyone but the owner: a runtime login can
- *    neither read the content nor touch the link. Reached only through four definers (owner rab_secure_owner,
- *    search_path pg_catalog, pg_temp; EXECUTE for crewflow_app only), each pinned to the bound organisation + workspace:
- *      - report_export_file_put(export, requester, csv): Worker only; stores the file, expiry = now + 24 h;
+ *    ONE owner-only PERMISSIVE policy (CURRENT_USER = rab_secure_owner AND the bound organisation AND workspace, true
+ *    only inside the definers below) and a RESTRICTIVE deny-all for crewflow / crewflow_app. No table privilege for
+ *    anyone but the owner: on its normal paths the runtime login can neither read the content nor touch the link.
+ *    SAME POSTURE AS EVERY OTHER rab_secure_owner TABLE (behaviour catalogue BC-01, owner-accepted): the owner login
+ *    crewflow_owner is a member of rab_secure_owner (INHERIT / SET), so arbitrary SQL in that session (injection) could
+ *    `SET ROLE rab_secure_owner` or alter the policies; this protects normal code paths, not an attacker with SQL.
+ *    A composite FK ties each file to its export row (same id, organisation, workspace and requester); a file row is
+ *    never deleted while the export exists — purging clears the content and keeps a tombstone, so a file can be stored
+ *    at most once per export. Reached only through four definers (owner rab_secure_owner, search_path pg_catalog,
+ *    pg_temp; EXECUTE for crewflow_app only), each pinned to the bound organisation + workspace:
+ *      - report_export_file_put(export, requester, csv): Worker only; the export must exist in the bound workspace with
+ *        that requester (FK), once per export (PK); stores the file, expiry = now + 24 h;
  *      - report_export_file_issue_link(export, token_hash): the requester only, only before the file expires; the
  *        database sets the 60-second lifetime;
  *      - report_export_file_take(export, token_hash): the requester only; burns the link and returns the content in ONE
  *        statement, only for an unused, unexpired link of an unexpired file;
- *      - report_export_file_purge(export): Worker only; deletes the file once it has expired.
+ *      - report_export_file_purge(export): Worker only; clears the file content once it has expired (tombstone kept).
  *    None names a crewflow-owned table (secure-owner invariant R4 unchanged).
  * 3. `core.notification_preference.notification_type` CHECK += 'report_export_ready'.
  *
@@ -40,7 +47,7 @@ const TABLE = 'core.report_export';
 const FILE = 'core.report_export_file';
 const OWNER = `organisation_id = core.current_org() AND workspace_id = core.current_workspace() AND requested_by = core.current_uid()`;
 const WORKER = `current_setting('rab.actor_type', true) = 'worker' AND organisation_id = core.current_org() AND workspace_id = core.current_workspace()`;
-const SECURE_ONLY = `(CURRENT_USER = 'rab_secure_owner'::name)`;
+const SECURE_ONLY = `(CURRENT_USER = 'rab_secure_owner'::name AND organisation_id = core.current_org() AND workspace_id = core.current_workspace())`;
 
 export const REPORT_EXPORT_POLICIES_1786723200000 = ['report_export_insert', 'report_export_select', 'report_export_worker_select', 'report_export_worker_update'] as const;
 export const REPORT_EXPORT_FILE_POLICIES_1786723200000 = ['report_export_file_runtime_deny', 'report_export_file_secure_owner_definer'] as const;
@@ -106,6 +113,7 @@ CREATE TABLE ${TABLE} (
   created_at           timestamptz NOT NULL DEFAULT now(),
   updated_at           timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT report_export_organisation_fkey FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE,
+  CONSTRAINT report_export_file_target_key UNIQUE (id, organisation_id, workspace_id, requested_by),
   CONSTRAINT report_export_report_key_check CHECK (report_key IN (${list(REPORT_KEYS_1786723200000)})),
   CONSTRAINT report_export_params_check CHECK (
     CASE WHEN report_key = 'payroll_run_summary'
@@ -194,16 +202,20 @@ CREATE TABLE ${FILE} (
   organisation_id            uuid        NOT NULL,
   workspace_id               uuid        NOT NULL,
   requested_by               uuid        NOT NULL,
-  csv_content                text        NOT NULL,
+  csv_content                text,
   created_at                 timestamptz NOT NULL,
   file_expires_at            timestamptz NOT NULL,
+  purged_at                  timestamptz,
   download_token_hash        text,
   download_token_issued_at   timestamptz,
   download_token_expires_at  timestamptz,
   download_token_used_at     timestamptz,
   download_count             integer     NOT NULL DEFAULT 0,
   CONSTRAINT report_export_file_organisation_fkey FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE,
-  CONSTRAINT report_export_file_size_check CHECK (octet_length(csv_content) <= 10485760),
+  CONSTRAINT report_export_file_export_fkey FOREIGN KEY (export_id, organisation_id, workspace_id, requested_by)
+    REFERENCES core.report_export (id, organisation_id, workspace_id, requested_by) ON DELETE CASCADE,
+  CONSTRAINT report_export_file_size_check CHECK (csv_content IS NULL OR octet_length(csv_content) <= 10485760),
+  CONSTRAINT report_export_file_purge_check CHECK ((purged_at IS NULL) = (csv_content IS NOT NULL) AND (purged_at IS NULL OR purged_at >= file_expires_at)),
   CONSTRAINT report_export_file_expiry_check CHECK (file_expires_at = created_at + interval '24 hours'),
   CONSTRAINT report_export_file_link_check CHECK (
     (download_token_hash IS NULL OR download_token_hash ~ '^[0-9a-f]{64}$')
@@ -253,7 +265,7 @@ BEGIN
      SET download_token_hash = p_token_hash, download_token_issued_at = v_now,
          download_token_expires_at = v_now + interval '60 seconds', download_token_used_at = NULL
    WHERE f.export_id = p_export_id AND f.organisation_id = core.current_org() AND f.workspace_id = core.current_workspace()
-     AND f.requested_by = core.current_uid() AND f.file_expires_at > v_now;
+     AND f.requested_by = core.current_uid() AND f.purged_at IS NULL AND f.file_expires_at > v_now;
   RETURN FOUND;
 END;
 $f$`,
@@ -274,7 +286,7 @@ BEGIN
      SET download_token_used_at = v_now, download_count = f.download_count + 1
    WHERE f.export_id = p_export_id AND f.organisation_id = core.current_org() AND f.workspace_id = core.current_workspace()
      AND f.requested_by = core.current_uid() AND f.download_token_hash = p_token_hash AND f.download_token_used_at IS NULL
-     AND f.download_token_expires_at > v_now AND f.file_expires_at > v_now
+     AND f.download_token_expires_at > v_now AND f.file_expires_at > v_now AND f.purged_at IS NULL
   RETURNING f.csv_content INTO v_csv;
   RETURN v_csv;
 END;
@@ -289,9 +301,12 @@ BEGIN
   IF pg_catalog.current_setting('rab.actor_type', true) IS DISTINCT FROM 'worker' THEN
     RAISE EXCEPTION 'report_export_file_purge: the Worker only' USING ERRCODE = 'insufficient_privilege';
   END IF;
-  DELETE FROM core.report_export_file f
+  -- Content cleared, row kept as a tombstone: the PK then refuses any second file for this export.
+  UPDATE core.report_export_file f
+     SET csv_content = NULL, purged_at = pg_catalog.clock_timestamp(), download_token_hash = NULL, download_token_issued_at = NULL,
+         download_token_expires_at = NULL, download_token_used_at = NULL
    WHERE f.export_id = p_export_id AND f.organisation_id = core.current_org() AND f.workspace_id = core.current_workspace()
-     AND f.file_expires_at <= pg_catalog.clock_timestamp();
+     AND f.purged_at IS NULL AND f.file_expires_at <= pg_catalog.clock_timestamp();
   RETURN FOUND;
 END;
 $f$`,
@@ -336,7 +351,7 @@ export class ReportExport1786723200000 implements MigrationInterface {
     await runner.query(`ALTER TABLE ${FILE} OWNER TO rab_secure_owner`);
     await runner.query(`REVOKE ALL ON TABLE ${FILE} FROM PUBLIC, crewflow, crewflow_app`);
     await runner.query(`REVOKE ALL ON TABLE ${FILE} FROM rab_secure_owner`);
-    await runner.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${FILE} TO rab_secure_owner`);
+    await runner.query(`GRANT SELECT, INSERT, UPDATE ON TABLE ${FILE} TO rab_secure_owner`);
     await runner.query(`ALTER TABLE ${FILE} ENABLE ROW LEVEL SECURITY`);
     await runner.query(`ALTER TABLE ${FILE} FORCE ROW LEVEL SECURITY`);
     await runner.query(`CREATE POLICY report_export_file_secure_owner_definer ON ${FILE} AS PERMISSIVE FOR ALL TO rab_secure_owner USING ${SECURE_ONLY} WITH CHECK ${SECURE_ONLY}`);

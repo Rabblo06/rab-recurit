@@ -238,7 +238,7 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   // Owner decision 29, reports page v1 (DRAFT, owner SQL review pending; THREAT-MODEL "Reports page and async export"): the
   // policies of the two NEW tables, added only. core.report_export: the requester's own rows (select / insert as a fresh
   // pending row) and the Worker's (rab.actor_type = 'worker') select / update within the bound organisation and workspace.
-  // core.report_export_file (rab_secure_owner): the owner-only definer policy and the RESTRICTIVE deny for the runtime logins. Owner, FORCE RLS, grants and triggers are pinned by the golden posture snapshot and the migration's own
+  // core.report_export_file (rab_secure_owner): the owner-only definer policy (plus the bound tenant) and the RESTRICTIVE deny for the runtime logins. Owner, FORCE RLS, grants and triggers are pinned by the golden posture snapshot and the migration's own
   // post-condition; no runtime login gains a privilege on an existing object.
   '1786723200000-ReportExport': [
     "+ policy|report_export|report_export_insert|a|permissive=true|roles=public|using=|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (requested_by = core.current_uid()) AND (status = 'pending'::text) AND (attempts = 0))",
@@ -246,7 +246,7 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|report_export|report_export_worker_select|r|permissive=true|roles=public|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=",
     "+ policy|report_export|report_export_worker_update|w|permissive=true|roles=public|using=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((current_setting('rab.actor_type'::text, true) = 'worker'::text) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
     '+ policy|report_export_file|report_export_file_runtime_deny|*|permissive=false|roles=crewflow,crewflow_app|using=false|check=false',
-    "+ policy|report_export_file|report_export_file_secure_owner_definer|*|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=(CURRENT_USER = 'rab_secure_owner'::name)",
+    "+ policy|report_export_file|report_export_file_secure_owner_definer|*|permissive=true|roles=rab_secure_owner|using=((CURRENT_USER = 'rab_secure_owner'::name) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((CURRENT_USER = 'rab_secure_owner'::name) AND (organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
 };
 

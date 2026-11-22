@@ -57,7 +57,7 @@ describe('report builders (owner decision 29)', () => {
     const lines = csv.split('\n');
     expect(lines[0]).toBe('"Venue","Staff"');
     expect(lines[1]).toBe(`"'=HYPERLINK(""http://x"")","'+1"`);
-    expect(lines[2]).toBe(`"'@SUM(A1)","'-2"`);
+    expect(lines[2]).toBe(`"'@SUM(A1)","-2"`); // a plain negative number stays a number
     expect(lines[3]).toBe(`"' =1+1","'a;=1+1"`);
     expect(lines[4]).toBe(`"'\uff1d1+1","ok"`);
   });

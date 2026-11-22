@@ -283,7 +283,7 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     expect((refused as HttpException).getStatus()).toBe(429);
   });
 
-  it('database: no tenant context → 0 rows; another user → 0 rows; the file is unreadable to the runtime login; only the Worker updates; no DELETE; the database starts every row', async () => {
+  it('database: no tenant context → 0 rows; another user → 0 rows; the runtime login holds no privilege on the file table; only the Worker updates; no DELETE; the database starts every row', async () => {
     const { org, manager } = await workspace('rep-db');
     const created = await service.request(ctxOf(manager), { reportKey: ReportKey.FILL_RATE_BY_VENUE, ...PERIOD });
     const id = created.id;
@@ -342,7 +342,23 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     expect(pgCode(await asUser(manager, (m) => m.query(`DELETE FROM core.report_export WHERE id = $1`, [id])).catch((e) => e))).toBe('42501');
     expect(await adminDataSource.query(`SELECT 1 FROM core.report_export WHERE id = $1`, [id])).toHaveLength(1);
 
-    // A link issued (database-fixed 60 s), then the file expires: issuing and using a link are refused by the database.
+    // The file must belong to an existing export of this workspace with the same requester (composite FK), once (PK).
+    expect(pgCode(await asWorker(manager, (m) => m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, 'x')`, [randomUUID(), manager.userId])).catch((e) => e))).toBe('23503');
+    expect(pgCode(await asWorker(manager, (m) => m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, 'x')`, [inserted[0].id, other.userId])).catch((e) => e))).toBe('23503');
+    expect(pgCode(await asWorker(manager, (m) => m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, 'x')`, [id, manager.userId])).catch((e) => e))).toBe('23505');
+
+    // A link issued (database-fixed 60 s); a session bound to another organisation gets nothing from it and does not burn it.
+    const otherOrg = await factory.createOrganisation('rep-db-other');
+    const stranger = await factory.createInternalManager(otherOrg, { permissions: 'production' });
+    const live = 'e'.repeat(64);
+    expect((await asUser(manager, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, $2::text) AS ok`, [id, live])))[0].ok).toBe(true);
+    const crossOrg = await tenantContext.runInTenantContext({ organisationId: otherOrg.id, workspaceId: stranger.workspaceId, userId: manager.userId, role: '' }, (m) =>
+      m.query(`SELECT core.report_export_file_take($1::uuid, $2::text) AS csv`, [id, live]),
+    );
+    expect(crossOrg[0].csv).toBeNull();
+    expect((await asUser(manager, (m) => m.query(`SELECT core.report_export_file_take($1::uuid, $2::text) AS csv`, [id, live])))[0].csv).toBe('secret,content');
+
+    // Then the file expires: issuing and using a link are refused by the database.
     const hash = 'c'.repeat(64);
     expect((await asUser(manager, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, $2::text) AS ok`, [id, hash])))[0].ok).toBe(true);
     const [link] = await adminDataSource.query(`SELECT extract(epoch FROM download_token_expires_at - download_token_issued_at)::int AS ttl FROM core.report_export_file WHERE export_id = $1`, [id]);

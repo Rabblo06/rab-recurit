@@ -134,6 +134,31 @@ describeIfDb('report export Worker cycle (integration)', () => {
 ')).not.toContain('notice down');
   });
 
+  it('a failing audit write is never dropped: that export rolls back to pending, the error name is logged, the next export still builds', async () => {
+    const victim = await exportsService.request(ctxOf(b), { reportKey: ReportKey.FILL_RATE_BY_VENUE, periodFrom: '2026-11-05', periodTo: '2026-11-06' });
+    const fine = await exportsService.request(ctxOf(a), { reportKey: ReportKey.FILL_RATE_BY_VENUE, periodFrom: '2026-11-07', periodTo: '2026-11-08' });
+    class AuditDown extends Error {
+      override name = 'AuditDown';
+    }
+    const flakyAudit = {
+      record: jest.fn(async (m: Parameters<AuditService['record']>[0], ctx: { organisationId: string; userId: string }, action: string, opts: { entityId: string } & Record<string, unknown>) => {
+        if (opts.entityId === victim.id) throw new AuditDown('audit storage unavailable');
+        return audit.record(m, ctx as never, action as never, opts as never);
+      }),
+    };
+    const logged: string[] = [];
+    const result = await runReportExportCycle(dataSource, tenantContext, notifications, flakyAudit, { lateGraceMinutes: 10, organisationId: a.organisationId, log: (l) => logged.push(l) });
+    expect(result.errors).toBeGreaterThanOrEqual(1);
+    expect(await rowOf(victim.id)).toMatchObject({ status: 'pending', csv_content: null });
+    expect((await rowOf(fine.id)).status).toBe('ready');
+    expect(logged.some((l) => l.includes(victim.id) && l.includes('AuditDown'))).toBe(true);
+    expect(logged.join('
+')).not.toContain('audit storage unavailable');
+    // With audit back, the export builds on the next cycle.
+    await cycle();
+    expect((await rowOf(victim.id)).status).toBe('ready');
+  });
+
   it('a build that cannot succeed fails at once (not_found), audited, never retried', async () => {
     // A row for a payroll run that does not exist, written as the requester (the service would have refused it with 404).
     const [{ id }] = await tenantContext.runInTenantContext({ organisationId: a.organisationId, workspaceId: a.workspaceId, userId: a.userId, role: '' }, (m) =>
@@ -162,7 +187,8 @@ describeIfDb('report export Worker cycle (integration)', () => {
     expect(result.deleted).toBeGreaterThanOrEqual(1);
     const row = await rowOf(created.id);
     expect(row).toMatchObject({ status: 'expired', csv_content: null });
-    expect(await adminDataSource.query(`SELECT 1 FROM core.report_export_file WHERE export_id = $1`, [created.id])).toHaveLength(0);
+    // The content is gone; a tombstone row stays so no second file can ever be stored for this export.
+    expect(await adminDataSource.query(`SELECT csv_content, purged_at IS NOT NULL AS purged FROM core.report_export_file WHERE export_id = $1`, [created.id])).toEqual([{ csv_content: null, purged: true }]);
     expect(row.file_deleted_at).not.toBeNull();
     expect(await adminDataSource.query(`SELECT action FROM core.audit_log WHERE entity_id = $1 AND action = 'report_export.file_deleted'`, [created.id])).toHaveLength(1);
     await expect(exportsService.issueLink(ctxOf(a), created.id)).rejects.toBeInstanceOf(NotFoundException);
