@@ -10371,3 +10371,27 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `c1-keyset-paging.integration.spec.ts` (page 1 total, page 2/3 null, hasMore true/false, every row once,
   filtered page 1 count; the shared offset-walk helper no longer relies on `total` after page 1);
   `pagination.spec.ts` (null total on later pages walks to the end, stops on `hasMore: false`).
+
+## engine/ stops importing modules/ — identity entities, venue resource scope, entity cache (branches refactor/engine-owns-identity-entities, refactor/engine-modules-scope-and-cache, refactor/engine-modules-venue-summary, 2026-11-21; no migration)
+- **Finding:** CLAUDE.md's "engine/ never imports from modules/" had 24 production violations (ratchet baseline
+  `engine-to-modules`), 20 of them auth, permissions, audit, email, platform-admin and user-deletion services importing
+  identity entities from `modules/identity`. A dependency in that direction lets a domain-module change silently alter
+  platform security code (and a domain module could add an entity relation the auth path then loads).
+- **Control:** the 18 identity/access entities move to `engine/core-modules/identity/entities` (pure file move, re-exported
+  from `modules/identity/entities`); `ManagerVenue` moves to `engine/core-modules/resource-scope/entities`; the by-owner
+  workspace and venue display-cache reads move to `modules/manager-workspace` and `modules/venue` (same cache kinds, keys and
+  projections, through `CoreEntityCacheService.getOrFetch`). The baseline loses the rule entirely, so any new engine ->
+  modules import fails ci-security (`tools/check-import-boundaries.cjs`; owner-dated approvals are the only exception).
+- **Changed read (authorisation input):** `ResourceScopeService.resolveTx`'s venue-manager scope no longer joins the
+  `ManagerProfile` entity; it filters `mv.manager_profile_id IN (SELECT mp.id FROM core.manager_profile mp WHERE mp.user_id
+  = $1)`. Same rows (mp.id is the primary key, so each manager_venue row joined at most one profile), same RLS on both
+  tables, `manager_venue` still schema-qualified by the bound manager, user id still a bound parameter. A venue manager with
+  no assignment still gets `{ kind: 'venue', venueIds: [] }` (sees nothing), never an owner scope.
+- **Tests:** `resource-scope.service.spec.ts` (exact SQL under core routing and a bound workspace schema, parameter binding,
+  empty-assignment fail-closed, non-venue-manager never queries manager_venue); `manager-workspace-display-cache.spec.ts`
+  and `venue-summary-cache.spec.ts` (same cache kind/key, no extra enabled/TTL argument, same projection, null never
+  cached, hit skips the database); `core-entity-cache.integration.spec.ts` follows the moved reads; the live venue scope
+  stays covered by `venue-manager-scoping.integration.spec.ts` (assign -> visible, unassign -> gone, another manager's venue
+  invisible).
+- **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
+  `core.manager_workspace`); the ratchet sees imports, not table names.

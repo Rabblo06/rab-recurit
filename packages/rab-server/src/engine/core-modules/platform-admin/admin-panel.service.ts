@@ -13,7 +13,7 @@ import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-clien
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../worker-shared/heartbeat.constants';
-import { PlatformConfig, User } from '../../../modules/identity/entities';
+import { PlatformConfig, User } from '../identity/entities';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
 import { UpdateSmtpConfigDto } from './dto/update-smtp-config.dto';
