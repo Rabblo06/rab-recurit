@@ -204,6 +204,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       jobRoleId?: string | null;
       availableDays?: string[] | null;
       otherSkills?: string | null;
+      createdBy?: string;
     },
   ): Promise<StaffFixture> {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
@@ -231,7 +232,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         jobRoleId: overrides && 'jobRoleId' in overrides ? (overrides.jobRoleId ?? undefined) : fx.jobRoleId,
         availableDays: overrides && 'availableDays' in overrides ? (overrides.availableDays ?? undefined) : undefined,
         otherSkills: overrides && 'otherSkills' in overrides ? (overrides.otherSkills ?? undefined) : undefined,
-        createdBy: fx.managerUserId,
+        createdBy: overrides?.createdBy ?? fx.managerUserId,
         workspaceId: fx.workspaceId,
       });
       return { staffProfileId: staffProfile.id, userId };
@@ -684,6 +685,19 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       await runReplacementStaffCycle(adminDataSource, tenantContext, notificationService, auditService);
       const row = await requestFor(fx, fixture);
       expect(row.candidatesSnapshot.filter((c) => c.eligible === true)).toHaveLength(7);
+    });
+
+    it('C5 (security review): staff created by anyone other than the shift owner are never listed, eligible or not', async () => {
+      const fx = await seedOrgFixture('rankC5');
+      const declining = await seedStaff(fx, 'declining');
+      const own = await seedStaff(fx, 'ownStaff');
+      // A real user of the same organisation and workspace (the declining staff member's own account) as the creator.
+      const foreign = await seedStaff(fx, 'foreignStaff', { createdBy: declining.userId });
+      const fixture = await seedDeclinedOfferShift(fx, declining);
+      await runReplacementStaffCycle(adminDataSource, tenantContext, notificationService, auditService);
+      const row = await requestFor(fx, fixture);
+      expect(entryFor(row, own.staffProfileId)).toMatchObject({ eligible: true });
+      expect(entryFor(row, foreign.staffProfileId)).toBeUndefined();
     });
 
     it('C4: a legacy row with a stored score is shown without it, in its stored order, and stays approvable', async () => {

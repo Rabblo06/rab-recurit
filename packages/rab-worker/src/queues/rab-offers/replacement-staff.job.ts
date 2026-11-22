@@ -49,8 +49,10 @@ import { CandidateFacts, buildReplacementCandidates } from './replacement-candid
  * with the reasons shown". No score, no ranking, no shortlist cut by rank;
  * the list is in name order and the manager chooses. The rules and their
  * columns are in `replacement-candidates.ts`. This file only loads the
- * population: ACTIVE employment + ACTIVE account in the organisation, never
- * the staff member who just declined/let it expire.
+ * population: the SHIFT OWNER's own staff (`created_by`, the staff list's
+ * rule; security review), ACTIVE employment + ACTIVE account, never the staff
+ * member who just declined/let it expire. The API then narrows the list to
+ * the caller's own scope (a Venue Manager: their team pool).
  */
 export interface ReplacementStaffResult {
   created: number;
@@ -141,8 +143,11 @@ export async function runReplacementStaffCycle(
           AND sp.employment_status = $4
           AND u.status = $5
           AND sp.id != $6
+          -- Security review: the shift owner's own staff only (the staff list's rule), never another manager's staff in
+          -- the organisation. A Venue Manager additionally sees only their team pool of these (ReplacementRequestService).
+          AND sp.created_by = $7
         `,
-        [candidate.shift_id, toTstzRange(shift.startsAt, shift.endsAt), candidate.organisation_id, EmploymentStatus.ACTIVE, UserStatus.ACTIVE, declinedAssignment.staffProfileId],
+        [candidate.shift_id, toTstzRange(shift.startsAt, shift.endsAt), candidate.organisation_id, EmploymentStatus.ACTIVE, UserStatus.ACTIVE, declinedAssignment.staffProfileId, shift.createdBy],
       );
 
       // Decision 8: everyone in the population is listed, eligible first, each group in NAME order. No score, no cut.

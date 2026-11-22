@@ -10383,3 +10383,16 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   not eligible; approving them is refused 409, claim released, zero offers), C2 (the old +20 fact favours the
   alphabetically last person, who still comes last; no score in DB or API), C3 (all 7 eligible listed), C4 (legacy
   scored row shown without the score and still approvable).
+
+## Replacement suggestions — candidates limited to the shift owner's staff and the caller's scope (security review of decision 8, branch feat/replacement-eligible-with-reasons, 2026-11-22; no SQL)
+- **Finding (High, review of #334):** the Worker loaded the suggestion population by organisation only, so a request (and,
+  with decision 8, its not-eligible list) named staff created by other managers of the organisation, outside the caller's
+  staff list; a Venue Manager saw names outside their team pool.
+- **Control:** the Worker loads only the shift owner's own staff (`sp.created_by = shift.created_by`). The API
+  (`ReplacementRequestService` list / get / approve / reject) re-derives the caller's scope per request and returns only
+  candidates the caller could see in their staff list: an owner-scoped manager their resolved owner's staff, a Venue Manager
+  their saved team pool (the rule `assertVenueTeamSelection` applies to every send). A candidate outside that scope cannot be
+  approved (409, same as "not on the shortlist"; the claim rolls back, no offer). Stored rows are not rewritten.
+- **Tests:** `replacement-staff-workflow.integration.spec.ts` C5 (staff created by another user are never listed);
+  `same-org-manager-isolation.integration.spec.ts` E-scope (Manager B's staff in Manager A's snapshot are hidden from A's
+  list / get and refused at approve, zero offers; a Venue Manager sees only their team-pool candidate, the owner both).
