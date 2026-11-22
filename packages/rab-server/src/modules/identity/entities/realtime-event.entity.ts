@@ -1,7 +1,7 @@
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
-import { Organisation } from './organisation.entity';
-import { User } from './user.entity';
+import { Organisation } from '../../../engine/core-modules/identity/entities/organisation.entity';
+import { User } from '../../../engine/core-modules/identity/entities/user.entity';
 
 // NOT exported, deliberately — `core.datasource.ts` builds its entity list via
 // `Object.values(identityEntities)` over this whole barrel's exports (see
