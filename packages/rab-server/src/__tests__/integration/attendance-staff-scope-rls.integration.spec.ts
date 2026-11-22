@@ -12,7 +12,6 @@ import {
   CORE_CORRECTION_POLICY_SQL,
   CORE_CORRECTION_SCOPE_HASH,
 } from '../../database/typeorm/workspace-schema/attendance-staff-scope-sql';
-import { ATTENDANCE_ON_BEHALF_UNVERIFIABLE_SQL } from '../../engine/core-modules/user-deletion/user-deletion.service';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
@@ -84,7 +83,12 @@ describeIfDb('M4 §11: core.attendance staff-own-or-manager RLS predicate (integ
     const manager = (user: string, type: string, workspaceId: string) =>
       one(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, user, type, workspaceId]);
     await manager(users.manager, 'internal', w.id);
-    await manager(users.otherManager, 'internal', other.id);
+    // A second workspace of the SAME organisation (manager_profile's (workspace_id, organisation_id) key), owned by otherManager.
+    const sibling = await one(
+      `INSERT INTO core.manager_workspace (organisation_id, owner_user_id, name, subdomain, status, schema_status) VALUES ($1, $2, $3, $3, 'active', 'CREATING') RETURNING id`,
+      [w.org, users.otherManager, `attscope-sibling-${SFX}`],
+    );
+    await manager(users.otherManager, 'internal', sibling);
     const vmX = await manager(users.vmX, 'venue', w.id);
     const vmY = await manager(users.vmY, 'venue', w.id);
     const venue = (name: string) => one(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, w.id, name, w.owner]);
@@ -275,15 +279,6 @@ describeIfDb('M4 §11: core.attendance staff-own-or-manager RLS predicate (integ
     }
   });
 
-  it('user deletion fails safe: a caller without full attendance visibility cannot conclude a manager target made no on-behalf punch', async () => {
-    const check = (caller: string, target: string) => as({ user: caller }, async () => (await app.query(ATTENDANCE_ON_BEHALF_UNVERIFIABLE_SQL, [target])).rows.length);
-    // A Venue Manager (no non-venue manager profile here) deleting another manager of this workspace: not conclusive, soft delete.
-    expect(await check(users.vmY, users.vmX)).toBe(1);
-    // The workspace Manager sees every attendance row, so the ordinary on-behalf check is conclusive.
-    expect(await check(users.manager, users.vmX)).toBe(0);
-    // A target who is not a manager of this workspace cannot have punched anyone in here.
-    expect(await check(users.vmY, users.staffA)).toBe(0);
-  });
 
   it('zero rows with no tenant context bound (runtime login)', async () => {
     expect(await visible({ bind: false })).toEqual([]);

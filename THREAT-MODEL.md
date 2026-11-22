@@ -10340,9 +10340,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   be visible (`EXISTS (SELECT 1 FROM core.attendance a WHERE a.id = attendance_correction.attendance_id)`, USING and WITH
   CHECK), so a correction has exactly its attendance's readers; before, staff could read each other's corrections. (2) The
   attendance predicate's OR branches are ordered worker, manager (both uncorrelated), staff own, Venue Manager. (3)
-  UserDeletionService.findProtectedHistory fails safe: when the target holds a manager profile in the scope and the caller
-  holds no non-venue manager profile there (so it cannot see every attendance row), the on-behalf-punch check is not
-  conclusive and the account is soft-deleted instead of hard-deleted (no dangling clock_in_by / clock_out_by). (4) Positive
+  UserDeletionService.findProtectedHistory is unchanged in behaviour: its hard-delete path runs only for a never-activated
+  invite (never signed in), which cannot be clock_in_by / clock_out_by, and its own history is caught through the
+  tenant-wide shift_assignment rows; a comment records why. (4) Positive
   tests as the runtime login: own clock-in INSERT, own clock-out UPDATE, Manager and venue Venue Manager on-behalf updates (the
   other venue's Venue Manager updates 0 rows), and a finalise-path payroll_record INSERT whose mirrorsApprovedAttendance check
   reads attendance under the new RLS. Merge order: after #241 (the worker marker is bound only through the tenant-context
