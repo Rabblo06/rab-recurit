@@ -134,6 +134,13 @@ interface RekeyContext {
   pushTokenFingerprint: () => Buffer;
 }
 
+/** For SMTP-only writes, which never re-key a push token: calling it is a programming error and fails closed. */
+const NO_PUSH_REKEY: RekeyContext = {
+  pushTokenFingerprint: () => {
+    throw new Error('secret rotation: no push token fingerprint for this write (not a push_token row).');
+  },
+};
+
 const RAB2_MAGIC = Buffer.from([0x52, 0x41, 0x42, 0x32]);
 const DEFAULT_BATCH = 200;
 const MAX_UNREADABLE_REPORTED = 50;
@@ -486,7 +493,7 @@ export class SecretRotationService {
   }
 
   private async writeIfUnchanged(organisationId: string, expectedCurrent: Buffer, next: Buffer): Promise<boolean> {
-    return this.runScopedForOrg(organisationId, (manager) => SMTP_ADAPTER.writeIfUnchanged(manager, organisationId, organisationId, expectedCurrent, next));
+    return this.runScopedForOrg(organisationId, (manager) => SMTP_ADAPTER.writeIfUnchanged(manager, organisationId, organisationId, expectedCurrent, next, NO_PUSH_REKEY));
   }
 
   // Local copy of rab-worker's runScopedForOrg helper's exact semantics (actorType 'worker': a system execution context, not
