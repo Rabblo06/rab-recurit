@@ -6,6 +6,7 @@ import { Logger as NestLogger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { Worker } from 'bullmq';
 import Redis from 'ioredis';
+import { hostname } from 'node:os';
 import type { Client as PgClient } from 'pg';
 import { DataSource } from 'typeorm';
 
@@ -59,6 +60,7 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
 import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
+import { redisClusterIntervalLease } from './core/scheduler/cluster-interval-lease';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
 import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
@@ -628,6 +630,8 @@ async function bootstrap(): Promise<void> {
     expectedMigrations: gateReport.expectedMigrations ?? [],
     production: isProductionProcess('worker', process.env),
     actAsCrewflow: true,
+    // XR-12: the daily drift and orphan checks run once per interval for the whole cluster (not at every start, not per replica).
+    dailyLease: redisClusterIntervalLease(redis, `${hostname()}:${process.pid}`),
   }).catch(refuseStartup);
   logger.log(`workspace provisioning: in-process on the owner login (interval ${provisioningInterval.intervalSeconds}s)`);
   // ---- end T4 ----

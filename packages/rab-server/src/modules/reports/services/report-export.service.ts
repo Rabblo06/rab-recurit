@@ -1,5 +1,6 @@
 import {
   PermissionFlag,
+  PermissionFlagType,
   REPORT_EXPORT_LINK_TTL_SECONDS,
   REPORT_EXPORT_MAX_PERIOD_DAYS,
   REPORT_EXPORTS_PER_USER_PER_HOUR,
@@ -51,6 +52,18 @@ interface ExportRow {
 }
 
 const iso = (d: Date | null) => (d ? new Date(d).toISOString() : null);
+
+/**
+ * Security review: the object flag(s) behind each report, checked (with report.view / report.export) when the export is
+ * asked for, when its link is issued and at download. Pay columns additionally need payroll.view (columnsFor).
+ */
+export const REPORT_OBJECT_FLAGS: Readonly<Record<ReportKeyType, readonly PermissionFlagType[]>> = Object.freeze({
+  hours_and_pay_by_venue: [PermissionFlag.ATTENDANCE_VIEW],
+  attendance_exceptions: [PermissionFlag.ATTENDANCE_VIEW],
+  weekly_hours_per_staff: [PermissionFlag.ATTENDANCE_VIEW],
+  fill_rate_by_venue: [PermissionFlag.SCHEDULE_VIEW],
+  payroll_run_summary: [PermissionFlag.PAYROLL_VIEW],
+});
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 const NOT_FOUND = 'Report export not found.';
 
@@ -111,6 +124,7 @@ export class ReportExportService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.permissions.assertPermissionTx(m, ctx, PermissionFlag.REPORT_VIEW);
       await this.permissions.assertPermissionTx(m, ctx, PermissionFlag.REPORT_EXPORT);
+      await this.assertObjectFlags(m, ctx, params.reportKey);
       const scope = await this.resourceScope.resolveTx(m, ctx);
       const t = businessTables(m);
 
@@ -194,14 +208,12 @@ export class ReportExportService {
       await this.permissions.assertPermissionTx(m, ctx, PermissionFlag.REPORT_EXPORT);
       const row = await this.ownRow(m, ctx, id);
       await this.assertStillAllowed(m, ctx, row);
+      if (row.status !== 'ready') throw new NotFoundException(NOT_FOUND);
       const token = randomBytes(32).toString('base64url');
-      const [rows] = (await m.query(
-        `UPDATE core.report_export SET download_token_hash = $4
-          WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3 AND requested_by = $5 AND status = 'ready' AND file_expires_at > now()
-          RETURNING id`,
-        [id, ctx.organisationId, ctx.workspaceId, sha256(token), ctx.userId],
-      )) as [Array<{ id: string }>, number];
-      if (!rows.length) throw new NotFoundException(NOT_FOUND);
+      // core.report_export_file_issue_link (SECURITY DEFINER): the requester's own, unexpired file only; the database sets
+      // the 60-second lifetime. The file table itself is unreadable to every runtime login.
+      const [{ ok }] = await m.query(`SELECT core.report_export_file_issue_link($1::uuid, $2::text) AS ok`, [id, sha256(token)]);
+      if (ok !== true) throw new NotFoundException(NOT_FOUND);
       await this.audit.record(m, ctx, AuditAction.REPORT_EXPORT_LINK_ISSUED, { entityType: 'report_export', entityId: id, metadata: { reportKey: row.report_key } });
       return { token, expiresInSeconds: REPORT_EXPORT_LINK_TTL_SECONDS };
     });
@@ -218,22 +230,17 @@ export class ReportExportService {
       await this.permissions.assertPermissionTx(m, ctx, PermissionFlag.REPORT_EXPORT);
       const row = await this.ownRow(m, ctx, id);
       await this.assertStillAllowed(m, ctx, row);
-      const [rows] = (await m.query(
-        `UPDATE core.report_export SET download_token_used_at = clock_timestamp(), download_count = download_count + 1
-          WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3 AND requested_by = $4
-            AND download_token_hash = $5 AND download_token_used_at IS NULL AND download_token_expires_at > clock_timestamp()
-            AND status = 'ready' AND file_expires_at > now()
-          RETURNING csv_content`,
-        [id, ctx.organisationId, ctx.workspaceId, ctx.userId, sha256(token)],
-      )) as [Array<{ csv_content: string }>, number];
-      if (!rows.length) throw new NotFoundException('This download link has expired or was already used. Ask for a new one.');
+      // core.report_export_file_take (SECURITY DEFINER): burns the link and returns the content in ONE statement, only for
+      // the requester's unused, unexpired link of an unexpired file.
+      const [{ csv }] = await m.query(`SELECT core.report_export_file_take($1::uuid, $2::text) AS csv`, [id, sha256(token)]);
+      if (typeof csv !== 'string') throw new NotFoundException('This download link has expired or was already used. Ask for a new one.');
       await this.audit.record(m, ctx, AuditAction.REPORT_EXPORT_DOWNLOADED, {
         entityType: 'report_export',
         entityId: id,
         metadata: { reportKey: row.report_key, includePay: row.include_pay, rowCount: row.row_count },
       });
       const suffix = row.period_from ? `${row.period_from}-to-${row.period_to}` : `run-${row.payroll_run_id}`;
-      return { filename: `${row.report_key}-${suffix}.csv`, csv: rows[0]!.csv_content };
+      return { filename: `${row.report_key}-${suffix}.csv`, csv };
     });
   }
 
@@ -283,7 +290,12 @@ export class ReportExportService {
    * The stored decision must still hold for the caller NOW: the same scope (a Venue Manager still assigned to every
    * stored venue; an owner-scoped export still the same owner), and pay / hours columns only while still allowed.
    */
+  private async assertObjectFlags(m: EntityManager, ctx: AuthContext, reportKey: ReportKeyType): Promise<void> {
+    for (const flag of REPORT_OBJECT_FLAGS[reportKey]) await this.permissions.assertPermissionTx(m, ctx, flag);
+  }
+
   private async assertStillAllowed(m: EntityManager, ctx: AuthContext, row: ExportRow): Promise<void> {
+    await this.assertObjectFlags(m, ctx, row.report_key);
     const scope = await this.resourceScope.resolveTx(m, ctx);
     if (row.scope_kind === 'venue') {
       if (scope.kind !== 'venue' || !row.scope_venue_ids.every((v) => scope.venueIds.includes(v))) throw new NotFoundException(NOT_FOUND);

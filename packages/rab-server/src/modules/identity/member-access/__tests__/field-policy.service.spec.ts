@@ -115,8 +115,8 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
 
   it('all columns for a caller whose policy hides nothing', () => {
     const [header, row] = buildPayrollRunCsv(view, policy([])).split('\n');
-    expect(header).toBe('Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Late approvals,Run status');
-    expect(row).toContain('4.00,48.00');
+    expect(header).toBe('"Staff reference","Staff name","Period start","Period end","Payday","Shifts","Hours","Gross (GBP)","Late approvals","Run status"');
+    expect(row).toContain('"4.00","48.00"');
   });
 
   it('a hidden field is ABSENT from the header and every row (never an empty column)', () => {
@@ -131,13 +131,27 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
     expect(noHours).not.toContain('4.00');
   });
 
-  it('neutralises spreadsheet formula injection in names (=, +, -, @, tab, CR) and still quotes', () => {
+  it('neutralises spreadsheet formula injection in names (=, +, -, @, tab, CR) and quotes every cell', () => {
     expect(csvCell('=HYPERLINK("x")')).toBe(`"'=HYPERLINK(""x"")"`);
-    expect(csvCell('+1')).toBe(`'+1`);
-    expect(csvCell('-2')).toBe(`'-2`);
-    expect(csvCell('@SUM(A1)')).toBe(`'@SUM(A1)`);
+    expect(csvCell('+1')).toBe(`"'+1"`);
+    expect(csvCell('-2')).toBe(`"'-2"`);
+    expect(csvCell('@SUM(A1)')).toBe(`"'@SUM(A1)"`);
     expect(csvCell('Ava, Staff')).toBe('"Ava, Staff"');
-    expect(csvCell('Plain')).toBe('Plain');
+    expect(csvCell('Plain')).toBe('"Plain"');
     expect(buildPayrollRunCsv(view, policy([])).split('\n')[1]).toContain(`"'=HYPERLINK(""http://evil"")"`);
+  });
+
+  it('reads a value the way a spreadsheet does: leading space / NBSP / controls skipped, NFKC (fullwidth), split pieces checked', () => {
+    expect(csvCell(' =1+1')).toBe(`"' =1+1"`);
+    expect(csvCell('\uff1d1+1')).toBe(`"'\uff1d1+1"`);
+    expect(csvCell(' @x')).toBe(`"' @x"`);
+    expect(csvCell('\u00a0\u200b=1+1')).toBe(`"'\u00a0\u200b=1+1"`);
+    expect(csvCell('\u0007-2')).toBe(`"'\u0007-2"`);
+    expect(csvCell('a;=1+1')).toBe(`"'a;=1+1"`);
+    expect(csvCell('a,+1')).toBe(`"'a,+1"`);
+    expect(csvCell('line\n@x')).toBe(`"'line\n@x"`);
+    expect(csvCell("O'Neil; Pier Hall")).toBe(`"O'Neil; Pier Hall"`);
+    expect(csvCell('2026-11-01')).toBe('"2026-11-01"');
+    expect(csvCell('')).toBe('""');
   });
 });

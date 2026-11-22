@@ -74,9 +74,12 @@ export class ReportScanProcessor {
     const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger } = this.deps.get();
     const result = await runReportExportCycle(runtimeDataSource, tenantContext, notificationService, auditService, {
       lateGraceMinutes: environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'),
+      log: (line) => logger.warn(line),
     });
-    const handled = result.built + result.failed + result.retried + result.deleted;
-    if (handled) logger.log(`report export: built=${result.built} failed=${result.failed} retried=${result.retried} deleted=${result.deleted}`);
+    const handled = result.built + result.failed + result.retried + result.deleted + result.errors;
+    if (handled) {
+      logger.log(`report export: built=${result.built} failed=${result.failed} retried=${result.retried} deleted=${result.deleted} errors=${result.errors}`);
+    }
     return handled > 0;
   }
 }
