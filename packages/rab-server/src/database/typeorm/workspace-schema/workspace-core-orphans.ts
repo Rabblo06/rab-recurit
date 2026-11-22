@@ -3,6 +3,7 @@
 // every value is a bound parameter.
 import { Client } from 'pg';
 
+import { bindMaintenanceSessionGucs } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WORKSPACE_CORE_FOREIGN_KEYS } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
 
 /**
@@ -79,6 +80,16 @@ export const EXISTING_IDS_SQL: Readonly<Record<CoreReference['target'], string>>
 
 export async function checkWorkspaceCoreOrphans(client: Client, only?: readonly string[]): Promise<WorkspaceOrphanCycleResult> {
   const refs = coreReferences();
+  // The scan identity, bound only through the trusted binder (tenant-context.service.ts bindMaintenanceSessionGucs: the one
+  // binding statement, transaction-local, no RESET ROLE — this connection acts as crewflow through a session-level SET ROLE).
+  const bindScan = (ws: { organisation_id: string; workspace_id: string }, userId: string, role: string) =>
+    bindMaintenanceSessionGucs(async (sql, params) => (await client.query(sql, params)).rows, {
+      organisationId: ws.organisation_id,
+      workspaceId: ws.workspace_id,
+      userId,
+      role,
+      actorType: 'worker',
+    });
   const result: WorkspaceOrphanCycleResult = { checked: 0, findings: [], errors: [] };
   let after: string | null = null;
   for (;;) {
@@ -93,13 +104,12 @@ export async function checkWorkspaceCoreOrphans(client: Client, only?: readonly 
         // the workspace OWNER's read rights (`rab.user_id` = manager_workspace.owner_user_id: the manager branches of every
         // other table). READ ONLY, counts only. SECURITY TRADE-OFF 0a-T2 (WS-COMMANDS.md): a maintenance job reads as the
         // owner; it never writes, never returns a row, and a row neither identity may read stays invisible (not "clean").
-        await client.query(
-          `SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true), pg_catalog.set_config('rab.actor_type', 'worker', true)`,
-          [ws.organisation_id, ws.workspace_id],
-        );
+        // Organisation + workspace + the worker marker, no user and no role yet (the binder also resets the optional scope
+        // GUCs to ''); then the same with the owner as rab.user_id and rab.role = 'manager'.
+        await bindScan(ws, '', '');
         const ownerRow = await client.query<{ owner: string | null }>('SELECT owner_user_id::text AS owner FROM core.manager_workspace WHERE id = $1', [ws.workspace_id]);
         const ownerId = ownerRow.rows[0]?.owner ?? null;
-        if (ownerId) await client.query(`SELECT pg_catalog.set_config('rab.user_id', $1, true), pg_catalog.set_config('rab.role', 'manager', true)`, [ownerId]);
+        if (ownerId) await bindScan(ws, ownerId, 'manager');
         else result.errors.push({ workspaceId: ws.workspace_id, detail: 'workspace owner not visible: worker-scope coverage only' });
         const reg = await client.query<{ status: string }>('SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.workspace_id]);
         if (reg.rows[0]?.status !== 'READY') {
