@@ -296,7 +296,7 @@ it can be vetoed before it ships.
 
 ```bash
 yarn start   # server + front concurrently, worker after server is healthy
-yarn mobile  # Expo dev server for rab-mobile
+yarn mobile  # flutter run in packages/rab-mobile (extra args pass through)
 yarn build   # nx run-many build across the workspace
 yarn lint    # nx run-many lint
 yarn test    # nx run-many test
