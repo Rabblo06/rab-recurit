@@ -61,10 +61,10 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
     expect(WORKSPACE_UPGRADE_COMMANDS['0-7'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true, Boolean(c.precheck)])).toEqual([
       ['ValidateStaffProfileWorkspaceRequired', 1786721595000, 23, false, false],
       ['ShiftTeamSelectMultiRole', 1786721600000, 24, false, false],
-      ['AttendanceStaffScope', 1786722100000, 25, false, false],
+      ['AttendanceStaffScope', 1786722120000, 25, false, false],
     ]);
     expect(lastInstanceStepOfVersion('0.7.0')).toBe('0.7.0_HwsCutover_1786721540100');
-    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_AttendanceStaffScope_1786722100000');
+    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_AttendanceStaffScope_1786722120000');
   });
 
   it('the level-21 to level-25 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {

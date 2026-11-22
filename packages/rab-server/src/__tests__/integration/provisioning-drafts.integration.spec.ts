@@ -68,7 +68,7 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
 function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23 | 24 | 25): string {
-  // M4 §11 LOW, structure level 25 (AttendanceStaffScopeRls1786722100000; DRAFT SQL, owner review first): the same guarded v3
+  // M4 §11 LOW, structure level 25 (WorkspaceAttendanceStaffScope1786722120000; DRAFT SQL, owner review first): the same guarded v3
   // body over template(24) + the attendance ALTER POLICY, derived exactly as that migration derives it.
   if (through === 25) {
     const structure = ATTENDANCE_STAFF_SCOPE.structure!;
@@ -226,7 +226,7 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const l22 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceCoreForeignKeyRemoval1786721530000'`);
       const l23 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000'`);
       const l24 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'StaffShiftTeamMultiRole1786721600000'`);
-      const l25 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'AttendanceStaffScopeRls1786722100000'`);
+      const l25 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceStaffScope1786722120000'`);
       expect(prosrc).toBe(approvedProvisionBody(l25.length === 1 ? 25 : l24.length === 1 ? 24 : l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);

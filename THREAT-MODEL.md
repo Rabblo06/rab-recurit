@@ -10468,3 +10468,56 @@ This entry covers only what release 0.7.0 adds to switch it on.
   non-level-24 body, down() refused while a level-25 workspace exists, and (rolled back) down() / up() round trip with an
   unknown core expression refused. `structure-level-25.spec.ts`: statement shape, template = level 24 + the statement,
   goldens pin the predicate.
+## Attendance, layer 5: a staff-own-or-manager RLS predicate on core.attendance (branch fix/attendance-staff-scope-core, 2026-11-21; DRAFT: new SQL, owner review first)
+- **Finding closed (security finding format, §5.8; M4 design §11 LOW).** Severity: Low. Actor: a staff user
+  (`attendance.clock`) reached through a code path that forgets `ownStaffProfile` / `attendanceReadScopeCondition`.
+  Action: reads or writes another staff member's attendance in the same workspace. Consequence before: the database allowed
+  it, because `attendance_tenant` bound only organisation + workspace (the fifth enforcement layer was missing). Root cause:
+  attendance never got the second, tighter predicate that `payroll_record_select` has.
+- **Change (narrows only).** Migration AttendanceStaffScopeRls1786722100000: `ALTER POLICY attendance_tenant ON
+  core.attendance USING (P) WITH CHECK (P)`, P = the unchanged tenant binding AND one of: the worker marker
+  (`rab.actor_type = 'worker'`, bound only by TenantContextService for Worker contexts); the caller's own staff profile;
+  a non-venue manager profile of this workspace (Manager, CEO: `payroll_record_select`'s payrollManager); a Venue Manager
+  linked (manager_venue) to the shift's venue. FOR ALL / PERMISSIVE / TO PUBLIC unchanged; no grant, no new policy, no data
+  change. Every clause is a subset of the tenant-only policy, so no caller gains a row. The predicate lives in one place
+  (`upgrade-commands/0-7/attendance-staff-scope.ts`) so the workspace-schema copies get the identical text.
+- **Scope today.** `core.attendance` is the copy every request uses while HWS is off (production). The workspace-schema
+  copies (HWS on, dev/test) get the same predicate from a 0.7.0 workspace command once the 0.7.0 release chain (#175 / #177 /
+  #243) is on main (it needs a structure level); until then, staff isolation on workspace-schema attendance stays the
+  service layer alone, exactly as before.
+- **Who loses rows (intended).** Staff see only their own attendance; a Venue Manager only attendance of shifts at their own
+  venues (as `attendanceReadScopeCondition` already scoped them); a manager profile bound to another workspace, a custom
+  workspace member (never granted `attendance.view`) and any session with no `rab.user_id` and no worker marker see none.
+- **Residual risk.** The worker marker and `rab.user_id` are transaction-local GUCs set by TenantContextService; a
+  compromised runtime connection (injection) can set them (same trust level as `staff_profile_worker_scan`, BC-01). Internal
+  Managers are scoped at the database to the whole workspace (as payroll); the narrower "Staff they created" rule stays in
+  the service.
+- **Fail closed in the migration.** Only a known pair of expressions is replaced (tenant-only, or its own on a re-run, by
+  semantic-golden hash on USING and WITH CHECK); PERMISSIVE / FOR ALL / TO PUBLIC are re-checked before and after; then the
+  secure-owner invariants.
+- **Tests.** `attendance-staff-scope-rls.integration.spec.ts`, as the runtime login (asserted: crewflow_owner, not
+  superuser / BYPASSRLS): Staff A sees only their own row, gets 0 rows for Staff B's id, updates 0 rows of Staff B's
+  attendance and is refused (42501, WITH CHECK) inserting attendance for Staff B; a workspace Manager sees every row; a
+  manager of another workspace sees none; Venue Manager X sees only venue X's rows and Venue Manager Y only venue Y's; the
+  worker marker sees every row and no user without it sees none; an unrelated user, an unknown user id, another organisation
+  and another workspace see none; zero rows with no tenant context; the deparsed policy equals the reviewed text; down() /
+  up() round trip with an unknown expression refused (rolled back). `attendance-staff-scope-sql.spec.ts`: statement shape,
+  hashes, goldens, harness lines.
+- **Security review fixes (2026-11-21).** (1) `attendance_correction_tenant` on core now also requires the parent attendance to
+  be visible (`EXISTS (SELECT 1 FROM core.attendance a WHERE a.id = attendance_correction.attendance_id)`, USING and WITH
+  CHECK), so a correction has exactly its attendance's readers; before, staff could read each other's corrections. (2) The
+  attendance predicate's OR branches are ordered worker, manager (both uncorrelated), staff own, Venue Manager. (3)
+  UserDeletionService.findProtectedHistory is unchanged in behaviour: its hard-delete path runs only for a never-activated
+  invite (never signed in), which cannot be clock_in_by / clock_out_by, and its own history is caught through the
+  tenant-wide shift_assignment rows; a comment records why. (4) Positive
+  tests as the runtime login: own clock-in INSERT, own clock-out UPDATE, Manager and venue Venue Manager on-behalf updates (the
+  other venue's Venue Manager updates 0 rows), and a finalise-path payroll_record INSERT whose mirrorsApprovedAttendance check
+  reads attendance under the new RLS. Merge order: after #241 (the worker marker is bound only through the tenant-context
+  binder).
+- **Rebased onto #305 and the refreshed #175 (2026-11-22).** The core copies are now changed only by #305
+  (AttendanceStaffScopeRls1786722100000: attendance AND attendance_correction). This branch's level-25 migration is renamed
+  WorkspaceAttendanceStaffScope1786722120000: it changes no core policy (it refuses unless both core policies already carry
+  #305's predicates) and only re-creates core.provision_workspace over level 25. The 0.7.0 workspace command
+  `AttendanceStaffScope` (timestamp 1786722120000) applies the same two ALTER POLICY statements (attendance_tenant and
+  attendance_correction_tenant) to every workspace schema. down() is refused while a level-25 workspace exists and restores
+  the level-24 body only. Level-25 fingerprints are placeholders until CI measures them.
