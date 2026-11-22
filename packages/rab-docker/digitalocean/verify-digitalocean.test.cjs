@@ -340,6 +340,27 @@ test('Caddyfile (review MEDIUM): the template passes; per-hostname AOP, require_
   assertRefused(v.lintCaddyfile(`${c}\n}`), /braces do not balance/);
 });
 
+test('Caddyfile (re-review LOW): only one https://<host> and one http://<host> site; reverse_proxy only in the mTLS block', () => {
+  const c = caddyTemplate();
+  const port80 = `${c}\n:80 {\n\treverse_proxy 127.0.0.1:3000\n}\n`;
+  const bareHost = `${c}\nother.example.com {\n\treverse_proxy 127.0.0.1:3000\n}\n`;
+  for (const text of [port80, bareHost]) {
+    assertRefused(v.lintCaddyfile(text), /not exactly one https:\/\/<host> or http:\/\/<host>/);
+    assertRefused(v.lintCaddyfile(text), /reverse_proxy outside the mTLS https:\/\/ site block/);
+  }
+  assertRefused(v.lintCaddyfile(c.replace('https://api.example.com {', 'https://api.example.com, https://other.example.com {')), /not exactly one https:\/\/<host>/);
+  assertRefused(v.lintCaddyfile(`${c}\nhttps://second.example.com {\n\trespond 200\n}\n`), /more than one https:\/\/ or http:\/\/ site block/);
+  assertRefused(v.lintCaddyfile(c.replace('\tabort @not_cloudflare\n', '\tabort @not_cloudflare\n\treverse_proxy 127.0.0.1:3000\n')), /reverse_proxy outside the mTLS https:\/\/ site block/);
+});
+
+test('ACL (re-review LOW): an extra enabled user, or ops switched on with more than -@all +ping +info, is refused', () => {
+  const acl = aclTemplate();
+  assertRefused(v.lintRedisAcl(`${acl}\nuser extra on #${'c'.repeat(64)} ~* +@all\n`), /user extra: an enabled user that is not one of default, crewflow, healthcheck, ops/);
+  assertRefused(v.lintRedisAcl(acl.replace(/^user ops .*$/m, `user ops on #${'d'.repeat(64)} resetkeys ~* resetchannels +@all`)), /user ops: must be limited to -@all \+ping \+info/);
+  assert.deepEqual(v.lintRedisAcl(acl.replace(/^user ops off resetpass/m, `user ops on #${'d'.repeat(64)}`)), []);
+  assert.deepEqual(v.lintRedisAcl(`${acl}\nuser retired off resetpass resetkeys -@all\n`), []);
+});
+
 let opensslAvailable = true;
 try {
   execFileSync('openssl', ['version'], { stdio: 'ignore' });

@@ -10384,7 +10384,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   `trust_pool` = our CA alone; `strict_sni_host on`). The DigitalOcean Cloud Firewall (80/443 from Cloudflare's ranges,
   SSH from the owner's address) and Caddy's `remote_ip` refusal are outer filters: they admit every Cloudflare customer.
   The gate lints the Caddyfile (`strict_sni_host on`, `require_and_verify`, exactly one `trust_pool file`, refused when
-  named like or issued by Cloudflare or not a CA, loopback-only upstream, nothing proxied over plain HTTP). Docker Engine
+  named like or issued by Cloudflare or not a CA, loopback-only upstream, nothing proxied over plain HTTP, exactly one
+  `https://<host>` and at most one `http://<host>` site, `reverse_proxy` only inside the mTLS block); the ACL lint refuses
+  any enabled user other than default / crewflow / healthcheck / ops, and `ops` beyond `-@all +ping +info`. Docker Engine
   28+ is required (older engines let a neighbour route to a 127.0.0.1-published port). The lints print names and reasons
   only (a test proves the admin password and host never reach stdout).
 - **Not chosen:** an edge container in compose (the gates allow only rab-api to publish, and only on loopback);

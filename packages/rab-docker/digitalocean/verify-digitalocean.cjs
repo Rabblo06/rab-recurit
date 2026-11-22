@@ -327,6 +327,8 @@ const APP_ACL_ALLOWED = Object.freeze([
   'resetkeys', '~*', 'resetchannels', '&*', '+@all', '-@admin', '-@dangerous', '+info',
   '+client|setname', '+client|getname', '+client|id', '+client|info', '+client|list', '-flushall', '-flushdb', '-keys', '-swapdb',
 ]);
+/** The only ACL users that may be enabled (env/redis-users.acl.example): any other enabled user is refused. */
+const ACL_KNOWN_USERS = Object.freeze(['default', 'crewflow', 'healthcheck', 'ops']);
 /** Denials both users must carry after `+@all`. */
 const APP_ACL_REQUIRED_DENIALS = Object.freeze(['-@admin', '-@dangerous', '-flushall', '-flushdb', '-keys', '-swapdb']);
 
@@ -350,6 +352,9 @@ function lintRedisAcl(text) {
     if (rules.some((r) => r.startsWith('>'))) problems.push(`user ${name}: a clear-text password (>...) in the file; use #<sha256 hex>`);
     for (const h of passwords(rules)) if (!/^#[0-9a-f]{64}$/.test(h)) problems.push(`user ${name}: a password hash that is not 64 lower-case hex characters`);
     const on = rules.includes('on') && !rules.includes('off');
+    // Re-review of #332 (LOW): only the four reviewed users may be enabled; `ops` stays PING/INFO-only even when on.
+    if (on && !ACL_KNOWN_USERS.includes(name)) problems.push(`user ${name}: an enabled user that is not one of ${ACL_KNOWN_USERS.join(', ')}`);
+    if (name === 'ops' && JSON.stringify(perms(rules).filter((r) => !['resetkeys', 'resetchannels', '~*'].includes(r))) !== JSON.stringify(['-@all', '+ping', '+info'])) problems.push('user ops: must be limited to -@all +ping +info');
     if (name === 'healthcheck') {
       if (on && JSON.stringify(perms(rules).filter((r) => !['resetkeys', 'resetchannels'].includes(r))) !== JSON.stringify(['-@all', '+ping'])) problems.push('user healthcheck: must be PING-only (-@all +ping)');
       continue;
@@ -424,8 +429,22 @@ function lintCaddyfile(text, { readFile = null } = {}) {
   const all = blocks.flatMap((b) => b.body);
   if (!global || !global.body.includes('strict_sni_host on')) problems.push('strict_sni_host on is missing from the global servers block (the TLS server name and the Host header must match)');
   if (all.some((l) => /^strict_sni_host\s+(?!on$)/.test(l))) problems.push('strict_sni_host is set to something other than on');
-  const https = blocks.filter((b) => /^https:\/\//.test(b.label));
+  // Re-review of #332 (LOW): every top-level block is the global options block, a snippet, or a site whose label is
+  // EXACTLY one https://<host> or one http://<host>. A `:80 { ... }`, a bare `other.example.com { ... }` or a multi-address
+  // label would otherwise escape every rule below. At most one site of each scheme.
+  const SITE = /^(https?):\/\/[a-z0-9.-]+$/;
+  const SNIPPET = /^\([a-z0-9_-]+\)$/;
+  for (const b of blocks) {
+    if (b.label !== '' && !SNIPPET.test(b.label) && !SITE.test(b.label)) problems.push('a site block whose address is not exactly one https://<host> or http://<host> (no bare host, port-only, wildcard or list)');
+  }
+  const https = blocks.filter((b) => /^https:\/\//.test(b.label) && SITE.test(b.label));
+  const http = blocks.filter((b) => /^http:\/\//.test(b.label) && SITE.test(b.label));
   if (https.length === 0) problems.push('no https:// site block');
+  if (https.length > 1 || http.length > 1) problems.push('more than one https:// or http:// site block (exactly one API host)');
+  // reverse_proxy only inside the mTLS https block: never in a snippet (it could be imported anywhere) or another block.
+  for (const b of blocks.filter((x) => !https.includes(x))) {
+    if (b.body.some((l) => /^reverse_proxy\b/.test(l))) problems.push(`${/^http:\/\//.test(b.label) ? `${b.label}: proxies over plain HTTP (redirect only)` : 'reverse_proxy outside the mTLS https:// site block'}`);
+  }
   for (const b of https) {
     const body = b.body;
     if (!body.includes('client_auth {')) problems.push(`${b.label}: no client_auth (per-hostname Authenticated Origin Pulls)`);
@@ -451,9 +470,6 @@ function lintCaddyfile(text, { readFile = null } = {}) {
       const upstreams = l.replace(/^reverse_proxy\s+/, '').replace(/\s*\{$/, '').split(/\s+/).filter(Boolean);
       if (upstreams.length === 0 || upstreams.some((u) => !/^(https?:\/\/)?(127\.0\.0\.1|localhost):\d+$/.test(u))) problems.push(`${b.label}: reverse_proxy must target rab-api on loopback only`);
     }
-  }
-  for (const b of blocks.filter((x) => /^http:\/\//.test(x.label))) {
-    if (b.body.some((l) => /^reverse_proxy\b/.test(l))) problems.push(`${b.label}: proxies over plain HTTP (redirect only)`);
   }
   return problems;
 }
@@ -536,7 +552,7 @@ function templateProblems() {
   for (const m of lintDatabaseEnv(database)) problems.push(`template database: ${m}`);
   for (const m of lintRuntimeEnv(runtime)) problems.push(`template runtime: ${m}`);
   for (const m of lintRedisAcl(acl)) problems.push(`template acl: ${m}`);
-  for (const m of lintCaddyfile(fs.readFileSync(TEMPLATES.caddyfile, 'utf8'))) problems.push(`template Caddyfile: ${m}`);
+  for (const m of lintCaddyfile(fs.readFileSync(TEMPLATES.caddyfile, 'utf8').replace(/<api-host>/g, 'api.example.com'))) problems.push(`template Caddyfile: ${m}`);
   return problems;
 }
 
