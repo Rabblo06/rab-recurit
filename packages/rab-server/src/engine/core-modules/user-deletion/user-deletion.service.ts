@@ -2,7 +2,7 @@ import { assertTransition, EmailOutboxStatus, USER_STATUS_TRANSITIONS, UserStatu
 import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
-import { EmailOutbox, User } from '../../../modules/identity/entities';
+import { EmailOutbox, User } from '../identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 import { AuthContext } from '../tenant/auth-context.interface';
