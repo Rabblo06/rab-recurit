@@ -72,7 +72,7 @@ function harness(opts: {
       return fn(manager);
     }),
   };
-  const entityCache = { invalidate: jest.fn(async () => undefined), getManagerWorkspaceByOwner: jest.fn(async () => null) };
+  const entityCache = { invalidate: jest.fn(async () => undefined), getOrFetch: jest.fn(async () => null) };
   const provisioning = { provisionOwnWorkspace: jest.fn(async () => 'READY' as const) };
   const environment = { get: jest.fn((key: string) => (key === 'HWS_RUNTIME_ENABLED' ? opts.hws : undefined)) };
   const service = new ManagerWorkspaceService(
@@ -103,7 +103,7 @@ describe('ManagerWorkspaceResponse.schemaRequired (server-derived navigation inf
 
   it('is computed per request, never served from the entity cache (session-dependent)', async () => {
     const { service, entityCache } = harness({ hws: true });
-    entityCache.getManagerWorkspaceByOwner.mockResolvedValueOnce({
+    entityCache.getOrFetch.mockResolvedValueOnce({
       id: WS_ID, name: 'Acme', subdomain: 'acme', logoFileId: null, status: 'active', schemaStatus: 'CREATING',
       onboardingCompletedAt: null, createdAt: '2026-10-29T09:00:00Z',
     } as never);
