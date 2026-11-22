@@ -6,12 +6,51 @@ updates:
   # of staying safe. Dependabot opens a PR (never auto-merges) whenever a
   # pinned action/image has a newer release, keeping the pin fresh without
   # reopening the "arbitrary mutable tag" gap it was meant to close.
+  #
+  # '/' covers .github/workflows; the composite actions under .github/actions/* pin actions too (yarn-install pins
+  # setup-node and cache) and are only scanned when listed. tools/check-action-pins.cjs (ci-security) refuses any
+  # `uses:` that is not a full commit SHA with a `# vX.Y.Z` comment, so a Dependabot PR must keep that shape.
+  # Cooldown: a version-update PR is opened only once a release is 14 days old, so a hijacked or broken release has time
+  # to be noticed and yanked first. Security updates are not delayed by it.
   - package-ecosystem: 'github-actions'
-    directory: '/'
+    directories:
+      - '/'
+      - '/.github/actions/*'
     schedule:
       interval: 'weekly'
+    cooldown:
+      default-days: 14
 
   - package-ecosystem: 'docker'
     directory: '/packages/rab-docker/rab'
     schedule:
       interval: 'weekly'
+
+  # CI service images, pinned by digest: the `image:` keys in workflow files (redis `services:`, the Playwright
+  # `container:`) and .github/ci-images/<name>/image.yaml (read by ref.sh for the `docker run`s and disposable-postgres).
+  # Dependabot's docker ecosystem reads every `image:` key in the YAML files of these directories. One directory per
+  # postgres major, because Dependabot merges every pin of one image name in a directory into a single dependency.
+  # Majors are ignored: redis stays 7 and each postgres-<major> directory stays on its major (the CI matrix tests
+  # 15/16/17/18 on purpose); what Dependabot proposes is the new digest of the same tag. The Playwright image is ignored:
+  # the AI visual baselines were captured in that exact image, and it moves with @playwright/test, by hand.
+  # Grouped by dependency name across directories, so the inline redis copies and .github/ci-images/redis move together
+  # in one PR (tools/check-image-pins.cjs refuses two digests for one tag).
+  - package-ecosystem: 'docker'
+    directories:
+      - '/.github/workflows'
+      - '/.github/ci-images/*'
+    schedule:
+      interval: 'weekly'
+    ignore:
+      - dependency-name: 'postgres'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'redis'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '*playwright*'
+    groups:
+      ci-service-images:
+        patterns: ['*']
+        # One PR per image across ALL the directories above, not one per directory: the inline redis pins in
+        # /.github/workflows and /.github/ci-images/redis must land together, or check-image-pins (one tag, one digest)
+        # fails both halves.
+        group-by: dependency-name

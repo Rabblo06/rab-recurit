@@ -74,9 +74,10 @@ function serviceEnv(rel, service, vars = {}) {
 const WORKER_COMMAND = ['node', 'packages/rab-worker/dist/main.js'];
 /**
  * DB-SETUP (database setup like Twenty, T-5; PID 1 lead decision 2026-11-12): the two DEPLOY files make worker-start.sh the
- * Worker's ENTRYPOINT (PID 1, no command, no compose init). It derives the crewflow_owner URL from the admin PG_DATABASE_URL,
- * unsets the admin credential and only then execs `/sbin/tini -s --` + WORKER_COMMAND, so tini is PID 1 (the watchdog SIGKILL
- * works) with a clean environment. Part F2 (X2.3): the dev and QA files run Part A's setup too (bundled db + db-setup), so
+ * Worker's ENTRYPOINT (PID 1, no command, no compose init). It runs its refusals (no admin URL, no second database URL,
+ * no role password; owner decision 2026-11-18: PG_DATABASE_URL is the crewflow_owner URL, read from the environment) and
+ * only then execs `/sbin/tini -s --` + WORKER_COMMAND, so tini is PID 1 (the watchdog SIGKILL works) with a clean
+ * environment. Part F2 (X2.3): the dev and QA files run Part A's setup too (bundled db + db-setup), so
  * their Worker has the same entrypoint (WORKER_START_FILES). The test harnesses keep WORKER_COMMAND under compose's init
  * (they hand the Worker its own URL directly).
  */
@@ -87,8 +88,6 @@ const DEPLOY_FILES = ['packages/rab-docker/docker-compose.production.yml', 'pack
 const WORKER_START_FILES = [...DEPLOY_FILES, 'packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml'];
 /** DB-SETUP (D1 a): the one mount the deploy app services may have, the bundled db's CA volume, read-only. */
 const DB_CA_MOUNT = 'crewflow-db-ca:/run/crewflow/db-ca:ro';
-/** PR #125 option A: db-setup's target file, read-only (the crewflow_owner URL is built from it). */
-const DB_TARGET_MOUNT = 'crewflow-db-target:/run/crewflow/db-target:ro';
 const JOBS_HEALTH = ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs'];
 const JOBS_ENV = {
   HOME: '/nonexistent',
@@ -233,8 +232,8 @@ function sizeMiB(value) {
 
 /**
  * No privileged mode, host namespace, device, host mount (Docker socket included) or extra capability source. DB-SETUP
- * (D1 a): the volumes allowed are the bundled db's CA volume and (option A) db-setup's target volume, both read-only (named
- * volumes, never a host path).
+ * (D1 a): the one volume allowed is the bundled db's CA volume, read-only (a named volume, never a host path). Owner
+ * decision 2026-11-18 (Twenty's way): db-setup's target volume is gone; the apps read PG_DATABASE_URL from their environment.
  */
 /**
  * Release 0.7.0 (Part C3, owner rule "no cutover without a verified backup"): the ONE host mount allowed, on rab-api only
@@ -250,8 +249,8 @@ function assertNoHostAccess(name, svc) {
     assert.ok(!/^host$/i.test(String(svc[key] ?? '')), `${name}: ${key}=host`);
   }
   assert.equal(svc.devices, undefined, `${name}: devices`);
-  const allowed = name === 'rab-api' ? [DB_CA_MOUNT, DB_TARGET_MOUNT, HWS_CUTOVER_BACKUP_MOUNT] : [DB_CA_MOUNT, DB_TARGET_MOUNT];
-  assert.deepEqual(svc.volumes ?? [], allowed, `${name}: volumes (no host mount, no Docker socket; only the bundled db's CA and db-setup's target, read-only${name === 'rab-api' ? ', plus the read-only HWS cutover backup directory' : ''})`);
+  const allowed = name === 'rab-api' ? [DB_CA_MOUNT, HWS_CUTOVER_BACKUP_MOUNT] : [DB_CA_MOUNT];
+  assert.deepEqual(svc.volumes ?? [], allowed, `${name}: volumes (no host mount, no Docker socket; only the bundled db's CA, read-only${name === 'rab-api' ? ', plus the read-only HWS cutover backup directory' : ''})`);
   assert.equal(svc.volumes_from, undefined, `${name}: volumes_from`);
   for (const opt of svc.security_opt ?? []) {
     assert.ok(!/unconfined|label[:=]disable/i.test(opt), `${name}: security_opt ${opt}`);
@@ -302,7 +301,7 @@ test(
     // as the image's non-root `node` user, so it needs no capability at all.
     assert.equal(svc.user, '1000:1000');
     // DB-SETUP T-5 / PID 1: worker-start.sh is PID 1; it execs `/sbin/tini -s -- node packages/rab-worker/dist/main.js`
-    // after the URL swap, so tini (PID 1, a clean environment) runs the Worker as its child and the watchdog's SIGKILL works.
+    // after its refusals, so tini (PID 1, a clean environment) runs the Worker as its child and the watchdog's SIGKILL works.
     // ASSERTION CHANGE (lead decision 2026-11-12): compose's init is no longer required but refused (docker-init at PID 1
     // would keep the admin URL readable in /proc/1/environ).
     assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);

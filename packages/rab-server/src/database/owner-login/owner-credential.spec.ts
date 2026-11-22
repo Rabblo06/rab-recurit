@@ -1,4 +1,4 @@
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -7,10 +7,9 @@ import { scramVerifier } from '../typeorm/scripts/twenty-mode-check';
 
 import {
   ADMIN_URL_LABEL,
-  buildRuntimeDatabaseUrl,
   DB_SETUP_INPUT_MESSAGES,
-  generateOwnerPassword,
   isOwnerLoginUrl,
+  isStrongOwnerPassword,
   isValidOwnerPassword,
   OWNER_CREDENTIAL_MESSAGES,
   OWNER_LOGIN,
@@ -18,16 +17,18 @@ import {
   planDbSetup,
   RETIRED_ADMIN_URL_NAMES,
   scramSha256Verifier,
+  runtimeUrlFacts,
+  sameDatabase,
   selectDbSetupInput,
 } from './owner-credential';
-import { dbTargetFromRuntimeUrl, runtimeUrlFromDbTarget } from './db-target';
 
 /**
- * The Twenty Helm model (OWNER-DB-FINAL.md Part A). Every secret below is a generated test value; no assertion message prints one.
+ * The Twenty way (owner decision 2026-11-18). Every secret below is a generated test value; no assertion message prints one.
  */
-const ADMIN_PASSWORD = 'adminSentinel7f3a';
-/** A crewflow_owner password as db-setup generates it (Twenty: randAlphaNum 32, secret-db-url.yaml:3-8). */
-const DERIVED = generateOwnerPassword();
+/** Strong enough for the M2 floor (32+ characters, 10+ distinct): it is also used as the crewflow_owner password below. */
+const ADMIN_PASSWORD = 'adminSentinel7f3a-0123456789-bcdeghjklm';
+/** A crewflow_owner password as the operator sets it (`openssl rand -hex 32`, PG_DATABASE_APP_PASSWORD). */
+const DERIVED = randomBytes(32).toString('hex');
 
 function refusal(fn: () => unknown): string {
   try {
@@ -261,185 +262,9 @@ describe('scramSha256Verifier', () => {
   });
 });
 
-describe('buildRuntimeDatabaseUrl (§5.1)', () => {
-  const admin = (rest: string, scheme = 'postgres') =>
-    `${scheme}://neondb_owner:${ADMIN_PASSWORD}@${rest}`;
-
-  it('keeps host, port, database and the allowed query; drops application_name; swaps the userinfo', () => {
-    const url = buildRuntimeDatabaseUrl(
-      admin(
-        'db.example.internal:6000/crewflow?sslmode=verify-full&application_name=admin-tool&channel_binding=require&target_session_attrs=any&connect_timeout=10&keepalives=1',
-      ),
-      DERIVED,
-    );
-    expect(
-      url ===
-        `postgres://${OWNER_LOGIN}:${DERIVED}@db.example.internal:6000/crewflow?sslmode=verify-full&channel_binding=require&target_session_attrs=any&connect_timeout=10&keepalives=1`,
-    ).toBe(true);
-    expect(url.includes(ADMIN_PASSWORD) || url.includes('neondb_owner')).toBe(
-      false,
-    );
-  });
-
-  it('round-trips through parsePgUrl to the same target as crewflow_owner', () => {
-    const source = admin(
-      'db:5432/crewflow?sslmode=verify-full&channel_binding=prefer',
-    );
-    const a = parsePgUrl(source, 'PG_DATABASE_URL');
-    const r = parsePgUrl(
-      buildRuntimeDatabaseUrl(source, DERIVED),
-      'PG_DATABASE_URL',
-    );
-    expect({
-      host: r.host,
-      port: r.port,
-      database: r.database,
-      sslmode: r.sslmode,
-      channelBinding: r.channelBinding,
-    }).toEqual({
-      host: a.host,
-      port: a.port,
-      database: a.database,
-      sslmode: a.sslmode,
-      channelBinding: a.channelBinding,
-    });
-    expect(r.user).toBe(OWNER_LOGIN);
-    expect(r.password === DERIVED).toBe(true);
-  });
-
-  it('writes the default port explicitly and keeps the postgresql scheme', () => {
-    expect(
-      buildRuntimeDatabaseUrl(admin('db/crewflow', 'postgresql'), DERIVED) ===
-        `postgresql://${OWNER_LOGIN}:${DERIVED}@db:5432/crewflow`,
-    ).toBe(true);
-  });
-
-  it('keeps an IPv6 host and a percent-encoded database name', () => {
-    const url = buildRuntimeDatabaseUrl(admin('[::1]:5433/my%20db'), DERIVED);
-    expect(
-      url === `postgres://${OWNER_LOGIN}:${DERIVED}@[::1]:5433/my%20db`,
-    ).toBe(true);
-    expect(parsePgUrl(url, 'PG_DATABASE_URL').database).toBe('my db');
-  });
-
-  it("keeps a Neon endpoint options token naming the host's own endpoint", () => {
-    const url = buildRuntimeDatabaseUrl(
-      admin(
-        'ep-cool-1234.eu-central-1.aws.neon.tech/neondb?sslmode=verify-full&options=endpoint%3Dep-cool-1234',
-      ),
-      DERIVED,
-    );
-    expect(parsePgUrl(url, 'PG_DATABASE_URL').providerOptions).toBe(
-      'endpoint=ep-cool-1234',
-    );
-  });
-
-  it.each([
-    [
-      'sslrootcert',
-      'db:5432/crewflow?sslmode=verify-full&sslrootcert=/etc/ca.pem',
-    ],
-    ['sslcert', 'db:5432/crewflow?sslcert=/tmp/c.pem'],
-    ['a target override (?host=)', 'db:5432/crewflow?host=elsewhere'],
-    ['an unknown parameter', 'db:5432/crewflow?search_path=x'],
-    ['-c role options', 'db:5432/crewflow?options=-c%20role%3Dpostgres'],
-    [
-      'a repeated parameter',
-      'db:5432/crewflow?sslmode=require&sslmode=disable',
-    ],
-  ])('refuses %s, without echoing the URL', (_name, rest) => {
-    const message = refusal(() =>
-      buildRuntimeDatabaseUrl(admin(rest), DERIVED),
-    );
-    expect(message).toMatch(/^PG_DATABASE_URL /);
-    expect(
-      message.includes(ADMIN_PASSWORD) ||
-        message.includes('neondb_owner') ||
-        message.includes(DERIVED),
-    ).toBe(false);
-  });
-
-  it.each([
-    [
-      'Neon -pooler host',
-      'ep-cool-1234-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=verify-full',
-    ],
-    [
-      'Supabase port 6543',
-      'aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=verify-full',
-    ],
-    [
-      'DigitalOcean pool port 25061',
-      'db-x.ondigitalocean.com:25061/defaultdb?sslmode=verify-full',
-    ],
-  ])('refuses a transaction pooler admin URL (%s)', (_name, rest) => {
-    expect(refusal(() => buildRuntimeDatabaseUrl(admin(rest), DERIVED))).toBe(
-      OWNER_CREDENTIAL_MESSAGES.transactionPooler,
-    );
-  });
-
-  it('refuses a malformed or missing URL without echoing it', () => {
-    expect(refusal(() => buildRuntimeDatabaseUrl('', DERIVED))).toBe(
-      OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing,
-    );
-    expect(
-      refusal(() =>
-        buildRuntimeDatabaseUrl(`mysql://u:${ADMIN_PASSWORD}@h/d`, DERIVED),
-      ).includes(ADMIN_PASSWORD),
-    ).toBe(false);
-    expect(
-      refusal(() =>
-        buildRuntimeDatabaseUrl(`postgres://u:${ADMIN_PASSWORD}@/d`, DERIVED),
-      ).includes(ADMIN_PASSWORD),
-    ).toBe(false);
-  });
-
-  it('refuses an empty, oversized or control-character password; percent-encodes any other (a copied crewflow_owner password)', () => {
-    for (const bad of ['', 'x'.repeat(1025), 'tab\there', 'new\nline', 'nul\u0000']) {
-      expect(refusal(() => buildRuntimeDatabaseUrl(admin('db/crewflow'), bad))).toBe(OWNER_CREDENTIAL_MESSAGES.badOwnerPassword);
-    }
-    for (const odd of ['p@ss:w/rd?#%', 'ünïcödé', ' leading-space', 'x'.repeat(1024)]) {
-      const url = buildRuntimeDatabaseUrl(admin('db/crewflow?sslmode=verify-full'), odd);
-      const parsed = parsePgUrl(url, 'PG_DATABASE_URL');
-      expect(parsed.user).toBe(OWNER_LOGIN);
-      expect(parsed.password === odd).toBe(true);
-    }
-  });
-
-  it('a crewflow_owner URL is rebuilt with the given password too (no pass-through: the stored password wins)', () => {
-    const source = `postgres://crewflow_owner:${ADMIN_PASSWORD}@db.example.internal/crewflow?sslmode=verify-full&application_name=keep-me`;
-    const url = buildRuntimeDatabaseUrl(source, DERIVED);
-    expect(url.includes(ADMIN_PASSWORD)).toBe(false);
-    expect(parsePgUrl(url, 'PG_DATABASE_URL').password === DERIVED).toBe(true);
-    expect(isOwnerLoginUrl(source)).toBe(true);
-  });
-
-  it('still refuses a policy-invalid crewflow_owner URL (pass-through is not a policy bypass)', () => {
-    expect(
-      refusal(() =>
-        buildRuntimeDatabaseUrl(
-          'postgres://crewflow_owner:x@db/crewflow?sslrootcert=/x',
-          DERIVED,
-        ),
-      ),
-    ).toMatch(/sslrootcert/);
-  });
-});
-
-describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => {
+describe('planDbSetup and selectDbSetupInput (the Twenty way)', () => {
   const ADMIN_URL = `postgres://doadmin:${ADMIN_PASSWORD}@db-x.ondigitalocean.com:25060/defaultdb?sslmode=verify-full`;
   const OWN = `postgres://crewflow_owner:${ADMIN_PASSWORD}@db.example.internal:5432/crewflow?sslmode=verify-full`;
-
-  it('a new password is 32 crypto-random bytes as 64 lowercase hex, different every time (Twenty: randAlphaNum 32)', () => {
-    const seen = new Set<string>();
-    for (let i = 0; i < 50; i += 1) {
-      const pw = generateOwnerPassword();
-      expect(/^[0-9a-f]{64}$/.test(pw)).toBe(true);
-      expect(isValidOwnerPassword(pw)).toBe(true);
-      seen.add(pw);
-    }
-    expect(seen.size).toBe(50);
-  });
 
   it('an admin URL is the bootstrap mode; no password is derived or needed up front', () => {
     const plan = planDbSetup(ADMIN_URL);
@@ -466,17 +291,91 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
     }
   });
 
-  // Owner decision 2026-11-17: PG_ADMIN_URL (db-setup only) vs PG_DATABASE_URL (ALWAYS the app login, crewflow_owner).
-  it('selectDbSetupInput: PG_ADMIN_URL = bootstrap, PG_DATABASE_URL (crewflow_owner) = owner-url; the URL is non-enumerable', () => {
-    const admin = selectDbSetupInput({ PG_ADMIN_URL: ADMIN_URL });
-    expect(admin.name).toBe(ADMIN_URL_LABEL);
-    expect(admin.plan.mode).toBe('bootstrap');
-    expect(admin.url).toBe(ADMIN_URL);
-    expect(JSON.stringify(admin)).not.toContain(ADMIN_PASSWORD);
-    const app = selectDbSetupInput({ PG_DATABASE_URL: OWN, PG_ADMIN_URL: '  ' });
-    expect(app.name).toBe('PG_DATABASE_URL');
-    expect(app.plan.mode).toBe('owner-url');
-    expect(JSON.stringify(app)).not.toContain(ADMIN_PASSWORD);
+  // Owner decision 2026-11-18: PG_DATABASE_URL (ALWAYS crewflow_owner, always required) + optional PG_ADMIN_URL (db-setup only).
+  const SAME_DB_ADMIN = `postgres://doadmin:${ADMIN_PASSWORD}@db.example.internal:5432/crewflow?sslmode=verify-full`;
+  it('selectDbSetupInput: PG_ADMIN_URL + PG_DATABASE_URL = bootstrap (mode b, the NORMAL case); PG_DATABASE_URL alone = owner-url (mode c); every secret non-enumerable', () => {
+    const b = selectDbSetupInput({ PG_ADMIN_URL: SAME_DB_ADMIN, PG_DATABASE_URL: OWN });
+    expect(b.mode).toBe('bootstrap');
+    expect(b.name).toBe(ADMIN_URL_LABEL);
+    expect(b.plan.mode).toBe('bootstrap');
+    expect(b.url === SAME_DB_ADMIN).toBe(true);
+    expect(b.appUrl === OWN).toBe(true);
+    expect(b.ownerPassword === ADMIN_PASSWORD).toBe(true);
+    expect(b.appTarget.user).toBe(OWNER_LOGIN);
+    expect(JSON.stringify(b)).not.toContain(ADMIN_PASSWORD);
+    expect(Object.keys(b)).not.toEqual(expect.arrayContaining(['url', 'appUrl', 'ownerPassword']));
+    const c = selectDbSetupInput({ PG_DATABASE_URL: OWN, PG_ADMIN_URL: '  ' });
+    expect(c.mode).toBe('owner-url');
+    expect(c.name).toBe('PG_DATABASE_URL');
+    expect(c.plan.mode).toBe('owner-url');
+    expect(c.url === OWN && c.appUrl === OWN).toBe(true);
+    expect(JSON.stringify(c)).not.toContain(ADMIN_PASSWORD);
+  });
+
+  it('the bundled shape (mode a): the db superuser URL and the compose-built crewflow_owner URL name the same database', () => {
+    const app = `postgresql://crewflow_owner:${DERIVED}@db:5432/crewflow?sslmode=verify-full`;
+    const admin = `postgresql://postgres:${ADMIN_PASSWORD}@db:5432/crewflow?sslmode=verify-full`;
+    const input = selectDbSetupInput({ PG_ADMIN_URL: admin, PG_DATABASE_URL: app });
+    expect(input.mode).toBe('bootstrap');
+    expect(input.ownerPassword === DERIVED).toBe(true);
+  });
+
+  it('DENIAL selectDbSetupInput: PG_ADMIN_URL and PG_DATABASE_URL naming different databases (host, port, database or Neon endpoint) are refused', () => {
+    for (const other of [
+      OWN.replace('db.example.internal', 'db2.example.internal'),
+      OWN.replace(':5432/', ':5433/'),
+      OWN.replace('/crewflow?', '/crewflow2?'),
+    ]) {
+      expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: SAME_DB_ADMIN, PG_DATABASE_URL: other }))).toBe(DB_SETUP_INPUT_MESSAGES.targetMismatch);
+    }
+    // Case-insensitive host, other query parameters: the same database.
+    const upper = SAME_DB_ADMIN.replace('db.example.internal', 'DB.Example.Internal').replace('sslmode=verify-full', 'sslmode=verify-full&connect_timeout=5');
+    expect(selectDbSetupInput({ PG_ADMIN_URL: upper, PG_DATABASE_URL: OWN }).mode).toBe('bootstrap');
+    const a = parsePgUrl(SAME_DB_ADMIN, 'PG_ADMIN_URL');
+    expect(sameDatabase(a, parsePgUrl(OWN, 'PG_DATABASE_URL'))).toBe(true);
+    expect(sameDatabase(a, parsePgUrl(OWN.replace('/crewflow?', '/other?'), 'PG_DATABASE_URL'))).toBe(false);
+  });
+
+  it('DENIAL review M2: an admin URL with a weak crewflow_owner password is refused before anything connects (nothing can be created or set)', () => {
+    // Too short, too few distinct characters, one short block repeated (the floor's three rules).
+    for (const weak of ['Short9pw1', 'changeme', 'a'.repeat(40), 'ab'.repeat(20), 'abcdefghij'.repeat(4)]) {
+      const app = `postgres://crewflow_owner:${encodeURIComponent(weak)}@db.example.internal:5432/crewflow?sslmode=verify-full`;
+      let thrown: unknown;
+      try {
+        selectDbSetupInput({ PG_ADMIN_URL: SAME_DB_ADMIN, PG_DATABASE_URL: app });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(OwnerCredentialError);
+      expect((thrown as Error).message).toBe(DB_SETUP_INPUT_MESSAGES.weakPassword);
+      expect((thrown as Error).message).not.toContain(weak);
+    }
+    // The bundled shape (openssl rand -hex 32) and a 32-character hex value pass.
+    expect(isStrongOwnerPassword(DERIVED)).toBe(true);
+    expect(isStrongOwnerPassword(randomBytes(16).toString('hex'))).toBe(true);
+  });
+
+  it('review M2, mode c: a weak crewflow_owner password is refused in production (any production marker), accepted outside it', () => {
+    const weakApp = 'postgres://crewflow_owner:changeme@db.example.internal:5432/crewflow?sslmode=verify-full';
+    for (const env of [{ NODE_ENV: 'production' }, { RAB_RUNTIME_ENV: ' Production ' }, { DB_TARGET: 'PRODUCTION' }]) {
+      expect(refusal(() => selectDbSetupInput({ ...env, PG_DATABASE_URL: weakApp }))).toBe(DB_SETUP_INPUT_MESSAGES.weakPasswordProduction);
+    }
+    expect(selectDbSetupInput({ NODE_ENV: 'development', PG_DATABASE_URL: weakApp }).mode).toBe('owner-url');
+    expect(selectDbSetupInput({ NODE_ENV: 'production', PG_DATABASE_URL: OWN }).mode).toBe('owner-url');
+  });
+
+  it('runtimeUrlFacts: the login and the pooler shape, never a value', () => {
+    expect(runtimeUrlFacts(OWN)).toEqual({ owner: true, transactionPooler: false, strongPassword: true });
+    expect(runtimeUrlFacts(ADMIN_URL)).toEqual({ owner: false, transactionPooler: false, strongPassword: true });
+    expect(runtimeUrlFacts(`postgres://crewflow_owner:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`)).toEqual({
+      owner: true,
+      transactionPooler: true,
+      strongPassword: true,
+    });
+    // Info (re-review): the password floor as a boolean only; the value is never returned.
+    expect(runtimeUrlFacts('postgresql://crewflow_owner:short@db.example.internal/crewflow?sslmode=verify-full').strongPassword).toBe(false);
+    const message = refusal(() => runtimeUrlFacts(`mysql://u:${ADMIN_PASSWORD}@h/d`));
+    expect(message).not.toContain(ADMIN_PASSWORD);
   });
 
   it('DENIAL selectDbSetupInput: an admin login in PG_DATABASE_URL is refused (renamed), never reinterpreted as the admin URL', () => {
@@ -484,7 +383,9 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
       const url = ADMIN_URL.replace('doadmin', login);
       expect(refusal(() => selectDbSetupInput({ PG_DATABASE_URL: url }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
     }
-    expect(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner).toMatch(/renamed to PG_ADMIN_URL/);
+    expect(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner).toMatch(/an admin URL goes in PG_ADMIN_URL/);
+    // ... also beside a valid admin URL (mode b): the app URL must still be crewflow_owner.
+    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: SAME_DB_ADMIN, PG_DATABASE_URL: SAME_DB_ADMIN }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
   });
 
   it('I-4 (review of PR #230): a percent-encoded crewflow_owner login in PG_DATABASE_URL is the same login (decoded, accepted); a login smuggled in as ?user= is refused', () => {
@@ -496,9 +397,10 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
     // The admin login encoded: still an admin login, still refused in PG_DATABASE_URL.
     expect(refusal(() => selectDbSetupInput({ PG_DATABASE_URL: ADMIN_URL.replace('doadmin', 'do%61dmin') }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
     // ?user= (or any target override) on either URL: refused by the URL policy, before any mode decision.
-    for (const [name, url] of [['PG_ADMIN_URL', ADMIN_URL], ['PG_DATABASE_URL', OWN]] as const) {
+    for (const [name, url] of [['PG_ADMIN_URL', SAME_DB_ADMIN], ['PG_DATABASE_URL', OWN]] as const) {
       for (const param of ['user=crewflow_owner', 'user=postgres', 'password=x', 'host=elsewhere', 'dbname=other']) {
-        const message = refusal(() => selectDbSetupInput({ [name]: `${url}&${param}` }));
+        const env = { PG_DATABASE_URL: OWN, [name]: `${url}&${param}` };
+        const message = refusal(() => selectDbSetupInput(env));
         expect(message).toMatch(/as a query parameter, which would override the connection target/);
         expect(message).toContain(name);
         expect(message).not.toContain(ADMIN_PASSWORD);
@@ -506,15 +408,17 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
     }
   });
 
-  it('DENIAL selectDbSetupInput: crewflow_owner in PG_ADMIN_URL, both, neither, the retired name; refusals are value-free and name the variable', () => {
-    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
-    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.both);
-    expect(refusal(() => selectDbSetupInput({}))).toBe(DB_SETUP_INPUT_MESSAGES.neither);
-    expect(refusal(() => selectDbSetupInput({ DATABASE_URL: ADMIN_URL }))).toBe(DB_SETUP_INPUT_MESSAGES.neither);
+  it('DENIAL selectDbSetupInput: crewflow_owner in PG_ADMIN_URL, no PG_DATABASE_URL (with or without an admin URL), the retired name; refusals are value-free and name the variable', () => {
+    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: OWN, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
+    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: SAME_DB_ADMIN }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlMissing);
+    expect(refusal(() => selectDbSetupInput({}))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlMissing);
+    expect(refusal(() => selectDbSetupInput({ DATABASE_URL: ADMIN_URL }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlMissing);
     expect(RETIRED_ADMIN_URL_NAMES).toEqual(['PG_DATABASE_ADMIN_URL']);
     expect(refusal(() => selectDbSetupInput({ PG_DATABASE_ADMIN_URL: ADMIN_URL }))).toBe(DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL'));
     expect(refusal(() => selectDbSetupInput({ PG_DATABASE_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL'));
-    const pooler = refusal(() => selectDbSetupInput({ PG_ADMIN_URL: `postgres://doadmin:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require` }));
+    const pooler = refusal(() =>
+      selectDbSetupInput({ PG_DATABASE_URL: OWN, PG_ADMIN_URL: `postgres://doadmin:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require` }),
+    );
     expect(pooler).toBe(OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join('PG_ADMIN_URL'));
     for (const m of Object.values(DB_SETUP_INPUT_MESSAGES)) {
       const text = typeof m === 'function' ? m('PG_DATABASE_ADMIN_URL') : m;
@@ -523,19 +427,12 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
     }
   });
 
-  it('the credential-free target round-trips with the stored password for either URL', () => {
-    for (const url of [ADMIN_URL, OWN]) {
-      const runtime = buildRuntimeDatabaseUrl(url, DERIVED);
-      const target = dbTargetFromRuntimeUrl(runtime, DERIVED);
-      expect(JSON.stringify(target)).not.toContain(DERIVED);
-      expect(runtimeUrlFromDbTarget(target, DERIVED)).toBe(runtime);
-    }
-  });
-
   it('owner-credential.ts never imports pg, never logs, and has no HKDF / APP_SECRET', () => {
     const source = fs.readFileSync(path.join(__dirname, 'owner-credential.ts'), 'utf8');
     expect(source).not.toMatch(/from 'pg'|require\('pg'\)/);
     expect(source).not.toMatch(/console\.|process\.(stdout|stderr)/);
     expect(source).not.toMatch(/hkdfSync|deriveOwnerPassword|appSecret/);
+    // Owner decision 2026-11-18: no generated password and no URL rewriting any more (PG_DATABASE_URL is used as given).
+    expect(source).not.toMatch(/generateOwnerPassword|buildRuntimeDatabaseUrl/);
   });
 });

@@ -34,6 +34,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { NavigationModule } from './modules/navigation/navigation.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { MemberAccessModule } from './modules/identity/member-access/member-access.module';
+import { PlatformAdminBootstrapModule } from './modules/identity/platform-admin-bootstrap/platform-admin-bootstrap.module';
 import { ManagerModule } from './modules/manager/manager.module';
 import { MembershipModule } from './modules/membership/membership.module';
 import { ManagerWorkspaceModule } from './modules/manager-workspace/manager-workspace.module';
@@ -78,6 +79,9 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     LoginHandoffModule,
     IdentityModule,
     MemberAccessModule,
+    // First platform administrator at boot from BOOTSTRAP_ADMIN_EMAIL (the bootstrap-admin command's own code path; one
+    // attempt per start, fail closed without a crash loop). API only: CommandModule and WorkerModule never import it.
+    PlatformAdminBootstrapModule,
     StaffModule,
     ManagerModule,
     MembershipModule,
