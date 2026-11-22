@@ -66,8 +66,12 @@ const CSV_LEADING_IGNORABLE = /^[\s\u00a0\u1680\u2000-\u200f\u2028-\u202f\u205f\
 const CSV_FORMULA_START = /^[=+\-@\t\r]/;
 const CSV_SPLITTERS = /[,;\t\r\n]/;
 
+/** A plain decimal number (`-12.34`, `7`, `0.5`): a negative amount is data, not a formula, so it is never prefixed. */
+const CSV_PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+
 function startsFormula(piece: string): boolean {
-  return CSV_FORMULA_START.test(piece.normalize('NFKC').replace(CSV_LEADING_IGNORABLE, ''));
+  const text = piece.normalize('NFKC').replace(CSV_LEADING_IGNORABLE, '');
+  return CSV_FORMULA_START.test(text) && !CSV_PLAIN_NUMBER.test(text);
 }
 
 /**
@@ -76,7 +80,8 @@ function startsFormula(piece: string): boolean {
  *  - the value is read the way a spreadsheet would: NFKC-normalised (a fullwidth equals sign is `=`), leading whitespace /
  *    NBSP / control and format characters skipped, and every piece a `,` `;` tab or line break could split it into is
  *    checked too (`a;=1+1` in a semicolon-separated locale);
- *  - a value with a trigger (`=` `+` `-` `@` tab CR) is prefixed with `'` (the original text is kept, never rewritten);
+ *  - a value with a trigger (`=` `+` `-` `@` tab CR) is prefixed with `'` (the original text is kept, never rewritten),
+ *    except a value (or piece) that is entirely a plain decimal number such as `-12.34`, which stays a number;
  *  - EVERY cell is quoted (`"` doubled), so no separator inside a value starts a new cell in any locale.
  */
 export function csvCell(value: string): string {
