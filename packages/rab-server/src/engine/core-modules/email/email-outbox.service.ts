@@ -2,7 +2,7 @@ import { EmailOutboxJobType, EmailOutboxJobTypeType, EmailOutboxStatus } from '@
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { EmailOutbox } from '../../../modules/identity/entities';
+import { EmailOutbox } from '../identity/entities';
 import { AfterCommitPublisher } from '../after-commit/after-commit-publisher';
 
 /** Bound on fast publishes held for ONE transaction (account emails write one row each; beyond it the dispatcher publishes). */

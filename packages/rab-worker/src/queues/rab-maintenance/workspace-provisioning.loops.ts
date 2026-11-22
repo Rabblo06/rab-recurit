@@ -4,6 +4,7 @@ import { checkSchemaCompatibility } from '@rab/server/database/boot-checks/datab
 import { createPgClient, pgClientConfig, probePgSessionAffinity, ResolvedPgEnvironment } from '@rab/server/database/postgres/index';
 
 import { ReconnectingPgClient } from '../../core/database/reconnecting-pg-client';
+import { ClusterIntervalLease, clusterLeasedLoop } from '../../core/scheduler/cluster-interval-lease';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 import { runWorkspaceProvisioningCycle } from './workspace-provisioning.job';
 import { runWorkspaceCoreOrphanCycle } from './workspace-core-orphans.job';
@@ -26,12 +27,18 @@ import { runWorkspaceSchemaDriftCycle } from './workspace-schema-drift.job';
  *   - the bounded provisioning advisory lock with `shouldAbort` (abandoned at once when shutdown begins; a busy lock skips
  *     the tick, recorded as idle, never stamped);
  *   - the daily alert-only drift loop on its own short-lived connection;
+ *   - XR-12: the two daily loops (schema drift, core orphans) run once per interval for the whole cluster, behind a Redis
+ *     lease (`clusterLeasedLoop`): not at every Worker start and not once per replica any more. Provisioning itself keeps
+ *     its 5 s tick: its bounded advisory lock already lets one replica work and the others skip at once;
  *   - the durable CREATING / FAILED / READY ledger and readiness states and `createFor` semantics, which live in
  *     runWorkspaceProvisioningCycle / provisionWorkspaceSchema and are not touched.
  */
 export const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Part D 0a: the report-only orphan check of the dropped workspace → core references, daily like the drift check. */
 export const WORKSPACE_CORE_ORPHAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** XR-12: the cluster lease names (Redis `rab:worker:lease:<name>`) of the two daily loops. */
+export const WORKSPACE_SCHEMA_DRIFT_LEASE = 'workspace-schema-drift';
+export const WORKSPACE_CORE_ORPHAN_LEASE = 'workspace-core-orphans';
 export const PROVISIONING_ROLE = 'crewflow';
 
 export class ProvisioningIdentityError extends Error {
@@ -127,6 +134,11 @@ export interface ProvisioningLoopsOptions {
   /** Owner login: SET ROLE crewflow on every provisioning and drift session. */
   actAsCrewflow: boolean;
   driftIntervalMs?: number;
+  /**
+   * XR-12: the cluster lease of the daily loops (main.ts: `redisClusterIntervalLease` on the Worker's Redis). Absent only
+   * where a test drives the loops by hand: the daily loops then run on every tick, as before.
+   */
+  dailyLease?: ClusterIntervalLease;
 }
 
 export interface WorkspaceProvisioningLoopsHandle {
@@ -203,28 +215,36 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
 
   runtime.every({
     name: 'workspace schema drift',
-    intervalMs: options.driftIntervalMs ?? WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastWorkspaceSchemaDriftAt', failures: 'workspaceSchemaDriftFailures' },
-    run: async () => {
-      const drift = await alertOnMajorMismatch(logger, 'workspace schema drift', () => runWorkspaceSchemaDriftCycle(driftConfig, onConnect));
-      for (const f of drift.findings) {
-        logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
-      }
-      logger.log(`workspace schema drift: checked=${drift.checked} ok=${drift.ok} notReady=${drift.notReady} findings=${drift.findings.length}`);
-    },
+    ...clusterLeasedLoop({
+      leaseName: WORKSPACE_SCHEMA_DRIFT_LEASE,
+      intervalMs: options.driftIntervalMs ?? WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS,
+      lease: options.dailyLease,
+      run: async () => {
+        const drift = await alertOnMajorMismatch(logger, 'workspace schema drift', () => runWorkspaceSchemaDriftCycle(driftConfig, onConnect));
+        for (const f of drift.findings) {
+          logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
+        }
+        logger.log(`workspace schema drift: checked=${drift.checked} ok=${drift.ok} notReady=${drift.notReady} findings=${drift.findings.length}`);
+      },
+    }),
   });
 
   runtime.every({
     name: 'workspace core orphans',
-    intervalMs: WORKSPACE_CORE_ORPHAN_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastWorkspaceCoreOrphanAt', failures: 'workspaceCoreOrphanFailures' },
-    run: async () => {
-      // Report only (owner decision pending on repair): counts per workspace / table / column, never ids or values.
-      const r = await runWorkspaceCoreOrphanCycle(() => createPgClient(pg, { endpoint, purpose: 'orphans', sessionAffinity: true, statementTimeoutMs: 60_000 }), onConnect);
-      for (const f of r.findings) logger.warn(`workspace core orphans: workspace=${f.workspaceId} ${f.table}.${f.column} -> ${f.target}: ${f.rows} row(s)`);
-      for (const e of r.errors) logger.warn(`workspace core orphans: workspace=${e.workspaceId} ${e.detail}`);
-      logger.log(`workspace core orphans: checked=${r.checked} findings=${r.findings.length} errors=${r.errors.length}`);
-    },
+    ...clusterLeasedLoop({
+      leaseName: WORKSPACE_CORE_ORPHAN_LEASE,
+      intervalMs: WORKSPACE_CORE_ORPHAN_INTERVAL_MS,
+      lease: options.dailyLease,
+      run: async () => {
+        // Report only (owner decision pending on repair): counts per workspace / table / column, never ids or values.
+        const r = await runWorkspaceCoreOrphanCycle(() => createPgClient(pg, { endpoint, purpose: 'orphans', sessionAffinity: true, statementTimeoutMs: 60_000 }), onConnect);
+        for (const f of r.findings) logger.warn(`workspace core orphans: workspace=${f.workspaceId} ${f.table}.${f.column} -> ${f.target}: ${f.rows} row(s)`);
+        for (const e of r.errors) logger.warn(`workspace core orphans: workspace=${e.workspaceId} ${e.detail}`);
+        logger.log(`workspace core orphans: checked=${r.checked} findings=${r.findings.length} errors=${r.errors.length}`);
+      },
+    }),
   });
 
   return { close: () => provisioning.close() };
