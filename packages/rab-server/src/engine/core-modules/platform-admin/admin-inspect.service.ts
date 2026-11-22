@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { AdminInspectSession, User } from '../../../modules/identity/entities';
+import { AdminInspectSession, User } from '../identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { AuthContext } from '../tenant/auth-context.interface';
