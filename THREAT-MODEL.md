@@ -10147,6 +10147,87 @@ Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and
   calls act or return data); with only the email-change scope check removed, every `EmailChangeService.request` refusal
   fails (a request is written).
 
+## Upgrade runner — reviewed upgrade-from lists, and a patch resumes its failed `.0` step (branch feat/runner-cross-upgrade, 2026-11-18; owner decisions 2026-11-18; no SQL)
+- **Threat:** (1) after #219, a minor release accepted only the LAST published version. Once 0.6.1 is published, a database
+  still at 0.6.0 is refused by 0.7.0 (65), so the operator's only way forward is an extra hop or `--force`, which skips the
+  previous-version check for everything. (2) A wider "accept anything older" rule would let a database two minors behind
+  skip the commands of the minor in between (0.5.0 → 0.7.0 would never run 0.6.0's workspace commands or the adoption).
+  (3) When a minor's instance command fails (the HWS switch-on: 0.7.0's cutover refuses without a verified backup), the
+  workspaces it blocked stay blocked (503) and a fixed patch (0.7.1) could not take over: it refused 65 because 0.7.0 was
+  not complete. The only way out was `--force`, and a forced patch skipped the `.0`'s instance commands, so the one-way
+  cutover sentinel and the copy never ran. (4) A retried step that is not idempotent could duplicate or corrupt data when
+  it runs a second time after a partial failure. (5) A patch that "resumes" a `.0` it cannot actually finish (a workspace
+  with no logbook row: only 0.6.0 adopts) would block that workspace forever instead of refusing the start.
+- **Control (a), Twenty's model (TWENTY_PREVIOUS_VERSIONS + TWENTY_CROSS_UPGRADE_SUPPORTED_VERSIONS @ eedb0a73,
+  re-implemented, not copied):** `CREWFLOW_UPGRADE_FROM_VERSIONS` (`upgrade-version.ts`) is an explicit list per MINOR release,
+  reviewed with that release. A minor release accepts exactly the versions on its list (0.7.0: every published 0.6.x it
+  lists); anything else is refused 65 with a message that names the list. Fail closed (`AppVersionError`, config 64, before
+  any outcome, fresh and rollback included): a missing or empty list, an unsorted or duplicate entry, an entry that is not
+  published (`CREWFLOW_PREVIOUS_VERSIONS`) or not older than the release, an inherited (prototype) key, and any entry that is
+  not on the PREVIOUS minor line (it would skip that line's commands, threat 2). The adoption release 0.6.0 must list exactly
+  0.4.0 and 0.5.0. Patches keep their own-line rule (no entry). The M-1 fold (a patch counts as complete only with its `.0`)
+  and the L-2 ascending check are unchanged. `crossUpgradeSupportedVersions` = list + code version, as Twenty.
+- **Control (b), Twenty's resume (upgrade-sequence-runner.service.ts:98-247 "Rerun the upgrade to resume from this step",
+  resumeWorkspaceCommandsFromCursors):** a patch start resumes its minor `.0`. `decideUpgradeStart` continues a patch when an
+  earlier UNFORCED, non-initial instance row was executed by the `.0` or by an earlier patch of its line (review O3: a fresh
+  0.7.1 whose 0.7.0 retry failed wrote rows as 0.7.1 only; 0.7.2 must still resume) AND every READY workspace has a logbook
+  row; otherwise it still refuses 65 (threat 5; forced rows never count). Every `.0` instance COMMAND whose latest attempt
+  is not completed runs again under the `.0`'s own step name with `executed_by_version` = the patch.
+  - **Order invariant (review R1):** the locked runner applies every pending migration between `beforeApply` and
+    `afterApply`, so the retry runs in `beforeApply`: BEFORE any migration of the patch's start (never after this start's
+    migrations; on the `.0` schema unless an earlier `--force` or fresh patch start applied later ones), and only when the
+    `.0`'s migrations step is completed (nothing maps a migration to a release, so that step proves every migration the `.0`
+    ships was applied). A `.0` command with its migrations step incomplete refuses 65 ("Nothing was applied") unless
+    `--force`. A command that fails again is recorded failed (attempt + 1): with migrations pending an unforced start refuses
+    (`MinorReleaseResumeFailedError`, 66, fail closed: the code cannot serve with its migrations unapplied); the patch's
+    migrations are NOT applied, and the log names the `.0` command and its attempt, never a migration (review A). Under
+    `--force` the start goes on (review B): the migrations apply and it serves degraded (70), every row forced, the blocked
+    workspaces stay 503. With nothing pending it serves degraded (70). Only after the `.0` is resumed is the patch's own
+    migrations step recorded.
+  - **Hotfix case:** when a `.0` MIGRATION failed and the patch ships the fix, and the `.0` has instance commands, the patch
+    start refuses 65 unless `--force`: the `.0`'s commands must never run on a schema whose `.0` migrations are not all
+    applied, and the patch cannot apply them without also applying its own, so there is no order that runs the commands
+    first. `--force` applies every migration, then runs the `.0`'s commands (WARNING; rows forced). A `.0` with no instance
+    command has no such conflict (its migrations step alone is recorded).
+    Exceptions, which run the `.0`'s commands after every migration: a start with no instance row (fresh install or an
+    unchecked local / test history: no data of the `.0` exists) and a `--force` start whose `.0` migrations step is
+    incomplete (logged as a WARNING). The invariant is stated in `upgrade-runner.ts`, `upgrade-version.ts` and
+    `upgrade-command.ts`.
+  - **`--force` (review O4):** a `--force` patch start that is resumable reports decision `continue`, not `forced` (the resume
+    check comes first); every logbook row it writes is still marked `forced = true`. A later retry of a `.0` step that an
+    earlier `--force` start attempted, run when nothing is pending (that start already applied this code's migrations), is
+    recorded `forced = true` too, with a WARNING that it runs on a schema the forced start moved past the `.0`. The
+    in-process `testUpgrade` seam is refused unless NODE_ENV=test on a disposable, non-production database (like
+    `readTestFailCommand`).
+  - Failed `.0` workspace steps are retried by the workspace pass under their `.0` names (it walks each cursor's sequence). A
+    blocked workspace stays blocked (503 "Workspace is being upgraded.") until its step passes. `/healthz` reads the `.0`'s
+    instance steps for a patch too, so a still-failed `.0` step reads `failed`, also when the patch's own step is completed
+    (review R2). A fresh 0.7.1 install now runs 0.7.0's instance commands, as a fresh 0.7.0 install does.
+- **Idempotency audit (threat 4):** 0.6.0 has no instance command. Its workspace commands re-run as no-ops:
+  StaffProfileMemberSelect (CREATE POLICY guarded by IF NOT EXISTS; ws-staff-member-select spec, crash after COMMIT),
+  DropWorkspaceCoreForeignKeys (DROP CONSTRAINT IF EXISTS; ws-core-fk-removal spec, second run up-to-date) and
+  SyncStandardObjects (plans nothing on a re-run; standard-objects-catalog spec). Every workspace step is one transaction,
+  rolled back whole on failure. 0.7.0 (not registered, #175 / #177): HwsCutover is resumable by design (it blocks first,
+  keeps per-workspace state started → verified, copies with ON CONFLICT DO NOTHING, skips verified workspaces, inserts the
+  activation sentinel ON CONFLICT DO NOTHING; hws-c3-cutover spec: kill and resume, second run copies nothing, failed then
+  completed through the logbook). #177's Q3 `VALIDATE CONSTRAINT` is a no-op on a validated constraint and the runner skips
+  the level bump at or past its level. The rule is written into `upgrade-command.ts` / `workspace-upgrade-command.ts`.
+- **Not changed:** no SQL, no migration, no grant. The shipped version stays 0.6.0; the shipped map holds only 0.6.0's
+  adoption entry. 0.7.0's release PR (#175) must add `CREWFLOW_UPGRADE_FROM_VERSIONS['0.7.0']` next to the version bump (a
+  release guard test refuses a minor code version without a valid entry).
+- **Tests:** `upgrade-cross-upgrade.spec.ts` (pure): the list rules and every fail-closed case (64), a refusal names the
+  list (65), M-1 and L-2 kept, the patch resume decision (resumable / not / forced / minor never resumes), the instance steps
+  of a start, a release guard on the shipped version. `cross-upgrade-resume.integration.spec.ts` (UpgradeRun on the locked
+  runtime login, a probe instance command shaped like the C3 cutover): 0.7.1 before 0.7.0 refuses 65; 0.7.0 from 0.6.0, the
+  cutover fails, workspace blocked (resolver 'upgrading'); a READY workspace with no logbook row stops the resume (65);
+  0.7.1 retries `0.7.0_ProbeHwsCutover` (attempt 2 by 0.7.1, still blocked, `/healthz` not ok); 0.7.1 again succeeds
+  (attempt 3), then 0.7.1_TypeOrmMigrations, unblocked, `/healthz` ok, a further start records nothing; a failed 0.7.0
+  workspace step is retried by 0.7.1 under its 0.7.0 name; R2: `/healthz` is exactly `failed` while the `.0` step is failed,
+  also with the patch's own step completed; R1, through the REAL locked start with a REAL patch-only migration: the cutover
+  runs before the migration (66 and the migration not applied when it fails again; 65 and nothing applied when 0.7.0's
+  migrations step is incomplete); O3: after a fresh 0.7.1 whose 0.7.0 retry failed, 0.7.2 resumes. Existing patch / ledger /
+  C3 specs updated for the list.
+
 ## Worker marker bound only through the tenant-context binder (2026-11-18)
 
 - **Asset.** `rab.actor_type = 'worker'`: the RLS marker that opens the `*_worker_scan` / `*_worker_select` /
@@ -10420,3 +10501,27 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## engine/ stops importing modules/ — identity entities, venue resource scope, entity cache (branches refactor/engine-owns-identity-entities, refactor/engine-modules-scope-and-cache, refactor/engine-modules-venue-summary, 2026-11-21; no migration)
+- **Finding:** CLAUDE.md's "engine/ never imports from modules/" had 24 production violations (ratchet baseline
+  `engine-to-modules`), 20 of them auth, permissions, audit, email, platform-admin and user-deletion services importing
+  identity entities from `modules/identity`. A dependency in that direction lets a domain-module change silently alter
+  platform security code (and a domain module could add an entity relation the auth path then loads).
+- **Control:** the 18 identity/access entities move to `engine/core-modules/identity/entities` (pure file move, re-exported
+  from `modules/identity/entities`); `ManagerVenue` moves to `engine/core-modules/resource-scope/entities`; the by-owner
+  workspace and venue display-cache reads move to `modules/manager-workspace` and `modules/venue` (same cache kinds, keys and
+  projections, through `CoreEntityCacheService.getOrFetch`). The baseline loses the rule entirely, so any new engine ->
+  modules import fails ci-security (`tools/check-import-boundaries.cjs`; owner-dated approvals are the only exception).
+- **Changed read (authorisation input):** `ResourceScopeService.resolveTx`'s venue-manager scope no longer joins the
+  `ManagerProfile` entity; it filters `mv.manager_profile_id IN (SELECT mp.id FROM core.manager_profile mp WHERE mp.user_id
+  = $1)`. Same rows (mp.id is the primary key, so each manager_venue row joined at most one profile), same RLS on both
+  tables, `manager_venue` still schema-qualified by the bound manager, user id still a bound parameter. A venue manager with
+  no assignment still gets `{ kind: 'venue', venueIds: [] }` (sees nothing), never an owner scope.
+- **Tests:** `resource-scope.service.spec.ts` (exact SQL under core routing and a bound workspace schema, parameter binding,
+  empty-assignment fail-closed, non-venue-manager never queries manager_venue); `manager-workspace-display-cache.spec.ts`
+  and `venue-summary-cache.spec.ts` (same cache kind/key, no extra enabled/TTL argument, same projection, null never
+  cached, hit skips the database); `core-entity-cache.integration.spec.ts` follows the moved reads; the live venue scope
+  stays covered by `venue-manager-scoping.integration.spec.ts` (assign -> visible, unassign -> gone, another manager's venue
+  invisible).
+- **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
+  `core.manager_workspace`); the ratchet sees imports, not table names.
