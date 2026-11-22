@@ -10361,7 +10361,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   semicolon-separated locale) reached Excel / Sheets unprefixed and could be evaluated when a manager opened the export.
 - **Control:** the value is NFKC-normalised and leading whitespace / NBSP / Unicode spaces / control / format characters are
   skipped before the trigger test, and every piece a `,` `;` tab or line break could split it into is tested too; a hit is
-  prefixed with `'` (the original text kept). Every cell is now quoted (`"` doubled), so no separator inside a value starts a
+  prefixed with `'` (the original text kept), except a value or piece that is entirely a plain decimal number
+  (`-12.34`, re-review: a negative amount must stay a number in Excel). Every cell is now quoted (`"` doubled), so no separator inside a value starts a
   new cell in any locale. The reports exports (decision 29) use the same function.
 - **Tests:** `field-policy.service.spec.ts` (` =1+1`, fullwidth `＝1+1`, ` @x`, NBSP + zero-width, a control character,
   `a;=1+1`, `a,+1`, a line break, benign text quoted only); `payroll-runs.integration.spec.ts` header now quoted.
