@@ -211,7 +211,7 @@ export class ReportExportService {
       if (row.status !== 'ready') throw new NotFoundException(NOT_FOUND);
       const token = randomBytes(32).toString('base64url');
       // core.report_export_file_issue_link (SECURITY DEFINER): the requester's own, unexpired file only; the database sets
-      // the 60-second lifetime. The file table itself is unreadable to every runtime login.
+      // the 60-second lifetime. The runtime login holds no privilege on the file table itself (BC-01 posture).
       const [{ ok }] = await m.query(`SELECT core.report_export_file_issue_link($1::uuid, $2::text) AS ok`, [id, sha256(token)]);
       if (ok !== true) throw new NotFoundException(NOT_FOUND);
       await this.audit.record(m, ctx, AuditAction.REPORT_EXPORT_LINK_ISSUED, { entityType: 'report_export', entityId: id, metadata: { reportKey: row.report_key } });

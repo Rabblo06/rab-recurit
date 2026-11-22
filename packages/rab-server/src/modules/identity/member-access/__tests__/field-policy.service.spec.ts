@@ -134,7 +134,7 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
   it('neutralises spreadsheet formula injection in names (=, +, -, @, tab, CR) and quotes every cell', () => {
     expect(csvCell('=HYPERLINK("x")')).toBe(`"'=HYPERLINK(""x"")"`);
     expect(csvCell('+1')).toBe(`"'+1"`);
-    expect(csvCell('-2')).toBe(`"'-2"`);
+    expect(csvCell('-2')).toBe(`"-2"`); // a plain negative number stays a number (quoted, not prefixed)
     expect(csvCell('@SUM(A1)')).toBe(`"'@SUM(A1)"`);
     expect(csvCell('Ava, Staff')).toBe('"Ava, Staff"');
     expect(csvCell('Plain')).toBe('"Plain"');
@@ -146,12 +146,24 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
     expect(csvCell('\uff1d1+1')).toBe(`"'\uff1d1+1"`);
     expect(csvCell(' @x')).toBe(`"' @x"`);
     expect(csvCell('\u00a0\u200b=1+1')).toBe(`"'\u00a0\u200b=1+1"`);
-    expect(csvCell('\u0007-2')).toBe(`"'\u0007-2"`);
+    expect(csvCell('\u0007-A1')).toBe(`"'\u0007-A1"`);
     expect(csvCell('a;=1+1')).toBe(`"'a;=1+1"`);
     expect(csvCell('a,+1')).toBe(`"'a,+1"`);
     expect(csvCell('line\n@x')).toBe(`"'line\n@x"`);
     expect(csvCell("O'Neil; Pier Hall")).toBe(`"O'Neil; Pier Hall"`);
     expect(csvCell('2026-11-01')).toBe('"2026-11-01"');
     expect(csvCell('')).toBe('""');
+  });
+
+  it('a plain decimal number (a negative amount) is never prefixed; anything formula-like still is', () => {
+    expect(csvCell('-12.34')).toBe('"-12.34"');
+    expect(csvCell(' -12.34')).toBe('" -12.34"');
+    expect(csvCell('-0.5')).toBe('"-0.5"');
+    expect(csvCell('12.34')).toBe('"12.34"');
+    expect(csvCell('-1+2')).toBe(`"'-1+2"`);
+    expect(csvCell('-A1')).toBe(`"'-A1"`);
+    expect(csvCell('-12.34;=1+1')).toBe(`"'-12.34;=1+1"`);
+    expect(csvCell('+12')).toBe(`"'+12"`); // only a plain (optionally negative) decimal is exempt
+    expect(csvCell('-1e5')).toBe(`"'-1e5"`);
   });
 });

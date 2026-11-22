@@ -68,11 +68,12 @@ export interface ReportExportCycleOptions {
  *    REPORT_EXPORT_MAX_BYTES fails as `too_large` (no retry). On success: ready, the file kept until ready_at + 24 h, an
  *    in-app notice to the requester, an audit row. Never a download link: only the requester's own session issues one.
  *  - DELETE: the file content is removed (status expired); the row and its audit trail stay.
- * The file lives in core.report_export_file, unreadable to every runtime login: the Worker stores it through
+ * The file lives in core.report_export_file, on which the runtime login holds no privilege: the Worker stores it through
  * core.report_export_file_put and deletes it through core.report_export_file_purge (SECURITY DEFINER, Worker only).
- * The database guard (`core.report_export_guard()`) refuses any other status move. One export's failure (a build error,
- * a notice or audit write) is contained: the notice and audit run in their own savepoint, and the cycle logs and moves
- * on to the next export instead of stopping every organisation's queue.
+ * The database guard (`core.report_export_guard()`) refuses any other status move. One export's failure cannot stop the
+ * queue: the in-app notice runs in its own savepoint (a failed notice is logged, the export still ready); an audit write
+ * stays in the export's transaction (audit is evidence, fail closed), so a failed audit rolls that export back to pending
+ * and the cycle logs it and moves on to the next export.
  */
 export async function runReportExportCycle(
   runtimeDataSource: DataSource,
@@ -161,8 +162,17 @@ async function buildOne(
         WHERE id = $1 AND status = 'pending'`,
       [job.id, bytes, built.rowCount],
     );
-    await contained(m, 'report_export_notice', options, async () => {
-      await notifications.notify(m, {
+    // The audit row is evidence: written in the export's own transaction, so a failed audit write rolls back the export's
+    // state change too (fail closed; the cycle logs it and moves on). Only the in-app notice is contained.
+    await audit.record(m, { organisationId: job.organisation_id, userId: '' }, 'report_export.ready', {
+      entityType: 'report_export',
+      entityId: job.id,
+      targetUserId: job.requested_by,
+      metadata: { reportKey: job.report_key, rowCount: built.rowCount, bytes },
+      actorUserId: null,
+    });
+    await contained(m, 'report_export_notice', options, () =>
+      notifications.notify(m, {
         organisationId: job.organisation_id,
         userId: job.requested_by,
         type: NotificationType.REPORT_EXPORT_READY,
@@ -170,15 +180,8 @@ async function buildOne(
         message: `${REPORT_LABELS[job.report_key]} is ready to download. The file is deleted after 24 hours.`,
         relatedEntityType: 'report_export',
         relatedEntityId: job.id,
-      });
-      await audit.record(m, { organisationId: job.organisation_id, userId: '' }, 'report_export.ready', {
-        entityType: 'report_export',
-        entityId: job.id,
-        targetUserId: job.requested_by,
-        metadata: { reportKey: job.report_key, rowCount: built!.rowCount, bytes },
-        actorUserId: null,
-      });
-    });
+      }),
+    );
     return 'built';
   }
 
@@ -206,18 +209,16 @@ async function fail(
     `UPDATE core.report_export SET status = 'failed', error_code = $2, attempts = LEAST(attempts + 1, $3) WHERE id = $1 AND status = 'pending'`,
     [job.id, errorCode, REPORT_EXPORT_MAX_ATTEMPTS],
   );
-  await contained(m, 'report_export_audit', options, () =>
-    audit.record(m, { organisationId: job.organisation_id, userId: '' }, 'report_export.failed', {
-      entityType: 'report_export',
-      entityId: job.id,
-      targetUserId: job.requested_by,
-      metadata: { reportKey: job.report_key, errorCode },
-      actorUserId: null,
-    }),
-  );
+  await audit.record(m, { organisationId: job.organisation_id, userId: '' }, 'report_export.failed', {
+    entityType: 'report_export',
+    entityId: job.id,
+    targetUserId: job.requested_by,
+    metadata: { reportKey: job.report_key, errorCode },
+    actorUserId: null,
+  });
 }
 
-/** Runs a side effect (notice, audit) in its own savepoint: its failure is logged and rolled back alone, never the build. */
+/** Runs the in-app notice in its own savepoint: its failure is logged and rolled back alone, never the build. Audit is never contained. */
 async function contained(m: EntityManager, savepoint: string, options: ReportExportCycleOptions, work: () => Promise<void>): Promise<void> {
   await m.query(`SAVEPOINT ${savepoint}`);
   try {
@@ -230,7 +231,7 @@ async function contained(m: EntityManager, savepoint: string, options: ReportExp
 }
 
 async function deleteOne(m: EntityManager, id: string, audit: ReportExportAuditor, options: ReportExportCycleOptions): Promise<keyof ReportExportCycleResult | null> {
-  // The file first (Worker-only definer, only once it has expired), then the export row; the row and audit stay.
+  // The file content first (Worker-only definer, only once it has expired; a tombstone stays), then the export row.
   await m.query(`SELECT core.report_export_file_purge($1::uuid)`, [id]);
   const [rows] = (await m.query(
     `UPDATE core.report_export SET status = 'expired', file_deleted_at = now()
@@ -240,14 +241,12 @@ async function deleteOne(m: EntityManager, id: string, audit: ReportExportAudito
   )) as [Array<{ organisation_id: string; requested_by: string; report_key: string }>, number];
   const row = rows[0];
   if (!row) return null;
-  await contained(m, 'report_export_audit', options, () =>
-    audit.record(m, { organisationId: row.organisation_id, userId: '' }, 'report_export.file_deleted', {
-      entityType: 'report_export',
-      entityId: id,
-      targetUserId: row.requested_by,
-      metadata: { reportKey: row.report_key },
-      actorUserId: null,
-    }),
-  );
+  await audit.record(m, { organisationId: row.organisation_id, userId: '' }, 'report_export.file_deleted', {
+    entityType: 'report_export',
+    entityId: id,
+    targetUserId: row.requested_by,
+    metadata: { reportKey: row.report_key },
+    actorUserId: null,
+  });
   return 'deleted';
 }
