@@ -10354,3 +10354,14 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## CSV export cells: formula neutralising reads values like a spreadsheet; every cell quoted (security review of decision 29, branch fix/csv-cell-formula-hardening, 2026-11-21; no SQL)
+- **Finding (Medium, existing):** `csvCell` (payroll run CSV export) tested only the first raw character for `= + - @ tab CR`.
+  A staff name such as ` =1+1` (leading space), ` @x` (NBSP), `＝1+1` (fullwidth, NFKC `=`) or `a;=1+1` (a new cell in a
+  semicolon-separated locale) reached Excel / Sheets unprefixed and could be evaluated when a manager opened the export.
+- **Control:** the value is NFKC-normalised and leading whitespace / NBSP / Unicode spaces / control / format characters are
+  skipped before the trigger test, and every piece a `,` `;` tab or line break could split it into is tested too; a hit is
+  prefixed with `'` (the original text kept). Every cell is now quoted (`"` doubled), so no separator inside a value starts a
+  new cell in any locale. The reports exports (decision 29) use the same function.
+- **Tests:** `field-policy.service.spec.ts` (` =1+1`, fullwidth `＝1+1`, ` @x`, NBSP + zero-width, a control character,
+  `a;=1+1`, `a,+1`, a line break, benign text quoted only); `payroll-runs.integration.spec.ts` header now quoted.
