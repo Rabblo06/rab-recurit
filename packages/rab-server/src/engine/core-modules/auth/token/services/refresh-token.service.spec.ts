@@ -1,7 +1,7 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { EntityManager, IsNull } from 'typeorm';
 
-import { RefreshToken } from '../../../../../modules/identity/entities';
+import { RefreshToken } from '../../../identity/entities';
 import { absoluteSessionTtlMsFor } from '../../session-policy';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 import { REFRESH_TOKEN_TTL_MS, RefreshTokenService } from './refresh-token.service';

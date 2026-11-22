@@ -5,7 +5,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { EntityManager, IsNull } from 'typeorm';
 
 import { WEB_SESSION_TOKEN_PREFIX } from '../../constants/web-session-cookie.constants';
-import { RefreshToken, UserSession } from '../../../../../modules/identity/entities';
+import { RefreshToken, UserSession } from '../../../identity/entities';
 import { PlatformAdminService } from '../../../platform-admin/platform-admin.service';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
 import { deactivateAllPushDevicesForOrganisation, deactivateAllPushDevicesForUser, deactivatePushDevicesIfNoLiveSession } from '../../../push/push-device-deactivation';
