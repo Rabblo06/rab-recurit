@@ -13,6 +13,7 @@ import { readRuntimeDotenvValues } from './runtime-database-guard';
 import { assertDbTarget, assertDeferredDeploymentIdentity, DbTarget } from './database-target';
 import { assertMigrationIdentity, MIGRATION_IDENTITY_FACTS_QUERY, MigrationIdentityError, ROLE_SPLIT_MIGRATION } from './migration-identity';
 import { assertProductionMigrationApproval } from './production-migration-approval';
+import { selectWorkspaceFingerprintsForServer } from '../workspace-schema/v1/expected-fingerprints';
 
 import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
 import { PushDevice } from '../../../engine/core-modules/push/entities/push-device.entity';
@@ -233,6 +234,7 @@ export class GuardedMigrationDataSource extends DataSource {
   override async runMigrations(options?: Parameters<DataSource['runMigrations']>[0]): ReturnType<DataSource['runMigrations']> {
     assertProductionMigrationApproval({ target: this.dbTarget, pendingMigrationNames: await this.pendingMigrationNames() });
     await this.assertIdentityForPendingMigrations();
+    await this.selectWorkspaceFingerprints();
     return super.runMigrations(options);
   }
 
@@ -257,7 +259,18 @@ export class GuardedMigrationDataSource extends DataSource {
   override async undoLastMigration(options?: Parameters<DataSource['undoLastMigration']>[0]): Promise<void> {
     // A revert replays a down() that may touch rab_secure_owner objects: require the bootstrap identity once split.
     await this.assertIdentityForPendingMigrations(1);
+    await this.selectWorkspaceFingerprints();
     return super.undoLastMigration(options);
+  }
+
+  /**
+   * The frozen workspace migrations read EXPECTED_WORKSPACE_FINGERPRINTS inside up() / down(), and an unselected read throws
+   * (WorkspaceFingerprintMajorNotSelectedError: no PostgreSQL 16 default). Select the major of THIS server before any of
+   * them runs, exactly like locked-migration-runner.ts does for the migrate child: idempotent; an unsupported major, or a
+   * process that selected another one, throws before any migration is applied.
+   */
+  private async selectWorkspaceFingerprints(): Promise<void> {
+    await selectWorkspaceFingerprintsForServer((sql) => this.query(sql) as Promise<Array<Record<string, unknown>>>);
   }
 
   private async assertIdentityForPendingMigrations(minimumPending = 0): Promise<void> {

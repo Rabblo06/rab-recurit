@@ -12,7 +12,7 @@ import {
 } from '@rab/shared';
 import { Column, Entity, JoinColumn, ManyToOne, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 
-import { User } from './user.entity';
+import { User } from '../../../engine/core-modules/identity/entities/user.entity';
 
 /**
  * One row per user — Experience/Formats settings. `timezone` is nullable:
