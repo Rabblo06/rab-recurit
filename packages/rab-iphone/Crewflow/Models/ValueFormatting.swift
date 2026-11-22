@@ -1,26 +1,37 @@
 import Foundation
 
 /// Money is always an integer number of pence (CLAUDE.md). Never a Double.
-/// Formatting is identical to the Flutter app's `formatPence` /
-/// `payRateLabel` / `estimatedPayLabel`
-/// (packages/rab-mobile/lib/core/theme/money.dart): `£<pounds>.<pp>`, no
-/// thousands separator.
+/// Formatting matches the web's `formatPence`
+/// (packages/rab-shared/src/utils/money.ts), which prints the en-GB GBP
+/// currency format of `Intl.NumberFormat`: the sign before the pound sign,
+/// comma thousands separators, two decimals (`-£1,234.56`). Owner decision:
+/// the phone apps print money exactly like the website. The Flutter app's
+/// `formatPence` (packages/rab-mobile/lib/core/theme/money.dart) is the same,
+/// and all three test suites read the same table of cases,
+/// packages/rab-shared/src/utils/money-format-cases.json.
 ///
-/// A negative amount keeps its sign at every size: the sign is taken from
-/// `pence` itself, then pounds and pence are formatted from the magnitude.
-/// (Splitting a negative value into truncated pounds dropped the sign under
-/// £1: -50 used to print "£0.50".) The sign keeps this app's existing
-/// position, "£-1.50"; the web's shared `formatPence` prints "-£1.50".
-///
-/// Flutter's `formatPence` (packages/rab-mobile/lib/core/theme/money.dart)
-/// uses the same sign-then-magnitude rule, so both apps print identically.
+/// Built with integer arithmetic, not `NumberFormatter`, so the output never
+/// depends on the device locale, the OS's ICU data or a Double conversion.
+/// The sign is taken from `pence`; pounds and pence come from the magnitude
+/// (`Int64.magnitude`, so `Int64.min` is safe too).
 public enum Money {
     public static func formatPence(_ pence: Int64) -> String {
         let sign = pence < 0 ? "-" : ""
         let magnitude = pence.magnitude // UInt64: also safe for Int64.min
-        let pounds = magnitude / 100
+        let pounds = groupThousands(String(magnitude / 100))
         let remainder = magnitude % 100
-        return "£\(sign)\(pounds)." + (remainder < 10 ? "0\(remainder)" : "\(remainder)")
+        return "\(sign)£\(pounds)." + (remainder < 10 ? "0\(remainder)" : "\(remainder)")
+    }
+
+    /// "1234567" → "1,234,567".
+    private static func groupThousands(_ digits: String) -> String {
+        let count = digits.count
+        var out = ""
+        for (index, digit) in digits.enumerated() {
+            if index > 0 && (count - index) % 3 == 0 { out.append(",") }
+            out.append(digit)
+        }
+        return out
     }
 
     /// ASSUMPTION carried over from Flutter (display only, flagged to the

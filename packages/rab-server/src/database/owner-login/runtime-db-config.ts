@@ -31,14 +31,15 @@
  * Values are compared exactly (case-sensitive, no trimming); unset and blank are the same thing (a compose `KEY=` line).
  * A refusal names the variable and the allowed values and never echoes the value.
  *
- * DB-SETUP (plan §2.2, 2026-11-12): checkRuntimeLogin is the runtime-login rule — in production the API, the Worker and the
- * migrate child refuse any PG_DATABASE_URL login other than crewflow_owner BEFORE connecting. It parses the URL with the
- * policy parser (owner-credential.ts isOwnerLoginUrl) but is still pure: no I/O, no connection, no logging. It is a separate function on
- * purpose (see its comment): the prestart shell copy and the bootstrap child legitimately hold the admin URL.
+ * checkRuntimeLogin is the runtime-login rule — in production the API, the Worker and the migrate child refuse a
+ * PG_DATABASE_URL whose login is not crewflow_owner, or whose host has a transaction-pooler shape, BEFORE connecting. It
+ * parses the URL with the policy parser (owner-credential.ts runtimeUrlFacts) but is still pure: no I/O, no connection, no
+ * logging. It is a separate function on purpose: the prestart shell copy does not parse URLs, and the bootstrap child
+ * legitimately holds the admin URL.
  */
 
 import { readPrimaryDatabaseUrl } from '../postgres/pg-config';
-import { isOwnerLoginUrl, OWNER_LOGIN, OwnerCredentialError } from './owner-credential';
+import { OWNER_LOGIN, OWNER_PASSWORD_MIN_DISTINCT, OWNER_PASSWORD_MIN_LENGTH, OwnerCredentialError, runtimeUrlFacts } from './owner-credential';
 
 export type MigrationApprovalMode = 'none' | 'token';
 
@@ -190,11 +191,11 @@ export function readRuntimeDbConfig(env: Env, options: ReadRuntimeDbConfigOption
 }
 
 /**
- * DB-SETUP (plan §2.2 / §5.2, "database setup like Twenty"): the ONE login a runtime process may connect as is
- * owner-credential.ts OWNER_LOGIN (crewflow_owner). In a deployment, `PG_DATABASE_URL` in the container definition is the
- * database ADMIN URL; api-prestart.sh (after the bootstrap child) and worker-start.sh replace it with the derived
- * crewflow_owner URL before any runtime process starts. A crewflow_owner URL is passed through unchanged (owner decision D5),
- * so it is accepted here exactly as before.
+ * The runtime-login rule (owner decision 2026-11-18, Twenty's way): the API, the Worker and the migrate child read
+ * PG_DATABASE_URL straight from their environment, and it is ALWAYS the crewflow_owner URL at a direct host (Twenty: server
+ * and worker receive the app user's URL, helm/twenty/templates/deployment-server.yaml:148-155). Nothing in front of them
+ * builds or rewrites it any more, so this rule (with the boot gates' role checks once connected) is what refuses a wrong
+ * one.
  */
 export type RuntimeLoginProcess = 'api' | 'worker' | 'migrate';
 
@@ -208,47 +209,63 @@ function looksLikeProduction(env: Env): boolean {
 }
 
 export interface RuntimeLoginCheck {
-  /** Outside production only: a non-crewflow_owner login is allowed (dev and test suites use other logins) but reported. */
+  /** Outside production only: a non-crewflow_owner login or a pooler shape is allowed (dev and test suites) but reported. */
   warning: string | null;
 }
 
 /**
- * The runtime-login rule (plan §2.2): in production, a runtime process whose `PG_DATABASE_URL` login is anything other than
- * crewflow_owner is refused (RuntimeDbConfigError, exit 64) BEFORE any connection is opened. Pure: it parses the URL with the
- * same policy parser every connection uses (owner-credential.ts isOwnerLoginUrl -> pg-url-policy.ts parsePgUrl) and never connects, logs, or echoes a value (not
- * the URL, not the login). Outside production it returns a warning instead.
+ * In production, a runtime process whose PG_DATABASE_URL (1) logs in as anything other than crewflow_owner, or (2) has a
+ * documented transaction-pooler shape (the API takes session advisory locks through its migrate child and its storage lock;
+ * the URL must name the provider's DIRECT host), is refused (RuntimeDbConfigError, exit 64) BEFORE any connection is opened.
+ * Pure: it parses the URL with the same policy parser every connection uses (owner-credential.ts runtimeUrlFacts ->
+ * pg-url-policy.ts parsePgUrl) and never connects, logs, or echoes a value (not the URL, not the login, not the host).
+ * Outside production it returns a warning instead. A superuser / BYPASSRLS / CREATEDB / REPLICATION / CREATEROLE login is
+ * refused once connected, by the boot gates (database-boot-gate-rules.ts gate 1).
  *
- * Deliberately NOT part of readRuntimeDbConfig and NOT in api-prestart.sh's literal shell copy: the prestart shell and the
- * bootstrap child hold the ADMIN URL by design until the swap, and CLI commands validate their environment through
- * env.validation.ts. Callers: runtime-database-guard.ts resolveRuntimeDatabase (API and Worker, also run by
- * check-pending-migrations.ts) and the migrate child (twenty-migrate.ts). The superseded separate provisioner process is left
- * exactly as it was (the process itself was removed in X5.1; the role stays until the legacy names are refused, X3.5-S8).
- *
- * An absent PG_DATABASE_URL is not this rule's business (pg-config.ts refuses it in production with its own message). A
- * present but unparseable one is refused in production (fail closed) with the policy parser's value-free message.
+ * Callers: runtime-database-guard.ts resolveRuntimeDatabase (API and Worker, also run by check-pending-migrations.ts) and
+ * the migrate child (twenty-migrate.ts). An absent PG_DATABASE_URL is not this rule's business (pg-config.ts refuses it in
+ * production with its own message). A present but unparseable one is refused in production (fail closed) with the policy
+ * parser's value-free message.
  */
 export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): RuntimeLoginCheck {
   // The factory's own reader (pg-config.ts): PG_DATABASE_URL, or outside production the deprecated DATABASE_URL; trimmed.
   const value = readPrimaryDatabaseUrl(env)?.value ?? '';
   if (value === '') return { warning: null };
   const production = looksLikeProduction(env);
-  let owner: boolean;
+  let facts: { owner: boolean; transactionPooler: boolean; strongPassword: boolean };
   try {
-    owner = isOwnerLoginUrl(value);
+    facts = runtimeUrlFacts(value);
   } catch (error) {
     if (!(error instanceof OwnerCredentialError)) throw error;
     if (production) throw new RuntimeDbConfigError(`The ${processName} process: ${error.message}`);
     return { warning: null };
   }
-  if (owner) return { warning: null };
-  if (production) {
+  if (!facts.owner) {
+    if (production) {
+      throw new RuntimeDbConfigError(
+        `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN}. In production a runtime process connects ONLY as ${OWNER_LOGIN}: PG_DATABASE_URL is always the ${OWNER_LOGIN} URL (an admin URL belongs only to db-setup, in PG_ADMIN_URL). Login not shown. Refusing to start before connecting.`,
+      );
+    }
+    return {
+      warning: `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN} (login not shown). Allowed outside production only; production refuses it before connecting.`,
+    };
+  }
+  if (facts.transactionPooler) {
+    if (production) {
+      throw new RuntimeDbConfigError(
+        `The ${processName} process: PG_DATABASE_URL has a documented transaction-pooler shape. In production PG_DATABASE_URL must name the database's DIRECT host and port (session advisory locks and per-session settings do not survive a transaction pooler). Host not shown. Refusing to start before connecting.`,
+      );
+    }
+    return { warning: `The ${processName} process: PG_DATABASE_URL has a transaction-pooler shape. Allowed outside production only; production refuses it before connecting.` };
+  }
+  // Re-review (info): the M2 floor at the runtime too, so a weak mode-c password is refused even when a platform starts the
+  // API before db-setup (OpenShip ignores depends_on conditions). Production only: test and development databases use short ones.
+  if (production && !facts.strongPassword) {
     throw new RuntimeDbConfigError(
-      `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN}. In production a runtime process connects ONLY as ${OWNER_LOGIN}; this process was not started through api-prestart.sh / worker-start.sh, which replace the database admin URL with the derived ${OWNER_LOGIN} URL before any runtime process starts (login not shown). Refusing to start before connecting.`,
+      `The ${processName} process: the crewflow_owner password inside PG_DATABASE_URL is too weak for production (at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters; openssl rand -hex 32). Value not shown. Refusing to start before connecting.`,
     );
   }
-  return {
-    warning: `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN} (login not shown). Allowed outside production only; production refuses it before connecting.`,
-  };
+  return { warning: null };
 }
 
 /** Problems as strings (env.validation.ts style), or an empty list. */

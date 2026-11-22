@@ -9,10 +9,12 @@
  * with the SAME parser pg uses, and returns explicit values; `pg-tls.ts` builds the `ssl` object from configuration only.
  *
  * Allowed query parameters (anything else is refused, fail closed):
- *   sslmode            a DECLARATION only, mapped by pg-tls.ts (never passed to pg)
+ *   sslmode            a DECLARATION only, mapped by pg-tls.ts (never passed to pg). Production accepts require, verify-ca
+ *                      and verify-full, all three enforced as verify-full (owner decision 2026-11-19, "SSL like Twenty")
  *   application_name   kept as the connection's application_name
  *   channel_binding    require/prefer → pg `enableChannelBinding` (pg uses SCRAM-SHA-256-PLUS when the server offers it;
- *                      pg 8 cannot REQUIRE it — TLS verify-full is what authenticates the server); disable → off
+ *                      pg 8.23 cannot REQUIRE it — TLS verify-full is what authenticates the server); disable → off.
+ *                      `require` on a connection without TLS is refused (pg-tls.ts buildPgSsl)
  *   options            ONLY a Neon `endpoint=<id>` / `project=<id>` token naming the same endpoint as the host; or, for the
  *                      MIGRATE process against a local/test target only (`allowSessionRole`), exactly `-c role=<identifier>`
  *                      — the M2 restricted-migrator harness's phase-A identity (migration-security-check.ts). Refused for
@@ -85,6 +87,8 @@ export interface PgTarget {
   sslmode: PgSslMode | null;
   applicationName: string | null;
   channelBinding: boolean;
+  /** The URL's channel_binding value as written (null when absent); `require` needs TLS (pg-tls.ts buildPgSsl). */
+  channelBindingMode: 'require' | 'prefer' | 'disable' | null;
   /** Neon `endpoint=<id>` token from `options`, merged into the startup options by the factory. */
   providerOptions: string | null;
   /** `-c role=<identifier>` from `options` (migrate process, local/test target only), merged into the startup options. */
@@ -178,7 +182,7 @@ export function parsePgUrl(raw: string, label: string, parseOptions: ParsePgUrlO
   const params = url.searchParams;
   const sslmodeRaw = params.get('sslmode');
   if (sslmodeRaw !== null && !SSL_MODES.has(sslmodeRaw)) {
-    throw new PgConfigError(`${label} has an unrecognised sslmode. Use verify-full (or require), or disable outside production.`);
+    throw new PgConfigError(`${label} has an unrecognised sslmode. Use require, verify-ca or verify-full (all verified in full), or disable outside production.`);
   }
   const applicationName = params.get('application_name');
   if (applicationName !== null && !/^[\x20-\x7e]{1,63}$/.test(applicationName)) {
@@ -277,6 +281,7 @@ export function parsePgUrl(raw: string, label: string, parseOptions: ParsePgUrlO
     sslmode: (sslmodeRaw as PgSslMode | null) ?? null,
     applicationName,
     channelBinding: channelBindingRaw === 'require' || channelBindingRaw === 'prefer',
+    channelBindingMode: (channelBindingRaw as PgTarget['channelBindingMode']) ?? null,
     providerOptions,
     sessionRoleOption,
     routedNeonEndpoint,

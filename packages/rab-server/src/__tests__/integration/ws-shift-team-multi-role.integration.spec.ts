@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { StaffShiftTeamMultiRole1786721600000 } from '../../database/typeorm/core/migrations/1786721600000-StaffShiftTeamMultiRole';
-import { takeAttendanceLevelsDownTo } from './helpers/attendance-levels-down';
+import { WorkspaceAttendanceStaffScope1786722120000 } from '../../database/typeorm/core/migrations/1786722120000-WorkspaceAttendanceStaffScope';
+import { attendanceCorrectionTenantOnlySql, attendanceTenantOnlySql } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import {
@@ -345,9 +346,19 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
       for (const r of rows as Array<{ nspname: string }>) await admin.query(shiftTeamSelectSingleRoleSql(r.nspname));
       // The fail-closed guard recognises the level-23 form on this major (else it would count these and refuse).
       expect((await admin.query(LEVEL_24_WORKSPACES_SQL)).rows[0].n).toBe(0);
-      // Levels 25+ (attendance) are installed on top: take them down first, the same way (their workspaces back, then their own
-      // down()), so this migration's down() finds its own level-24 body.
-      await takeAttendanceLevelsDownTo(admin, 24);
+      // Level 25 (attendance scope) is installed on top: take it down first, the same way (its workspaces back to the tenant-only
+      // attendance and correction policies, then its own down(); the core copies stay #305's), so this migration's down() finds its own level-24 body.
+      if ((await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceStaffScope1786722120000'`)).rows.length === 1) {
+        const att = await admin.query(
+          `SELECT DISTINCT n.nspname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname ~ '^workspace_[0-9a-f]{32}$' AND c.relname = 'attendance' AND p.polname = 'attendance_tenant'`,
+        );
+        for (const r of att.rows as Array<{ nspname: string }>) {
+          await admin.query(attendanceTenantOnlySql(r.nspname));
+          await admin.query(attendanceCorrectionTenantOnlySql(r.nspname));
+        }
+        await new WorkspaceAttendanceStaffScope1786722120000().down(runnerOf(admin));
+      }
 
       await migration.down(runnerOf(admin));
       expect(await coreHash()).toBe(CORE_SHIFT_TEAM_USING_HASH_EQUALITY);

@@ -3,8 +3,8 @@
  * Shell-level tests for the API start: packages/rab-docker/rab/api-prestart.sh (the image's API command since Phase B P7)
  * and packages/rab-docker/rab/start.sh (retired as a migrating entrypoint; now only delegates to api-prestart.sh), for
  * the Worker start, packages/rab-docker/rab/worker-start.sh, and for the one-shot packages/rab-docker/rab/db-setup.sh
- * (PR #125 option 2: only db-setup holds PG_DATABASE_URL, in any form; rab-api / rab-worker build the crewflow_owner URL from
- * its target file and refuse a PG_DATABASE_URL of their own).
+ * (owner decision 2026-11-18, Twenty's way: rab-api and rab-worker read PG_DATABASE_URL, the crewflow_owner URL, from their
+ * environment; only db-setup holds an admin login; there is no target file, password file, setup volume or derive step).
  *
  * Runs the REAL scripts with the image's shell (BusyBox sh in node:24-alpine, same base as the production image) inside a
  * throwaway container per case. Every node entrypoint they could call is replaced by a stub mounted at its real path,
@@ -31,8 +31,9 @@ const stubs = path.join(work, 'stubs');
 fs.mkdirSync(stubs);
 // Each stub reports the environment it actually received, from the kernel's view, then exits with the code in /ctl/<name>.
 // DB-SETUP: also the CA path it got, whether the ADMIN sentinel is in its own kernel environment (admin=) and in PID 1's
-// (admin1=; in this harness PID 1 is the script itself until it execs) — present|absent, the value is never printed — and a
-// short hash of its PG_DATABASE_URL.
+// (admin1=; in this harness PID 1 is the script itself until it execs) — present|absent, the value is never printed — and
+// short hashes of its PG_DATABASE_URL (url=) and PG_ADMIN_URL (aurl=). The bootstrap-child stub writes NO file: the real
+// child writes none either.
 const stub = (name) => `
 const fs = require('fs');
 const keys = (p) => fs.readFileSync(p, 'utf8').split('\\0').filter(Boolean).map((kv) => kv.split('=')[0]).sort();
@@ -51,35 +52,7 @@ const admin = raw('/proc/self/environ').includes('ADMINSENTINEL') ? 'present' : 
 const admin1 = raw('/proc/1/environ').includes('ADMINSENTINEL') ? 'present' : 'absent';
 const url = require('crypto').createHash('sha256').update(process.env.PG_DATABASE_URL || '').digest('hex').slice(0, 12);
 const aurl = require('crypto').createHash('sha256').update(process.env.PG_ADMIN_URL || '').digest('hex').slice(0, 12);
-// The bootstrap child as db-setup (the agreed interface): on success it writes CREWFLOW_DB_TARGET_FILE (no user, no password)
-// in every mode (option 2: a crewflow_owner URL too) unless /ctl/no-target exists; the Twenty Helm model also stores the
-// crewflow_owner password file beside it unless /ctl/no-password-file exists. The stub records whether APP_SECRET reached it.
-// Security re-review F1: like the real child it first takes the volume's run lock (.db-setup.lock/owner with db-setup.sh's
-// token, CREWFLOW_DB_SETUP_LOCK_TOKEN) unless /ctl/no-lock exists, then removes the previous target, and never releases the
-// lock (db-setup.sh does, on exit).
-if ('${name}' === 'bootstrap' && process.env.CREWFLOW_DB_TARGET_FILE && readCtl('/ctl/no-lock', null) === null) {
-  const lockDir = require('path').join(require('path').dirname(process.env.CREWFLOW_DB_TARGET_FILE), '.db-setup.lock');
-  try {
-    fs.mkdirSync(lockDir, { mode: 0o700 });
-    fs.writeFileSync(require('path').join(lockDir, 'owner'), JSON.stringify({ v: 1, token: process.env.CREWFLOW_DB_SETUP_LOCK_TOKEN || '', host: 'stub', pid: process.pid, boot: null, started: Date.now() }));
-    // ... and, holding it, removes the previous target (bootstrap-owner-login.ts does exactly this under the lock).
-    fs.rmSync(process.env.CREWFLOW_DB_TARGET_FILE, { force: true });
-  } catch {}
-}
-if ('${name}' === 'bootstrap' && code === 0 && process.env.CREWFLOW_DB_TARGET_FILE && readCtl('/ctl/no-password-file', null) === null) {
-  fs.writeFileSync(require('path').join(require('path').dirname(process.env.CREWFLOW_DB_TARGET_FILE), 'owner-password'), 'stubpassword0123');
-}
-if ('${name}' === 'bootstrap' && code === 0 && process.env.CREWFLOW_DB_TARGET_FILE && readCtl('/ctl/no-target', null) === null) {
-  fs.writeFileSync(process.env.CREWFLOW_DB_TARGET_FILE, JSON.stringify({ v: 1, host: 'db', port: 5432, database: 'crewflow', params: { sslmode: 'verify-full' } }) + '\\n');
-}
-// Re-check R1/R2: fd 9 is the volume's .db-setup.flock (inherited from db-setup.sh).
-let fd9 = 'no';
-try {
-  const lockFile = require('path').join(require('path').dirname(process.env.CREWFLOW_DB_TARGET_FILE || '/x/y'), '.db-setup.flock');
-  const a = fs.fstatSync(9), b = fs.lstatSync(lockFile);
-  fd9 = a.ino === b.ino && a.dev === b.dev ? 'flock' : 'other';
-} catch {}
-console.log('STUB ${name} fd9=' + fd9 + ' tf=' + (process.env.CREWFLOW_DB_TARGET_FILE ? 'set' : '-') + ' pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' aurl=' + aurl + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
+console.log('STUB ${name} tf=' + (process.env.CREWFLOW_DB_TARGET_FILE ? 'set' : '-') + ' pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' aurl=' + aurl + ' argv=' + (process.argv.slice(2).join('|') || '-') + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
 process.exit(code);
 `;
 const STUBS = {
@@ -115,44 +88,6 @@ fs.writeFileSync(path.join(stubs, 'tini.sh'), [
   '',
 ].join('\n'), { mode: 0o755 });
 fs.chmodSync(path.join(stubs, 'tini.sh'), 0o755);
-// DB-SETUP: the derive step, with the interface of derive-runtime-url.js (PR #125 option 2):
-//   CREWFLOW_DB_TARGET_FILE AND PG_DATABASE_URL set -> 64 (the apps never hold PG_DATABASE_URL);
-//   CREWFLOW_DB_TARGET_FILE set      -> a missing file exits 75 ("not ready"); else /ctl/derive-url (default: a fixed
-//                                       crewflow_owner URL) on fd 4;
-//   PG_DATABASE_URL alone            -> /ctl/derive-url, or PG_DATABASE_URL unchanged (the no-target mode), on fd 4;
-//   neither                          -> 64.
-// /ctl/derive (or /ctl/derive-seq, one code per run) forces an exit code first; /ctl/derive-empty writes an empty value;
-// /ctl/derive-slow-ms delays the step (a cold start on a loaded host): the scripts must wait for it, never cut it off.
-const DERIVE = `${SCRIPTS_DIR}/owner-login/derive-runtime-url.js`;
-fs.writeFileSync(path.join(stubs, 'derive.js'), `
-const fs = require('fs');
-const read = (f, d) => { try { return fs.readFileSync(f, 'utf8'); } catch { return d; } };
-let code;
-const seq = read('/ctl/derive-seq', null);
-if (seq !== null) {
-  const n = Number(read('/tmp/derive-attempts', '0')) + 1;
-  try { fs.writeFileSync('/tmp/derive-attempts', String(n)); } catch {}
-  const list = seq.trim().split(',');
-  code = Number(list[Math.min(n, list.length) - 1]);
-} else code = Number(read('/ctl/derive', '0'));
-const url = process.env.PG_DATABASE_URL || '';
-const tf = process.env.CREWFLOW_DB_TARGET_FILE || '';
-const mode = url ? 'url' : tf ? 'target' : 'none';
-const admin = read('/proc/self/environ', '').includes('ADMINSENTINEL') ? 'present' : 'absent';
-console.log('STUB derive mode=' + mode + ' both=' + (url && tf ? 'yes' : 'no') + ' pid=' + process.pid + ' t=' + process.hrtime.bigint() + ' admin=' + admin + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-'));
-const slow = Number(read('/ctl/derive-slow-ms', '0'));
-if (slow > 0) { const until = Date.now() + slow; while (Date.now() < until) { /* a slow start */ } }
-if (code !== 0) process.exit(code);
-const out = (d) => (read('/ctl/derive-empty', null) !== null ? '' : read('/ctl/derive-url', d));
-if (url && tf) { console.error('derive-runtime-url: REFUSED: CREWFLOW_DB_TARGET_FILE and PG_DATABASE_URL are both set'); process.exit(64); }
-if (url) fs.writeSync(4, out(url));
-else if (tf) {
-  if (!fs.existsSync(tf)) { console.error('derive-runtime-url: the database target file is not there yet'); process.exit(75); }
-  if (!fs.existsSync(require('path').join(require('path').dirname(tf), 'owner-password'))) { console.error('derive-runtime-url: the crewflow_owner password file is not there yet'); process.exit(75); }
-  fs.writeSync(4, out('postgres://crewflow_owner:derived0123@db:5432/crewflow?sslmode=verify-full'));
-} else { console.error('derive-runtime-url: REFUSED: no PG_DATABASE_URL and no target file'); process.exit(64); }
-process.exit(0);
-`);
 // Owner-login architecture: the short-lived migrate child (Agent 1). It reports its environment like the other stubs, prints
 // /ctl/migrate-result (the TWENTY_MIGRATE_RESULT line) when present, and exits with the next code of /ctl/migrate-seq
 // (comma-separated; the attempt counter lives in the container's writable /tmp), so a 69-then-0 retry can be driven.
@@ -172,28 +107,29 @@ if (result) console.log('TWENTY_MIGRATE_RESULT ' + result);
 process.exit(code);
 `);
 
-// Option A: `target` = 'present' (a target file db-setup wrote, mounted read-only), 'absent' (the empty volume, read-only) or
-// 'rw' (db-setup's writable view; `targetDir` names the host directory so a case can inspect it). Default: present.
-function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [], target = 'present', targetDir = null, cmd = null } = {}) {
+// Owner decision 2026-11-18: no setup volume is mounted anywhere (there is none any more); `cmd` runs a shell line instead
+// of a script.
+function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [], cmd = null, execSetup = false } = {}) {
+  // db-setup.sh waits for the database before the child (section 15); the harness has no database (--network none), so
+  // every other db-setup case runs with CREWFLOW_DB_WAIT_SECONDS=0 (do not wait) unless it sets the variable itself.
+  if ((entry.startsWith('db-setup.sh') || (cmd && cmd.includes('db-setup'))) && !Object.prototype.hasOwnProperty.call(env, 'CREWFLOW_DB_WAIT_SECONDS')) {
+    env = { ...env, CREWFLOW_DB_WAIT_SECONDS: '0' };
+  }
   const ctlDir = path.join(work, `ctl-${name}`);
   fs.mkdirSync(ctlDir);
   for (const [k, v] of Object.entries(ctl)) fs.writeFileSync(path.join(ctlDir, k), String(v));
-  const tDir = targetDir ?? path.join(work, `target-${name}`);
-  fs.mkdirSync(tDir, { recursive: true });
-  // db-setup's writable view: the named volume is owned by the container's uid (1000) in a deployment. A host directory
-  // created by the runner's user (uid 1001 on GitHub's Linux runners) is not writable by a container running as 1000, so it
-  // is opened up here (the test directory only), exactly as the volume's ownership would allow.
-  if (target === 'rw') fs.chmodSync(tDir, 0o777);
-  if (target === 'present') {
-    fs.writeFileSync(path.join(tDir, 'target.json'), '{"version":1,"mode":"bootstrap","target":"postgresql://db:5432/crewflow?sslmode=verify-full"}\n');
-    fs.writeFileSync(path.join(tDir, 'owner-password'), 'stubpassword0123');
+  // execSetup: db-setup.sh mounted with its image mode (0555 in rab/Dockerfile), so the compose wrapper's `exec ./db-setup.sh`
+  // runs it exactly as in the image (the repository file is 0644).
+  let setupFile = DB_SETUP;
+  if (execSetup) {
+    setupFile = path.join(work, `db-setup-${name}.sh`);
+    fs.copyFileSync(DB_SETUP, setupFile);
+    fs.chmodSync(setupFile, 0o555);
   }
-  const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`, '-v', `${WORKER_START}:/app/worker-start.sh:ro`, '-v', `${DB_SETUP}:/app/db-setup.sh:ro`];
-  args.push('-v', `${tDir}:/run/crewflow/db-target${target === 'rw' ? '' : ':ro'}`);
+  const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`, '-v', `${WORKER_START}:/app/worker-start.sh:ro`, '-v', `${setupFile}:/app/db-setup.sh:ro`];
   if (withPrestart) args.push('-v', `${PRESTART}:/app/api-prestart.sh:ro`);
   for (const [stubName, target] of Object.entries(STUBS)) args.push('-v', `${path.join(stubs, `${stubName}.js`)}:${target}:ro`);
   args.push('-v', `${path.join(stubs, 'twentymigrate.js')}:${MIGRATE_CHILD}:ro`);
-  args.push('-v', `${path.join(stubs, 'derive.js')}:${DERIVE}:ro`);
   args.push('-v', `${path.join(stubs, 'tini.sh')}:${TINI}:ro`);
   args.push('-v', `${ctlDir}:/ctl:ro`);
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
@@ -206,9 +142,13 @@ function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = tr
 
 // Owner-login architecture: CREWFLOW_MIGRATE_ON_START is required on the API; the failure delay is 0 except where a case
 // measures it.
-// PR #125 option 2: no PG_DATABASE_URL on rab-api (the target file, mounted read-only by default, is the only source).
+// Owner decision 2026-11-18 (Twenty's way): PG_DATABASE_URL is the crewflow_owner URL, from the environment. OWNER_PW is a
+// valid bundled password (32+ of A-Z a-z 0-9 _ -), so the same URL serves db-setup's mode (a) cases too.
+const OWNER_PW = `ownerpw${'0123456789abcdef'.repeat(4)}`;
+const RUNTIME_URL = `postgres://crewflow_owner:${OWNER_PW}@db:5432/crewflow?sslmode=verify-full`;
 const BASE = {
   NODE_ENV: 'production',
+  PG_DATABASE_URL: RUNTIME_URL,
   APP_SECRET: 'x'.repeat(40),
   CREWFLOW_MIGRATE_ON_START: 'false',
   CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS: '0',
@@ -231,6 +171,12 @@ check('1b no migration / bootstrap entrypoint ran', noMigration(r.out), r.out);
 // DB-SETUP PID 1: the script execs tini (PID 1 from then on), which runs main.js as its child.
 const underTini = (out, who) => /STUB tini pid=1 /.test(out) && / ppid=1 /.test(line(out, who)) && !/ pid=1 /.test(line(out, who));
 check('1c tini is PID 1 after exec, main.js its child, with the runtime environment', underTini(r.out, 'main') && keysOf(main, 'self').includes('APP_SECRET') && keysOf(main, 'self').includes('PG_DATABASE_URL'), r.out);
+// 1d. First platform administrator at boot (2026-11-19): the five rab-api inputs are allowed and reach main.js unchanged.
+const BOOTSTRAP_INPUTS = { BOOTSTRAP_ADMIN_EMAIL: 'admin@example.test', BOOTSTRAP_ADMIN_FIRST_NAME: 'First', BOOTSTRAP_ADMIN_LAST_NAME: 'Admin', BOOTSTRAP_ADMIN_ORG_SLUG: 'platform', BOOTSTRAP_ADMIN_ORG_NAME: 'Platform' };
+r = run('bootstrap-inputs', { ...BASE, ...BOOTSTRAP_INPUTS });
+check('1d BOOTSTRAP_ADMIN_EMAIL and the optional name / organisation inputs are accepted and reach main.js', r.code === 0 && Object.keys(BOOTSTRAP_INPUTS).every((k) => keysOf(line(r.out, 'main'), 'self').includes(k)), r.out);
+r = run('bootstrap-inputs-password', { ...BASE, ...BOOTSTRAP_INPUTS, BOOTSTRAP_ADMIN_PASSWORD: 'x' });
+check('1e ...but never with BOOTSTRAP_ADMIN_PASSWORD -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'main') && /BOOTSTRAP_ADMIN_PASSWORD must never be set/.test(r.out) && !/STUB tini/.test(r.out), r.out);
 
 // 2. Pending migrations (the restricted check fails) -> refused, main never starts, still nothing migrates.
 r = run('pending', BASE, { ctl: { check: 1 } });
@@ -247,10 +193,12 @@ const FORBIDDEN = [
   'CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF',
   // Owner-login architecture: one PG_DATABASE_URL, no role password, no mode switch, no provisioner setting on the API.
   'DATABASE_URL', 'DATABASE_DIRECT_URL', 'PG_DATABASE_REPLICA_URL', 'PG_WORKER_DATABASE_URL', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
-  'CREWFLOW_OWNER_PASSWORD', 'CREWFLOW_OWNER_BOOTSTRAP_PASSWORD', 'PG_DATABASE_PASSWORD', 'CREWFLOW_DB_MODE', 'CREWFLOW_PROVISIONER_ENABLED', 'CREWFLOW_PROVISIONER_ANYTHING',
+  'CREWFLOW_OWNER_PASSWORD', 'CREWFLOW_OWNER_BOOTSTRAP_PASSWORD', 'PG_DATABASE_PASSWORD', 'PG_DATABASE_APP_PASSWORD', 'CREWFLOW_DB_MODE', 'CREWFLOW_PROVISIONER_ENABLED', 'CREWFLOW_PROVISIONER_ANYTHING',
   // ASSERTION CHANGE (owner decision C1, 2026-11-05): DISABLE_DB_MIGRATIONS left this list — it is accepted (case 9).
   // CREWFLOW_UPGRADE_INCOMPLETE is retired (OWNER-DB-ULTIMATE Part B3): an inherited value is refused.
   'CREWFLOW_UPGRADE_INCOMPLETE',
+  // First platform administrator at boot (2026-11-19): there is no bootstrap password; one is refused.
+  'BOOTSTRAP_ADMIN_PASSWORD',
 ];
 // Final review F5: the approval is now a token naming the exact pending set (pending-<count>-<sha256>); a well-formed token
 // is refused on the API exactly like any other value (by name), and so is the retired constant.
@@ -284,7 +232,7 @@ check('6a Docker defaults (root, 14 capabilities, writable root, no memory limit
 r = run('isolation-declared', BASE, { dockerArgs: ['--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256', '--memory', '768m'] });
 check('6b the production rab-api settings -> "runtime isolation as declared", no warning, starts', r.code === 0 && line(r.out, 'main') &&
   r.out.includes('api-prestart: runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=256 memory.max=805306368') && !/WARNING/.test(r.out), r.out);
-check('6c the report prints no environment value', !r.out.includes(BASE.APP_SECRET) && !r.out.includes('derived0123'), r.out);
+check('6c the report prints no environment value', !r.out.includes(BASE.APP_SECRET) && !r.out.includes(OWNER_PW), r.out);
 
 // 7. Owner decision "never drop a security setting silently": CREWFLOW_RUNTIME_ISOLATION=enforce refuses (64) when any
 // declared control is missing, before the schema check or main.js. Each case removes exactly one control.
@@ -469,81 +417,60 @@ check('10h a failed upgrade command (70) and a failed registration -> main still
 r = run('c2-behind-no-register', BASE, { ctl: { check: 1 } });
 check('10i the schema behind (65) -> no registration either (the start is refused first)', r.code === 65 && !line(r.out, 'register'), r.out);
 
-// 11. PR #125 option 2: rab-api NEVER receives PG_DATABASE_URL. With it empty (the deploy compose files' literal pin) or
-// unset, api-prestart.sh points the derive step at db-setup's target file (CREWFLOW_DB_TARGET_FILE) and waits, bounded, for
-// it; ANY non-empty PG_DATABASE_URL (an admin URL, a crewflow_owner URL, anything) is refused before anything runs. It never
-// runs the bootstrap child.
+// 11. Owner decision 2026-11-18 (Twenty's way): rab-api READS PG_DATABASE_URL, the crewflow_owner URL, from its
+// environment. api-prestart.sh refuses an empty one and one with an empty crewflow_owner password; it passes any other value
+// unchanged (its login, its host shape and the role's attributes are judged by the processes: checkRuntimeLogin and the boot
+// gates). There is no target file, no password file and no derive step; it never runs the bootstrap child.
 const ADMIN_URL = 'postgres://postgres:ADMINSENTINEL1@db:5432/crewflow?sslmode=verify-full';
-const RUNTIME_URL = 'postgres://crewflow_owner:derived0123@db:5432/crewflow?sslmode=verify-full';
 const hash = (v) => require('node:crypto').createHash('sha256').update(v).digest('hex').slice(0, 12);
 const field = (l, k) => ((l.match(new RegExp(` ${k}=([^ ]*)`)) || [])[1] || '');
-const NOURL = { ...MIGRATE_ON, PG_DATABASE_URL: '' };
-const DERIVED = { 'migrate-seq': '0', 'derive-url': RUNTIME_URL };
-const SEAM = (seconds) => ({ NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS: String(seconds) });
 // Order by the stubs' monotonic clock (stdout and stderr are captured separately, so text position proves nothing).
 const tOf = (out, who) => BigInt(field(line(out, who), 't') || '0');
 const inOrder = (out, ...who) => who.every((w) => tOf(out, w) > 0n) && who.slice(1).every((w, i) => tOf(out, who[i]) < tOf(out, w));
-r = run('dbsetup-order', NOURL, { ctl: DERIVED });
-check('11a option A: derive (from the target file), then the migrate child, the registration and main.js (under tini), in that order; the bootstrap child never ran', r.code === 0 &&
-  field(line(r.out, 'derive'), 'mode') === 'target' && field(line(r.out, 'derive'), 'both') === 'no' && inOrder(r.out, 'derive', 'register', 'main') && line(r.out, 'twentymigrate') && underTini(r.out, 'main') && !line(r.out, 'bootstrap'), r.out);
-check('11b every process (derive, the registration, main.js, tini) holds only the derived crewflow_owner URL; no admin credential anywhere', /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) &&
-  ['derive', 'register', 'main'].every((w) => field(line(r.out, w), 'admin') === 'absent') && ['register', 'main'].every((w) => field(line(r.out, w), 'url') === hash(RUNTIME_URL)), r.out);
-check('11c main.js gets PG_DATABASE_URL and neither CREWFLOW_DB_TARGET_FILE, PG_DATABASE_PASSWORD nor RUNTIME_URL; the derived URL is never printed', keysOf(line(r.out, 'main'), 'self').includes('PG_DATABASE_URL') &&
-  !['CREWFLOW_DB_TARGET_FILE', 'PG_DATABASE_PASSWORD', 'RUNTIME_URL'].some((k) => keysOf(line(r.out, 'main'), 'self').includes(k)) && !r.out.includes('derived0123'), r.out);
-r = run('dbsetup-readonly', NOURL, { ctl: DERIVED, dockerArgs: ['--read-only', '--user', '1000:1000'] });
-check('11d read-only root, uid 1000, target mounted read-only (as shipped): main.js gets only the derived URL', r.code === 0 && field(line(r.out, 'main'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'main'), 'admin') === 'absent', r.out);
-r = run('dbsetup-check-path', { ...BASE, PG_DATABASE_URL: '' }, { ctl: DERIVED });
-check('11e CREWFLOW_MIGRATE_ON_START=false: the read-only schema check also runs on the derived URL only', r.code === 0 && field(line(r.out, 'check'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'check'), 'admin') === 'absent', r.out);
-r = run('dbsetup-no-target', { ...NOURL, ...SEAM(4) }, { ctl: DERIVED, target: 'absent' });
-check('11f the target file never appears -> waits with a fixed message, then refuses (75) at the bound; no migration, API or bootstrap child (never an admin path)', r.code === 75 &&
-  /waiting for db-setup: the database target file is not there yet/.test(r.out) && /did not appear within 4s/.test(r.out) && !line(r.out, 'twentymigrate') && !line(r.out, 'main') && !line(r.out, 'bootstrap'), r.out);
-r = run('dbsetup-seam-prod', { ...NOURL, CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS: '4' }, { ctl: DERIVED });
-check('11g the wait-bound test seam outside NODE_ENV=test -> refused (64), nothing ran', r.code === 64 && /CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS is a test seam/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'main'), r.out);
-r = run('dbsetup-attempts', { ...NOURL, ...SEAM(4) }, { ctl: DERIVED, target: 'absent' });
-check('11m security review I2: the wait is bounded by a COUNT of derive attempts (4 s -> exactly 2), never by the clock', r.code === 75 && (r.out.match(/^STUB derive /gm) || []).length === 2 && /attempt 1 of 2/.test(r.out), r.out);
-{
-  // A2 (live, loaded host): a slow derive start was killed by `timeout 10`, and busybox `timeout`'s watcher kept the
-  // command-substitution pipe open until its bound, so every start also paid the full bound. Neither may happen again.
-  const t0 = Date.now();
-  r = run('dbsetup-derive-slow', NOURL, { ctl: { ...DERIVED, 'derive-slow-ms': '12000' } });
-  const ms = Date.now() - t0;
-  check('11n A2: a derive step slower than the old 10-s bound (12 s) is waited for, and the start then proceeds (main.js runs)', r.code === 0 && field(line(r.out, 'main'), 'url') === hash(RUNTIME_URL) && ms < 60_000, `${ms} ms\n${r.out}`);
-  const t1 = Date.now();
-  r = run('dbsetup-derive-fast', NOURL, { ctl: DERIVED });
-  const fast = Date.now() - t1;
-  check('11o A2: a fast derive step costs no fixed delay (the whole start well under 15 s)', r.code === 0 && fast < 15_000, `${fast} ms\n${r.out}`);
+const NO_FILES = (l) => !['CREWFLOW_DB_TARGET_FILE', 'PG_DATABASE_PASSWORD', 'PG_DATABASE_APP_PASSWORD', 'RUNTIME_URL', 'CREWFLOW_DB_SETUP_LOCK_TOKEN', 'CREWFLOW_DB_SETUP_FLOCK_FD'].some((k) => keysOf(l, 'self').includes(k));
+r = run('url-order', MIGRATE_ON, { ctl: { 'migrate-seq': '0' } });
+check('11a the migrate child, the registration and main.js (under tini) run in that order; the bootstrap child never ran', r.code === 0 &&
+  before(r.out, 'STUB twentymigrate ', 'STUB register ') && inOrder(r.out, 'register', 'main') && underTini(r.out, 'main') && !line(r.out, 'bootstrap'), r.out);
+check('11b every process (the registration, main.js, tini) holds exactly the given crewflow_owner URL; no admin credential anywhere', /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) &&
+  ['register', 'main'].every((w) => field(line(r.out, w), 'admin') === 'absent' && field(line(r.out, w), 'url') === hash(RUNTIME_URL)), r.out);
+check('11c main.js gets PG_DATABASE_URL and no target-file, lock or password variable; the password is never printed', keysOf(line(r.out, 'main'), 'self').includes('PG_DATABASE_URL') &&
+  NO_FILES(line(r.out, 'main')) && !r.out.includes(OWNER_PW), r.out);
+r = run('url-readonly', MIGRATE_ON, { ctl: { 'migrate-seq': '0' }, dockerArgs: ['--read-only', '--user', '1000:1000'] });
+check('11d read-only root, uid 1000, no volume but the CA (as shipped): main.js gets the URL', r.code === 0 && field(line(r.out, 'main'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'main'), 'admin') === 'absent', r.out);
+r = run('url-check-path', BASE);
+check('11e CREWFLOW_MIGRATE_ON_START=false: the read-only schema check runs on the same URL', r.code === 0 && field(line(r.out, 'check'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'check'), 'admin') === 'absent', r.out);
+for (const [label, env] of [['empty', { ...MIGRATE_ON, PG_DATABASE_URL: '' }], ['unset', Object.fromEntries(Object.entries(MIGRATE_ON).filter(([k]) => k !== 'PG_DATABASE_URL'))]]) {
+  r = run(`url-${label}`, env, { ctl: { 'migrate-seq': '0' } });
+  check(`11f DENIAL: PG_DATABASE_URL ${label} on rab-api -> refused (64) before anything ran (no migrate child, check, registration, API or bootstrap child)`, r.code === 64 &&
+    /PG_DATABASE_URL is empty: it is the crewflow_owner URL/.test(r.out) && !migrated(r.out) && !line(r.out, 'check') && !line(r.out, 'main') && !line(r.out, 'bootstrap') && !/STUB tini/.test(r.out), r.out);
 }
-r = run('dbsetup-target-late', NOURL, { ctl: { ...DERIVED, 'derive-seq': '75,75,0' } });
-check('11h the target file appears late (75, 75, then 0) -> two waits, then the normal start', r.code === 0 && (r.out.match(/the database target file is not there yet/g) || []).length >= 2 && field(line(r.out, 'main'), 'url') === hash(RUNTIME_URL), r.out);
-for (const code of [64, 70]) {
-  r = run(`dbsetup-derive-${code}`, NOURL, { ctl: { ...DERIVED, derive: code } });
-  check(`11i the derive step exits ${code} -> no start (exit ${code}); no wait, migrate child or main.js`, r.code === code && !/not there yet/.test(r.out) && !line(r.out, 'twentymigrate') && !line(r.out, 'main') && /could not build the crewflow_owner connection/.test(r.out), r.out);
+for (const url of ['postgresql://crewflow_owner:@db:5432/crewflow?sslmode=verify-full', 'postgres://crewflow_owner:@db-direct.example:25060/d?sslmode=verify-full']) {
+  r = run(`url-empty-password-${hash(url)}`, { ...MIGRATE_ON, PG_DATABASE_URL: url }, { ctl: { 'migrate-seq': '0' } });
+  check('11g DENIAL: a crewflow_owner URL with an EMPTY password (PG_DATABASE_APP_PASSWORD unset for the bundled db) -> refused (64), nothing ran', r.code === 64 &&
+    /PG_DATABASE_URL has an empty crewflow_owner password/.test(r.out) && !migrated(r.out) && !line(r.out, 'main') && !/STUB tini/.test(r.out), r.out);
 }
-r = run('dbsetup-derive-empty', NOURL, { ctl: { ...DERIVED, 'derive-empty': '1' } });
-check('11j an empty runtime URL -> refused (70), main.js never ran', r.code === 70 && /empty crewflow_owner connection/.test(r.out) && !line(r.out, 'main') && !line(r.out, 'twentymigrate'), r.out);
-for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external admin URL', 'postgresql://doadmin:ADMINSENTINEL2@db-direct.example:25060/d?sslmode=verify-full'], ['a former separated login', 'postgresql://crewflow_app:ADMINSENTINEL3@db:5432/crewflow?sslmode=verify-full'], ['a login that only starts with crewflow_owner', 'postgresql://crewflow_ownerx:ADMINSENTINEL4@db:5432/crewflow?sslmode=verify-full'], ['a crewflow_owner URL (option 2: no pass-through on the apps)', 'postgresql://crewflow_owner:ADMINSENTINEL5@db:5432/crewflow?sslmode=verify-full'], ['any non-empty value', 'ADMINSENTINEL6']]) {
-  r = run(`dbsetup-url-${label.replace(/[^a-z]+/g, '-')}`, { ...MIGRATE_ON, PG_DATABASE_URL: url }, { ctl: DERIVED });
-  check(`11k DENIAL: ${label} in rab-api's PG_DATABASE_URL -> refused (64) before anything runs (no derive, no bootstrap, no API); the value is never printed`, r.code === 64 &&
-    /PG_DATABASE_URL must never be set on the api service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'bootstrap') && !line(r.out, 'main') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+// The shell does not judge the login: every non-empty URL with a password reaches the processes unchanged, which refuse a
+// non-crewflow_owner login, a pooler host or a privileged role (runtime-db-config.ts checkRuntimeLogin, the boot gates).
+for (const url of ['postgresql://crewflow_owner:pw-external-0123@db-direct.example:25060/defaultdb?sslmode=verify-full', `postgres://crewflow_owner:${OWNER_PW}@db:5432/crewflow`]) {
+  r = run(`url-passed-${hash(url)}`, { ...MIGRATE_ON, PG_DATABASE_URL: url }, { ctl: { 'migrate-seq': '0' } });
+  check('11h a crewflow_owner URL reaches the migrate child and main.js byte for byte (no rewrite, no derive step)', r.code === 0 &&
+    field(line(r.out, 'main'), 'url') === hash(url) && keysOf(migrated(r.out), 'self').includes('PG_DATABASE_URL'), r.out);
 }
 // Owner decision 2026-11-17: PG_ADMIN_URL never reaches rab-api (never-in-runtime-env.ts; this is the image enforcer).
 for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external admin URL', 'postgresql://doadmin:ADMINSENTINEL2@db-direct.example:25060/d?sslmode=verify-full'], ['any non-empty value', 'ADMINSENTINEL6']]) {
   for (const entry of [undefined, 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command']) {
-    r = run(`dbsetup-admin-url-${entry ? 'oneoff-' : ''}${label.replace(/[^a-z]+/g, '-')}`, { ...NOURL, PG_ADMIN_URL: url }, { ...(entry ? { entry } : {}), ctl: DERIVED });
-    check(`11n DENIAL PG_ADMIN_URL: ${label} in rab-api's environment${entry ? ' (a one-off)' : ''} -> refused (64) before anything runs; the value is never printed`, r.code === 64 &&
-      /PG_ADMIN_URL must never be set on the api service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'bootstrap') && !line(r.out, 'main') && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+    r = run(`admin-url-${entry ? 'oneoff-' : ''}${label.replace(/[^a-z]+/g, '-')}`, { ...MIGRATE_ON, PG_ADMIN_URL: url }, { ...(entry ? { entry } : {}), ctl: { 'migrate-seq': '0' } });
+    check(`11i DENIAL PG_ADMIN_URL: ${label} in rab-api's environment${entry ? ' (a one-off)' : ''} -> refused (64) before anything runs; the value is never printed`, r.code === 64 &&
+      /PG_ADMIN_URL must never be set on the api service/.test(r.out) && !migrated(r.out) && !line(r.out, 'bootstrap') && !line(r.out, 'main') && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
   }
 }
-r = run('dbsetup-url-unset', { ...MIGRATE_ON }, { ctl: DERIVED });
-check('11l PG_DATABASE_URL unset (not just empty) -> the same target-file path; main.js gets the derived URL', r.code === 0 &&
-  field(line(r.out, 'derive'), 'mode') === 'target' && field(line(r.out, 'main'), 'url') === hash(RUNTIME_URL) && !line(r.out, 'bootstrap'), r.out);
-r = run('dbsetup-inherited-tf', { ...NOURL, CREWFLOW_DB_TARGET_FILE: '/etc/passwd' }, { ctl: { 'migrate-seq': '0', 'derive-url': RUNTIME_URL } });
-check('11m an inherited CREWFLOW_DB_TARGET_FILE is replaced by the fixed path and never reaches main.js', r.code === 0 && field(line(r.out, 'derive'), 'mode') === 'target' && !keysOf(line(r.out, 'main'), 'self').includes('CREWFLOW_DB_TARGET_FILE'), r.out);
-// D1 a: the bundled db's CA, only when the RUNTIME URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset or blank.
+// D1 a: the bundled db's CA, only when the URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset or blank.
 const DB_CA = '/run/crewflow/db-ca/ca.crt';
 const CA_CASES = [
   ['host db, CA unset -> the bundled CA', RUNTIME_URL, {}, DB_CA],
   ['host db with a port and userinfo, CA blank -> the bundled CA', 'postgresql://crewflow_owner:p@db:5432/crewflow?sslmode=verify-full', { PG_SSL_CA_CERT_PATH: '' }, DB_CA],
+  // docker-compose.production.yml's ${PG_SSL_CA_CERT_PATH:-} / ${PG_SSL_CA_CERT:-}: both present and EMPTY = both unset.
+  ['host db, both CA settings blank (the production compose default) -> the bundled CA', RUNTIME_URL, { PG_SSL_CA_CERT_PATH: '', PG_SSL_CA_CERT: '' }, DB_CA],
   ['host db, CA set -> kept', RUNTIME_URL, { PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],
   // The inline CA (PEM text, one line with \n escapes) is the operator's choice: no path is added beside it (both set refuses).
   ['host db, inline PG_SSL_CA_CERT set -> path not set', RUNTIME_URL, { PG_SSL_CA_CERT: '-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----' }, '-'],
@@ -553,49 +480,42 @@ const CA_CASES = [
   ['a query naming host=db does not count', 'postgresql://crewflow_owner:p@other.example:5432/d?host=db&sslmode=verify-full', {}, '-'],
 ];
 for (const [label, url, extra, want] of CA_CASES) {
-  r = run(`dbsetup-ca-${label.replace(/[^a-z]+/g, '-')}`, { ...NOURL, ...extra }, { ctl: { 'migrate-seq': '0', 'derive-url': url } });
-  check(`11n ${label} (main.js gets it)`, r.code === 0 && field(line(r.out, 'main'), 'ca') === want, r.out);
+  r = run(`ca-${label.replace(/[^a-z]+/g, '-')}`, { ...MIGRATE_ON, PG_DATABASE_URL: url, ...extra }, { ctl: { 'migrate-seq': '0' } });
+  check(`11j ${label} (main.js gets it)`, r.code === 0 && field(line(r.out, 'main'), 'ca') === want, r.out);
 }
 
-// 12. Option 2: worker-start.sh. It never runs the bootstrap child and never receives PG_DATABASE_URL: the same target-file
-// rule (any non-empty PG_DATABASE_URL refused), then tini runs the Worker as its child.
-const W = { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), PG_DATABASE_URL: '', DISABLE_DB_MIGRATIONS: 'true' };
-r = run('worker-ok', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
+// 12. worker-start.sh: the same rule. It never runs the bootstrap child; it reads PG_DATABASE_URL, refuses an empty one or an
+// empty password, every admin / second URL and the compose-only passwords; then tini runs the Worker as its child.
+const W = { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), PG_DATABASE_URL: RUNTIME_URL, DISABLE_DB_MIGRATIONS: 'true' };
+r = run('worker-ok', W, { entry: 'worker-start.sh' });
 const wm = line(r.out, 'workermain');
-check('12a worker-start.sh: derive (from the target file), then tini (PID 1, clean environment) runs the Worker with only the derived URL; no bootstrap child, no API', r.code === 0 &&
-  field(line(r.out, 'derive'), 'mode') === 'target' && inOrder(r.out, 'derive', 'workermain') && underTini(r.out, 'workermain') && /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) &&
+check('12a worker-start.sh: tini (PID 1, clean environment) runs the Worker with exactly the given URL and the bundled CA; no bootstrap child, no API', r.code === 0 &&
+  underTini(r.out, 'workermain') && /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) &&
   !line(r.out, 'bootstrap') && !line(r.out, 'main') && field(wm, 'admin') === 'absent' && field(wm, 'admin1') === 'absent' && field(wm, 'url') === hash(RUNTIME_URL) && field(wm, 'ca') === DB_CA, r.out);
-check('12b the Worker keeps PG_DATABASE_URL and gets no CREWFLOW_DB_TARGET_FILE / admin credential variable; nothing secret is printed', keysOf(wm, 'self').includes('PG_DATABASE_URL') &&
-  !['CREWFLOW_DB_TARGET_FILE', 'PG_DATABASE_PASSWORD', 'RUNTIME_URL'].some((k) => keysOf(wm, 'self').includes(k)) && !r.out.includes('derived0123'), r.out);
-r = run('worker-readonly', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL }, dockerArgs: ['--read-only', '--user', '1000:1000'] });
-check('12c read-only root, uid 1000, target read-only (as shipped): the same URL', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'workermain'), 'admin') === 'absent', r.out);
-r = run('worker-password', { ...W, PG_DATABASE_PASSWORD: 'x'.repeat(64) }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-check('12d PG_DATABASE_PASSWORD on the worker service -> refused (64), nothing ran, the value is not echoed', r.code === 64 && /PG_DATABASE_PASSWORD must never be set on the worker service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !r.out.includes('x'.repeat(64)), r.out);
-for (const code of [64, 70]) {
-  r = run(`worker-derive-${code}`, W, { entry: 'worker-start.sh', ctl: { derive: code } });
-  check(`12e the derive step exits ${code} -> the Worker never starts (exit ${code})`, r.code === code && !line(r.out, 'workermain') && /could not build the crewflow_owner connection/.test(r.out), r.out);
+check('12b the Worker keeps PG_DATABASE_URL and gets no target-file, lock or password variable; nothing secret is printed', keysOf(wm, 'self').includes('PG_DATABASE_URL') && NO_FILES(wm) && !r.out.includes(OWNER_PW), r.out);
+// docker-compose.production.yml's ${PG_SSL_CA_CERT_PATH:-} / ${PG_SSL_CA_CERT:-}: both present and EMPTY = both unset.
+r = run('worker-ca-blank', { ...W, PG_SSL_CA_CERT_PATH: '', PG_SSL_CA_CERT: '' }, { entry: 'worker-start.sh' });
+check('12a2 worker-start.sh: both CA settings present and blank (the production compose default) -> the bundled CA', r.code === 0 && field(line(r.out, 'workermain'), 'ca') === DB_CA, r.out);
+r = run('worker-readonly', W, { entry: 'worker-start.sh', dockerArgs: ['--read-only', '--user', '1000:1000'] });
+check('12c read-only root, uid 1000 (as shipped): the same URL', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'workermain'), 'admin') === 'absent', r.out);
+for (const [name, pattern] of [['PG_DATABASE_PASSWORD', /PG_DATABASE_PASSWORD must never be set on the worker service/], ['PG_DATABASE_APP_PASSWORD', /PG_DATABASE_APP_PASSWORD must never be set on the worker service/]]) {
+  r = run(`worker-${name}`, { ...W, [name]: 'x'.repeat(64) }, { entry: 'worker-start.sh' });
+  check(`12d ${name} on the worker service -> refused (64), nothing ran, the value is not echoed`, r.code === 64 && pattern.test(r.out) && !line(r.out, 'workermain') && !/STUB tini/.test(r.out) && !r.out.includes('x'.repeat(64)), r.out);
 }
-r = run('worker-derive-empty', W, { entry: 'worker-start.sh', ctl: { 'derive-empty': '1' } });
-check('12f an empty runtime URL -> refused (70), the Worker never starts', r.code === 70 && !line(r.out, 'workermain'), r.out);
-r = run('worker-no-target', { ...W, ...SEAM(4) }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL }, target: 'absent' });
-check('12g the target file never appears -> waits with a fixed message, then refuses (75) at the bound; the Worker never starts', r.code === 75 && /waiting for db-setup/.test(r.out) && /did not appear within 4s/.test(r.out) && !line(r.out, 'workermain') && !line(r.out, 'bootstrap'), r.out);
-r = run('worker-attempts', { ...W, ...SEAM(4) }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL }, target: 'absent' });
-check('12p security review I2: the Worker wait is bounded by a COUNT of derive attempts (4 s -> exactly 2)', r.code === 75 && (r.out.match(/^STUB derive /gm) || []).length === 2 && /attempt 1 of 2/.test(r.out), r.out);
-r = run('worker-derive-slow', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL, 'derive-slow-ms': '12000' } });
-check('12q A2: the Worker waits for a derive step slower than 10 s and then starts (no restart loop)', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
-r = run('worker-target-late', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL, 'derive-seq': '75,0' } });
-check('12h the target file appears late (75, then 0) -> one wait, then the Worker starts', r.code === 0 && /not there yet/.test(r.out) && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
-r = run('worker-seam-prod', { ...W, CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS: '4' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-check('12i the wait-bound test seam outside NODE_ENV=test -> refused (64)', r.code === 64 && /test seam/.test(r.out) && !line(r.out, 'workermain'), r.out);
-r = run('worker-trap-prod', { ...W, CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-check('12r Part C2: the search_path trap seam outside NODE_ENV=test -> refused (64), nothing ran', r.code === 64 && /CREWFLOW_TEST_SEARCH_PATH_TRAP is a test seam/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
-for (const [label, url] of [['an admin', 'postgresql://doadmin:ADMINSENTINEL2@db-direct.example:25060/d?sslmode=verify-full'], ['a crewflow_owner (option 2: no pass-through on the apps)', 'postgresql://crewflow_owner:ADMINSENTINEL5@db:5432/crewflow?sslmode=verify-full']]) {
-  r = run(`worker-url-${label.replace(/[^a-z]+/g, '-')}`, { ...W, PG_DATABASE_URL: url }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-  check(`12k DENIAL: ${label} PG_DATABASE_URL on rab-worker -> refused (64) before the derive step; the Worker never starts; the value is never printed`, r.code === 64 && /PG_DATABASE_URL must never be set on the worker service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+for (const [label, env] of [['empty', { ...W, PG_DATABASE_URL: '' }], ['unset', Object.fromEntries(Object.entries(W).filter(([k]) => k !== 'PG_DATABASE_URL'))]]) {
+  r = run(`worker-url-${label}`, env, { entry: 'worker-start.sh' });
+  check(`12e DENIAL: PG_DATABASE_URL ${label} on rab-worker -> refused (64); the Worker never starts`, r.code === 64 && /PG_DATABASE_URL is empty/.test(r.out) && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
 }
+r = run('worker-empty-password', { ...W, PG_DATABASE_URL: 'postgresql://crewflow_owner:@db:5432/crewflow?sslmode=verify-full' }, { entry: 'worker-start.sh' });
+check('12f DENIAL: an empty crewflow_owner password -> refused (64); the Worker never starts', r.code === 64 && /PG_DATABASE_URL has an empty crewflow_owner password/.test(r.out) && !line(r.out, 'workermain'), r.out);
+r = run('worker-external', { ...W, PG_DATABASE_URL: 'postgresql://crewflow_owner:pw-external-0123@db-direct.example:25060/d?sslmode=verify-full' }, { entry: 'worker-start.sh' });
+check('12g an external crewflow_owner URL reaches the Worker unchanged, without the bundled CA', r.code === 0 &&
+  field(line(r.out, 'workermain'), 'url') === hash('postgresql://crewflow_owner:pw-external-0123@db-direct.example:25060/d?sslmode=verify-full') && field(line(r.out, 'workermain'), 'ca') === '-', r.out);
+r = run('worker-trap-prod', { ...W, CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true' }, { entry: 'worker-start.sh' });
+check('12h Part C2: the search_path trap seam outside NODE_ENV=test -> refused (64), nothing ran', r.code === 64 && /CREWFLOW_TEST_SEARCH_PATH_TRAP is a test seam/.test(r.out) && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
 for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external admin URL', 'postgresql://doadmin:ADMINSENTINEL2@db-direct.example:25060/d?sslmode=verify-full']]) {
-  r = run(`worker-admin-url-${label.replace(/[^a-z]+/g, '-')}`, { ...W, PG_ADMIN_URL: url }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-  check(`12s DENIAL PG_ADMIN_URL: ${label} on rab-worker -> refused (64) before the derive step; the Worker never starts; the value is never printed`, r.code === 64 && /PG_ADMIN_URL must never be set on the worker service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+  r = run(`worker-admin-url-${label.replace(/[^a-z]+/g, '-')}`, { ...W, PG_ADMIN_URL: url }, { entry: 'worker-start.sh' });
+  check(`12i DENIAL PG_ADMIN_URL: ${label} on rab-worker -> refused (64); the Worker never starts; the value is never printed`, r.code === 64 && /PG_ADMIN_URL must never be set on the worker service/.test(r.out) && !line(r.out, 'workermain') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
 }
 // Security review of PR #230, L-1: the admin URL under another name (the retired PG_DATABASE_ADMIN_URL, db-setup's
 // CREWFLOW_BUNDLED_DB_ADMIN_URL) or ANY variable holding a postgres:// URL, on the API, the one-off and the Worker: refused
@@ -615,203 +535,306 @@ for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external 
     ['KEYWORD_DSN', 'host=db port=5432 dbname=crewflow user=postgres password=ADMINSENTINEL13 sslmode=verify-full', /KEYWORD_DSN holds a PostgreSQL URL or a libpq password DSN/],
   ]) {
     for (const [where, env, opts] of [
-      ['the API', { ...NOURL, [name]: value }, { ctl: DERIVED }],
-      ['the one-off (bootstrap-admin)', { ...NOURL, [name]: value }, { entry: ONE_OFF, ctl: DERIVED }],
-      ['the Worker', { ...W, [name]: value }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } }],
+      ['the API', { ...MIGRATE_ON, [name]: value }, { ctl: { 'migrate-seq': '0' } }],
+      ['the one-off (bootstrap-admin)', { ...MIGRATE_ON, [name]: value }, { entry: ONE_OFF }],
+      ['the Worker', { ...W, [name]: value }, { entry: 'worker-start.sh' }],
     ]) {
       r = run(`l1-${name}-${where.replace(/[^a-z]+/gi, '-')}`, env, opts);
-      check(`12t DENIAL L-1: ${name}=<a postgres URL> on ${where} -> refused (64) before anything runs; the value is never printed`, r.code === 64 && pattern.test(r.out) &&
-        !line(r.out, 'derive') && !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+      check(`12j DENIAL L-1: ${name}=<a postgres URL> on ${where} -> refused (64) before anything runs; the value is never printed`, r.code === 64 && pattern.test(r.out) &&
+        !migrated(r.out) && !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
     }
   }
   // Not a database credential: an https URL, a variable NAMED like a password, a password= with no host/dbname/user.
-  r = run('l1-not-a-dsn-api', { ...NOURL, SENTRY_DSN: 'https://k@o1.ingest.example/1', EMAIL_SMTP_PASSWORD: 'x'.repeat(20), NOTE_VALUE: 'password=1' }, { ctl: DERIVED });
-  check('12v L-1: an https DSN, a *_PASSWORD variable and a bare password= are not refused; the API starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
+  r = run('l1-not-a-dsn-api', { ...BASE, SENTRY_DSN: 'https://k@o1.ingest.example/1', EMAIL_SMTP_PASSWORD: 'x'.repeat(20), NOTE_VALUE: 'password=1' });
+  check('12k L-1: an https DSN, a *_PASSWORD variable and a bare password= are not refused; the API starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
   // The refusal block is literally the same code in both entrypoints.
   const dsnBlock = (file) => { const t = fs.readFileSync(file, 'utf8'); const a1 = t.indexOf('# BEGIN crewflow database-URL refusal'); const b1 = t.indexOf('# END crewflow database-URL refusal'); return a1 >= 0 && b1 > a1 ? t.slice(a1, b1) : null; };
-  check('12w the database-URL refusal block is identical in api-prestart.sh and worker-start.sh', dsnBlock(PRESTART) !== null && dsnBlock(PRESTART) === dsnBlock(WORKER_START), 'the BEGIN/END crewflow database-URL refusal blocks differ');
-  r = run('l2-admin-url-pinned-empty-api', { ...NOURL, PG_ADMIN_URL: '' }, { ctl: DERIVED });
-  check('12u L-2: PG_ADMIN_URL="" (the compose pin) on the API is accepted; main.js starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
-  r = run('l2-admin-url-pinned-empty-worker', { ...W, PG_ADMIN_URL: '' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-  check('12u2 L-2: PG_ADMIN_URL="" (the compose pin) on the Worker is accepted; the Worker starts', r.code === 0 && Boolean(line(r.out, 'workermain')), r.out);
+  check('12l the database-URL refusal block is identical in api-prestart.sh and worker-start.sh', dsnBlock(PRESTART) !== null && dsnBlock(PRESTART) === dsnBlock(WORKER_START), 'the BEGIN/END crewflow database-URL refusal blocks differ');
+  r = run('l2-admin-url-pinned-empty-api', { ...BASE, PG_ADMIN_URL: '' });
+  check('12m L-2: PG_ADMIN_URL="" (the compose pin) on the API is accepted; main.js starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
+  r = run('l2-admin-url-pinned-empty-worker', { ...W, PG_ADMIN_URL: '' }, { entry: 'worker-start.sh' });
+  check('12m2 L-2: PG_ADMIN_URL="" (the compose pin) on the Worker is accepted; the Worker starts', r.code === 0 && Boolean(line(r.out, 'workermain')), r.out);
 }
-r = run('worker-url-unset', { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), DISABLE_DB_MIGRATIONS: 'true' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
-check('12j PG_DATABASE_URL unset (not just empty) -> the target-file path; the Worker gets the derived URL', r.code === 0 && field(line(r.out, 'derive'), 'mode') === 'target' && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
-r = run('worker-args', W, { entry: 'worker-start.sh node x.js', ctl: { 'derive-url': RUNTIME_URL } });
-check('12m worker-start.sh with arguments -> refused (64), nothing ran', r.code === 64 && /takes no arguments/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
+r = run('worker-args', W, { entry: 'worker-start.sh node x.js' });
+check('12n worker-start.sh with arguments -> refused (64), nothing ran', r.code === 64 && /takes no arguments/.test(r.out) && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
 
 // 13. The owner CLI one-off (`docker compose run --rm --no-deps rab-api node .../command/main.js <cmd>`): api-prestart.sh keeps
-// every refusal, builds the same crewflow_owner URL (from the target file), then execs tini with the arguments.
+// every refusal, keeps the same PG_DATABASE_URL (from the environment: an OpenShip terminal or `run -e` works the same),
+// then execs tini with the arguments.
 const ONEOFF = 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command';
-r = run('oneoff', NOURL, { entry: ONEOFF, ctl: { 'derive-url': RUNTIME_URL } });
+r = run('oneoff', BASE, { entry: ONEOFF });
 const cmdLine = line(r.out, 'command');
-check('13a one-off: derive (from the target file), then tini (PID 1, clean) runs the command with only the derived URL; no bootstrap, migration, registration or API', r.code === 0 &&
-  field(line(r.out, 'derive'), 'mode') === 'target' && /STUB tini pid=1 admin=absent pgpw=absent argc=3/.test(r.out) && / ppid=1 /.test(cmdLine) && field(cmdLine, 'admin') === 'absent' && field(cmdLine, 'admin1') === 'absent' &&
+check('13a one-off: tini (PID 1, clean) runs the command with exactly the given URL; no bootstrap, migration, registration or API', r.code === 0 &&
+  /STUB tini pid=1 admin=absent pgpw=absent argc=3/.test(r.out) && / ppid=1 /.test(cmdLine) && field(cmdLine, 'admin') === 'absent' && field(cmdLine, 'admin1') === 'absent' &&
   field(cmdLine, 'url') === hash(RUNTIME_URL) && !line(r.out, 'bootstrap') && !line(r.out, 'twentymigrate') && !line(r.out, 'check') && !line(r.out, 'register') && !line(r.out, 'main') &&
   /one-off command: running it as crewflow_owner/.test(r.out), r.out);
-for (const [name, value] of [['CREWFLOW_MIGRATION_DATABASE_URL', 'postgres://x@db/rab'], ['PG_DATABASE_PASSWORD', 'x'.repeat(40)], ['CREWFLOW_OPS_RUN', 'one-off'], ['CREWFLOW_MIGRATION_APPROVED', `pending-1-${'0'.repeat(64)}`]]) {
-  r = run(`oneoff-forbidden-${name}`, { ...NOURL, [name]: value }, { entry: ONEOFF, ctl: { 'derive-url': RUNTIME_URL } });
-  check(`13b one-off: every other refusal still applies (${name} refused, 64), nothing ran`, r.code === 64 && !line(r.out, 'derive') && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
+for (const [name, value] of [['CREWFLOW_MIGRATION_DATABASE_URL', 'postgres://x@db/rab'], ['PG_DATABASE_PASSWORD', 'x'.repeat(40)], ['PG_DATABASE_APP_PASSWORD', 'x'.repeat(40)], ['CREWFLOW_OPS_RUN', 'one-off'], ['CREWFLOW_MIGRATION_APPROVED', `pending-1-${'0'.repeat(64)}`], ['BOOTSTRAP_ADMIN_PASSWORD', 'x']]) {
+  r = run(`oneoff-forbidden-${name}`, { ...BASE, [name]: value }, { entry: ONEOFF });
+  check(`13b one-off: every other refusal still applies (${name} refused, 64), nothing ran`, r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
 }
-r = run('oneoff-derive-fails', NOURL, { entry: ONEOFF, ctl: { derive: 64 } });
-check('13c one-off: a failed derive step -> refused (64); the command never runs', r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
+r = run('oneoff-no-url', { ...BASE, PG_DATABASE_URL: '' }, { entry: ONEOFF });
+check('13c one-off without PG_DATABASE_URL -> refused (64); the command never runs', r.code === 64 && /PG_DATABASE_URL is empty/.test(r.out) && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
 // The owner CLI's per-invocation authority (DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS on `docker compose run -e`): handed to
 // the one-off command only; the API start keeps refusing both (case 3).
-r = run('oneoff-authority', { ...NOURL, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js bootstrap-admin', ctl: { 'derive-url': RUNTIME_URL } });
-check('13d one-off: DB_TARGET and ALLOW_PRODUCTION_DB_COMMANDS reach the command (and only through this path); the URL is still the derived one', r.code === 0 &&
+r = run('oneoff-authority', { ...BASE, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js bootstrap-admin' });
+check('13d one-off: DB_TARGET and ALLOW_PRODUCTION_DB_COMMANDS reach the command (and only through this path); the URL is unchanged', r.code === 0 &&
   ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS'].every((k) => keysOf(line(r.out, 'command'), 'self').includes(k)) && field(line(r.out, 'command'), 'url') === hash(RUNTIME_URL) &&
   field(line(r.out, 'command'), 'admin') === 'absent' && !line(r.out, 'bootstrap'), r.out);
-r = run('api-authority', { ...NOURL, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }, { ctl: DERIVED });
-check('13e the API start (no arguments) with DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'derive') && !line(r.out, 'main') && !/STUB tini/.test(r.out), r.out);
-r = run('oneoff-no-target', { ...NOURL, ...SEAM(3) }, { entry: ONEOFF, ctl: { 'derive-url': RUNTIME_URL }, target: 'absent' });
-check('13f one-off before db-setup ever ran (no target file) -> waits, then refuses (75); the command never runs', r.code === 75 && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
-r = run('oneoff-admin-url', { ...MIGRATE_ON, PG_DATABASE_URL: ADMIN_URL }, { entry: ONEOFF, ctl: { 'derive-url': RUNTIME_URL } });
-check('13g DENIAL: a one-off with an admin URL (`run -e PG_DATABASE_URL=<admin>`) -> refused (64); the command never runs', r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
-r = run('oneoff-owner-url', { ...MIGRATE_ON, PG_DATABASE_URL: 'postgresql://crewflow_owner:ADMINSENTINEL5@db:5432/crewflow?sslmode=verify-full' }, { entry: ONEOFF, ctl: { 'derive-url': RUNTIME_URL } });
-check('13h DENIAL (option 2): a one-off with a crewflow_owner URL -> refused (64) too; the command never runs', r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+r = run('api-authority', { ...BASE, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' });
+check('13e the API start (no arguments) with DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'main') && !/STUB tini/.test(r.out), r.out);
 
-// 14. Option 2: db-setup.sh, the one-shot service's entrypoint and the ONLY holder of PG_ADMIN_URL (owner decision
-// 2026-11-17). It removes the old target, runs the bootstrap child (with PG_ADMIN_URL, or a crewflow_owner PG_DATABASE_URL,
-// and CREWFLOW_DB_TARGET_FILE), checks that the target file was written, and starts nothing else. A crewflow_owner URL
-// (pass-through) takes the same path: the child writes the target. The bundled mode (neither URL) hands the child the
-// compose-built CREWFLOW_BUNDLED_DB_ADMIN_URL as PG_ADMIN_URL. Twenty Helm model: db-setup never receives APP_SECRET (14f).
-const S = { NODE_ENV: 'production', PG_ADMIN_URL: ADMIN_URL };
-const setupDir = (name, stale) => {
-  const d = path.join(work, `setup-${name}`);
-  fs.mkdirSync(d, { recursive: true });
-  if (stale) fs.writeFileSync(path.join(d, 'target.json'), 'STALE');
-  return d;
-};
-const targetText = (d) => { try { return fs.readFileSync(path.join(d, 'target.json'), 'utf8'); } catch { return null; } };
-const passwordText = (d) => { try { return fs.readFileSync(path.join(d, 'owner-password'), 'utf8'); } catch { return null; } };
-let sd = setupDir('ok', true);
-r = run('setup-ok', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-check('14a db-setup.sh: the bootstrap child runs with the admin URL and CREWFLOW_DB_TARGET_FILE; the target file is written (the stale one replaced); exit 0', r.code === 0 &&
-  field(line(r.out, 'bootstrap'), 'admin') === 'present' && field(line(r.out, 'bootstrap'), 'aurl') === hash(ADMIN_URL) && field(line(r.out, 'bootstrap'), 'url') === hash('') && field(line(r.out, 'bootstrap'), 'tf') === 'set' &&
-  /db-setup: done \(crewflow_owner ready/.test(r.out) && /"v":1/.test(targetText(sd) ?? ''), r.out);
-check('14a2 the crewflow_owner password file is stored beside the target; APP_SECRET never reached the child', passwordText(sd) === 'stubpassword0123' && !keysOf(line(r.out, 'bootstrap'), 'self').includes('APP_SECRET'), r.out);
-check('14b db-setup.sh starts nothing else (no derive, API, Worker, migration, tini) and never prints the admin URL', !line(r.out, 'derive') && !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'twentymigrate') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+// 14. db-setup.sh, the one-shot service's entrypoint and the ONLY holder of an admin login. It picks the mode (a: bundled
+// superuser from CREWFLOW_BUNDLED_DB_ADMIN_URL; b: PG_ADMIN_URL; c: PG_DATABASE_URL only), runs the bootstrap child with
+// PG_DATABASE_URL (always) and PG_ADMIN_URL (a, b), and starts nothing else. It writes NO file and takes no file lock.
+const EXT_ADMIN = 'postgresql://doadmin:ADMINSENTINEL7@db-direct.example:25060/d?sslmode=verify-full';
+const EXT_OWNER = 'postgresql://crewflow_owner:pw-external-0123@db-direct.example:25060/d?sslmode=verify-full';
+const BUNDLED_ADMIN_EMPTY = 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full';
+const BUNDLED = { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: '', PG_DATABASE_URL: RUNTIME_URL, CREWFLOW_BUNDLED_DB_ADMIN_URL: ADMIN_URL };
+const MODE_B = { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '0', PG_ADMIN_URL: EXT_ADMIN, PG_DATABASE_URL: EXT_OWNER, CREWFLOW_BUNDLED_DB_ADMIN_URL: BUNDLED_ADMIN_EMPTY };
+const MODE_C = { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '0', PG_ADMIN_URL: '', PG_DATABASE_URL: EXT_OWNER, CREWFLOW_BUNDLED_DB_ADMIN_URL: BUNDLED_ADMIN_EMPTY };
+const SETUP_RO = ['--read-only', '--user', '1000:1000'];
+const boot = (out) => line(out, 'bootstrap');
+r = run('setup-bundled', BUNDLED, { entry: 'db-setup.sh', dockerArgs: SETUP_RO });
+check('14a mode (a): the bundled superuser URL reaches the child as PG_ADMIN_URL, with PG_DATABASE_URL (the bundled crewflow_owner URL) and the bundled CA; never under its compose name; exit 0',
+  r.code === 0 && /db-setup: mode bundled/.test(r.out) && field(boot(r.out), 'admin') === 'present' && field(boot(r.out), 'aurl') === hash(ADMIN_URL) && field(boot(r.out), 'url') === hash(RUNTIME_URL) &&
+  field(boot(r.out), 'ca') === DB_CA && !keysOf(boot(r.out), 'self').includes('CREWFLOW_BUNDLED_DB_ADMIN_URL') && /db-setup: done \(crewflow_owner ready for PG_DATABASE_URL\)/.test(r.out), r.out);
+check('14b ... read-only root, uid 1000, NO writable volume (as shipped): db-setup needs none; no target, lock or password variable reaches the child; APP_SECRET never did; nothing secret printed',
+  NO_FILES(boot(r.out)) && field(boot(r.out), 'tf') === '-' && !keysOf(boot(r.out), 'self').includes('APP_SECRET') && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
+check('14c db-setup.sh starts nothing else (no API, Worker, migration, tini)', !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'twentymigrate') && !/STUB tini/.test(r.out), r.out);
+r = run('setup-mode-b', MODE_B, { entry: 'db-setup.sh', dockerArgs: SETUP_RO });
+check('14d mode (b): PG_ADMIN_URL AND PG_DATABASE_URL both set is the normal admin mode: the child gets both, no bundled URL, no bundled CA; exit 0',
+  r.code === 0 && /db-setup: mode admin/.test(r.out) && field(boot(r.out), 'aurl') === hash(EXT_ADMIN) && field(boot(r.out), 'url') === hash(EXT_OWNER) && field(boot(r.out), 'ca') === '-' &&
+  !keysOf(boot(r.out), 'self').includes('CREWFLOW_BUNDLED_DB_ADMIN_URL'), r.out);
+r = run('setup-mode-b-bundled-1', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1' }, { entry: 'db-setup.sh', dockerArgs: SETUP_RO });
+check('14d2 PG_ADMIN_URL with CREWFLOW_BUNDLED_DB=1 -> still mode admin (the bundled db runs unused); the bundled superuser URL is dropped', r.code === 0 && /db-setup: mode admin/.test(r.out) && field(boot(r.out), 'aurl') === hash(EXT_ADMIN), r.out);
+r = run('setup-mode-c', MODE_C, { entry: 'db-setup.sh', dockerArgs: SETUP_RO });
+check('14e mode (c): CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL only -> the child gets only the crewflow_owner URL (no admin, no bundled URL); exit 0',
+  r.code === 0 && /db-setup: mode owner/.test(r.out) && field(boot(r.out), 'url') === hash(EXT_OWNER) && field(boot(r.out), 'aurl') === hash('') && field(boot(r.out), 'admin') === 'absent' &&
+  !keysOf(boot(r.out), 'self').includes('CREWFLOW_BUNDLED_DB_ADMIN_URL'), r.out);
 for (const code of [64, 70, 1]) {
-  sd = setupDir(`bootstrap-${code}`, true);
-  r = run(`setup-bootstrap-${code}`, S, { entry: 'db-setup.sh', ctl: { bootstrap: code }, target: 'rw', targetDir: sd });
-  check(`14c the bootstrap child exits ${code} -> db-setup exits ${code}; no target file is left (the stale one was removed first)`, r.code === code && targetText(sd) === null && /the database setup step (refused|failed)/.test(r.out), r.out);
+  r = run(`setup-bootstrap-${code}`, MODE_B, { entry: 'db-setup.sh', ctl: { bootstrap: code } });
+  check(`14f the bootstrap child exits ${code} -> db-setup exits ${code} with a fixed line`, r.code === code && /the database setup step (refused|failed)/.test(r.out) && !/db-setup: done/.test(r.out), r.out);
 }
-sd = setupDir('keeps-password', true);
-fs.writeFileSync(path.join(sd, 'owner-password'), 'existingpassword');
-r = run('setup-keeps-password', S, { entry: 'db-setup.sh', ctl: { bootstrap: 64 }, target: 'rw', targetDir: sd });
-check('14c2 a refused setup removes the target but NEVER the crewflow_owner password file (the credential of an existing role)', r.code === 64 && targetText(sd) === null && passwordText(sd) === 'existingpassword', r.out);
-sd = setupDir('no-password-file', true);
-r = run('setup-no-password-file', S, { entry: 'db-setup.sh', ctl: { 'no-password-file': '1' }, target: 'rw', targetDir: sd });
-check('14d2 the child reports success but no password file exists -> db-setup refuses (70) and removes the target (the apps keep waiting)', r.code === 70 && targetText(sd) === null && /no crewflow_owner password file exists/.test(r.out), r.out);
-sd = setupDir('no-target', true);
-r = run('setup-no-target', S, { entry: 'db-setup.sh', ctl: { 'no-target': '1' }, target: 'rw', targetDir: sd });
-check('14d the child reports success but writes no target file -> db-setup refuses (70): rab-api would otherwise wait for nothing', r.code === 70 && targetText(sd) === null && /wrote no target file/.test(r.out), r.out);
-sd = setupDir('pass-through', true);
-const P = { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '0', PG_DATABASE_URL: RUNTIME_URL };
-r = run('setup-pass-through', P, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-check('14e mode (c) pass-through: a crewflow_owner PG_DATABASE_URL -> the bootstrap child runs with it ONLY (no PG_ADMIN_URL) and writes the target (the stale one replaced); exit 0', r.code === 0 &&
-  field(line(r.out, 'bootstrap'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'bootstrap'), 'aurl') === hash('') && field(line(r.out, 'bootstrap'), 'tf') === 'set' && /"v":1/.test(targetText(sd) ?? '') && /db-setup: done \(crewflow_owner ready/.test(r.out), r.out);
-sd = setupDir('pass-through-no-target', true);
-r = run('setup-pass-through-no-target', P, { entry: 'db-setup.sh', ctl: { 'no-target': '1' }, target: 'rw', targetDir: sd });
-check('14j option 2 pass-through: success without a target file -> db-setup refuses (70) (no pass-through shortcut any more)', r.code === 70 && targetText(sd) === null && /wrote no target file/.test(r.out), r.out);
 for (const [label, env, entry, pattern] of [
-  ['arguments', S, 'db-setup.sh sh', /takes no arguments/],
-  ['PG_DATABASE_PASSWORD', { ...S, PG_DATABASE_PASSWORD: 'y'.repeat(64) }, 'db-setup.sh', /PG_DATABASE_PASSWORD must never reach a container/],
-  ['CREWFLOW_BUNDLED_DB=0 without PG_ADMIN_URL or PG_DATABASE_URL', { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '0', PG_ADMIN_URL: '', PG_DATABASE_URL: '', CREWFLOW_BUNDLED_DB_ADMIN_URL: 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full' }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) needs PG_ADMIN_URL/],
-  ['the bundled db without PG_DATABASE_PASSWORD (fail closed, no compose :?)', { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: '', PG_DATABASE_URL: '', CREWFLOW_BUNDLED_DB_ADMIN_URL: 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full' }, 'db-setup.sh', /PG_DATABASE_PASSWORD is required for the bundled database/],
-  ['no database setting at all (no bundled URL in the definition)', { NODE_ENV: 'production' }, 'db-setup.sh', /the bundled database URL is missing from this service definition/],
-  ['a CREWFLOW_BUNDLED_DB other than 0 or 1', { ...S, CREWFLOW_BUNDLED_DB: 'yes' }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB must be exactly 0/],
-  ['APP_SECRET (Twenty Helm model: never part of a database credential)', { ...S, APP_SECRET: 'y'.repeat(64) }, 'db-setup.sh', /APP_SECRET must never reach db-setup/],
+  ['an unknown argument', MODE_B, 'db-setup.sh sh', /takes no argument, or exactly one: harden/],
+  ['harden plus another argument', MODE_B, 'db-setup.sh harden now', /takes no argument, or exactly one: harden/],
+  // Security review of PR #246, L2: an old compose.env with the admin URL in PG_DATABASE_URL, refused in shell before node.
+  ['an admin login in PG_DATABASE_URL (mode b; an old compose.env)', { ...MODE_B, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL/],
+  ['an admin login in PG_DATABASE_URL (mode c)', { ...MODE_C, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['an admin login in PG_DATABASE_URL (bundled)', { ...BUNDLED, PG_DATABASE_URL: ADMIN_URL }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['a look-alike login (crewflow_owner2) in PG_DATABASE_URL', { ...MODE_C, PG_DATABASE_URL: EXT_OWNER.replace('crewflow_owner:', 'crewflow_owner2:') }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['a PG_DATABASE_URL without userinfo', { ...MODE_C, PG_DATABASE_URL: 'postgresql://db-direct.example:25060/d?sslmode=verify-full' }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['a PG_ADMIN_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_URL logs in as crewflow_owner, the app login/],
+  ['an admin login in PG_DATABASE_URL (db-harden)', { ...MODE_B, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh harden', /db-harden: REFUSED - PG_DATABASE_URL does not log in as crewflow_owner/],
+  // Owner decision 2026-11-20: the password rotation opt-in reaches db-setup only; db-harden refuses it.
+  ['the rotation opt-in on db-harden', { ...MODE_B, CREWFLOW_ROTATE_APP_PASSWORD: '1' }, 'db-setup.sh harden', /db-harden: REFUSED - CREWFLOW_ROTATE_APP_PASSWORD must never reach db-harden/],
+  // Owner decision M1: db-harden's bounded wait, validated in shell.
+  ['a non-numeric harden timeout', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '20m' }, 'db-setup.sh harden', /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be a whole number of seconds from 60 to 7200/],
+  ['a harden timeout below 60 in production', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '59' }, 'db-setup.sh harden', /from 60 to 7200/],
+  ['a harden timeout above 7200', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '7201' }, 'db-setup.sh harden', /from 60 to 7200/],
+  ['a huge harden timeout', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '99999999999999999999' }, 'db-setup.sh harden', /from 60 to 7200/],
+  ['a zero harden timeout under NODE_ENV=test', { ...MODE_B, NODE_ENV: 'test', CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '0' }, 'db-setup.sh harden', /from 1 to 7200/],
+  ['PG_DATABASE_PASSWORD', { ...MODE_B, PG_DATABASE_PASSWORD: 'y'.repeat(64) }, 'db-setup.sh', /PG_DATABASE_PASSWORD must never reach a container but the bundled db/],
+  ['PG_DATABASE_APP_PASSWORD', { ...MODE_B, PG_DATABASE_APP_PASSWORD: 'y'.repeat(64) }, 'db-setup.sh', /PG_DATABASE_APP_PASSWORD must never reach a container/],
+  ['APP_SECRET (never part of a database credential)', { ...MODE_B, APP_SECRET: 'y'.repeat(64) }, 'db-setup.sh', /APP_SECRET must never reach db-setup/],
+  ['a CREWFLOW_BUNDLED_DB other than 0 or 1', { ...MODE_B, CREWFLOW_BUNDLED_DB: 'yes' }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB must be exactly 0/],
+  ['an empty PG_DATABASE_URL', { ...MODE_B, PG_DATABASE_URL: '' }, 'db-setup.sh', /PG_DATABASE_URL is empty: it is always required/],
+  ['an unset PG_DATABASE_URL', Object.fromEntries(Object.entries(MODE_B).filter(([k]) => k !== 'PG_DATABASE_URL')), 'db-setup.sh', /PG_DATABASE_URL is empty: it is always required/],
+  ['an empty crewflow_owner password (PG_DATABASE_APP_PASSWORD unset)', { ...BUNDLED, PG_DATABASE_URL: 'postgresql://crewflow_owner:@db:5432/crewflow?sslmode=verify-full' }, 'db-setup.sh', /the crewflow_owner password in PG_DATABASE_URL is empty/],
+  ['the bundled db without PG_DATABASE_PASSWORD (fail closed, no compose :?)', { ...BUNDLED, CREWFLOW_BUNDLED_DB_ADMIN_URL: BUNDLED_ADMIN_EMPTY }, 'db-setup.sh', /PG_DATABASE_PASSWORD is required for the bundled database/],
+  ['the bundled db with no bundled URL in the definition', Object.fromEntries(Object.entries(BUNDLED).filter(([k]) => k !== 'CREWFLOW_BUNDLED_DB_ADMIN_URL')), 'db-setup.sh', /the bundled database URL is missing from this service definition/],
+  ['a bundled crewflow_owner password shorter than 32', { ...BUNDLED, PG_DATABASE_URL: 'postgresql://crewflow_owner:short0123@db:5432/crewflow?sslmode=verify-full' }, 'db-setup.sh', /PG_DATABASE_APP_PASSWORD must be 32\+ characters/],
+  ['a bundled crewflow_owner password with a character outside A-Z a-z 0-9 _ -', { ...BUNDLED, PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}.x@db:5432/crewflow?sslmode=verify-full` }, 'db-setup.sh', /PG_DATABASE_APP_PASSWORD must be 32\+ characters/],
+  ['CREWFLOW_BUNDLED_DB=0 (mode c) with a PG_DATABASE_URL still on host db', { ...MODE_C, PG_DATABASE_URL: RUNTIME_URL }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) but PG_DATABASE_URL still names the bundled host db/],
+  ['CREWFLOW_BUNDLED_DB=0 (mode b) with a PG_DATABASE_URL still on host db', { ...MODE_B, PG_DATABASE_URL: RUNTIME_URL }, 'db-setup.sh', /CREWFLOW_BUNDLED_DB=0 \(your own database\) but PG_DATABASE_URL still names the bundled host db/],
+  // Owner decision 2026-11-19 / security review F6 of #259: the URL compose built from PG_DATABASE_APP_PASSWORD and
+  // PG_DATABASE_HOST (set) is checked at run time; PG_ADMIN_DIRECT_URL and PG_DATABASE_SESSION_URL login rules.
+  ['a built URL with a short password', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: 'postgresql://crewflow_owner:short0123@db-direct.example:25060/d?sslmode=verify-full' }, 'db-setup.sh', /the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST/],
+  ['a built URL whose host carries a brace', { ...MODE_B, PG_DATABASE_HOST: 'db{x}', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db{x}:25060/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port is not digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25x/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port has more than 5 digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:250600/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port smuggles its own query (PG_DATABASE_PORT=5432/x?sslmode=disable&y=)', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '5432/x?sslmode=disable&y=', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:5432/x?sslmode=disable&y=/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['PG_ADMIN_DIRECT_URL without PG_ADMIN_URL', { ...MODE_C, PG_ADMIN_DIRECT_URL: EXT_ADMIN }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL/],
+  ['a PG_ADMIN_DIRECT_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_DIRECT_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL logs in as crewflow_owner/],
+  ['a PG_DATABASE_SESSION_URL that is not crewflow_owner', { ...MODE_B, PG_DATABASE_SESSION_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_SESSION_URL does not log in as crewflow_owner/],
 ]) {
-  sd = setupDir(`refuse-${label.replace(/[^a-z]+/gi, '-')}`, false);
-  r = run(`setup-refuse-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry, target: 'rw', targetDir: sd });
-  check(`14f db-setup.sh refuses ${label} (64) before anything runs; nothing is printed of the value`, r.code === 64 && pattern.test(r.out) && !line(r.out, 'bootstrap') && !r.out.includes('y'.repeat(64)), r.out);
+  r = run(`setup-refuse-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry });
+  check(`14g db-setup.sh refuses ${label} (64) before the child runs; nothing is printed of the value`, r.code === 64 && pattern.test(r.out) && !boot(r.out) &&
+    !r.out.includes('y'.repeat(64)) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
 }
-for (const [label, url, extra, want] of [
-  ['host db, CA unset -> the bundled CA', ADMIN_URL, {}, DB_CA],
-  ['host db, CA set -> kept', ADMIN_URL, { PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],
-  ['external host -> not set', 'postgresql://doadmin:p@db-direct.example:25060/defaultdb?sslmode=verify-full', {}, '-'],
+// Re-review N3 of #259: a well-formed built URL (exactly /<name>?sslmode=verify-full after the port) still passes.
+r = run('setup-built-ok', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
+check('14g2 db-setup.sh accepts a well-formed built URL (the child runs)', r.code === 0 && !/is malformed/.test(r.out) && !!boot(r.out), r.out);
+// #257 + #259 combined (OpenShip): PG_ADMIN_URL with sslmode=require and the built crewflow_owner URL reach the child.
+r = run('setup-admin-require', { ...MODE_B, PG_ADMIN_URL: EXT_ADMIN.replace('verify-full', 'require'), PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
+check('14g3 db-setup.sh accepts PG_ADMIN_URL with sslmode=require (the child runs)', r.code === 0 && !!boot(r.out), r.out);
+for (const [label, env, want] of [
+  // docker-compose.production.yml's db-setup: ${PG_SSL_CA_CERT_PATH:-} / ${PG_SSL_CA_CERT:-}, both present and EMPTY.
+  ['mode a (bundled db), both CA settings blank -> the bundled CA', { ...BUNDLED, PG_SSL_CA_CERT_PATH: '', PG_SSL_CA_CERT: '' }, DB_CA],
+  ['mode b, admin on host db, CA unset -> the bundled CA', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL }, DB_CA],
+  ['mode b, admin on host db, CA set -> kept', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL, PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],
+  ['mode c, external host -> not set', MODE_C, '-'],
 ]) {
-  sd = setupDir(`ca-${label.replace(/[^a-z]+/g, '-')}`, false);
-  r = run(`setup-ca-${label.replace(/[^a-z]+/g, '-')}`, { ...S, PG_ADMIN_URL: url, ...extra }, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-  check(`14g db-setup.sh CA: ${label} (the bootstrap child gets it)`, r.code === 0 && field(line(r.out, 'bootstrap'), 'ca') === want, r.out);
+  r = run(`setup-ca-${label.replace(/[^a-z]+/g, '-')}`, env, { entry: 'db-setup.sh' });
+  check(`14h db-setup.sh CA: ${label} (the bootstrap child gets it)`, r.code === 0 && field(boot(r.out), 'ca') === want, r.out);
 }
-sd = setupDir('ca-pass-through-db', false);
-r = run('setup-ca-pass-through-db', { NODE_ENV: 'production', PG_DATABASE_URL: RUNTIME_URL }, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-check('14g2 db-setup.sh CA: a crewflow_owner PG_DATABASE_URL on host db -> the bundled CA too', r.code === 0 && field(line(r.out, 'bootstrap'), 'ca') === DB_CA, r.out);
-// Mode (a), the bundled db (owner decision 2026-11-17): neither URL set -> the compose-built bundled URL becomes the child's
-// PG_ADMIN_URL; the bundled URL variable itself never reaches the child. Mode (b): PG_ADMIN_URL wins and the bundled URL is
-// dropped (CREWFLOW_BUNDLED_DB=0: no password, so it has an empty one).
+
+// 16. Security review of PR #246, L2: rab-api, the owner CLI one-off and rab-worker refuse a PG_DATABASE_URL whose login is
+// not crewflow_owner (a pure shell userinfo parse; an old compose.env with the admin URL there) with exit 64 BEFORE any node
+// process runs. The percent-encoded underscore form of crewflow_owner is the same login and is accepted.
 {
-  const BUNDLED = { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: '', PG_DATABASE_URL: '', CREWFLOW_BUNDLED_DB_ADMIN_URL: ADMIN_URL };
-  sd = setupDir('bundled', true);
-  r = run('setup-bundled', BUNDLED, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-  check('14t mode (a): the bundled superuser URL reaches the child as PG_ADMIN_URL (CA = the bundled db\'s), never under its compose name; exit 0',
-    r.code === 0 && field(line(r.out, 'bootstrap'), 'aurl') === hash(ADMIN_URL) && field(line(r.out, 'bootstrap'), 'url') === hash('') && field(line(r.out, 'bootstrap'), 'ca') === DB_CA &&
-    !keysOf(line(r.out, 'bootstrap'), 'self').includes('CREWFLOW_BUNDLED_DB_ADMIN_URL') && !r.out.includes('ADMINSENTINEL'), r.out);
-  const EXT = 'postgresql://doadmin:ADMINSENTINEL7@db-direct.example:25060/d?sslmode=verify-full';
-  sd = setupDir('own-admin', true);
-  r = run('setup-own-admin', { NODE_ENV: 'production', CREWFLOW_BUNDLED_DB: '0', PG_ADMIN_URL: EXT, PG_DATABASE_URL: '', CREWFLOW_BUNDLED_DB_ADMIN_URL: 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full' }, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-  check('14u mode (b): CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL, no PG_DATABASE_PASSWORD -> the child gets that admin URL only (the empty-password bundled URL is dropped); exit 0',
-    r.code === 0 && field(line(r.out, 'bootstrap'), 'aurl') === hash(EXT) && field(line(r.out, 'bootstrap'), 'ca') === '-' && !keysOf(line(r.out, 'bootstrap'), 'self').includes('CREWFLOW_BUNDLED_DB_ADMIN_URL'), r.out);
-  sd = setupDir('own-owner', true);
-  r = run('setup-own-owner', { ...P, PG_ADMIN_URL: '', CREWFLOW_BUNDLED_DB_ADMIN_URL: 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full' }, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-  check('14v mode (c): CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL, no PG_ADMIN_URL, no password -> the child gets only the crewflow_owner URL; exit 0',
-    r.code === 0 && field(line(r.out, 'bootstrap'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'bootstrap'), 'aurl') === hash('') && !keysOf(line(r.out, 'bootstrap'), 'self').includes('CREWFLOW_BUNDLED_DB_ADMIN_URL'), r.out);
-}
-{
-  const temps = ['.owner-password.12.abcdef.tmp', '.owner-password.next.13.abcdef.tmp', '.target.json.14.abcdef.tmp'];
-  const FOREIGN = JSON.stringify({ v: 1, token: 'f'.repeat(32), host: 'other', pid: 7, boot: null, started: Date.now() });
-  // [label, ctl, a lock held by ANOTHER run before the start, expected exit, temps + target removed?]
-  for (const [label, ctl, foreign, want, removed] of [
-    ['failure, this run holds the lock', { bootstrap: 70 }, false, 70, true],
-    ['failure, another run holds the lock (F1)', { bootstrap: 70, 'no-lock': '1' }, true, 70, false],
+  const L2_ADMIN = 'postgresql://doadmin:ADMINSENTINEL9@db-direct.example:25060/d?sslmode=verify-full';
+  const NODE_STUBS = ['check', 'main', 'register', 'command', 'workermain', 'bootstrap', 'twentymigrate'];
+  const noNode = (out) => NODE_STUBS.every((n) => !line(out, n)) && !/STUB tini/.test(out);
+  for (const [label, entry, env] of [
+    ['rab-api', 'api-prestart.sh', { ...BASE, PG_DATABASE_URL: L2_ADMIN }],
+    ['rab-api (the bundled superuser URL)', 'api-prestart.sh', { ...BASE, PG_DATABASE_URL: ADMIN_URL }],
+    ['the owner CLI one-off', 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js bootstrap-admin', { ...BASE, PG_DATABASE_URL: L2_ADMIN }],
+    ['rab-worker', 'worker-start.sh', { ...W, PG_DATABASE_URL: L2_ADMIN }],
+    ['rab-worker (no userinfo)', 'worker-start.sh', { ...W, PG_DATABASE_URL: 'postgresql://db-direct.example:25060/d?sslmode=verify-full' }],
   ]) {
-    sd = setupDir(`temps-${label.replace(/[^a-z0-9]+/gi, '-')}`, true);
-    for (const t of temps) fs.writeFileSync(path.join(sd, t), 'partial');
-    fs.writeFileSync(path.join(sd, 'owner-password.next'), 'pendingpassword1');
-    if (foreign) {
-      fs.mkdirSync(path.join(sd, '.db-setup.lock'));
-      fs.writeFileSync(path.join(sd, '.db-setup.lock', 'owner'), FOREIGN);
-    }
-    r = run(`setup-temps-${label.replace(/[^a-z0-9]+/gi, '-')}`, S, { entry: 'db-setup.sh', ctl, target: 'rw', targetDir: sd });
-    const left = fs.readdirSync(sd);
-    const gone = temps.every((t) => !left.includes(t)) && !left.includes('target.json');
-    const kept = temps.every((t) => left.includes(t)) && left.includes('target.json');
-    check(`14k security review L2/F1 (${label}): db-setup removes the temp files and the target ${removed ? 'because it holds the run lock' : 'NEVER (another run holds the lock: its in-flight files are not touched)'}; the pending owner-password.next is kept`,
-      r.code === want && (removed ? gone : kept) && left.includes('owner-password.next'), `${left.join(',')}\n${r.out}`);
-    if (foreign) check('14m F1: a run lock held by another run survives this run (db-setup.sh releases only its own token)', fs.readFileSync(path.join(sd, '.db-setup.lock', 'owner'), 'utf8') === FOREIGN, left.join(','));
+    r = run(`l2-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry });
+    check(`16a DENIAL L2: an admin login in PG_DATABASE_URL on ${label} -> refused (64) before any node process ran; the value is never printed`,
+      r.code === 64 && /PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL/.test(r.out) && noNode(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
   }
-  sd = setupDir('lock-released', true);
-  r = run('setup-lock-released', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-  check('14n F1: the child gets a 32-hex lock token (never printed); the lock it took is released by db-setup.sh on exit (success)',
-    r.code === 0 && keysOf(line(r.out, 'bootstrap'), 'self').includes('CREWFLOW_DB_SETUP_LOCK_TOKEN') && !fs.readdirSync(sd).includes('.db-setup.lock'), `${fs.readdirSync(sd).join(',')}\n${r.out}`);
-  sd = setupDir('lock-released-fail', true);
-  r = run('setup-lock-released-fail', S, { entry: 'db-setup.sh', ctl: { bootstrap: 64 }, target: 'rw', targetDir: sd });
-  check('14n2 F1: ... and on a refusal', r.code === 64 && !fs.readdirSync(sd).includes('.db-setup.lock'), fs.readdirSync(sd).join(','));
+  const ENCODED = RUNTIME_URL.replace('crewflow_owner:', 'crewflow%5Fowner:');
+  r = run('l2-encoded-api', { ...BASE, PG_DATABASE_URL: ENCODED });
+  check('16b the percent-encoded crewflow%5Fowner login is crewflow_owner: rab-api starts with it unchanged', r.code === 0 && field(line(r.out, 'main'), 'url') === hash(ENCODED), r.out);
+  const ENCODED_LOWER = RUNTIME_URL.replace('crewflow_owner:', 'crewflow%5fowner:');
+  r = run('l2-encoded-worker', { ...W, PG_DATABASE_URL: ENCODED_LOWER }, { entry: 'worker-start.sh' });
+  check('16b ... and rab-worker (lower-case %5f)', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(ENCODED_LOWER), r.out);
+  r = run('l2-encoded-setup', { ...MODE_C, PG_DATABASE_URL: EXT_OWNER.replace('crewflow_owner:', 'crewflow%5Fowner:') }, { entry: 'db-setup.sh' });
+  check('16b ... and db-setup (the child decides the rest)', r.code === 0 && Boolean(boot(r.out)), r.out);
 }
+
+// 17. Owner decision M1: `db-setup.sh harden` is the one-shot db-harden service. It runs the same refusals and mode
+// selection, then the child with --harden (bundled / admin modes) and the validated, exported harden timeout; mode c has no
+// admin login and exits 0 without any node process; a child failure (e.g. its bounded wait timed out) is that exit code.
 {
-  // Re-check R1/R2: the kernel lock. A holder of the volume's flock (another db-setup) -> this one refuses (70) before the
-  // child runs; the child inherits fd 9 (the flock file) and the marker; a symlinked lock file is refused.
-  sd = setupDir('flock-held', true);
-  r = run('setup-flock-held', S, { target: 'rw', targetDir: sd, cmd: '(flock -n 9 && sleep 4) 9>>/run/crewflow/db-target/.db-setup.flock & sleep 1; sh /app/db-setup.sh; echo "exit=$?"' });
-  check('14p R1/R2: while another process holds the volume\'s kernel lock, db-setup.sh refuses (70) before the child runs, and touches no file',
-    /another db-setup is running on this setup volume/.test(r.out) && /exit=70/.test(r.out) && !line(r.out, 'bootstrap') && targetText(sd) === 'STALE', r.out);
-  sd = setupDir('flock-inherited', true);
-  r = run('setup-flock-inherited', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
-  check('14q R1/R2: the child inherits fd 9 = the volume\'s .db-setup.flock and CREWFLOW_DB_SETUP_FLOCK_FD; the lock is free again after the run',
-    r.code === 0 && field(line(r.out, 'bootstrap'), 'fd9') === 'flock' && keysOf(line(r.out, 'bootstrap'), 'self').includes('CREWFLOW_DB_SETUP_FLOCK_FD'), r.out);
-  r = run('setup-flock-free', S, { target: 'rw', targetDir: sd, cmd: 'flock -n 9 9>>/run/crewflow/db-target/.db-setup.flock && echo flock-free' });
-  check('14q2 R1/R2: after the run the kernel lock is free (nothing to clean up)', /flock-free/.test(r.out), r.out);
-  sd = setupDir('flock-symlink', true);
-  r = run('setup-flock-symlink', S, { target: 'rw', targetDir: sd, cmd: 'ln -s /tmp/elsewhere /run/crewflow/db-target/.db-setup.flock && sh /app/db-setup.sh; echo "exit=$?"' });
-  check('14r R1/R2: a symlinked .db-setup.flock is refused (70) before the child runs', /exit=70/.test(r.out) && /run lock file in the setup volume is a symlink/.test(r.out) && !line(r.out, 'bootstrap'), r.out);
-  check('14s I3: db-setup.sh runs the child in the background and forwards TERM/INT (the EXIT trap still releases the lock directory)',
-    /&\nCHILD=\$!\ntrap 'kill -TERM "\$CHILD"[^\n]*exit 143' TERM INT\nwait "\$CHILD"/.test(fs.readFileSync(DB_SETUP, 'utf8')), 'db-setup.sh does not forward signals to the child');
+  r = run('harden-bundled', BUNDLED, { entry: 'db-setup.sh harden', dockerArgs: SETUP_RO });
+  check('17a db-harden, bundled: the child runs with --harden, the bundled admin as PG_ADMIN_URL, the default timeout exported; exit 0',
+    r.code === 0 && /db-harden: mode bundled/.test(r.out) && field(boot(r.out), 'argv') === '--harden' && field(boot(r.out), 'aurl') === hash(ADMIN_URL) &&
+    keysOf(boot(r.out), 'self').includes('CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS') && /db-harden: done/.test(r.out) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
+  r = run('harden-mode-b', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '300' }, { entry: 'db-setup.sh harden' });
+  check('17b db-harden, mode b with a valid timeout: the child runs with --harden and your admin URL; exit 0', r.code === 0 && field(boot(r.out), 'argv') === '--harden' && field(boot(r.out), 'aurl') === hash(EXT_ADMIN), r.out);
+  r = run('harden-mode-c', MODE_C, { entry: 'db-setup.sh harden' });
+  check('17c db-harden, mode c (no admin login): one fixed line, exit 0, NO node process', r.code === 0 && /db-harden: no admin login \(mode c\): nothing to harden/.test(r.out) && !boot(r.out), r.out);
+  r = run('setup-no-harden-argv', MODE_B, { entry: 'db-setup.sh' });
+  check('17d plain db-setup runs the child WITHOUT --harden and needs no harden timeout', r.code === 0 && field(boot(r.out), 'argv') === '-', r.out);
+  for (const code of [64, 75]) {
+    r = run(`harden-child-${code}`, MODE_B, { entry: 'db-setup.sh harden', ctl: { bootstrap: code } });
+    check(`17e db-harden: the child exits ${code} -> exit ${code}, a fixed line, nothing claimed done`, r.code === code && /db-harden: REFUSED - the CREATEROLE hardening step (refused|failed or timed out)/.test(r.out) && !/db-harden: done/.test(r.out), r.out);
+  }
+  r = run('harden-test-timeout', { ...MODE_B, NODE_ENV: 'test', CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '5' }, { entry: 'db-setup.sh harden' });
+  check('17f under NODE_ENV=test a short harden timeout (5 s) is accepted', r.code === 0 && field(boot(r.out), 'argv') === '--harden', r.out);
 }
-sd = setupDir('readonly', false);
-r = run('setup-readonly', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd, dockerArgs: ['--read-only', '--user', '1000:1000'] });
-check('14h read-only root, uid 1000 (as shipped), only the target volume writable: the setup completes', r.code === 0 && targetText(sd) !== null, r.out);
+
+// 15. db-setup and db-harden wait for the database themselves (owner instruction 2026-11-18, Twenty's Helm wait-for-db): no
+// depends_on: db in docker-compose.production.yml / docker-compose.image.yml. The block (BEGIN/END crewflow wait-for-db) runs
+// inside db-setup.sh (db-setup and `db-setup.sh harden`) and, identical, in the db-setup compose wrapper that execs
+// ./db-setup.sh (the published 0.6.0 image has no wait). Target: PG_ADMIN_URL's host when it is set (mode b: both URLs set),
+// else the bundled db (mode a), else PG_DATABASE_URL's host (mode c). A fake PostgreSQL in the same container (127.0.0.1,
+// --network none) answers the startup message: 57P03 while "starting up", then an authentication request ('R'), or the hba
+// error 28000 (both mean "accepts connections").
+{
+  const waitApi = require('../../scripts/db-setup-wait.cjs');
+  const FAKE_PG = `
+const net = require('net');
+const [mode, slowSeconds, port] = [process.argv[2], Number(process.argv[3] || 0), Number(process.argv[4] || 5432)];
+const t0 = Date.now();
+const err = (s, code) => { const b = Buffer.from('SFATAL\\0C' + code + '\\0Mfake\\0\\0', 'latin1'); const h = Buffer.alloc(5); h.write('E'); h.writeInt32BE(4 + b.length, 1); s.end(Buffer.concat([h, b])); };
+net.createServer((s) => {
+  s.on('error', () => {});
+  s.once('data', (d) => {
+    // The probe sends exactly a protocol-3.0 startup message with the fixed placeholder login, no password.
+    const ok = d.readInt32BE(4) === 196608 && d.toString('latin1').includes('user\\0crewflow_wait_for_db\\0');
+    if (!ok) return s.destroy();
+    if (Date.now() - t0 < slowSeconds * 1000) return err(s, '57P03');
+    if (mode === 'hba') return err(s, '28000');
+    const r = Buffer.alloc(9); r.write('R'); r.writeInt32BE(8, 1); r.writeInt32BE(10, 5); s.end(r);
+  });
+}).listen(port, '127.0.0.1');
+`;
+  // The compose wrapper's script, exactly as docker-compose.production.yml commits it (`$$` undone), from the raw text.
+  const wrapperOf = (rel) => {
+    const text = fs.readFileSync(path.resolve(__dirname, '..', '..', rel), 'utf8');
+    const m = /\n {6}- \|\n( {8}set -eu\n {8}# BEGIN crewflow wait-for-db\n[\s\S]*? {8}exec \.\/db-setup\.sh\n)/.exec(text);
+    return m ? m[1].split('\n').map((l) => l.replace(/^ {8}/, '')).join('\n').split('$$').join('$') : null;
+  };
+  const WRAP = wrapperOf('docker-compose.production.yml');
+  check('15a the wait block is identical in db-setup.sh and in the db-setup wrapper of docker-compose.production.yml and docker-compose.image.yml (exactly: set -eu, the block, the call, exec ./db-setup.sh)',
+    WRAP !== null && WRAP === waitApi.waitWrapperScript() && wrapperOf('docker-compose.image.yml') === WRAP, 'the wait blocks differ');
+  // Mode b, both URLs set: the admin URL is on the fake server; the crewflow_owner URL names an unreachable host, so only a
+  // wait on PG_ADMIN_URL's host can succeed.
+  const ADMIN_LOCAL = 'postgres://postgres:ADMINSENTINEL1@127.0.0.1:55432/crewflow?sslmode=verify-full';
+  const LOCAL = { ...MODE_B, PG_ADMIN_URL: ADMIN_LOCAL };
+  const OWNER_LOCAL = `postgresql://crewflow_owner:${OWNER_PW}@127.0.0.1:55432/crewflow?sslmode=verify-full`;
+  const ctlFor = (extra = {}) => ({ 'fakepg.cjs': FAKE_PG, 'wrapper.sh': WRAP ?? 'exit 99', ...extra });
+  const noSecret = (out) => !out.includes('ADMINSENTINEL') && !out.includes(OWNER_PW) && !out.includes('pw-external') && !out.includes('127.0.0.1') &&
+    !out.includes('55432') && !out.includes('db-direct') && !out.includes('postgres://') && !out.includes('postgresql://');
+  const before = (out, a, b) => out.indexOf(a) >= 0 && out.indexOf(b) > out.indexOf(a);
+  const tookOf = (out) => Number((/took=(\d+)/.exec(out) || [])[1]);
+
+  // In-image (db-setup.sh), mode b: a slow database (57P03 for 3 s) -> progress lines, then "accepts", THEN the child; exit 0.
+  r = run('wait-slow', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs ok 3 55432 & sleep 0.5; sh /app/db-setup.sh; echo "exit=$?"' });
+  check("15b db-setup.sh, mode b (both URLs): PG_ADMIN_URL's host still starting up (57P03) is waited for with progress lines, then the child runs; exit 0; nothing of either URL is printed",
+    /exit=0/.test(r.out) && /db-setup: waiting for your database to accept connections \(\d+s of 30s\): the server is starting up or shutting down \(57P03\)/.test(r.out) &&
+    before(r.out, 'your database accepts connections', 'STUB bootstrap') && field(boot(r.out), 'aurl') === hash(ADMIN_LOCAL) && noSecret(r.out), r.out);
+  // Unreachable -> the ONE fixed line, exit 70, no child.
+  r = run('wait-timeout', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '4' }, { cmd: 'start=$(date +%s); sh /app/db-setup.sh; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+  const took = tookOf(r.out);
+  check('15c db-setup.sh: an unreachable database -> after the bound (4 s) ONE fixed line and exit 70; the child never runs; nothing is printed of the URL',
+    /exit=70/.test(r.out) && took >= 4 && took <= 9 && (r.out.match(/db-setup: REFUSED - the database did not accept connections within 4s \(CREWFLOW_DB_WAIT_SECONDS\)/g) || []).length === 1 &&
+    /connection refused/.test(r.out) && !boot(r.out) && noSecret(r.out), `${took}\n${r.out}`);
+  // The hba refusal (28000: e.g. the bundled db's hostssl-only pg_hba.conf for the probe's plain TCP) means "up".
+  r = run('wait-hba', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '20' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs hba 0 55432 & sleep 0.5; sh /app/db-setup.sh; echo "exit=$?"' });
+  check('15d db-setup.sh: an error answer other than 57P03 (28000, the TLS-only pg_hba.conf) counts as "accepts connections"; the child runs', /exit=0/.test(r.out) && before(r.out, 'accepts connections', 'STUB bootstrap'), r.out);
+  // The bound: whole seconds 0-900; anything else refused (64) before anything connects; 0 = do not wait.
+  for (const v of ['abc', '901', '1000', '-1', '30s', '0300']) {
+    r = run(`wait-bad-${v.replace(/[^a-z0-9]/gi, 'x')}`, { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: v }, { entry: 'db-setup.sh' });
+    check(`15e CREWFLOW_DB_WAIT_SECONDS=${v} -> refused (64) before anything connects; the value is not printed`, r.code === 64 && /CREWFLOW_DB_WAIT_SECONDS must be a whole number of seconds from 0 to 900/.test(r.out) && !boot(r.out) && !r.out.includes(`=${v}`), r.out);
+  }
+  r = run('wait-zero', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '0' }, { entry: 'db-setup.sh' });
+  check('15f CREWFLOW_DB_WAIT_SECONDS=0 -> no wait (no probe line); the child runs at once', r.code === 0 && !/waiting for|accepts connections/.test(r.out) && Boolean(boot(r.out)), r.out);
+  // Mode c (PG_DATABASE_URL only): its own host is waited for.
+  r = run('wait-mode-c', { ...MODE_C, PG_DATABASE_URL: OWNER_LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs ok 2 55432 & sleep 0.5; sh /app/db-setup.sh; echo "exit=$?"' });
+  check("15f2 db-setup.sh, mode c: PG_DATABASE_URL's host is waited for, then the read-only child runs; exit 0",
+    /exit=0/.test(r.out) && /\(57P03\)/.test(r.out) && before(r.out, 'your database accepts connections', 'STUB bootstrap') && noSecret(r.out), r.out);
+
+  // db-harden (`db-setup.sh harden`, no compose wrapper): the same in-script wait, on PG_ADMIN_URL's host, before the child.
+  r = run('wait-harden', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), cmd: 'node /ctl/fakepg.cjs ok 3 55432 & sleep 0.5; sh /app/db-setup.sh harden; echo "exit=$?"' });
+  check("15f3 db-harden, mode b: waits for PG_ADMIN_URL's host (57P03, then accepts), then the child runs with --harden; exit 0",
+    /exit=0/.test(r.out) && /\(57P03\)/.test(r.out) && before(r.out, 'your database accepts connections', 'STUB bootstrap') && field(boot(r.out), 'argv') === '--harden' && noSecret(r.out), r.out);
+  r = run('wait-harden-mode-c', { ...MODE_C, CREWFLOW_DB_WAIT_SECONDS: '' }, { cmd: 'start=$(date +%s); sh /app/db-setup.sh harden; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+  check('15f4 db-harden, mode c: nothing to harden, so it never waits (unreachable database, default bound): exit 0 at once, no probe line',
+    /exit=0/.test(r.out) && tookOf(r.out) <= 3 && !/waiting for/.test(r.out) && !boot(r.out), r.out);
+
+  // The compose wrapper (the published image's path): the same block, then `exec ./db-setup.sh` (which waits again: instant).
+  r = run('wrap-slow', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '30' }, { ctl: ctlFor(), execSetup: true, cmd: 'node /ctl/fakepg.cjs ok 3 55432 & sleep 0.5; sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$?"' });
+  check("15g compose wrapper, mode b (both URLs): waits for PG_ADMIN_URL's host, then execs ./db-setup.sh (whose own wait passes at once: safe to run twice), the child runs; exit 0",
+    /exit=0/.test(r.out) && /\(57P03\)/.test(r.out) && (r.out.match(/your database accepts connections/g) || []).length === 2 && before(r.out, 'accepts connections', 'STUB bootstrap') && noSecret(r.out), r.out);
+  r = run('wrap-timeout', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '3' }, { ctl: ctlFor(), execSetup: true, cmd: 'sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$?"' });
+  check('15h compose wrapper: an unreachable database -> the fixed line, exit 70; db-setup.sh never runs (no mode line, no child)',
+    /exit=70/.test(r.out) && /did not accept connections within 3s/.test(r.out) && !/db-setup: mode /.test(r.out) && !boot(r.out) && noSecret(r.out), r.out);
+  // Mode (a) through the wrapper: the bundled db's host `db` (here 127.0.0.1 via --add-host), from CREWFLOW_BUNDLED_DB_ADMIN_URL.
+  r = run('wrap-bundled', { ...BUNDLED, CREWFLOW_DB_WAIT_SECONDS: '30' },
+    { ctl: ctlFor(), execSetup: true, dockerArgs: ['--add-host', 'db:127.0.0.1'], cmd: 'node /ctl/fakepg.cjs ok 2 5432 & sleep 0.5; sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$?"' });
+  check('15i compose wrapper, mode (a): waits for the bundled database (host db), then db-setup.sh runs the child with the bundled URL; exit 0',
+    /exit=0/.test(r.out) && /the bundled database \(db\) accepts connections/.test(r.out) && field(boot(r.out), 'aurl') === hash(ADMIN_URL) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
+  // Settings db-setup.sh refuses are never waited for (default bound, nothing listening): the refusal comes at once.
+  for (const [label, env, pattern] of [
+    ['the bundled db without PG_DATABASE_PASSWORD', { ...BUNDLED, CREWFLOW_BUNDLED_DB_ADMIN_URL: BUNDLED_ADMIN_EMPTY, CREWFLOW_DB_WAIT_SECONDS: '' }, /PG_DATABASE_PASSWORD is required for the bundled database/],
+    ['an empty PG_DATABASE_URL', { ...LOCAL, PG_DATABASE_URL: '', CREWFLOW_DB_WAIT_SECONDS: '' }, /PG_DATABASE_URL is empty: it is always required/],
+    ['an empty crewflow_owner password (PG_DATABASE_APP_PASSWORD unset)', { ...BUNDLED, PG_DATABASE_URL: 'postgresql://crewflow_owner:@db:5432/crewflow?sslmode=verify-full', CREWFLOW_DB_WAIT_SECONDS: '' }, /the crewflow_owner password in PG_DATABASE_URL is empty/],
+    ['a CREWFLOW_BUNDLED_DB other than 0 or 1', { ...LOCAL, CREWFLOW_BUNDLED_DB: 'yes', CREWFLOW_DB_WAIT_SECONDS: '' }, /CREWFLOW_BUNDLED_DB must be exactly 0/],
+  ]) {
+    r = run(`wrap-refuse-${label.replace(/[^a-z0-9]+/gi, '-')}`, env, { ctl: ctlFor(), execSetup: true, cmd: 'start=$(date +%s); sh -c "$(cat /ctl/wrapper.sh)" db-setup; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+    check(`15j compose wrapper: ${label} is not waited for; db-setup.sh refuses it at once (64)`, /exit=64/.test(r.out) && tookOf(r.out) <= 3 && pattern.test(r.out) && !/waiting for/.test(r.out) && !boot(r.out), r.out);
+  }
+  // A stop during the wait ends it at once (TERM forwarded; exit 143), never the 40 s grace period.
+  r = run('wrap-term', { ...LOCAL, CREWFLOW_DB_WAIT_SECONDS: '60' }, { ctl: ctlFor(), execSetup: true, cmd: 'start=$(date +%s); sh -c "$(cat /ctl/wrapper.sh)" db-setup & pid=$!; sleep 3; kill -TERM $pid; wait $pid; echo "exit=$? took=$(( $(date +%s) - start ))"' });
+  check('15k compose wrapper: TERM during the wait stops it at once (exit 143), the child never runs', /exit=143/.test(r.out) && tookOf(r.out) <= 6 && !boot(r.out), r.out);
+}
 
 // The bundled-db CA block is literally the same code in all three scripts.
 const block = (file) => {
@@ -820,20 +843,27 @@ const block = (file) => {
   const b = t.indexOf('# END crewflow bundled-db CA');
   return a >= 0 && b > a ? t.slice(a, b) : null;
 };
-check('12o the bundled-db CA block is identical in api-prestart.sh, worker-start.sh and db-setup.sh', block(PRESTART) !== null && block(PRESTART) === block(WORKER_START) && block(PRESTART) === block(DB_SETUP), 'the BEGIN/END crewflow bundled-db CA blocks differ');
+const ownerBlock = (file) => {
+  const t = fs.readFileSync(file, 'utf8');
+  const a = t.indexOf('# BEGIN crewflow owner-login check');
+  const b = t.indexOf('# END crewflow owner-login check');
+  return a >= 0 && b > a ? t.slice(a, b) : null;
+};
+check('15a2 the owner-login check block (security review of PR #246, L2) is identical in api-prestart.sh, worker-start.sh and db-setup.sh',
+  ownerBlock(PRESTART) !== null && ownerBlock(PRESTART) === ownerBlock(WORKER_START) && ownerBlock(PRESTART) === ownerBlock(DB_SETUP), 'the BEGIN/END crewflow owner-login check blocks differ');
+check('15a the bundled-db CA block is identical in api-prestart.sh, worker-start.sh and db-setup.sh', block(PRESTART) !== null && block(PRESTART) === block(WORKER_START) && block(PRESTART) === block(DB_SETUP), 'the BEGIN/END crewflow bundled-db CA blocks differ');
 const workerSource = fs.readFileSync(WORKER_START, 'utf8');
 const setupSource = fs.readFileSync(DB_SETUP, 'utf8');
-check('12l worker-start.sh writes no file, never traces (set -x) and never runs the bootstrap child', !/mktemp|\/tmp\//.test(workerSource) && !/set -[a-z]*x/.test(workerSource) && !/bootstrap-owner-login/.test(workerSource), 'worker-start.sh writes a file, traces, or runs the bootstrap child');
-check('12n option 2: api-prestart.sh never runs the bootstrap child and never traces (set -x)', !/bootstrap-owner-login/.test(prestartSource) && !/set -[a-z]*x/.test(prestartSource), 'api-prestart.sh runs the bootstrap child or enables tracing');
-check('12r I2 + A2: neither start script bounds its wait by the clock (no `date +%s`), and neither wraps the derive step in `timeout` (its watcher holds the fd-4 pipe until the bound)',
-  ![prestartSource, workerSource].some((t) => /date \+%s/.test(t)) && [prestartSource, workerSource].every((t) => /RUNTIME_URL="\$\(CREWFLOW_RUNTIME_URL_FD=4 node "\$DERIVE_RUNTIME_URL" 4>&1 1>&2\)"/.test(t) && !/\btimeout\b[^\n]*DERIVE_RUNTIME_URL/.test(t)), 'a start script uses the clock or wraps the derive step in timeout');
-check('14l security review L2: db-setup.sh no longer names the never-used $TARGET.tmp', !/\$TARGET\.tmp/.test(setupSource), 'db-setup.sh still names $TARGET.tmp');
-{
-  const beforeChild = setupSource.slice(0, setupSource.indexOf('node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js'));
-  check('14o F1: db-setup.sh removes nothing before the child holds the run lock (no rm before the child; removals only through lock_is_ours)',
-    !/^\s*rm /m.test(beforeChild.replace(/clean_after_failure\(\) \{[\s\S]*?\n\}/, '').replace(/release_lock\(\) \{[\s\S]*?\n\}/, '')), 'db-setup.sh removes a file before the run lock is held');
-}
-check('14i db-setup.sh never traces (set -x) and starts no runtime process (main.js, the Worker, a migration, tini)', !/set -[a-z]*x/.test(setupSource) && !/dist\/main\.js|twenty-migrate|\/sbin\/tini|register-schedulers/.test(setupSource), 'db-setup.sh traces or starts a runtime process');
+check('15b worker-start.sh writes no file, never traces (set -x) and never runs the bootstrap child', !/mktemp|\/tmp\//.test(workerSource) && !/set -[a-z]*x/.test(workerSource) && !/bootstrap-owner-login/.test(workerSource), 'worker-start.sh writes a file, traces, or runs the bootstrap child');
+check('15c api-prestart.sh never runs the bootstrap child and never traces (set -x)', !/bootstrap-owner-login/.test(prestartSource) && !/set -[a-z]*x/.test(prestartSource), 'api-prestart.sh runs the bootstrap child or enables tracing');
+// Owner decision 2026-11-18: no derive step, no target or password file, no setup volume, no file lock, anywhere.
+const RETIRED_FILE_CONTRACT = /derive-runtime-url|CREWFLOW_DB_TARGET_FILE|\/run\/crewflow\/db-target|owner-password(?!-wait)|target\.json|\.db-setup\.(flock|lock)|\bflock\b|CREWFLOW_DB_SETUP_LOCK_TOKEN|CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS/;
+check('15d none of the three scripts names the retired file contract (derive step, target / password file, setup volume, run lock, wait seam)',
+  [prestartSource, workerSource, setupSource].every((t) => !RETIRED_FILE_CONTRACT.test(t)), 'a script still names the retired target/password-file contract');
+check('15e db-setup.sh runs the child in the background and forwards TERM/INT',
+  /&\nCHILD=\$!\ntrap 'kill -TERM "\$CHILD"[^\n]*exit 143' TERM INT\nwait "\$CHILD"/.test(setupSource), 'db-setup.sh does not forward signals to the child');
+check('15f db-setup.sh writes and removes no file (no redirection to a path, no rm, no mkdir)', !/^\s*(rm|mkdir|mv|cp) /m.test(setupSource) && !/>>?\s*"?\$?[A-Za-z_{}]*\//.test(setupSource.replace(/\d?>\s*\/dev\/null/g, '')), 'db-setup.sh touches a file');
+check('15g db-setup.sh never traces (set -x) and starts no runtime process (main.js, the Worker, a migration, tini)', !/set -[a-z]*x/.test(setupSource) && !/dist\/main\.js|twenty-migrate|\/sbin\/tini|register-schedulers/.test(setupSource), 'db-setup.sh traces or starts a runtime process');
 
 fs.rmSync(work, { recursive: true, force: true });
 console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);

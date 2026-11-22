@@ -116,6 +116,9 @@ export class UserDeletionService {
       throw new UserDeletionBlockedException('CANNOT_DELETE_SELF', 'You cannot delete your own account.');
     }
     if (await this.platformAdmin.isPlatformAdminTx(manager, { userId: targetUserId })) {
+      // Security review of #264, F2: to a tenant-side actor the platform administrator's account does not exist (404, CLAUDE.md);
+      // only another platform admin learns that it is blocked.
+      if (!(await this.platformAdmin.isPlatformAdminTx(manager, { userId: ctx.userId }))) throw new NotFoundException('User not found.');
       throw new UserDeletionBlockedException('CANNOT_DELETE_PLATFORM_ADMIN', 'This account holds the platform administrator claim and cannot be deleted.');
     }
     const [owns] = await manager.query<Array<{ owns: boolean }>>(`SELECT core.user_owns_manager_workspace($1) AS owns`, [targetUserId]);
@@ -426,6 +429,12 @@ export class UserDeletionService {
       ['job_role_created_by', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
       ['venue_created_by', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
       ['payroll_decision_actor', `SELECT 1 FROM ${t.payroll_record} WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
+      // M4 §11 (security review of #305): attendance is visible only to its staff member, the workspace's managers, the
+      // shift's Venue Managers and the Worker, so a caller who is not a manager of this scope may not see every on-behalf
+      // punch here. That cannot hide one: this path runs only for a NEVER-ACTIVATED invite (status invited / invite_expired,
+      // last_login_at IS NULL, see deleteUser), and punching someone in or out on their behalf needs a signed-in session, so
+      // such a target can never be clock_in_by / clock_out_by. Its own staff history is caught through shift_assignment
+      // (tenant-wide visible; every attendance has one) by staffWithHistory / historyLost.
       ['attendance_on_behalf_actor', `SELECT 1 FROM ${t.attendance} WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
       ['job_offer_actor', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
       ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],
