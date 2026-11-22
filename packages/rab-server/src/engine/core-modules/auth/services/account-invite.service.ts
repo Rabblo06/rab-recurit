@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
 import { EmailOutboxStatus, EmailOutboxStatusType, UserStatus, UserStatusType } from '@rab/shared';
-import { AccountInvite, EmailOutbox } from '../../../../modules/identity/entities';
+import { AccountInvite, EmailOutbox } from '../../identity/entities';
 
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24h — the spec's own default invite validity
 const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days after the final (3rd) attempt expires
