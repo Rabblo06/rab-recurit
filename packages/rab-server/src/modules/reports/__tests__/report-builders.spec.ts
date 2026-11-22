@@ -2,7 +2,7 @@ import { ReportKey } from '@rab/shared';
 import type { EntityManager } from 'typeorm';
 
 import { bindBusinessSchema, CORE_BUSINESS_SCHEMA } from '../../../engine/core-modules/tenant/business-tables';
-import { buildReportCsv, minutesToHours, penceToDecimal, ReportExportJob, toCsv } from '../services/report-builders';
+import { buildReportCsv, minutesToHours, penceToDecimal, REPORT_MAX_ROWS, ReportExportJob, ReportTooLargeError, toCsv } from '../services/report-builders';
 
 /** A tenant-bound fake transaction manager that records every statement and answers with the queued rows. */
 function fakeManager(answers: unknown[][] = []) {
@@ -52,23 +52,35 @@ describe('report builders (owner decision 29)', () => {
     expect(minutesToHours(90)).toBe('1.50');
   });
 
-  it('neutralises spreadsheet formulas in every cell (a CSV never runs code in Excel)', () => {
-    const csv = toCsv({ header: ['Venue', 'Staff'], rows: [['=HYPERLINK("http://x")', '+1'], ['@SUM(A1)', '-2'], ['a,b', 'line\nbreak']] });
+  it('neutralises spreadsheet formulas in every cell and quotes every cell (a CSV never runs code in Excel)', () => {
+    const csv = toCsv({ header: ['Venue', 'Staff'], rows: [['=HYPERLINK("http://x")', '+1'], ['@SUM(A1)', '-2'], [' =1+1', 'a;=1+1'], ['\uff1d1+1', 'ok']] });
     const lines = csv.split('\n');
-    expect(lines[0]).toBe('Venue,Staff');
-    expect(csv).toContain(`"'=HYPERLINK(""http://x"")"`);
-    expect(csv).toContain("'+1");
-    expect(csv).toContain("'@SUM(A1)");
-    expect(csv).toContain("'-2");
-    expect(csv).toContain('"a,b"');
+    expect(lines[0]).toBe('"Venue","Staff"');
+    expect(lines[1]).toBe(`"'=HYPERLINK(""http://x"")","'+1"`);
+    expect(lines[2]).toBe(`"'@SUM(A1)","'-2"`);
+    expect(lines[3]).toBe(`"' =1+1","'a;=1+1"`);
+    expect(lines[4]).toBe(`"'\uff1d1+1","ok"`);
+  });
+
+  it('enforces the size budget while building: stops at the line that would pass it, never a partial file', () => {
+    const table = { header: ['A'], rows: Array.from({ length: 100 }, () => ['x'.repeat(100)]) };
+    expect(() => toCsv(table, 1_000)).toThrow(ReportTooLargeError);
+    expect(toCsv(table, 1_000_000).split('\n')).toHaveLength(101);
+  });
+
+  it('a query result over the row cap fails as too large (each query asks for one row more than the cap)', async () => {
+    const tooMany = Array.from({ length: REPORT_MAX_ROWS + 1 }, () => ({ venue: 'V', shifts: 1, required: 1, filled: 1 }));
+    const { manager, calls } = fakeManager([tooMany]);
+    await expect(buildReportCsv(manager, job({ report_key: ReportKey.FILL_RATE_BY_VENUE, include_pay: false }), { lateGraceMinutes: 10 })).rejects.toThrow(ReportTooLargeError);
+    expect(calls[0]!.sql).toContain(`LIMIT ${REPORT_MAX_ROWS + 1}`);
   });
 
   it('report 1: owner scope filters by the stored owner; pay and hours columns only when stored as allowed', async () => {
     const { manager, calls } = fakeManager([[{ venue: 'Pier', shifts: 3, minutes: '600', pence: '15000' }]]);
     const full = await buildReportCsv(manager, job(), { lateGraceMinutes: 10 });
     expect(full.csv.split('\n')).toEqual([
-      'Venue,Period start,Period end,Shifts worked,Hours,Gross pay recorded at clock-out (GBP)',
-      'Pier,2026-11-01,2026-11-30,3,10.00,150.00',
+      '"Venue","Period start","Period end","Shifts worked","Hours","Gross pay recorded at clock-out (GBP)"',
+      '"Pier","2026-11-01","2026-11-30","3","10.00","150.00"',
     ]);
     expect(full.rowCount).toBe(1);
     expect(calls[0]!.sql).toContain('sp.created_by = $1');
@@ -76,7 +88,7 @@ describe('report builders (owner decision 29)', () => {
 
     const { manager: m2 } = fakeManager([[{ venue: 'Pier', shifts: 3, minutes: '600', pence: '15000' }]]);
     const noPay = await buildReportCsv(m2, job({ include_pay: false, include_hours: false }), { lateGraceMinutes: 10 });
-    expect(noPay.csv).toBe('Venue,Period start,Period end,Shifts worked\nPier,2026-11-01,2026-11-30,3');
+    expect(noPay.csv).toBe('"Venue","Period start","Period end","Shifts worked"\n"Pier","2026-11-01","2026-11-30","3"');
     expect(noPay.csv).not.toContain('150.00');
   });
 
@@ -114,12 +126,12 @@ describe('report builders (owner decision 29)', () => {
     ]);
     const { csv, rowCount } = await buildReportCsv(manager, job({ report_key: ReportKey.ATTENDANCE_EXCEPTIONS, include_pay: false }), { lateGraceMinutes: 10 });
     const lines = csv.split('\n');
-    expect(lines[0]).toBe('Date,Venue,Staff reference,Staff name,Exception,Detail');
+    expect(lines[0]).toBe('"Date","Venue","Staff reference","Staff name","Exception","Detail"');
     expect(rowCount).toBe(4); // Ann no-show; Bob late + missing clock-out + out of area; Cat nothing
-    expect(csv).toContain('No-show,Confirmed by a manager');
-    expect(csv).toContain('Late arrival,Clocked in 25 min after the start');
-    expect(csv).toContain('Missing clock-out');
-    expect(csv).toMatch(/Out-of-area clock-in,Clocked in about 1\d{3} m from the venue \(geofence 200 m\)/);
+    expect(csv).toContain('"No-show","Confirmed by a manager"');
+    expect(csv).toContain('"Late arrival","Clocked in 25 min after the start"');
+    expect(csv).toContain('"Missing clock-out"');
+    expect(csv).toMatch(/"Out-of-area clock-in","Clocked in about 1\d{3} m from the venue \(geofence 200 m\)"/);
     expect(csv).not.toContain('Cat Day');
   });
 
@@ -131,7 +143,7 @@ describe('report builders (owner decision 29)', () => {
       ],
     ]);
     const { csv } = await buildReportCsv(manager, job({ report_key: ReportKey.WEEKLY_HOURS_PER_STAFF, include_pay: false }), { lateGraceMinutes: 10 });
-    expect(csv.split('\n').slice(1)).toEqual(['S1,Ann Lee,2026-11-02,6,48.00,No', 'S1,Ann Lee,2026-11-09,6,48.02,Yes']);
+    expect(csv.split('\n').slice(1)).toEqual(['"S1","Ann Lee","2026-11-02","6","48.00","No"', '"S1","Ann Lee","2026-11-09","6","48.02","Yes"']);
   });
 
   it('report 4 uses the shift owner (or the stored venues) and computes the fill rate from capped filled counts', async () => {
@@ -139,7 +151,7 @@ describe('report builders (owner decision 29)', () => {
     const { csv } = await buildReportCsv(manager, job({ report_key: ReportKey.FILL_RATE_BY_VENUE, include_pay: false }), { lateGraceMinutes: 10 });
     expect(calls[0]!.sql).toContain('s.created_by = $1');
     expect(calls[0]!.sql).toContain('LEAST(s.filled_count, s.required_count)');
-    expect(csv.split('\n')[1]).toBe('Pier,2026-11-01,2026-11-30,4,8,6,2,75.0');
+    expect(csv.split('\n')[1]).toBe('"Pier","2026-11-01","2026-11-30","4","8","6","2","75.0"');
   });
 
   it('an unknown report key builds nothing (fail closed)', async () => {

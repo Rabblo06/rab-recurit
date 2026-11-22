@@ -10415,3 +10415,33 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   new cell in any locale. The reports exports (decision 29) use the same function.
 - **Tests:** `field-policy.service.spec.ts` (` =1+1`, fullwidth `＝1+1`, ` @x`, NBSP + zero-width, a control character,
   `a;=1+1`, `a,+1`, a line break, benign text quoted only); `payroll-runs.integration.spec.ts` header now quoted.
+
+## Reports export — fixes from the independent security review (branch feat/reports-async-export, 2026-11-22; CHANGED SQL, DRAFT)
+- **Medium — the one-time link was service-only:** the requester's RLS rows plus the table SELECT grant let a runtime
+  session read `csv_content` directly, and the link checks ignored `file_expires_at`. **Fix:** the CSV and its link moved
+  to `core.report_export_file`, owned by rab_secure_owner (NOLOGIN), ENABLE + FORCE RLS with only the owner-only definer
+  policy and a RESTRICTIVE deny for crewflow / crewflow_app, and no table privilege for any runtime login. Four SECURITY
+  DEFINER functions (pinned search_path, EXECUTE for crewflow_app only, each pinned to the bound organisation + workspace):
+  `report_export_file_put` and `_purge` (Worker only), `_issue_link` and `_take` (the requester only; `_take` burns the link
+  and returns the content in one UPDATE … RETURNING). Both refuse once the file has expired (`file_expires_at >
+  clock_timestamp()`), whatever the link says. None names a crewflow-owned table (R4 unchanged). `core.report_export`
+  keeps only metadata; a person can no longer UPDATE it at all (no policy; the guard refuses a non-Worker update).
+- **Medium — object flags:** besides report.view / report.export, each report needs its object flag (attendance.view for
+  hours-and-pay, exceptions and weekly hours; schedule.view for fill rate; payroll.view for the payroll run summary), checked
+  at request, at link issue and at download (403).
+- **Low — insert defaults:** a BEFORE INSERT branch of `core.report_export_guard()` sets created_at / updated_at to now(),
+  status pending, attempts 0 and clears every build column (an owner-login runtime is not bound by the INSERT column grant).
+- **Low — size budget:** enforced while building: every report query fetches at most 100,000 rows (+1 to detect more) and
+  the CSV is built line by line against the 10 MB budget, failing `too_large` before a partial file exists.
+- **Low — one export cannot block the queue:** the notice and audit run in their own savepoint (a failure is logged by error
+  name and rolled back alone); an unexpected error on one export is logged and the cycle moves on (the row is retried next
+  cycle under the attempt limit).
+- **Residual (retention):** deleting the file after 24 h removes the row; the old row version stays in dead tuples until
+  vacuum, and in WAL and backups for their own retention (managed PostgreSQL: 7-day point-in-time restore). The 24-hour
+  promise is about what the application can serve, not about physical erasure.
+- **CSV cells:** the shared `csvCell` now reads values like a spreadsheet and quotes every cell (separate PR, merged in).
+- **Tests:** `report-exports.integration.spec.ts` (raw SELECT / UPDATE / DELETE of the file table refused for the runtime login
+  and the Worker; definer caller separation; link and take refused after file expiry; a backdated owner insert stored as a
+  fresh pending row; object flags 403 at request / link / download without burning the link); Worker spec (a failing notice
+  neither undoes the build nor blocks the next export; the file row gone after 24 h); `report-builders.spec.ts` (row cap,
+  byte budget while building, quoted cells).

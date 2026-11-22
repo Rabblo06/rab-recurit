@@ -1,4 +1,4 @@
-import { haversineDistanceMeters, ReportKey, ReportKeyType } from '@rab/shared';
+import { haversineDistanceMeters, REPORT_EXPORT_MAX_BYTES, ReportKey, ReportKeyType } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
@@ -68,9 +68,39 @@ export function minutesToHours(minutes: number | string): string {
   return (Number(minutes) / 60).toFixed(2);
 }
 
-/** One CSV document: header and rows through the payroll CSV's formula-neutralising `csvCell`. */
-export function toCsv(table: ReportTable): string {
-  return [table.header, ...table.rows].map((row) => row.map((cell) => csvCell(cell)).join(',')).join('\n');
+/** Most data rows any report query may return; one more and the export fails as too large (narrow the period / venue). */
+export const REPORT_MAX_ROWS = 100_000;
+
+/** The export would pass its size budget: the Worker stores it as failed `too_large`, never a partial file. */
+export class ReportTooLargeError extends Error {
+  constructor() {
+    super('The report is larger than the export size budget.');
+    this.name = 'ReportTooLargeError';
+  }
+}
+
+/** Refuses a query result over REPORT_MAX_ROWS (each query fetches at most one row more than that). */
+function withinRows<T>(rows: T[]): T[] {
+  if (rows.length > REPORT_MAX_ROWS) throw new ReportTooLargeError();
+  return rows;
+}
+
+const LIMIT = `LIMIT ${REPORT_MAX_ROWS + 1}`;
+
+/**
+ * One CSV document: header and rows through the payroll CSV's formula-neutralising `csvCell`. Built line by line against
+ * the byte budget: it stops (ReportTooLargeError) as soon as the next line would pass `maxBytes`, never after.
+ */
+export function toCsv(table: ReportTable, maxBytes: number = REPORT_EXPORT_MAX_BYTES): string {
+  const lines: string[] = [];
+  let bytes = 0;
+  for (const row of [table.header, ...table.rows]) {
+    const line = row.map((cell) => csvCell(cell)).join(',');
+    bytes += Buffer.byteLength(line, 'utf8') + (lines.length ? 1 : 0);
+    if (bytes > maxBytes) throw new ReportTooLargeError();
+    lines.push(line);
+  }
+  return lines.join('\n');
 }
 
 interface Sql {
@@ -107,7 +137,7 @@ async function hoursAndPayByVenue(m: EntityManager, job: ReportExportJob): Promi
   const t = businessTables(m);
   const q = sqlParams();
   const start = assignmentTimeSql('sa', 's').start;
-  const rows: Array<{ venue: string; shifts: number; minutes: string; pence: string }> = await m.query(
+  const rows: Array<{ venue: string; shifts: number; minutes: string; pence: string }> = withinRows(await m.query(
     // sql-injection-reviewed: table names from businessTables, fragments are code constants; every value is a bound $n parameter.
     `SELECT v.name AS venue, count(*)::int AS shifts, coalesce(sum(a.worked_minutes), 0)::text AS minutes, coalesce(sum(a.earned_pence), 0)::text AS pence
        FROM ${t.attendance} a
@@ -117,9 +147,10 @@ async function hoursAndPayByVenue(m: EntityManager, job: ReportExportJob): Promi
        JOIN ${t.staff_profile} sp ON sp.id = a.staff_profile_id
       WHERE ${staffScope(job, q)} AND a.clock_out_at IS NOT NULL AND ${periodAndVenue(job, q, start)}
       GROUP BY v.id, v.name
-      ORDER BY v.name, v.id`,
+      ORDER BY v.name, v.id
+      ${LIMIT}`,
     q.params,
-  );
+  ));
   const header = ['Venue', 'Period start', 'Period end', 'Shifts worked'];
   if (job.include_hours) header.push('Hours');
   if (job.include_pay) header.push('Gross pay recorded at clock-out (GBP)');
@@ -141,7 +172,7 @@ async function attendanceExceptions(m: EntityManager, job: ReportExportJob, opti
   const out: Array<{ at: Date; venue: string; staff: string; ref: string; type: string; detail: string }> = [];
 
   let q = sqlParams();
-  const noShows: Array<{ at: Date; venue: string; first_name: string; last_name: string; staff_ref: string | null; reviewed: boolean }> = await m.query(
+  const noShows: Array<{ at: Date; venue: string; first_name: string; last_name: string; staff_ref: string | null; reviewed: boolean }> = withinRows(await m.query(
     // sql-injection-reviewed: table names from businessTables, fragments are code constants; every value is a bound $n parameter.
     `SELECT ${start} AS at, v.name AS venue, u.first_name, u.last_name, sp.staff_ref, sa.attendance_reviewed_at IS NOT NULL AS reviewed
        FROM ${t.shift_assignment} sa
@@ -149,9 +180,10 @@ async function attendanceExceptions(m: EntityManager, job: ReportExportJob, opti
        JOIN ${t.venue} v ON v.id = s.venue_id
        JOIN ${t.staff_profile} sp ON sp.id = sa.staff_profile_id
        JOIN core."user" u ON u.id = sp.user_id
-      WHERE ${staffScope(job, q)} AND sa.status = 'no_show' AND ${periodAndVenue(job, q, start)}`,
+      WHERE ${staffScope(job, q)} AND sa.status = 'no_show' AND ${periodAndVenue(job, q, start)}
+      ${LIMIT}`,
     q.params,
-  );
+  ));
   for (const r of noShows) {
     out.push({ at: r.at, venue: r.venue, staff: staffName(r), ref: r.staff_ref ?? '', type: 'No-show', detail: r.reviewed ? 'Confirmed by a manager' : 'Not yet reviewed' });
   }
@@ -163,7 +195,7 @@ async function attendanceExceptions(m: EntityManager, job: ReportExportJob, opti
     at: Date; venue: string; first_name: string; last_name: string; staff_ref: string | null;
     late_minutes: number; missing_clock_out: boolean;
     clock_in_lat: string | null; clock_in_lng: string | null; venue_lat: string | null; venue_lng: string | null; radius_m: number | null;
-  }> = await m.query(
+  }> = withinRows(await m.query(
     // sql-injection-reviewed: table names from businessTables, fragments are code constants; every value is a bound $n parameter.
     `SELECT ${start} AS at, v.name AS venue, u.first_name, u.last_name, sp.staff_ref,
             CASE WHEN a.clock_in_at > ${start} + make_interval(mins => ${grace}::int)
@@ -176,9 +208,10 @@ async function attendanceExceptions(m: EntityManager, job: ReportExportJob, opti
        JOIN ${t.venue} v ON v.id = s.venue_id
        JOIN ${t.staff_profile} sp ON sp.id = a.staff_profile_id
        JOIN core."user" u ON u.id = sp.user_id
-      WHERE ${staffScope(job, q)} AND ${periodAndVenue(job, q, start)}`,
+      WHERE ${staffScope(job, q)} AND ${periodAndVenue(job, q, start)}
+      ${LIMIT}`,
     q.params,
-  );
+  ));
   for (const r of attendance) {
     const base = { at: r.at, venue: r.venue, staff: staffName(r), ref: r.staff_ref ?? '' };
     if (r.late_minutes > 0) out.push({ ...base, type: 'Late arrival', detail: `Clocked in ${r.late_minutes} min after the start` });
@@ -189,6 +222,7 @@ async function attendanceExceptions(m: EntityManager, job: ReportExportJob, opti
     }
   }
 
+  if (out.length > REPORT_MAX_ROWS) throw new ReportTooLargeError();
   out.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime() || a.venue.localeCompare(b.venue) || a.staff.localeCompare(b.staff) || a.type.localeCompare(b.type));
   return {
     header: ['Date', 'Venue', 'Staff reference', 'Staff name', 'Exception', 'Detail'],
@@ -201,7 +235,7 @@ async function weeklyHoursPerStaff(m: EntityManager, job: ReportExportJob): Prom
   const t = businessTables(m);
   const q = sqlParams();
   const start = assignmentTimeSql('sa', 's').start;
-  const rows: Array<{ staff_ref: string | null; first_name: string; last_name: string; week_start: string; shifts: number; minutes: number }> = await m.query(
+  const rows: Array<{ staff_ref: string | null; first_name: string; last_name: string; week_start: string; shifts: number; minutes: number }> = withinRows(await m.query(
     // sql-injection-reviewed: table names from businessTables, fragments are code constants; every value is a bound $n parameter.
     `SELECT sp.staff_ref, u.first_name, u.last_name,
             to_char(date_trunc('week', ${start} AT TIME ZONE ${LONDON}), 'YYYY-MM-DD') AS week_start,
@@ -213,9 +247,10 @@ async function weeklyHoursPerStaff(m: EntityManager, job: ReportExportJob): Prom
        JOIN core."user" u ON u.id = sp.user_id
       WHERE ${staffScope(job, q)} AND a.clock_out_at IS NOT NULL AND ${periodAndVenue(job, q, start)}
       GROUP BY sp.id, sp.staff_ref, u.first_name, u.last_name, week_start
-      ORDER BY u.last_name, u.first_name, sp.id, week_start`,
+      ORDER BY u.last_name, u.first_name, sp.id, week_start
+      ${LIMIT}`,
     q.params,
-  );
+  ));
   return {
     header: ['Staff reference', 'Staff name', 'Week starting (Monday)', 'Shifts', 'Hours', 'Above 48 hours'],
     rows: rows.map((r) => [r.staff_ref ?? '', staffName(r), r.week_start, String(r.shifts), minutesToHours(r.minutes), Number(r.minutes) > MINUTES_48_HOURS ? 'Yes' : 'No']),
@@ -226,7 +261,7 @@ async function weeklyHoursPerStaff(m: EntityManager, job: ReportExportJob): Prom
 async function fillRateByVenue(m: EntityManager, job: ReportExportJob): Promise<ReportTable> {
   const t = businessTables(m);
   const q = sqlParams();
-  const rows: Array<{ venue: string; shifts: number; required: number; filled: number }> = await m.query(
+  const rows: Array<{ venue: string; shifts: number; required: number; filled: number }> = withinRows(await m.query(
     // sql-injection-reviewed: table names from businessTables, fragments are code constants; every value is a bound $n parameter.
     `SELECT v.name AS venue, count(*)::int AS shifts, sum(s.required_count)::int AS required, sum(LEAST(s.filled_count, s.required_count))::int AS filled
        FROM ${t.shift} s
@@ -234,9 +269,10 @@ async function fillRateByVenue(m: EntityManager, job: ReportExportJob): Promise<
       WHERE ${shiftScope(job, q)} AND s.status IN ('open', 'offered', 'partially_filled', 'fully_filled', 'confirmed', 'in_progress', 'completed')
         AND ${periodAndVenue(job, q, 's.starts_at')}
       GROUP BY v.id, v.name
-      ORDER BY v.name, v.id`,
+      ORDER BY v.name, v.id
+      ${LIMIT}`,
     q.params,
-  );
+  ));
   return {
     header: ['Venue', 'Period start', 'Period end', 'Shifts', 'Positions', 'Filled', 'Unfilled', 'Fill rate (%)'],
     rows: rows.map((r) => [
@@ -253,7 +289,10 @@ async function payrollRunSummary(m: EntityManager, job: ReportExportJob): Promis
   if (!job.include_hours) hidden.add('workedTime');
   if (!job.include_pay) hidden.add('amount');
   const policy: FieldPolicy = { object: 'payroll_record', hiddenFields: hidden, hiddenProperties: new Set() };
-  return { csv: buildPayrollRunCsv(view, policy), rowCount: view.staff.length };
+  if (view.staff.length > REPORT_MAX_ROWS) throw new ReportTooLargeError();
+  const csv = buildPayrollRunCsv(view, policy);
+  if (Buffer.byteLength(csv, 'utf8') > REPORT_EXPORT_MAX_BYTES) throw new ReportTooLargeError();
+  return { csv, rowCount: view.staff.length };
 }
 
 /** Builds one export's CSV and its data-row count. Throws on any database error (the Worker records the failure). */

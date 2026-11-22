@@ -48,7 +48,11 @@ describeIfDb('report export Worker cycle (integration)', () => {
   const ctxOf = (i: TestIdentity) => ({ organisationId: i.organisationId, workspaceId: i.workspaceId, userId: i.userId, role: '' }) as AuthContext;
   const cycle = () => runReportExportCycle(dataSource, tenantContext, notifications, audit, { lateGraceMinutes: 10, organisationId: a.organisationId });
   const rowOf = async (id: string) =>
-    (await adminDataSource.query(`SELECT status, csv_content, row_count, error_code, attempts, ready_at, file_expires_at, file_deleted_at FROM core.report_export WHERE id = $1`, [id]))[0];
+    (await adminDataSource.query(
+      `SELECT e.status, f.csv_content, e.row_count, e.error_code, e.attempts, e.ready_at, e.file_expires_at, e.file_deleted_at
+         FROM core.report_export e LEFT JOIN core.report_export_file f ON f.export_id = e.id WHERE e.id = $1`,
+      [id],
+    ))[0];
 
   async function seedShift(owner: TestIdentity, startsAt: string, required: number, filled: number, status = 'confirmed'): Promise<void> {
     const [role] = await adminDataSource.query(`SELECT id FROM ${businessTable(owner.workspaceId!, 'job_role')} LIMIT 1`);
@@ -105,7 +109,7 @@ describeIfDb('report export Worker cycle (integration)', () => {
     expect(row.row_count).toBe(1);
     expect(new Date(row.file_expires_at).getTime() - new Date(row.ready_at).getTime()).toBe(24 * 3600 * 1000);
     // B owns no shift: B's own export is header-only, never A's rows.
-    expect((await rowOf(bExport.id)).csv_content).toBe('Venue,Period start,Period end,Shifts,Positions,Filled,Unfilled,Fill rate (%)');
+    expect((await rowOf(bExport.id)).csv_content).toBe('"Venue","Period start","Period end","Shifts","Positions","Filled","Unfilled","Fill rate (%)"');
 
     const notes = await adminDataSource.query(`SELECT user_id, type, related_entity_id FROM core.notification WHERE related_entity_id = $1`, [created.id]);
     expect(notes).toEqual([{ user_id: a.userId, type: 'report_export_ready', related_entity_id: created.id }]);
@@ -115,6 +119,19 @@ describeIfDb('report export Worker cycle (integration)', () => {
     const second = await cycle();
     expect(second.built).toBe(0);
     expect(await adminDataSource.query(`SELECT count(*)::int AS n FROM core.notification WHERE related_entity_id = $1`, [created.id])).toEqual([{ n: 1 }]);
+  });
+
+  it('one export's failing side effect neither undoes its build nor blocks the next export', async () => {
+    const first = await exportsService.request(ctxOf(a), { reportKey: ReportKey.FILL_RATE_BY_VENUE, periodFrom: '2026-11-01', periodTo: '2026-11-02' });
+    const second = await exportsService.request(ctxOf(a), { reportKey: ReportKey.FILL_RATE_BY_VENUE, periodFrom: '2026-11-03', periodTo: '2026-11-04' });
+    const failing = { notify: jest.fn(async () => { throw new Error('notice down'); }) };
+    const logged: string[] = [];
+    await runReportExportCycle(dataSource, tenantContext, failing, audit, { lateGraceMinutes: 10, organisationId: a.organisationId, log: (l) => logged.push(l) });
+    expect((await rowOf(first.id)).status).toBe('ready');
+    expect((await rowOf(second.id)).status).toBe('ready');
+    expect(logged.some((l) => /side effect report_export_notice failed: Error/.test(l))).toBe(true);
+    expect(logged.join('
+')).not.toContain('notice down');
   });
 
   it('a build that cannot succeed fails at once (not_found), audited, never retried', async () => {
@@ -139,11 +156,13 @@ describeIfDb('report export Worker cycle (integration)', () => {
     await adminDataSource.transaction(async (m) => {
       await m.query(`SET LOCAL session_replication_role = replica`);
       await m.query(`UPDATE core.report_export SET ready_at = now() - interval '25 hours', file_expires_at = now() - interval '1 hour' WHERE id = $1`, [created.id]);
+      await m.query(`UPDATE core.report_export_file SET created_at = now() - interval '25 hours', file_expires_at = now() - interval '1 hour' WHERE export_id = $1`, [created.id]);
     });
     const result = await cycle();
     expect(result.deleted).toBeGreaterThanOrEqual(1);
     const row = await rowOf(created.id);
     expect(row).toMatchObject({ status: 'expired', csv_content: null });
+    expect(await adminDataSource.query(`SELECT 1 FROM core.report_export_file WHERE export_id = $1`, [created.id])).toHaveLength(0);
     expect(row.file_deleted_at).not.toBeNull();
     expect(await adminDataSource.query(`SELECT action FROM core.audit_log WHERE entity_id = $1 AND action = 'report_export.file_deleted'`, [created.id])).toHaveLength(1);
     await expect(exportsService.issueLink(ctxOf(a), created.id)).rejects.toBeInstanceOf(NotFoundException);

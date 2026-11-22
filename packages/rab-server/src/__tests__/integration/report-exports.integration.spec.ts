@@ -78,13 +78,25 @@ describeIfDb('reports: background CSV exports (integration)', () => {
   }
 
   /** Marks an export ready exactly as the Worker does (its own binding, rab.actor_type = 'worker'). */
+  /** Marks an export ready exactly as the Worker does: the file through the Worker-only definer, then the export row. */
   async function markReady(owner: TestIdentity, id: string, csv = 'Venue,Shifts\nPier,1'): Promise<void> {
-    await tenantContext.runInTenantContext({ organisationId: owner.organisationId, workspaceId: owner.workspaceId, userId: '', role: '', actorType: 'worker' }, (m) =>
-      m.query(
-        `UPDATE core.report_export SET status = 'ready', csv_content = $2, csv_bytes = octet_length($2), row_count = 1, ready_at = now(), file_expires_at = now() + interval '24 hours' WHERE id = $1`,
+    await tenantContext.runInTenantContext({ organisationId: owner.organisationId, workspaceId: owner.workspaceId, userId: '', role: '', actorType: 'worker' }, async (m) => {
+      const [{ requested_by }] = await m.query(`SELECT requested_by FROM core.report_export WHERE id = $1`, [id]);
+      await m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, $3::text)`, [id, requested_by, csv]);
+      await m.query(
+        `UPDATE core.report_export SET status = 'ready', csv_bytes = octet_length($2), row_count = 1, ready_at = now(), file_expires_at = now() + interval '24 hours' WHERE id = $1`,
         [id, csv],
-      ),
-    );
+      );
+    });
+  }
+
+  /** Ages an export's file (and link) past their expiry: triggers off for this one owner statement; the CHECKs still hold. */
+  async function ageFile(id: string): Promise<void> {
+    await adminDataSource.transaction(async (m) => {
+      await m.query(`SET LOCAL session_replication_role = replica`);
+      await m.query(`UPDATE core.report_export_file SET created_at = now() - interval '25 hours', file_expires_at = now() - interval '1 hour' WHERE export_id = $1`, [id]);
+      await m.query(`UPDATE core.report_export SET ready_at = now() - interval '25 hours', file_expires_at = now() - interval '1 hour' WHERE id = $1`, [id]);
+    });
   }
 
   const asWorker = <T>(owner: TestIdentity, fn: (m: EntityManager) => Promise<T>) =>
@@ -126,7 +138,7 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     expect(link.body.expiresInSeconds).toBe(60);
     expect(link.body.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     // Only the hash is stored.
-    const [stored] = await adminDataSource.query(`SELECT download_token_hash, download_token_expires_at - download_token_issued_at AS ttl FROM core.report_export WHERE id = $1`, [created.body.id]);
+    const [stored] = await adminDataSource.query(`SELECT download_token_hash FROM core.report_export_file WHERE export_id = $1`, [created.body.id]);
     expect(stored.download_token_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(stored.download_token_hash).not.toContain(link.body.token);
 
@@ -134,7 +146,7 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     expect(file.status).toBe(200);
     expect(file.headers['content-type']).toMatch(/text\/csv/);
     expect(file.headers['cache-control']).toBe('no-store');
-    expect(file.text).toBe('Venue,Gross\n=1+1,2.00');
+    expect(file.text).toBe('Venue,Gross\n=1+1,2.00'); // stored as the Worker built it (the builders neutralise cells)
 
     // Single use.
     expect((await http().post(`/rest/v1/reports/exports/${created.body.id}/download`).set(auth(token)).send({ token: link.body.token })).status).toBe(404);
@@ -150,7 +162,7 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     // Age the link past 60 s (triggers off for this one owner statement; the CHECK still holds issue + 60 s).
     await adminDataSource.transaction(async (m) => {
       await m.query(`SET LOCAL session_replication_role = replica`);
-      await m.query(`UPDATE core.report_export SET download_token_issued_at = now() - interval '2 minutes', download_token_expires_at = now() - interval '1 minute' WHERE id = $1`, [id]);
+      await m.query(`UPDATE core.report_export_file SET download_token_issued_at = now() - interval '2 minutes', download_token_expires_at = now() - interval '1 minute' WHERE export_id = $1`, [id]);
     });
     expect((await http().post(`/rest/v1/reports/exports/${id}/download`).set(auth(token)).send({ token: link.token })).status).toBe(404);
     // A fresh link works again.
@@ -243,6 +255,26 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     });
   });
 
+  it('each report also needs its object flag (attendance.view / schedule.view) at request, link issue and download (403)', async () => {
+    const { manager, token } = await workspace('rep-objflag');
+    const { id } = (await http().post('/rest/v1/reports/exports').set(auth(token)).send({ reportKey: ReportKey.ATTENDANCE_EXCEPTIONS, ...PERIOD })).body;
+    await markReady(manager, id);
+    const link = await service.issueLink(ctxOf(manager), id);
+    await withRevoked(manager, PermissionFlag.ATTENDANCE_VIEW, async () => {
+      expect((await http().post('/rest/v1/reports/exports').set(auth(token)).send({ reportKey: ReportKey.ATTENDANCE_EXCEPTIONS, ...PERIOD })).status).toBe(403);
+      expect((await http().post('/rest/v1/reports/exports').set(auth(token)).send({ reportKey: ReportKey.WEEKLY_HOURS_PER_STAFF, ...PERIOD })).status).toBe(403);
+      await expect(service.issueLink(ctxOf(manager), id)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(service.download(ctxOf(manager), id, link.token)).rejects.toBeInstanceOf(ForbiddenException);
+      // Fill rate needs schedule.view, not attendance.view.
+      expect((await http().post('/rest/v1/reports/exports').set(auth(token)).send({ reportKey: ReportKey.FILL_RATE_BY_VENUE, ...PERIOD })).status).toBe(202);
+    });
+    await withRevoked(manager, PermissionFlag.SCHEDULE_VIEW, async () => {
+      expect((await http().post('/rest/v1/reports/exports').set(auth(token)).send({ reportKey: ReportKey.FILL_RATE_BY_VENUE, ...PERIOD })).status).toBe(403);
+    });
+    // The refused attempts never burnt the link.
+    expect((await service.download(ctxOf(manager), id, link.token)).csv).toContain('Venue');
+  });
+
   it('each user may start a limited number of exports per hour (429 after 10)', async () => {
     const { manager } = await workspace('rep-rate');
     for (let i = 0; i < 10; i++) await service.request(ctxOf(manager), { reportKey: ReportKey.FILL_RATE_BY_VENUE, ...PERIOD });
@@ -251,7 +283,7 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     expect((refused as HttpException).getStatus()).toBe(429);
   });
 
-  it('database: no tenant context → 0 rows; another user → 0 rows; a person never writes the file or status; the Worker never writes a link; no DELETE', async () => {
+  it('database: no tenant context → 0 rows; another user → 0 rows; the file is unreadable to the runtime login; only the Worker updates; no DELETE; the database starts every row', async () => {
     const { org, manager } = await workspace('rep-db');
     const created = await service.request(ctxOf(manager), { reportKey: ReportKey.FILL_RATE_BY_VENUE, ...PERIOD });
     const id = created.id;
@@ -259,35 +291,65 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     expect(await dataSource.transaction((m) => m.query(`SELECT id FROM core.report_export WHERE id = $1`, [id]))).toEqual([]);
     const other = await factory.createInternalManager(org, { permissions: 'production', label: 'other' });
     expect(await asUser(other, (m) => m.query(`SELECT id FROM core.report_export WHERE id = $1`, [id]))).toEqual([]);
-    // The requester's session cannot build or finish its own export.
-    expect(pgCode(await asUser(manager, (m) => m.query(`UPDATE core.report_export SET status = 'ready', csv_content = 'x', csv_bytes = 1, ready_at = now(), file_expires_at = now() + interval '24 hours' WHERE id = $1`, [id])).catch((e) => e))).toBe('42501');
-    // Nor insert a ready row, nor change the scope.
-    expect(
-      pgCode(
-        await asUser(manager, (m) =>
-          m.query(
-            `INSERT INTO core.report_export (organisation_id, workspace_id, requested_by, report_key, period_from, period_to, include_pay, include_hours, scope_kind, scope_owner_user_id, status)
-             VALUES ($1, $2, $3, 'fill_rate_by_venue', '2026-11-01', '2026-11-02', false, false, 'owner', $3, 'ready')`,
-            [org.id, manager.workspaceId, manager.userId],
-          ),
-        ).catch((e) => e),
+
+    // A person never updates an export (no update policy; the guard refuses a non-Worker update for the owner login).
+    const personUpdate = await asUser(manager, (m) => m.query(`UPDATE core.report_export SET status = 'ready', csv_bytes = 1, ready_at = now(), file_expires_at = now() + interval '24 hours' WHERE id = $1 RETURNING id`, [id])).catch((e) => e);
+    if (Array.isArray(personUpdate)) expect(personUpdate[0]).toEqual([]); // RLS: zero rows visible to update
+    else expect(pgCode(personUpdate)).toMatch(/^(42501|23514)$/);
+    expect((await adminDataSource.query(`SELECT status FROM core.report_export WHERE id = $1`, [id]))[0].status).toBe('pending');
+
+    // The database starts every row: a backdated, pre-built insert is stored as a fresh pending row created now.
+    const inserted = await asUser(manager, (m) =>
+      m.query(
+        `INSERT INTO core.report_export (organisation_id, workspace_id, requested_by, report_key, period_from, period_to, include_pay, include_hours, scope_kind, scope_owner_user_id)
+         VALUES ($1, $2, $3, 'fill_rate_by_venue', '2026-11-01', '2026-11-02', false, false, 'owner', $3) RETURNING id`,
+        [org.id, manager.workspaceId, manager.userId],
       ),
-    ).toBe('42501');
-    expect(pgCode(await asUser(manager, (m) => m.query(`UPDATE core.report_export SET include_pay = true WHERE id = $1`, [id])).catch((e) => e))).toMatch(/^(42501|23514)$/);
-    // A link only for a ready file.
-    expect(pgCode(await asUser(manager, (m) => m.query(`UPDATE core.report_export SET download_token_hash = repeat('a', 64) WHERE id = $1`, [id])).catch((e) => e))).toBe('23514');
-    // The Worker never touches a link; a ready file's content never changes.
-    await markReady(manager, id);
-    expect(pgCode(await asWorker(manager, (m) => m.query(`UPDATE core.report_export SET download_token_hash = repeat('b', 64) WHERE id = $1`, [id])).catch((e) => e))).toBe('42501');
-    expect(pgCode(await asWorker(manager, (m) => m.query(`UPDATE core.report_export SET csv_content = 'changed', csv_bytes = 7 WHERE id = $1`, [id])).catch((e) => e))).toBe('23514');
-    // Not due: the Worker cannot delete the file early.
-    expect(pgCode(await asWorker(manager, (m) => m.query(`UPDATE core.report_export SET status = 'expired', csv_content = NULL, file_deleted_at = now() WHERE id = $1`, [id])).catch((e) => e))).toBe('23514');
-    // No DELETE for the runtime login (grant parity / no grant); the row stays.
+    );
+    const backdated = await adminDataSource.transaction(async (m) => {
+      // As the table owner (the owner-login shape: column grants do not bind it), still through the BEFORE INSERT trigger.
+      await m.query(`SET LOCAL ROLE crewflow`);
+      await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [org.id, manager.workspaceId, manager.userId]);
+      return m.query(
+        `INSERT INTO core.report_export (organisation_id, workspace_id, requested_by, report_key, period_from, period_to, include_pay, include_hours, scope_kind, scope_owner_user_id, status, attempts, row_count, created_at)
+         VALUES ($1, $2, $3, 'fill_rate_by_venue', '2026-11-01', '2026-11-02', false, false, 'owner', $3, 'pending', 0, 99, '2001-01-01T00:00:00Z') RETURNING id`,
+        [org.id, manager.workspaceId, manager.userId],
+      );
+    });
+    const [fresh] = await adminDataSource.query(`SELECT status, attempts, row_count, created_at > now() - interval '1 minute' AS recent FROM core.report_export WHERE id = $1`, [backdated[0].id]);
+    expect(fresh).toEqual({ status: 'pending', attempts: 0, row_count: null, recent: true });
+    expect(inserted[0].id).toBeDefined();
+
+    // The file table: the runtime login can neither read nor write it directly, even its own row.
+    await markReady(manager, id, 'secret,content');
+    expect(pgCode(await asUser(manager, (m) => m.query(`SELECT csv_content FROM core.report_export_file WHERE export_id = $1`, [id])).catch((e) => e))).toBe('42501');
+    expect(pgCode(await asWorker(manager, (m) => m.query(`SELECT csv_content FROM core.report_export_file WHERE export_id = $1`, [id])).catch((e) => e))).toBe('42501');
+    expect(pgCode(await asUser(manager, (m) => m.query(`UPDATE core.report_export_file SET download_count = 0 WHERE export_id = $1`, [id])).catch((e) => e))).toBe('42501');
+    expect(pgCode(await asUser(manager, (m) => m.query(`DELETE FROM core.report_export_file WHERE export_id = $1`, [id])).catch((e) => e))).toBe('42501');
+    // The definers keep their callers apart: a person cannot store or purge a file, the Worker cannot issue or take a link.
+    expect(pgCode(await asUser(manager, (m) => m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, 'x')`, [randomUUID(), manager.userId])).catch((e) => e))).toBe('42501');
+    expect(pgCode(await asUser(manager, (m) => m.query(`SELECT core.report_export_file_purge($1::uuid)`, [id])).catch((e) => e))).toBe('42501');
+    expect((await asWorker(manager, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, repeat('a', 64)) AS ok`, [id])))[0].ok).toBe(false);
+    // Another user of the organisation gets nothing from the definers.
+    expect((await asUser(other, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, repeat('a', 64)) AS ok`, [id])))[0].ok).toBe(false);
+
+    // The Worker cannot delete a file early, nor move the export back.
+    expect((await asWorker(manager, (m) => m.query(`SELECT core.report_export_file_purge($1::uuid) AS purged`, [id])))[0].purged).toBe(false);
+    expect(pgCode(await asWorker(manager, (m) => m.query(`UPDATE core.report_export SET status = 'expired', file_deleted_at = now() WHERE id = $1`, [id])).catch((e) => e))).toBe('23514');
+    expect(pgCode(await asWorker(manager, (m) => m.query(`UPDATE core.report_export SET status = 'pending', csv_bytes = NULL, row_count = NULL, ready_at = NULL, file_expires_at = NULL WHERE id = $1`, [id])).catch((e) => e))).toBe('23514');
+
+    // No DELETE for the runtime login on the export row (grant parity / no grant); the row stays.
     expect(pgCode(await asUser(manager, (m) => m.query(`DELETE FROM core.report_export WHERE id = $1`, [id])).catch((e) => e))).toBe('42501');
     expect(await adminDataSource.query(`SELECT 1 FROM core.report_export WHERE id = $1`, [id])).toHaveLength(1);
-    // The database fixes the link lifetime (60 s) whatever the caller sends.
-    await asUser(manager, (m) => m.query(`UPDATE core.report_export SET download_token_hash = repeat('c', 64), download_token_expires_at = now() + interval '1 day' WHERE id = $1`, [id]));
-    const [link] = await adminDataSource.query(`SELECT extract(epoch FROM download_token_expires_at - download_token_issued_at)::int AS ttl FROM core.report_export WHERE id = $1`, [id]);
+
+    // A link issued (database-fixed 60 s), then the file expires: issuing and using a link are refused by the database.
+    const hash = 'c'.repeat(64);
+    expect((await asUser(manager, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, $2::text) AS ok`, [id, hash])))[0].ok).toBe(true);
+    const [link] = await adminDataSource.query(`SELECT extract(epoch FROM download_token_expires_at - download_token_issued_at)::int AS ttl FROM core.report_export_file WHERE export_id = $1`, [id]);
     expect(link.ttl).toBe(60);
+    await ageFile(id);
+    expect((await asUser(manager, (m) => m.query(`SELECT core.report_export_file_take($1::uuid, $2::text) AS csv`, [id, hash])))[0].csv).toBeNull();
+    expect((await asUser(manager, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, $2::text) AS ok`, [id, 'd'.repeat(64)])))[0].ok).toBe(false);
+    await expect(service.issueLink(ctxOf(manager), id)).rejects.toBeInstanceOf(NotFoundException);
   });
 });

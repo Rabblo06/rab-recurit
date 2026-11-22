@@ -15,7 +15,7 @@ jest.mock('../../queues/rab-shifts/shift-cancellation-followup.job', () => ({ ru
 jest.mock('../../queues/rab-reports/shift-report-scheduler.job', () => ({ runShiftReportSchedulerCycle: jest.fn(async () => ({ generated: 0, skippedLocked: 0, failed: 0 })) }));
 jest.mock('../../queues/rab-reports/final-timesheet.job', () => ({ runFinalTimesheetCycle: jest.fn(async () => ({ sent: 0, skippedLocked: 0, failed: 0 })) }));
 jest.mock('../../queues/rab-reports/payroll-period-attention.job', () => ({ runPayrollPeriodAttentionCycle: jest.fn(async () => ({ notified: 0 })) }));
-jest.mock('../../queues/rab-reports/report-export.job', () => ({ runReportExportCycle: jest.fn(async () => ({ built: 0, failed: 0, retried: 0, deleted: 0 })) }));
+jest.mock('../../queues/rab-reports/report-export.job', () => ({ runReportExportCycle: jest.fn(async () => ({ built: 0, failed: 0, retried: 0, deleted: 0, errors: 0 })) }));
 jest.mock('../../queues/rab-reports/shift-statement.job', () => ({ runShiftStatementDispatchCycle: jest.fn(async () => ({ claimed: 0 })), processShiftStatementJob: jest.fn() }));
 jest.mock('../../queues/rab-reports/shift-statement-enqueue', () => ({ enqueueShiftStatement: jest.fn() }));
 
