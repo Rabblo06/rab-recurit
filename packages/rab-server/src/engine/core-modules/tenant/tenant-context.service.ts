@@ -112,6 +112,42 @@ export function bindGucsSql(extras: BindExtras = {}): string {
   );
 }
 
+/** The identity a binding statement carries. `actorType` is set only by trusted server code (auth-context.interface.ts). */
+export type BindIdentity = Pick<AuthContext, 'organisationId' | 'workspaceId' | 'userId' | 'role' | 'actorType'>;
+
+/** Runs one statement with bound parameters and returns its rows (a TypeORM EntityManager, or a pg Client adapted to it). */
+export type BindQuery = (sql: string, params: unknown[]) => Promise<unknown>;
+
+/**
+ * The binding statement itself (bindGucsSql), with its parameters built in exactly one place. Shared by TenantContextService's
+ * own binder and bindMaintenanceSessionGucs below, so there is still only ONE statement that writes the identity GUCs
+ * (rab.actor_type included) and one place that maps a context onto its parameters.
+ */
+async function runBindStatement(query: BindQuery, ctx: BindIdentity, extras: BindExtras): Promise<{ cu: string; su: string } | undefined> {
+  const params: string[] = [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''];
+  if (extras.searchPath !== undefined) params.push(extras.searchPath);
+  const rows = (await query(bindGucsSql(extras), params)) as Array<{ cu: string; su: string }> | undefined;
+  return rows?.[0];
+}
+
+/**
+ * The trusted binder for a MAINTENANCE session that cannot go through a TenantContextService transaction: a dedicated pg Client
+ * or a transaction a maintenance job already holds (the Worker's workspace -> core orphan check, the account-invite cleanup's
+ * level-22 pass). Binds the same nine transaction-local GUCs with the same one statement and the same parameter mapping as
+ * every tenant-context transaction (bindGucsSql: rab.organisation_id, workspace_id, user_id, role, actor_type, and
+ * team_shift_id / team_staff_id / admin_scope / upgrade_scope reset to ''). The caller must be inside a transaction (the
+ * values are transaction-local and vanish on COMMIT / ROLLBACK, or on ROLLBACK TO SAVEPOINT).
+ *
+ * Unlike TenantContextService's own binder it does NOT run RESET ROLE and does not require current_user = session_user:
+ * those sessions are not pooled request connections, and the orphan check's connection deliberately acts as `crewflow`
+ * through a session-level SET ROLE on the owner login (workspace-provisioning.loops.ts actAsProvisioningRole) that RESET
+ * ROLE would silently drop for the rest of the connection. It changes no role, opens no transaction and sets no search_path.
+ * Never call it from a request path: those use runInTenantContext / runInWorkspaceContext.
+ */
+export async function bindMaintenanceSessionGucs(query: BindQuery, ctx: BindIdentity): Promise<void> {
+  await runBindStatement(query, ctx, {});
+}
+
 @Injectable()
 export class TenantContextService {
   constructor(
@@ -303,7 +339,7 @@ export class TenantContextService {
    * search_path is bound here, since the security snapshot never touches a physical workspace
    * schema by design (HWS routing boundary, P1C §11).
    */
-  async bindCoreIdentityGucs(manager: EntityManager, ctx: Pick<AuthContext, 'organisationId' | 'workspaceId' | 'userId' | 'role' | 'actorType'>): Promise<void> {
+  async bindCoreIdentityGucs(manager: EntityManager, ctx: BindIdentity): Promise<void> {
     await this.bindGucs(manager, ctx);
   }
 
@@ -322,11 +358,7 @@ export class TenantContextService {
     if (ctx.inspectedBy) await manager.query('SET TRANSACTION READ ONLY');
   }
 
-  private async bindGucs(
-    manager: EntityManager,
-    ctx: Pick<AuthContext, 'organisationId' | 'workspaceId' | 'userId' | 'role' | 'actorType'>,
-    extras: BindExtras = {},
-  ): Promise<void> {
+  private async bindGucs(manager: EntityManager, ctx: BindIdentity, extras: BindExtras = {}): Promise<void> {
     // Owner-login pool safety (G-09): a session-level SET ROLE / set_config('role', …, false) left behind by an earlier
     // request on this pooled connection must not carry into this tenant transaction. RESET ROLE (session level, inside the
     // transaction: it persists on COMMIT, reverts on ROLLBACK — allowed in READ ONLY transactions, never DISCARD ALL), then
@@ -345,10 +377,7 @@ export class TenantContextService {
     //     a UUID) plus an exact match with the registry row, and, for a cached value, the same exact-name comparison (ST-07).
     // Never pass anything else here (no request field, header, claim or other string).
     // RESET ROLE above stays its own statement (both layers kept, G-09).
-    const params: string[] = [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''];
-    if (extras.searchPath !== undefined) params.push(extras.searchPath);
-    const rows: Array<{ cu: string; su: string }> = await manager.query(bindGucsSql(extras), params);
-    const identity = rows?.[0];
+    const identity = await runBindStatement((sql, params) => manager.query(sql, params), ctx, extras);
     if (!identity || identity.cu !== identity.su) throw new TenantSessionRoleError(String(identity?.cu), String(identity?.su));
   }
 

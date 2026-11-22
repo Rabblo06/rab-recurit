@@ -10,7 +10,7 @@ import {
   RolePermission,
   UserPermissionOverride,
   UserRole,
-} from '../../../modules/identity/entities';
+} from '../identity/entities';
 import { memoRunnerFor, readTxPermissions, storeTxPermissions, txPermissionIdentity } from './tx-permission-memo';
 
 /**

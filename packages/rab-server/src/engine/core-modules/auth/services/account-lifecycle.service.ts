@@ -2,7 +2,7 @@ import { EmailOutboxJobType, PasswordResetTokenPurpose } from '@rab/shared';
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { User } from '../../../../modules/identity/entities';
+import { User } from '../../identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { EmailOutboxService } from '../../email/email-outbox.service';
