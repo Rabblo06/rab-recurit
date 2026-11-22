@@ -1,6 +1,6 @@
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
 
-import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
+import { bigintAsNumber } from '../../../utils/bigint-transformer';
 import { Organisation } from './organisation.entity';
 
 /** A named bundle of permissions, scoped to one organisation. */

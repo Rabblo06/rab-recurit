@@ -1,6 +1,7 @@
 import { DataSource, EntityManager } from 'typeorm';
 
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
+import { bindMaintenanceSessionGucs } from '@rab/server/engine/worker-shared/maintenance-session-binder';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/workspace-upgrade-block';
 import {
@@ -648,16 +649,31 @@ function level22RetainReason(error: unknown): string | null {
  * (`rab.user_id` = manager_workspace.owner_user_id: payslip, payslip_document, venue_manager_staff, staff_profile DELETE /
  * UPDATE). The same binding as the orphan check (owner decision 0a-T2, SECURITY TRADE-OFF). No owner → Level22Retain (fail
  * closed). Restored on success; on a throw the candidate savepoint rolls the transaction-local settings back.
+ *
+ * The marker is bound only through the trusted binder (tenant-context.service.ts bindMaintenanceSessionGucs: the one binding
+ * statement, never a raw set_config of rab.actor_type — worker-actor-type-trusted-only.spec.ts). That statement writes all
+ * nine identity GUCs, so the organisation, workspace and role in force are re-bound unchanged, and on the way out everything
+ * is bound back with the previous user and no marker. Fail closed if the marker or an optional scope GUC (team_shift_id,
+ * team_staff_id, admin_scope) is already set: this job never sets them, and the binder resets them to ''. (The binder also
+ * clears the upgrade logbook scope; a Worker job is never inside one, and only the upgrade paths may name it, ledger ST-5.)
  */
 async function withLevel22Visibility<T>(manager: EntityManager, workspaceId: string, run: () => Promise<T>): Promise<T> {
   const [owner] = await manager.query<Array<{ owner_user_id: string | null }>>(`SELECT owner_user_id FROM core.manager_workspace WHERE id = $1`, [workspaceId]);
   if (!owner?.owner_user_id) throw new Level22Retain('workspace_unverifiable');
-  const [previous] = await manager.query<Array<{ actor: string | null; uid: string | null }>>(
-    `SELECT current_setting('rab.actor_type', true) AS actor, current_setting('rab.user_id', true) AS uid`,
+  const [previous] = await manager.query<Array<Record<'org' | 'workspace' | 'uid' | 'role' | 'actor' | 'team_shift' | 'team_staff' | 'admin_scope', string | null>>>(
+    `SELECT current_setting('rab.organisation_id', true) AS org, current_setting('rab.workspace_id', true) AS workspace,
+            current_setting('rab.user_id', true) AS uid, current_setting('rab.role', true) AS role, current_setting('rab.actor_type', true) AS actor,
+            current_setting('rab.team_shift_id', true) AS team_shift, current_setting('rab.team_staff_id', true) AS team_staff,
+            current_setting('rab.admin_scope', true) AS admin_scope`,
   );
-  await manager.query(`SELECT set_config('rab.actor_type', 'worker', true), set_config('rab.user_id', $1, true)`, [owner.owner_user_id]);
+  if (previous?.actor || previous?.team_shift || previous?.team_staff || previous?.admin_scope) {
+    throw new Error('level-22 visibility: the transaction already carries the worker marker or an optional scope; refusing to re-bind it');
+  }
+  const query = (sql: string, params: unknown[]) => manager.query(sql, params);
+  const inForce = { organisationId: previous?.org || null, workspaceId: previous?.workspace || null, userId: previous?.uid ?? '', role: previous?.role ?? '' };
+  await bindMaintenanceSessionGucs(query, { ...inForce, userId: owner.owner_user_id, actorType: 'worker' });
   const result = await run();
-  await manager.query(`SELECT set_config('rab.actor_type', $1, true), set_config('rab.user_id', $2, true)`, [previous?.actor ?? '', previous?.uid ?? '']);
+  await bindMaintenanceSessionGucs(query, inForce);
   return result;
 }
 
