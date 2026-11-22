@@ -479,8 +479,12 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     const meta = (await admin.query(`SELECT metadata FROM core.audit_log WHERE entity_id = $1 AND action = $2`, [w1.id, HWS_CUTOVER_VERIFIED_ACTION])).rows[0].metadata;
     expect(meta).toMatchObject({ step: 'HwsCutover', outcome: 'copied-and-verified', tables: { payroll_record: { rows: 2 } } });
     // Review Info-4: no per-workspace money in the audit record or the log.
-    expect(JSON.stringify(meta)).not.toMatch(/pence|22501|11250/);
-    expect(lines.some((l) => /22501|11250/.test(l))).toBe(false);
+    // Whole tokens only: a money figure is never part of a longer hex / digit run, so an md5 checksum that happens to contain
+    // the digits (e.g. "...12d11250ff...") is not a leak (it made this assertion flaky).
+    const MONEY = /(^|[^0-9a-f])(22501|11250)(?![0-9a-f])/i;
+    expect(JSON.stringify(meta)).not.toMatch(/pence/);
+    expect(JSON.stringify(meta)).not.toMatch(MONEY);
+    expect(lines.some((l) => MONEY.test(l))).toBe(false);
     expect(await stateOf(w1)).toBe('verified');
     // Statement pointers (Q13): exactly the core twins' pointers now exist for the workspace copy; none for the record whose
     // twin had none; every core-source pointer of the workspace is purged.
