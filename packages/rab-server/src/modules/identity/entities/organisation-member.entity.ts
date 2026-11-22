@@ -10,8 +10,8 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-import { Organisation } from './organisation.entity';
-import { User } from './user.entity';
+import { Organisation } from '../../../engine/core-modules/identity/entities/organisation.entity';
+import { User } from '../../../engine/core-modules/identity/entities/user.entity';
 
 /**
  * A User's membership inside one Organisation — Increment 1 of the
