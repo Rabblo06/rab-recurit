@@ -242,4 +242,54 @@ describeIfDb('push dispatch — worker claim/send/retry/fail (integration)', () 
     expect(row!.status).toBe('FAILED');
     expect(row!.last_error_code).toBe('STUCK_LEASE_ATTEMPTS_EXHAUSTED');
   });
+
+  it('10 (SF-5, end to end): a manager\'s action notifies a STAFF member; the dispatch cycle publishes the delivery and the real push send, under the worker marker, reads that recipient-only notification and sends it', async () => {
+    const { organisation: org, managers } = await factory.createOrganisationWithManagers(1, { workspace: true, label: 'pushdispatch10' });
+    const manager = managers[0]!;
+    const staff = await factory.createStaff(org, { owner: manager, label: 'pushdispatch10-staff' });
+    const device = await pushDeviceService.register(ctxOf(staff), { deviceId: `d-${randomUUID()}`, platform: 'ios', pushToken: 'tok-sf5-e2e' });
+    const offerId = randomUUID();
+
+    // The producer runs in the MANAGER's context and writes a row for SOMEONE ELSE (no INSERT ... RETURNING under SF-5).
+    await tenantContext.runInTenantContext(ctxOf(manager), (m) =>
+      notificationService.notify(m, {
+        organisationId: org.id, userId: staff.userId, type: NotificationType.OFFER_SENT,
+        title: 'New shift offer', message: 'Venue · 12 Dec · £96.00', relatedEntityType: 'offer', relatedEntityId: offerId,
+      }),
+    );
+    const [notification] = await adminDataSource.manager.query(
+      `SELECT id, user_id, read_at FROM core.notification WHERE related_entity_id = $1`,
+      [offerId],
+    );
+    expect(notification.user_id).toBe(staff.userId);
+    const [delivery] = await adminDataSource.manager.query(
+      `SELECT id, status FROM core.push_delivery WHERE push_device_id = $1 AND notification_id = $2`,
+      [device.id, notification.id],
+    );
+    expect(delivery.status).toBe('PENDING');
+
+    // The row is recipient-only: neither the manager who caused it nor a no-user context without the marker can read it.
+    const readAs = (ctx: AuthContext) => tenantContext.runInTenantContext(ctx, (m) => m.query(`SELECT id FROM core.notification WHERE id = $1`, [notification.id]));
+    expect(await readAs(ctxOf(manager))).toEqual([]);
+    expect(await readAs({ organisationId: org.id, workspaceId: null, userId: '', role: '' })).toEqual([]);
+
+    // Dispatch: the real cycle publishes this delivery for this organisation...
+    const published: Array<{ id: string; org: string }> = [];
+    await runPushDispatchCycle(dataSource, tenantContext, async (id, orgId) => { published.push({ id, org: orgId }); }, async () => {}, pushService.ambiguousDeliverySafeToRetry);
+    const job = published.find((p) => p.id === delivery.id);
+    expect(job).toEqual({ id: delivery.id, org: org.id });
+
+    // ...and the real push-send processor delivers exactly what it published.
+    await runProcessor(job!.id, job!.org);
+    const sent = await rowFor('push_delivery', delivery.id);
+    expect(sent!.status).toBe('ACCEPTED');
+    expect(sent!.provider_message_id).toBeTruthy();
+    const messages = FakeFcmDriver.sentMessages.filter((m) => m.token === 'tok-sf5-e2e');
+    expect(messages).toHaveLength(1);
+    // The push carries the notification's id and type (read through the worker marker), never its title or message.
+    expect(messages[0]!.data).toEqual({ notificationId: notification.id, type: NotificationType.OFFER_SENT });
+    expect(`${messages[0]!.title} ${messages[0]!.body}`).not.toMatch(/New shift offer|£96/);
+    // Sending did not touch the notification (the worker cannot UPDATE it): still unread, still the staff member's.
+    expect((await adminDataSource.manager.query(`SELECT user_id, read_at FROM core.notification WHERE id = $1`, [notification.id]))[0]).toEqual({ user_id: staff.userId, read_at: null });
+  });
 });

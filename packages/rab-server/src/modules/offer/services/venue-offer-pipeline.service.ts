@@ -106,7 +106,7 @@ export class VenueOfferPipelineService {
         a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.clock_out_method AS "clockOutMethod",
         sa.attendance_reviewed_at AS "attendanceReviewedAt",
         sa.checked_in_at AS "checkedInAt", sa.check_in_source AS "checkInSource", a.clock_in_method AS "clockInMethod",
-        (SELECT max(n.read_at) FROM core.notification n WHERE n.organisation_id=o.organisation_id AND n.user_id=sp.user_id AND n.type='offer_sent' AND n.related_entity_id=o.id) AS "notificationReadAt",
+        core.offer_sent_notification_read_at(o.id, sp.user_id) AS "notificationReadAt",
         cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt",
         deadline.approval_deadline_at AS "approvalDeadlineAt", deadline.awaiting_manager_confirmation AS "awaitingManagerConfirmation",
         deadline.closed_reason AS "closedReason"

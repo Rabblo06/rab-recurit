@@ -308,10 +308,10 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
   // ----------------------------------------------------------------------------------- notifications
 
   it('notification.created — exactly the notification’s recipient, workspace NULL, no title/message in the outbox', async () => {
-    const entryIds = await tenantContext.runInTenantContext(ctxOf(owner), async (m) => {
-      await notifications.notify(m, { organisationId: org.id, userId: staff1.userId, type: 'offer_sent', title: 'Private title', message: 'Private message body' });
-      return m.query(`SELECT id FROM core.notification WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [staff1.userId]);
-    });
+    await tenantContext.runInTenantContext(ctxOf(owner), (m) =>
+      notifications.notify(m, { organisationId: org.id, userId: staff1.userId, type: 'offer_sent', title: 'Private title', message: 'Private message body' }));
+    // SF-5: the owner cannot read staff1's notification (recipient-only RLS): read the committed row back as the owner role.
+    const entryIds = await admin.query(`SELECT id FROM core.notification WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`, [staff1.userId]);
     const list = await rows(entryIds[0].id, 'notification.created');
     expect(list.map((r) => r.target_user_id)).toEqual([staff1.userId]);
     expect(list[0]!.workspace_id).toBeNull();

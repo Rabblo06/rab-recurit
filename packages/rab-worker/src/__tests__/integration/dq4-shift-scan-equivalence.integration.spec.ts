@@ -147,7 +147,9 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
 
   async function notificationCount(s: Subject): Promise<number> {
     const ids = [s.assignmentId, s.attendanceId].filter(Boolean);
-    const rows = await withOrg(s.org, (m) => m.query(`SELECT count(*)::int AS n FROM core.notification WHERE related_entity_id::text = ANY($1::text[])`, [ids]));
+    // SF-5: core.notification is recipient-only for human contexts; count every recipient's rows through the worker marker.
+    const rows = await tenantContext.runInTenantContext({ ...ctx(s.org), userId: '', actorType: 'worker' as const }, (m) =>
+      m.query(`SELECT count(*)::int AS n FROM core.notification WHERE related_entity_id::text = ANY($1::text[])`, [ids]));
     return rows[0].n;
   }
 
