@@ -8828,6 +8828,68 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   links are unchanged; step-up-gated methods use a real signed-in session so only the flag refuses; positive controls with
   the flag; wrong-route-flag and fail-closed cases; the platform-admin `getOrganisation` read still works; HTTP 403/200
   unchanged). `permissions.service.spec.ts` covers the helper.
+- **Follow-up:** the "not changed" item above is closed by the next entry.
+
+## SF-2 follow-up — invite resend / cancel re-check the route flag; platform admins use a separate, audited path (branch fix/sf2-invite-admin-path, 2026-11-18)
+- **Threat:** (1) a job, CLI command, AI tool or another service calls `ManagerService.resendInvite` / `cancelInvite`
+  directly. Neither re-checked a flag, so a caller without `manager.manage` / `user.reset_password` could send a fresh
+  activation email to a pending Manager (or CEO) of its organisation, or revoke the invitation and clear the account's
+  password. (2) The platform administrator's CEO resend / revoke reached the same methods with a context that holds no role
+  in the target organisation, so the only thing between "any caller" and "a platform admin" was the caller remembering to
+  check first, and the authority used was not recorded as such (only `via: platform_admin` metadata, which any caller of
+  `resendInvite` could also pass).
+- **Control (owner decision on PR #207):**
+  - `resendInvite` / `cancelInvite` re-check the caller's route flag FIRST inside their own transaction
+    (`assertRouteFlagTx` → `PermissionsService.assertPermissionTx`): 403 for any id before a row is read, so no existence
+    oracle. Defaults: `manager.manage` + `user.reset_password` (the `/managers` routes). `VenueManagerService` passes
+    `venue_manager.create` (+ `user.reset_password`). The Initial Manager resend / revoke route carries only its class
+    guard `manager.manage`, so `OrganisationOnboardingService` passes `manager.manage` with no extra flag (the route is
+    unchanged). Any other flag fails closed. Out-of-scope records stay 404 (RLS-scoped lookup). With the Venue Manager
+    flag, the target is also pinned in the same transaction to a `type: venue` profile of the caller's own workspace (404
+    otherwise), so a direct caller cannot use `venue_manager.create` on an Internal Manager or CEO (review L-1; resend and
+    cancel only; `update`, `setActive`, `resetPassword` have the same gap and are listed as a follow-up in PR #237).
+  - A platform admin acting in its OWN organisation (where it may hold `manager.manage` + `user.reset_password`) passes the
+    flag check, but another organisation's pending CEO is then a 404: `manager_profile`'s platform-admin RLS branch can
+    show the CEO profile, but the joined `core.user` row is invisible under `core.user`'s organisation-scoped RLS, so the
+    lookup finds no user. Both organisations stay unchanged.
+  - The `audit` parameter that let any caller stamp `via: platform_admin` on a resend is gone.
+  - New `resendInviteAsPlatformAdmin` / `cancelInviteAsPlatformAdmin`, used only by
+    `OrganisationOnboardingService.resendCeoInvite` / `revokeCeoInvite`. In ONE transaction bound to the target
+    organisation: the caller must be an ACTIVE platform admin (`core.is_active_platform_admin`) and not in an Admin Inspect
+    session (refused first in `OrganisationOnboardingService`, and again in ManagerService because `inspectedBy` is carried
+    into the context) → otherwise 403 before any row is read; the resend reason is re-validated (3–500 characters) → 400; the target
+    must be a CEO profile of the target organisation (organisation- and type-pinned; no organisation bound → 404) →
+    otherwise 404 (platform-admin authority covers the CEO invitation only, never another Manager's); a CEO that is no
+    longer pending is a 409. The ordinary steps then run (the tenant's
+    `user.invite_resent` with `via: platform_admin` + reason, or `user.invite_cancelled`) and the path writes its OWN row,
+    `platform_admin.invite_resent` / `platform_admin.invite_cancelled` (`entity_type` `account_invite`, `entity_id` the
+    invite; metadata: target `organisationId`, `managerProfileId`, `inviteId`, plus `sendNumber` and `reason` on a resend;
+    never a token). On a revoke `inviteId` is the invitation this action actually revoked (the unaccepted, unrevoked row
+    read before `revokeActive`), or null when nothing was live. Both rows commit or roll back with the action. Both actions are classified for the off-host copy
+    (`platform_admin`, warning).
+  - Layers: route guard (`PlatformAdminGuard` / `PermissionGuard`) → service re-check (this change) → organisation-pinned
+    lookup → RLS (`manager_profile`'s platform-admin branch reaches CEO rows only; `audit_log` FORCE RLS and the recorded
+    identity trigger, which allows a cross-organisation actor only when it is an active platform admin).
+- **Behaviour change:** a direct service call without the route's flags is now 403; HTTP behaviour is unchanged (the guards
+  already demanded the same flags). A platform-admin resend / revoke writes one extra audit row.
+- **Known gap (needs SQL, owner):** the Admin Panel Audit tab reads a frozen allowlist inside
+  `core.admin_list_audit_events` (AdminPanelReadFunctions1786720100000), so the two new actions are recorded but not yet
+  listed there. The admin resend stays visible through the existing `user.invite_resent` + `via` row; the admin revoke was
+  never listed and still is not. The proposed migration is in the PR body for owner approval.
+- **Tests:** `sf2-invite-admin-path.integration.spec.ts`: without `manager.manage` or `user.reset_password` → 403 for a real
+  and an unknown id, and the organisation's audit log, outbox, invites and accounts (status, password) are unchanged; a
+  production-permission Manager and a wrong-flag cast are refused; a platform admin (every flag in its own organisation)
+  bound to the target organisation is refused, and bound to its own organisation gets 404 for the other organisation's
+  pending CEO with both organisations inert; `venue_manager.create` used by a caller that can see the Internal Manager
+  under RLS (and would succeed without the pin, shown fail-first) → 404, while the same caller on its own workspace's pending
+  Venue Manager succeeds; out of scope (another
+  organisation, unknown id) → 404; positive control keeps the tenant rows only. Admin path: a non-admin Manager holding
+  every flag → 403 for resend and cancel, real and unknown id (service and `OrganisationOnboardingService`); an ACTIVE
+  platform admin in an Admin Inspect session → 403 through both services (shown to fail with the checks removed); a
+  revoked platform admin → 403; a non-CEO / other-organisation / unknown target → 404; a bad reason → 400; all inert. A
+  platform admin's resend and revoke write the tenant row plus `platform_admin.invite_resent` /
+  `platform_admin.invite_cancelled` naming the organisation, profile and invite (on revoke: the live invite it revoked);
+  a second revoke with nothing live records `inviteId` null.
 
 ## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
 - **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
