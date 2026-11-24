@@ -52,6 +52,8 @@ const LOCK = MIGRATION_LOCK_KEY.toString();
 const T0 = 1786950000000;
 const PREV_061 = ['0.4.0', '0.5.0', '0.6.0'];
 const PREV_070 = [...PREV_061, '0.6.1'];
+/** 0.7.0's reviewed upgrade-from list (every published 0.6.x, owner decision 2026-11-18). */
+const UF_070 = { '0.7.0': ['0.6.0', '0.6.1'] };
 /** This code's real 0.6.0 workspace steps (an adopted workspace runs them right after its is_initial row). */
 const REAL = (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => `0.6.0_${c.name}_${c.timestamp}`);
 const LEVEL = codeWorkspaceStructureLevel();
@@ -273,13 +275,14 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       const run = new UpgradeRun({
         codeVersion: '0.7.0',
         previousVersions: PREV_070,
+        upgradeFrom: UF_070,
         force: false,
         log: (l) => lines.push(l),
         registry: { ...UPGRADE_COMMANDS, '0-7': [instance] },
         workspaceRegistry: { ...WORKSPACE_UPGRADE_COMMANDS, '0-7': [workspace] },
         workspaceRunner: { workspaceIds: ids },
       });
-      expect(await start(run)).toMatchObject({ kind: 'continue', from: '0.6.1' });
+      expect(await start(run)).toMatchObject({ kind: 'continue', from: '0.6.0' });
       expect(run.report.recorded).toEqual([
         { name: '0.7.0_TypeOrmMigrations', status: 'completed', attempt: 1 },
         { name: `0.7.0_PatchSpecInstance_${T0}`, status: 'completed', attempt: 1 },
@@ -352,7 +355,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     const gateName = `0.6.0_PatchSpecGate_${T0 + 10}`;
     const w = await make('gate');
     const at070 = () =>
-      new UpgradeRun({ codeVersion: '0.7.0', previousVersions: PREV_070, force: false, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [w.id] } }).beforeApply(
+      new UpgradeRun({ codeVersion: '0.7.0', previousVersions: PREV_070, upgradeFrom: UF_070, force: false, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [w.id] } }).beforeApply(
         session,
         { fresh: false, attribution: null, unrestrictedTarget: true },
       );
@@ -368,9 +371,11 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       }).run(session);
       expect(adopted.failures.map((f) => f.step)).toEqual([gateName]);
 
-      // A forced 0.6.1: its migrations step completes (forced), the workspace pass retries the gate, which fails again.
+      // A forced 0.6.1: its migrations step completes (forced), the workspace pass retries the gate, which fails again. Since
+      // the owner's decision (b) (2026-11-18) the start resumes 0.6.0 (started unforced, every workspace has a logbook row)
+      // before --force is consulted, so the decision is `continue`; every row of the run is still marked forced.
       const forced = run061([w.id], { force: true, workspaceRegistry: registry });
-      expect((await start(forced)).kind).toBe('forced');
+      expect(await start(forced)).toMatchObject({ kind: 'continue', from: '0.6.0' });
       expect(await instanceRows('0.6.1')).toEqual([['0.6.1_TypeOrmMigrations', 'completed', 1, true]]);
       expect(forced.report.workspaces?.failures.map((f) => f.step)).toEqual([gateName]);
       expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: gateName, status: 'failed', attempt: 2 });
@@ -385,7 +390,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       const again = run061([w.id], { workspaceRegistry: registry });
       expect(await start(again)).toMatchObject({ kind: 'continue', from: '0.6.1' });
       expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: gateName, status: 'completed', attempt: 3 });
-      expect(await at070()).toMatchObject({ kind: 'continue', from: '0.6.1' });
+      expect(await at070()).toMatchObject({ kind: 'continue', from: '0.6.0' });
     } finally {
       await dropNewerInstanceRows();
     }
