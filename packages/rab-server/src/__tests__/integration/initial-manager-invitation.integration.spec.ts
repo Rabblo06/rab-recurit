@@ -6,6 +6,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { bypassDeletionProof } from './helpers/step-up-kit';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -69,6 +70,7 @@ describeIfDb('initial manager invitation (integration)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
+    bypassDeletionProof(app); // owner decision 73: this suite is about deletion invariants, not the user.delete proof
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

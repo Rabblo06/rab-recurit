@@ -6,6 +6,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { bypassDeletionProof } from './helpers/step-up-kit';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { EnvironmentVariables } from '../../engine/core-modules/environment/environment-variables';
@@ -66,6 +67,7 @@ describeIfDb('first platform admin at API boot, through the HTTP app (integratio
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
+    bypassDeletionProof(app); // owner decision 73: this suite is about deletion invariants, not the user.delete proof
     env = moduleRef.get(EnvironmentService);
     const realGet = env.get.bind(env);
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) => (key in overrides ? overrides[key] : realGet(key))) as EnvironmentService['get']);

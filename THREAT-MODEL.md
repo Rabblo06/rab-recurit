@@ -10533,3 +10533,27 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   a second approval on the same proof 403; a reviewer who did not finalise: service 403 and DB 42501.
   payroll-maker-checker-rls (core, runtime login): finaliser / reviewer approving 42501, run preparer finalising 42501, a
   third manager allowed.
+
+## 2026-11-24 — Deleting Staff / Managers / Venue Managers: hold-to-confirm + action-bound fresh proof (owner decision 73)
+
+- **Asset:** Staff, Manager and Venue Manager accounts (deletion is irreversible for the account's access; history rows stay).
+- **Change:** the web UI replaces "type DELETE + current password" with an uninterrupted 1.8 s hold (client intent only, not a
+  control). The server no longer reads a typed `currentPassword` on `DELETE /rest/v1/staff/:id`, `/managers/:id`,
+  `/venue-managers/:id`; instead `StaffService.deleteUser`, `ManagerService.deleteUser` and
+  `ManagerService.deleteVenueManagerUser` call `StepUpReauthService.assertFreshSecondFactorForAction(ctx, 'user.delete')`
+  FIRST (#335's action-bound proof, reused, not re-implemented): the actor must have an enrolled authenticator factor
+  (403 STEP_UP_MFA_ENROLMENT_REQUIRED otherwise), and THIS session must hold a grant recorded by `POST /auth/step-up` with
+  `action: 'user.delete'`, the password and a verified TOTP code, within AUTH_STEP_UP_WINDOW_SECONDS (300 s). Never a
+  sign-in grant, never the ordinary session grant, never a grant for another action; GETDEL makes it single use (one proof =
+  one delete). Refusals are audited with the action; Redis unavailable is 503 (fail closed); Admin Inspect is refused.
+- **Threat closed:** a hijacked or unattended live session alone cannot delete accounts (it would need the password and the
+  authenticator); a proof made for payroll approval cannot be replayed to delete, and one proof cannot delete twice.
+- **Unchanged:** route PermissionGuards, service-level permission re-checks, tenant/workspace scope (404 outside it) and
+  UserDeletionService invariants. erase-personal-data keeps its inline password step-up.
+- **Open (owner decision needed):** an actor with NO enrolled factor cannot delete anyone (no password-only path, as for
+  payroll approval). Proposed fallback, NOT implemented: a password re-entry proof bound to 'user.delete' (same single-use
+  action grant, `mfa: false`) accepted only when the actor has no factor.
+- **Tests:** `user-deletion-abuse-cases.integration.spec.ts` (401; unenrolled → STEP_UP_MFA_ENROLMENT_REQUIRED; no proof,
+  sign-in/ordinary grant, other action's proof, proof older than the window → STEP_UP_REQUIRED, target untouched; real
+  password + code + action proof → exactly one 204, replay refused); `account-invite-abuse-cases` (unenrolled owner refused).
+  Suites about deletion invariants use the `bypassDeletionProof` test fixture for 'user.delete' only.

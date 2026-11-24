@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { EmailOutboxStatus, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -16,6 +16,7 @@ import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
 import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
@@ -23,6 +24,8 @@ import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.const
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { provisionFixtureWorkspace, TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { codeAt } from './helpers/mfa-test-kit';
+import { approvalGrant, bypassDeletionProof, enrolTotp, freshApprovalProof } from './helpers/step-up-kit';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { businessSchema } from './helpers/hws-fixtures';
@@ -56,6 +59,8 @@ describeIfDb('user deletion abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
   let redisClient: ThrottlerRedisClientProvider;
+  let authRedis: AuthCacheRedisClientProvider;
+  let realDeletionProof = false;
 
   const password = FIXTURE_PASSWORD;
   // TestIdentityFactory generates its OWN random password per instance (`private readonly password
@@ -110,7 +115,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     return factory.loginTokens({ kind: 'internal_manager', email, password: passwordFor(email) });
   }
 
-  /** Hold-to-delete (2026-11-24): DELETE /managers|staff/:id no longer needs the actor's password; the body below is ignored. */
+  /** Owner decision 73: DELETE /managers|staff/:id needs a single-use 'user.delete' proof (bypassed outside the decision-73 describe); a password body is ignored. */
   function passwordFor(email: string): string {
     return managerPasswordsByEmail.get(email) ?? password;
   }
@@ -171,6 +176,10 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
     redisClient = moduleRef.get(ThrottlerRedisClientProvider);
+    authRedis = moduleRef.get(AuthCacheRedisClientProvider);
+    // Owner decision 73: the suites about deletion invariants run with the user.delete proof bypassed; the decision-73
+    // describe below switches the real proof back on.
+    bypassDeletionProof(app, () => realDeletionProof);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: passwordHashing });
@@ -634,47 +643,79 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     });
   });
 
-  describe('hold-to-delete (owner request 2026-11-24): no current-password step-up; session authorization still required', () => {
-    it('ABUSE: no session is 401 and the target is never touched', async () => {
-      const { organisation, email } = await seedOrgWithManager('hold-nosession');
-      const token = (await login(email)).accessToken;
-
+  describe('owner decision 73: deletion needs a fresh single-use proof bound to user.delete (hold-to-confirm in the UI is intent only)', () => {
+    beforeAll(() => {
+      realDeletionProof = true;
+    });
+    afterAll(() => {
+      realDeletionProof = false;
+    });
+    const sidOf = (token: string) => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+    const sessionKey = (token: string) => `crewflow:test:step-up:${createHash('sha256').update(sidOf(token)).digest('hex')}`;
+    const createStaff = async (token: string, label: string) => {
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `holdnosession-${randomUUID()}@example.test`, firstName: 'Hold', lastName: 'Delete' });
+        .send({ email: `${label}-${randomUUID()}@example.test`, firstName: 'Hold', lastName: 'Delete' });
       expect(create.status).toBe(201);
+      return create.body as { id: string; email: string };
+    };
+    const del = (token: string, staffId: string) => request(app.getHttpServer()).delete(`/rest/v1/staff/${staffId}`).set('Authorization', `Bearer ${token}`);
+    const exists = async (organisationId: string, email: string) => (await withTenant(organisationId, (m) => m.findOne(User, { where: { email } }))) !== null;
 
-      expect((await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`)).status).toBe(401);
+    it('ABUSE: no session is 401 on all three delete routes', async () => {
+      expect((await request(app.getHttpServer()).delete(`/rest/v1/staff/${randomUUID()}`)).status).toBe(401);
       expect((await request(app.getHttpServer()).delete(`/rest/v1/managers/${randomUUID()}`)).status).toBe(401);
       expect((await request(app.getHttpServer()).delete(`/rest/v1/venue-managers/${randomUUID()}`)).status).toBe(401);
-
-      const stillThere = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
-      expect(stillThere).not.toBeNull();
     });
 
-    it('ABUSE: an unknown or foreign id is still 404 without a password', async () => {
-      const { email } = await seedOrgWithManager('hold-unknown');
+    it('ABUSE: an actor with no authenticator factor is refused 403 STEP_UP_MFA_ENROLMENT_REQUIRED, whatever grant the session holds', async () => {
+      const { organisation, email } = await seedOrgWithManager('del-unenrolled');
       const token = (await login(email)).accessToken;
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${randomUUID()}`).set('Authorization', `Bearer ${token}`);
-      expect(del.status).toBe(404);
+      const staff = await createStaff(token, 'delunenrolled');
+      const userId = (await withTenant(organisation.id, (m) => m.findOneOrFail(User, { where: { email } }))).id;
+      await approvalGrant(authRedis, token, userId, 'user.delete');
+      const res = await del(token, staff.id).send({ currentPassword: passwordFor(email) });
+      expect({ status: res.status, code: res.body.code }).toEqual({ status: 403, code: 'STEP_UP_MFA_ENROLMENT_REQUIRED' });
+      expect(await exists(organisation.id, staff.email)).toBe(true);
     });
 
-    it('an authorized session deletes without a password body', async () => {
-      const { organisation, email } = await seedOrgWithManager('hold-ok');
+    it('ABUSE: enrolled, but no proof / a sign-in or ordinary grant / a proof for another action / an expired proof → 403 STEP_UP_REQUIRED, target untouched', async () => {
+      const { organisation, email } = await seedOrgWithManager('del-noproof');
       const token = (await login(email)).accessToken;
+      await enrolTotp(app, token, passwordFor(email));
+      const staff = await createStaff(token, 'delnoproof');
+      const userId = (await withTenant(organisation.id, (m) => m.findOneOrFail(User, { where: { email } }))).id;
 
-      const create = await request(app.getHttpServer())
-        .post('/rest/v1/staff')
-        .set('Authorization', `Bearer ${token}`)
-        .send({ email: `holdok-${randomUUID()}@example.test`, firstName: 'Hold', lastName: 'Delete' });
-      expect(create.status).toBe(201);
+      const none = await del(token, staff.id).send({ currentPassword: passwordFor(email) });
+      expect({ status: none.status, code: none.body.code, action: none.body.action }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED', action: 'user.delete' });
+      for (const via of ['sign_in', 'password'] as const) {
+        await authRedis.client.set(sessionKey(token), JSON.stringify({ u: userId, mfa: true, at: Date.now(), via }), 'PX', 60_000);
+        expect((await del(token, staff.id)).body.code).toBe('STEP_UP_REQUIRED');
+      }
+      await approvalGrant(authRedis, token, userId, 'payroll.record.approve');
+      expect((await del(token, staff.id)).body.code).toBe('STEP_UP_REQUIRED');
+      // Older than AUTH_STEP_UP_WINDOW_SECONDS (300 s) while its key still exists: the timestamp is authoritative.
+      await authRedis.client.set(`${sessionKey(token)}:action:user.delete`, JSON.stringify({ u: userId, mfa: true, at: Date.now() - 301_000, via: 'password' }), 'PX', 60_000);
+      expect((await del(token, staff.id)).body.code).toBe('STEP_UP_REQUIRED');
+      expect(await exists(organisation.id, staff.email)).toBe(true);
+    });
 
-      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`);
-      expect(del.status).toBe(204);
+    it('happy path: password + current code + action at POST /auth/step-up, then exactly ONE delete; the proof cannot be replayed', async () => {
+      const { organisation, email } = await seedOrgWithManager('del-ok');
+      const token = (await login(email)).accessToken;
+      const secret = await enrolTotp(app, token, passwordFor(email));
+      const first = await createStaff(token, 'delokfirst');
+      const second = await createStaff(token, 'deloksecond');
 
-      const gone = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
-      expect(gone).toBeNull();
+      const proof = await freshApprovalProof(app, token, passwordFor(email), codeAt(secret, 0), 'user.delete');
+      expect(proof.status).toBe(200);
+      expect((await del(token, first.id)).status).toBe(204);
+      expect(await exists(organisation.id, first.email)).toBe(false);
+
+      const replay = await del(token, second.id);
+      expect({ status: replay.status, code: replay.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
+      expect(await exists(organisation.id, second.email)).toBe(true);
     });
   });
 });

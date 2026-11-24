@@ -7,6 +7,7 @@ import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { bypassDeletionProof } from './helpers/step-up-kit';
 import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
@@ -160,6 +161,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
+    bypassDeletionProof(app); // owner decision 73: this suite is about deletion invariants, not the user.delete proof
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

@@ -11,6 +11,7 @@ import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { bypassDeletionProof } from './helpers/step-up-kit';
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { CoreEntityCacheService } from '../../engine/core-modules/entity-cache/core-entity-cache.service';
@@ -84,6 +85,7 @@ describeIfDb('SC-01 notification recipient is live; user display writers clear t
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
+    bypassDeletionProof(app); // owner decision 73: this suite is about deletion invariants, not the user.delete proof
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

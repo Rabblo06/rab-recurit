@@ -7,6 +7,7 @@ import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { bypassDeletionProof } from './helpers/step-up-kit';
 import { AuthService } from '../../engine/core-modules/auth/services/auth.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
@@ -134,6 +135,7 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
+    bypassDeletionProof(app); // owner decision 73: this suite is about deletion invariants, not the user.delete proof
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

@@ -1162,13 +1162,13 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect(detail.body).toMatchObject({ accountStatus: 'active', invitationStatus: null });
     });
 
-    it('DELETE uses authorized session without a password and still requires authentication', async () => {
+    it('DELETE needs a session (401) and a fresh user.delete proof: an unenrolled owner is refused 403 STEP_UP_MFA_ENROLMENT_REQUIRED, account untouched', async () => {
       const s = await acceptedVenueManager();
       const url = `/rest/v1/managers/${s.profileId}`;
       expect((await request(app.getHttpServer()).delete(url)).status).toBe(401);
-      expect(await adminDataSource.manager.findOneBy(User, {email:s.email})).not.toBeNull();
-      expect((await request(app.getHttpServer()).delete(url).set({Authorization:`Bearer ${s.ownerToken}`})).status).toBe(204);
-      expect(await adminDataSource.manager.findOneBy(User, {email:s.email})).toBeNull();
+      const res = await request(app.getHttpServer()).delete(url).set({ Authorization: `Bearer ${s.ownerToken}` }).send({ currentPassword: 'ignored' });
+      expect({ status: res.status, code: res.body.code }).toEqual({ status: 403, code: 'STEP_UP_MFA_ENROLMENT_REQUIRED' });
+      expect(await adminDataSource.manager.findOneBy(User, { email: s.email })).not.toBeNull();
     });
   });
 

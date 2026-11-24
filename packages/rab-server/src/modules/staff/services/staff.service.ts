@@ -1369,10 +1369,14 @@ export class StaffService {
    * profile's employment is set to inactive in the same transaction, so the scheduling and offer paths (which check
    * employment status) can no longer pick them. Only a never-activated invite with no history is removed (with its profile).
    *
-   * Hold-to-confirm is client intent only (owner request 2026-11-24, see THREAT-MODEL.md): no current-password step-up.
-   * Server authorization and every deletion invariant below remain mandatory.
+   * Owner decision 73 (2026-11-24): the web UI's hold-to-confirm is client intent only; the server requires a fresh,
+   * single-use proof made FOR 'user.delete' on this session (`assertFreshSecondFactorForAction`, #335: password + current
+   * authenticator code via POST /auth/step-up with action, within AUTH_STEP_UP_WINDOW_SECONDS; never a sign-in grant),
+   * checked FIRST, before even loading the target. No enrolled factor: 403 STEP_UP_MFA_ENROLMENT_REQUIRED; no or used
+   * proof: 403 STEP_UP_REQUIRED (fail closed; Redis error 503). The typed current password in the body is no longer read.
    */
   async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertFreshSecondFactorForAction(ctx, 'user.delete');
     let deletedUserId: string | null = null;
     await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // Layer 2 (security review M1): the route's PermissionGuard(STAFF_DEACTIVATE) is re-checked here, so a direct

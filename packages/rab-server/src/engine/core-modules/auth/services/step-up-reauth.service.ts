@@ -65,6 +65,8 @@ export const STEP_UP_ACTIONS = [
   'member.suspend',
   'member.reinstate',
   'user.deactivate',
+  // Owner decision 73 (2026-11-24): deleting a Staff / Manager / Venue Manager; action-bound (ACTION_BOUND_STEP_UP_ACTIONS).
+  'user.delete',
   'user.reactivate',
   'user.password_reset',
   'user.email.change',
@@ -106,9 +108,10 @@ export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
  * Owner decision 5 (2026-11-21, "a fresh 2FA check at approval, no override"): actions that need a proof made FOR THEM.
  * `assertFreshSecondFactorForAction` refuses an approver with no authenticator factor, never accepts a sign-in grant or a
  * grant earned for another action, and burns the grant on use (one proof = one approval call). Lane P2 adds
- * `payroll.adjustment.approve` and `payroll.holiday_pay.update` here (each must also be in STEP_UP_ACTIONS).
+ * `payroll.adjustment.approve` and `payroll.holiday_pay.update` here (each must also be in STEP_UP_ACTIONS). Owner decision 73
+ * (2026-11-24) adds `user.delete`: deleting a Staff / Manager / Venue Manager (hold-to-confirm in the UI is intent only).
  */
-export const ACTION_BOUND_STEP_UP_ACTIONS = ['payroll.record.approve', 'payroll.run.finalise'] as const satisfies readonly StepUpAction[];
+export const ACTION_BOUND_STEP_UP_ACTIONS = ['payroll.record.approve', 'payroll.run.finalise', 'user.delete'] as const satisfies readonly StepUpAction[];
 export type ActionBoundStepUpAction = (typeof ACTION_BOUND_STEP_UP_ACTIONS)[number];
 
 type FailureReason = 'password' | 'mfa_code' | 'mfa_code_missing' | 'step_up_required' | 'sso_reauth_required' | 'mfa_enrolment_required';

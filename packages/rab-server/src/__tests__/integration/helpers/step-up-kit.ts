@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
 
 import { AuthCacheRedisClientProvider } from '../../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { codeAt, earlyInStep, secretFromOtpauth } from './mfa-test-kit';
 import { TestSetupError } from './test-identities';
 
@@ -21,7 +22,7 @@ import { TestSetupError } from './test-identities';
  * `serviceApprovalSession`: the same grant for a service-direct call with a hand-built AuthContext; returns the session id to
  * put on the context.
  */
-export type ApprovalAction = 'payroll.record.approve' | 'payroll.run.finalise';
+export type ApprovalAction = 'payroll.record.approve' | 'payroll.run.finalise' | 'user.delete';
 
 const sidOf = (token: string) => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
 const actionKey = (sessionId: string, action: ApprovalAction) =>
@@ -55,4 +56,21 @@ export async function serviceApprovalSession(redis: AuthCacheRedisClientProvider
 /** Fixture: removes this session's grant for `action` (what using or expiring it does). */
 export async function dropApprovalGrant(redis: AuthCacheRedisClientProvider, token: string, action: ApprovalAction = 'payroll.record.approve'): Promise<void> {
   await redis.client.del(actionKey(sidOf(token), action));
+}
+
+/**
+ * Owner decision 73 fixture, ONLY for suites whose subject is a deletion INVARIANT (who may delete whom, history,
+ * workspaces, notifications), not the proof: lets `assertFreshSecondFactorForAction(ctx, 'user.delete')` pass while
+ * `realProof()` is false, so those suites do not have to enrol every actor in TOTP (an enrolled actor's later sign-ins and
+ * password re-entries need a code). Every other action, and 'user.delete' while `realProof()` is true, runs the real check.
+ * The real gate and its denials (unenrolled, no proof, other action, expired, replay) are covered in
+ * user-deletion-abuse-cases.integration.spec.ts with no bypass.
+ */
+export function bypassDeletionProof(app: INestApplication, realProof: () => boolean = () => false): jest.SpyInstance {
+  const service = app.get(StepUpReauthService);
+  const original = service.assertFreshSecondFactorForAction.bind(service);
+  return jest.spyOn(service, 'assertFreshSecondFactorForAction').mockImplementation(async (ctx, action) => {
+    if (action === 'user.delete' && !realProof()) return;
+    return original(ctx, action);
+  });
 }

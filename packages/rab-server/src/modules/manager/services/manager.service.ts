@@ -1322,10 +1322,14 @@ export class ManagerService {
    * workspace owner = last admin) and decides soft vs hard: an account with any history is SOFT deleted (row kept,
    * `deleted_at` set, every session and membership revoked); only a never-activated invite with no history is removed.
    *
-   * Hold-to-confirm is client intent only (owner request 2026-11-24, see THREAT-MODEL.md): no current-password step-up.
-   * Server authorization and every deletion invariant below remain mandatory.
+   * Owner decision 73 (2026-11-24): the web UI's hold-to-confirm is client intent only; the server requires a fresh,
+   * single-use proof made FOR 'user.delete' on this session (`assertFreshSecondFactorForAction`, #335: password + current
+   * authenticator code via POST /auth/step-up with action, within AUTH_STEP_UP_WINDOW_SECONDS; never a sign-in grant),
+   * checked FIRST, before even loading the target. No enrolled factor: 403 STEP_UP_MFA_ENROLMENT_REQUIRED; no or used
+   * proof: 403 STEP_UP_REQUIRED (fail closed; Redis error 503). The typed current password in the body is no longer read.
    */
   async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertFreshSecondFactorForAction(ctx, 'user.delete');
     const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Layer 2 (security review M1): the /managers route's class guard MANAGER_MANAGE, re-checked in the service.
       await this.assertCanManageManagersTx(manager, ctx);
@@ -1337,9 +1341,10 @@ export class ManagerService {
   /**
    * The Venue Manager route's delete: VenueManagerService has already run its own layer-2 check (VENUE_MANAGER_CREATE +
    * the target is a Venue Manager of the caller's own workspace) — a workspace owner may lack MANAGER_MANAGE, so this
-   * variant does not require it. No current-password step-up, like `deleteUser`.
+   * variant does not require it. Recent step-up first, like `deleteUser`.
    */
   async deleteVenueManagerUser(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertFreshSecondFactorForAction(ctx, 'user.delete');
     // The own-workspace Venue Manager scope AND the route's venue_manager.create (SF-2 layer 2: no implicit call-order
     // rule on the caller's earlier, separate check) are re-checked inside this transaction.
     const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
