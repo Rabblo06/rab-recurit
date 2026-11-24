@@ -4,6 +4,7 @@ import { composeServerPathTemplateLevel27, LEVEL_27_COUNTS, LEVEL_27_WORKSPACES_
 import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { WORKSPACE_STRUCTURE_LEVEL_TABLES, WORKSPACE_TABLES, WORKSPACE_TEMPLATE_TABLES } from './workspace-tables';
 import {
+  ATTENDANCE_BREAK_WRITE_GUARD_FUNCTION_SQL,
   ATTENDANCE_BREAKS_RECEIPTS,
   attendanceBreaksReceiptsPolicies,
   attendanceBreaksReceiptsSql,
@@ -84,6 +85,17 @@ describe('M4 §13 PR 2: attendance breaks and sync receipts (structure level 27)
     expect(VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_27_SQL).toContain("IF v_idx <> 112 THEN RETURN 'index count'; END IF;");
     expect(VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_27_SQL).toContain("IF v_pol <> 47 THEN RETURN 'policy count'; END IF;");
     expect(VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_27_SQL).toContain('v_l27 := coalesce(v_mv, 0) >= 27 OR (coalesce(v_mv, 0) = 0 AND v_n = 23);');
+  });
+
+  it('the break write guard checks the row count after EXECUTE (never FOUND), is NULL-safe, and locks the attendance FOR SHARE (re-review of #353)', () => {
+    const fn = ATTENDANCE_BREAK_WRITE_GUARD_FUNCTION_SQL;
+    expect(fn).toContain('FOR SHARE OF a');
+    expect(fn).toContain('GET DIAGNOSTICS v_n = ROW_COUNT;');
+    expect(fn).toContain('IF v_n IS DISTINCT FROM 1 THEN');
+    expect(fn).not.toMatch(/IF (NOT )?FOUND/);
+    expect(fn).not.toMatch(/IF NOT v\./);
+    expect(fn).toContain("v_window := NEW.end_source = 'staff' OR (NEW.end_source = 'clock_out' AND v.manager IS NOT TRUE);");
+    expect(fn).toContain("NEW.started_at >= coalesce(v.clock_out_at, 'infinity'::timestamptz)");
   });
 
   it('the down() guard reads the catalog only', () => {

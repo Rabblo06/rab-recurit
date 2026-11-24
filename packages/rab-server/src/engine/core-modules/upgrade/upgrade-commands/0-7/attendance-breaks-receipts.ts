@@ -86,7 +86,10 @@ export const ATTENDANCE_BREAK_CLOCK_OUT_END = 'attendance_break_clock_out_end';
  *     the staff member AND only while the venue has offline attendance enabled (it cannot be enabled before M5: venue CHECK,
  *     review item 5); `manager` only by a Manager of the workspace or a Venue Manager of the shift's venue; `clock_out` only by
  *     the staff member or such a manager AND only at the attendance's own clock_out_at (23514, constraint
- *     attendance_break_clock_out_end: the service writes clock_out_at, closes the open break, then moves the status);
+ *     attendance_break_clock_out_end: the service writes clock_out_at, closes the open break, then moves the status); a
+ *     clock_out end not written by a manager is also held to the ±120 s window;
+ *   - a break starts only on an OPEN attendance (clocked_in / on_break) and before its clock_out_at; the attendance row is read
+ *     FOR SHARE so a concurrent clock-out cannot interleave;
  *   - an attendance the writer cannot read refuses the write (42501).
  */
 // sql-injection-reviewed: the function name, constraint names and the tolerance are constants of this file; no input reaches this DDL.
@@ -97,7 +100,9 @@ SET search_path = pg_catalog, pg_temp
 AS $guard$
 DECLARE
   v record;
+  v_n bigint;
   v_end boolean;
+  v_window boolean;
 BEGIN
   IF current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
      OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
@@ -107,8 +112,10 @@ BEGIN
     RAISE EXCEPTION 'attendance_break: a closed break is never changed (corrections go through attendance_correction)'
       USING ERRCODE = '42501';
   END IF;
+  -- The parent attendance, read under the writer's own RLS and locked FOR SHARE until commit (re-review item 3: a concurrent
+  -- clock-out waits for this break write, or this write sees the clock-out).
   EXECUTE pg_catalog.format($q$
-    SELECT a.clock_out_at,
+    SELECT a.status, a.clock_out_at,
            coalesce(ve.offline_attendance_enabled, false) AS offline,
            EXISTS (SELECT 1 FROM %1$I.staff_profile sp WHERE sp.id = $1 AND sp.user_id = core.current_uid()) AS own,
            (EXISTS (SELECT 1 FROM core.manager_profile mp
@@ -120,14 +127,21 @@ BEGIN
       FROM %1$I.attendance a
       JOIN %1$I.shift s ON s.id = a.shift_id
       LEFT JOIN %1$I.venue ve ON ve.id = s.venue_id
-     WHERE a.id = $2 AND a.staff_profile_id = $1 $q$, TG_TABLE_SCHEMA)
+     WHERE a.id = $2 AND a.staff_profile_id = $1
+       FOR SHARE OF a $q$, TG_TABLE_SCHEMA)
     INTO v USING NEW.staff_profile_id, NEW.attendance_id;
-  IF NOT FOUND THEN
+  -- EXECUTE never sets FOUND (re-review item 1): the row count decides; a missing row would leave every field NULL.
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n IS DISTINCT FROM 1 THEN
     RAISE EXCEPTION 'attendance_break: the attendance is not visible to this writer' USING ERRCODE = '42501';
   END IF;
   IF TG_OP = 'INSERT' THEN
-    IF NOT v.own OR (NEW.start_source = 'offline_sync' AND NOT v.offline) THEN
+    IF v.own IS NOT TRUE OR (NEW.start_source = 'offline_sync' AND v.offline IS NOT TRUE) THEN
       RAISE EXCEPTION 'attendance_break: % start not permitted for this writer', NEW.start_source USING ERRCODE = '42501';
+    END IF;
+    IF (v.status IS DISTINCT FROM 'clocked_in' AND v.status IS DISTINCT FROM 'on_break')
+       OR NEW.started_at >= coalesce(v.clock_out_at, 'infinity'::timestamptz) THEN
+      RAISE EXCEPTION 'attendance_break: a break starts only on an open attendance, before its clock-out' USING ERRCODE = '42501';
     END IF;
     IF NEW.start_source = 'staff'
        AND pg_catalog.abs(EXTRACT(EPOCH FROM (NEW.started_at - pg_catalog.now()))) > ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} THEN
@@ -138,16 +152,19 @@ BEGIN
   v_end := NEW.ended_at IS NOT NULL
            AND (TG_OP = 'INSERT' OR NEW.ended_at IS DISTINCT FROM OLD.ended_at OR NEW.end_source IS DISTINCT FROM OLD.end_source);
   IF v_end THEN
-    IF NOT CASE NEW.end_source
-             WHEN 'staff' THEN v.own
-             WHEN 'offline_sync' THEN v.own AND v.offline
-             WHEN 'manager' THEN v.manager
-             WHEN 'clock_out' THEN v.own OR v.manager
-             ELSE false
-           END THEN
+    IF CASE NEW.end_source
+         WHEN 'staff' THEN v.own
+         WHEN 'offline_sync' THEN v.own AND v.offline
+         WHEN 'manager' THEN v.manager
+         WHEN 'clock_out' THEN v.own OR v.manager
+         ELSE false
+       END IS NOT TRUE THEN
       RAISE EXCEPTION 'attendance_break: % end not permitted for this writer', NEW.end_source USING ERRCODE = '42501';
     END IF;
-    IF NEW.end_source = 'staff'
+    -- A staff end, and a clock_out end not written by a manager (re-review item 2: staff could move their own clock_out_at
+    -- inside the transaction), must be within the window.
+    v_window := NEW.end_source = 'staff' OR (NEW.end_source = 'clock_out' AND v.manager IS NOT TRUE);
+    IF v_window
        AND pg_catalog.abs(EXTRACT(EPOCH FROM (NEW.ended_at - pg_catalog.now()))) > ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} THEN
       RAISE EXCEPTION 'attendance_break: a staff break end must be within ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} seconds of the server time'
         USING ERRCODE = '23514', CONSTRAINT = '${ATTENDANCE_BREAK_STAFF_WINDOW}';

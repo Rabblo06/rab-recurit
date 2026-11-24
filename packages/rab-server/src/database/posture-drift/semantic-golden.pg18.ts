@@ -32,7 +32,7 @@ export const SEMANTIC_GOLDEN_PG18: readonly string[] = Object.freeze([
   "function|ai_settings_writer()|owner=crewflow|definer=false|lang=sql|vol=s|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=25060769dadb02b58d81da584b2b5956",
   "function|ai_skill_limit_guard()|owner=crewflow|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=730ff55a5d68800b4496f1112b812682",
   "function|ai_usage_purge_expired(p_retention interval)|owner=crewflow|definer=true|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=192e6a581cff14c106eb69a227e7b563",
-  "function|attendance_break_write_guard()|owner=crewflow|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=4da7912f24f915be23f431cf33a51300",
+  "function|attendance_break_write_guard()|owner=crewflow|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=b73891a9cbb134b1749adc394a287cb1",
   "function|attendance_device_key_revoked_guard()|owner=crewflow|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=1b0b270bdd9ba51fd9fe7c0936a7741f",
   "function|audit_existing_user_ids(p_ids uuid[])|owner=rab_secure_owner|definer=true|lang=sql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, core, pg_temp|body=7ff6770771923e71ec0aafcf59e6b61e",
   "function|audit_identity_violations(p_actor_user_id uuid, p_target_user_id uuid)|owner=rab_secure_owner|definer=true|lang=sql|vol=s|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=9058e1220f6e9557dc8ff8a03ddd0e0e",

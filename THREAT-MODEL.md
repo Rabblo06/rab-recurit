@@ -10824,7 +10824,11 @@ This entry covers only what release 0.7.0 adds to switch it on.
     writer: `staff` / `offline_sync` only the break's own staff member, `offline_sync` only while the venue's offline flag is
     on, `manager` only a workspace Manager or the shift's Venue Manager, `clock_out` only at the attendance's own
     `clock_out_at` (23514, `attendance_break_clock_out_end`; the service writes clock_out_at, closes the break, then moves
-    the status). 42501 otherwise.
+    the status). 42501 otherwise. A `clock_out` end not written by a manager is also held to the ±120 s window (re-review:
+    staff could otherwise move their own clock_out_at inside the transaction). A break starts only on an open attendance,
+    before its clock_out_at, with the attendance row read FOR SHARE (no interleaved clock-out). Pre-existing, logged by the
+    lead as a separate follow-up: staff can write their own attendance clock times at the database layer (tenant-wide
+    policy, no column guard).
   - Offline attendance switched on before M5 (D12) -> `CHECK venue_offline_attendance_disabled (NOT
     offline_attendance_enabled)` on every venue copy; only the owner-approved M5 migration may drop it (review item 5).
   - Receipts (idempotency + offline evidence) edited or deleted -> no UPDATE / DELETE policy and statement-level guards

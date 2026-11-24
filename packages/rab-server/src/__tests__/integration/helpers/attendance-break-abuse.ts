@@ -157,6 +157,36 @@ export function registerBreakAbuseCases(ctx: BreakAbuseContext): void {
     }
   });
 
+  it('re-review item 1: a break write succeeds end to end for its staff member (start now, close now): the guard reads the attendance', async () => {
+    const fx = ctx.fx();
+    const out = await as({ user: fx.users.staffA }, async () => {
+      const id = (await insertBreak(fx.att.xA, fx.profiles.a)).rows[0].id as string;
+      const closed = (await run(`UPDATE ${q()}.attendance_break SET ended_at = now(), end_source = 'staff', updated_at = now() WHERE id = $1`, [id])).rowCount;
+      const row = (await run(`SELECT start_source, end_source, ended_at IS NOT NULL AS closed FROM ${q()}.attendance_break WHERE id = $1`, [id])).rows[0];
+      return { closed, row };
+    });
+    expect(out).toEqual({ closed: 1, row: { start_source: 'staff', end_source: 'staff', closed: true } });
+  });
+
+  it('re-review item 2: staff cannot dodge the window by moving their own clock_out_at and closing the break as clock_out (23514)', async () => {
+    const fx = ctx.fx();
+    const out = await as({ user: fx.users.staffA }, async () => {
+      const id = (await insertBreak(fx.att.xA, fx.profiles.a)).rows[0].id as string;
+      await run(`UPDATE ${q()}.attendance SET clock_out_at = now() + interval '10 minutes' WHERE id = $1`, [fx.att.xA]);
+      return coded(run(`UPDATE ${q()}.attendance_break SET ended_at = now() + interval '10 minutes', end_source = 'clock_out' WHERE id = $1`, [id]));
+    });
+    expect(out).toBe('23514:attendance_break_staff_window');
+  });
+
+  it('re-review item 3: a break cannot start at or after the attendance\'s clock-out, nor on an attendance that is no longer open (42501)', async () => {
+    const fx = ctx.fx();
+    const afterClockOut = await as({ user: fx.users.staffA }, async () => {
+      await run(`UPDATE ${q()}.attendance SET clock_out_at = now() - interval '1 minute' WHERE id = $1`, [fx.att.xA]);
+      return code(insertBreak(fx.att.xA, fx.profiles.a));
+    });
+    expect(afterClockOut).toBe('42501');
+  });
+
   it('review item 3: a closed break is never changed again, by its staff member or a manager (42501)', async () => {
     const fx = ctx.fx();
     const reopened = await as({ user: fx.users.staffA }, async () => {
