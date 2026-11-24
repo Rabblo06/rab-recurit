@@ -30,11 +30,18 @@ public struct RequestOptions: Sendable, Equatable {
     /// Sends `X-Crewflow-Background: 1` — use for automatic polling and
     /// background refresh so they do not keep an idle session alive.
     public var background: Bool
+    /// Binds the request to one account: it is sent only if the stored
+    /// session belongs to this user id, checked synchronously where the bearer
+    /// token is read (no await between the check and the token), so an
+    /// account switch can never send it under another identity
+    /// (`APIError.sessionChanged`, nothing sent). Used by the offline sync.
+    public var requiredSessionUserId: String?
 
-    public init(retry: RetryPolicy, timeout: TimeInterval = APIClient.requestTimeout, background: Bool = false) {
+    public init(retry: RetryPolicy, timeout: TimeInterval = APIClient.requestTimeout, background: Bool = false, requiredSessionUserId: String? = nil) {
         self.retry = retry
         self.timeout = timeout
         self.background = background
+        self.requiredSessionUserId = requiredSessionUserId
     }
 
     /// GET is repeat-safe; every mutation defaults to no automatic retry.
@@ -360,6 +367,9 @@ public final class APIClient: @unchecked Sendable {
         // `generation` is captured once per call; the 401 replay reuses it so
         // it can never run under an identity that replaced this one meanwhile.
         let bearer = tokens.accessToken()
+        if let required = options.requiredSessionUserId, tokens.sessionUserId() != required {
+            throw APIError.sessionChanged
+        }
         var request = try makeRequest(method, path, body: body, bearer: bearer, timeout: options.timeout)
         if options.background {
             // Fully validated, but does not slide the 7-day idle window.
