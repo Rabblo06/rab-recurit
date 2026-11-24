@@ -10640,5 +10640,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   `holidayBackfilled` on `payroll_run.prepared`); this follows owner decision 78's recommendation. (4b) UNIQUE per
   (organisation, workspace, record) and a plain insert: a conflict throws, nothing is silently skipped. (1) holidayPayPence
   follows the 'payroll_record' amount field at every depth.
+- **Re-review fix (item 2):** the insert guard binds every figure: the record must be `approved` in this organisation
+  and workspace (copy the application uses), with the line's staff_profile_id, staff user and base_pence = its approved
+  gross; mode and rate must equal the organisation's setting (no row = provider). A manager session can no longer insert
+  a line at 100% or on an invented base, or for another person.
 - **Decision 5 proof (with #335):** changing the setting uses `assertFreshSecondFactorForAction(ctx,
   'payroll.holiday_pay.update')`: an enrolled authenticator and a single-use proof made for this action on this session.

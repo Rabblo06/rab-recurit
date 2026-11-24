@@ -246,13 +246,28 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     // Insert-only: no UPDATE / DELETE for the runtime (owner) login; a second line for the same record is a conflict, never skipped.
     await expect(asUser(c.userId, `UPDATE core.payroll_record_holiday_pay SET holiday_pay_pence = 0 WHERE payroll_record_id = $1`, [recs[1]!.id])).rejects.toMatchObject({ code: '42501' });
     await expect(asUser(c.userId, `DELETE FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recs[1]!.id])).rejects.toMatchObject({ code: '42501' });
-    await expect(asUser(c.userId,
-      `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, base_pence, holiday_pay_pence, created_by)
-       VALUES ($1, $2, $3, $4, $5, 'provider', 0, 0, $6)`, [orgId, a.workspaceId, recs[1]!.id, staff[1]!.profileId, staff[1]!.userId, c.userId])).rejects.toMatchObject({ code: '23505' });
-    // The database re-derives the rounding: a figure that does not follow it cannot be stored, by anyone.
+    const h1 = rolledUpHolidayPayPence(recs[1]!.amountPence, 1207);
+    const line = (over: Partial<{ mode: string; rate: number | null; base: number; pay: number; user: string }> = {}) => {
+      const v = { mode: 'rolled_up', rate: 1207 as number | null, base: recs[1]!.amountPence, pay: h1, user: staff[1]!.userId, ...over };
+      return asUser(c.userId,
+        `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, rate_bps, base_pence, holiday_pay_pence, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, [orgId, a.workspaceId, recs[1]!.id, staff[1]!.profileId, v.user, v.mode, v.rate, v.base, v.pay, c.userId]);
+    };
+    // A second, correct line for the same record is a unique-key conflict (23505), never silently skipped.
+    await expect(line()).rejects.toMatchObject({ code: '23505' });
+    // Re-review item 2: every figure is bound to the record and the setting. With the record's line removed, a manager
+    // session still cannot insert a line at another rate, on another base, for another user, or as provider (42501).
+    await unfreeze(recs[1]!.id);
+    await expect(line({ rate: 10000, pay: recs[1]!.amountPence })).rejects.toMatchObject({ code: '42501' });
+    await expect(line({ base: 100_000_000, pay: rolledUpHolidayPayPence(100_000_000, 1207) })).rejects.toMatchObject({ code: '42501' });
+    await expect(line({ user: staff[0]!.userId })).rejects.toMatchObject({ code: '42501' });
+    await expect(line({ mode: 'provider', rate: null, pay: 0 })).rejects.toMatchObject({ code: '42501' });
+    // The one line the facts allow is accepted again.
+    await line();
+    // An unknown record: refused by the guard before any CHECK, even for the superuser.
     await expect(adminDataSource.query(
       `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, rate_bps, base_pence, holiday_pay_pence, created_by)
-       VALUES ($1, $2, $3, $4, $5, 'rolled_up', 1207, 4142, 499, $6)`, [orgId, a.workspaceId, randomUUID(), staff[0]!.profileId, staff[0]!.userId, c.userId])).rejects.toMatchObject({ code: '23514' });
+       VALUES ($1, $2, $3, $4, $5, 'rolled_up', 1207, 4142, 499, $6)`, [orgId, a.workspaceId, randomUUID(), staff[0]!.profileId, staff[0]!.userId, c.userId])).rejects.toMatchObject({ code: '42501' });
     // Staff cannot insert a line.
     await expect(asUser(staff[0]!.userId, `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, base_pence, holiday_pay_pence, created_by)
        VALUES ($1, $2, $3, $4, $5, 'provider', 0, 0, $5)`, [orgId, a.workspaceId, randomUUID(), staff[0]!.profileId, staff[0]!.userId])).rejects.toMatchObject({ code: '42501' });

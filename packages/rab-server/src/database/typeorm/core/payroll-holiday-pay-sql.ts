@@ -94,18 +94,54 @@ CREATE INDEX payroll_record_holiday_pay_staff_idx ON core.payroll_record_holiday
 export const HOLIDAY_PAY_INSERT_GUARD_FUNCTION = 'core.payroll_record_holiday_pay_insert_guard()';
 
 /**
- * Review fix (independent review of #339): BEFORE INSERT on core.payroll_record_holiday_pay. A holiday-pay line of a
- * payroll record that a FINALISED run already holds (core.payroll_run_event `finalised` fact of the same organisation and
- * workspace, PayrollAdjustmentSchema1786723100000) is refused (42501): a locked run's totals can never change through a
- * late snapshot. created_at is the database clock (the run view also ignores lines created after the run's finalisation).
+ * BEFORE INSERT on core.payroll_record_holiday_pay (review fix 2 + re-review item 2). Every figure of the line is bound to
+ * the database's own facts, so a manager session cannot insert an arbitrary line:
+ *   - a payroll record that a FINALISED run holds (core.payroll_run_event `finalised` fact) is refused: a locked run's
+ *     totals never change;
+ *   - the record is read in the copy the application uses (the workspace schema's `payroll_record` when it holds the
+ *     record, otherwise core's; the schema name derives from the uuid, so `%I` only quotes hex): it must exist in this
+ *     organisation and workspace, be `approved`, and its staff_profile_id, staff user (staff_profile.user_id) and approved
+ *     gross (amount_pence = base_pence) must equal the line's;
+ *   - mode and rate must equal the organisation's setting row (no row = `provider`, rate NULL; holiday_pay_pence is then
+ *     fixed by the rounding CHECK: 0 for provider, (base * rate + 5000) / 10000 for rolled-up).
+ * Any mismatch is refused (42501). created_at is the database clock.
  */
 export const HOLIDAY_PAY_INSERT_GUARD_FUNCTION_SQL = `CREATE FUNCTION core.payroll_record_holiday_pay_insert_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, core AS $fn$
+DECLARE
+  ws_schema text := 'workspace_' || pg_catalog.replace(NEW.workspace_id::text, '-', '');
+  sch text;
+  rec_id uuid;
+  rec_status text;
+  rec_staff uuid;
+  rec_amount bigint;
+  rec_user uuid;
+  set_mode text;
+  set_rate integer;
 BEGIN
   NEW.created_at := pg_catalog.now();
   IF EXISTS (SELECT 1 FROM core.payroll_run_event e
               WHERE e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'finalised'
                 AND NEW.payroll_record_id = ANY (e.payroll_record_ids)) THEN
     RAISE EXCEPTION 'holiday pay of payroll record % cannot be added: its payroll run is finalised', NEW.payroll_record_id USING ERRCODE = '42501';
+  END IF;
+  FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP
+    CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_record', sch)) IS NULL;
+    EXECUTE pg_catalog.format('SELECT pr.id, pr.status, pr.staff_profile_id, pr.amount_pence, sp.user_id FROM %I.payroll_record pr JOIN %I.staff_profile sp ON sp.id = pr.staff_profile_id WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch, sch)
+      INTO rec_id, rec_status, rec_staff, rec_amount, rec_user USING NEW.payroll_record_id, NEW.organisation_id, NEW.workspace_id;
+    EXIT WHEN rec_id IS NOT NULL;
+  END LOOP;
+  IF rec_id IS NULL OR rec_status IS DISTINCT FROM 'approved' OR rec_staff IS DISTINCT FROM NEW.staff_profile_id
+     OR rec_amount IS DISTINCT FROM NEW.base_pence OR rec_user IS DISTINCT FROM NEW.staff_user_id THEN
+    RAISE EXCEPTION 'a holiday pay line must match its approved payroll record' USING ERRCODE = '42501';
+  END IF;
+  SELECT s.holiday_pay_mode, s.holiday_pay_rate_bps INTO set_mode, set_rate
+    FROM core.organisation_payroll_setting s WHERE s.organisation_id = NEW.organisation_id;
+  IF set_mode IS NULL THEN
+    set_mode := 'provider';
+    set_rate := NULL;
+  END IF;
+  IF NEW.mode IS DISTINCT FROM set_mode OR NEW.rate_bps IS DISTINCT FROM set_rate THEN
+    RAISE EXCEPTION 'a holiday pay line must follow the organisation holiday pay setting' USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
 END

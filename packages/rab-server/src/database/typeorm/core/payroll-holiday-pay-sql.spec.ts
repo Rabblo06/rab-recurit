@@ -83,6 +83,12 @@ describe('holiday pay SQL (owner decision 4)', () => {
     expect(g).toContain('NEW.created_at := pg_catalog.now();');
     expect(g).toContain("IF EXISTS (SELECT 1 FROM core.payroll_run_event e WHERE e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'finalised' AND NEW.payroll_record_id = ANY (e.payroll_record_ids)) THEN");
     expect(g).toContain("USING ERRCODE = '42501'");
+    // Re-review item 2: the record (approved, staff, user, gross) and the setting (mode, rate; no row = provider) bind the line.
+    expect(g).toContain("FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP");
+    expect(g).toContain("pg_catalog.format('SELECT pr.id, pr.status, pr.staff_profile_id, pr.amount_pence, sp.user_id FROM %I.payroll_record pr JOIN %I.staff_profile sp ON sp.id = pr.staff_profile_id WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch, sch)");
+    expect(g).toContain("IF rec_id IS NULL OR rec_status IS DISTINCT FROM 'approved' OR rec_staff IS DISTINCT FROM NEW.staff_profile_id OR rec_amount IS DISTINCT FROM NEW.base_pence OR rec_user IS DISTINCT FROM NEW.staff_user_id THEN");
+    expect(g).toContain("IF set_mode IS NULL THEN set_mode := 'provider'; set_rate := NULL; END IF;");
+    expect(g).toContain('IF NEW.mode IS DISTINCT FROM set_mode OR NEW.rate_bps IS DISTINCT FROM set_rate THEN');
     expect(security).toContain('CREATE TRIGGER payroll_record_holiday_pay_insert_guard BEFORE INSERT ON core.payroll_record_holiday_pay FOR EACH ROW EXECUTE FUNCTION core.payroll_record_holiday_pay_insert_guard()');
   });
 
