@@ -14,7 +14,12 @@ import { createHash } from 'node:crypto';
  *             (whitespace-normalised pg_get_expr text) — ALTER POLICY … USING (true) changes the hash, FORCE does not hide it;
  *   function  every core function (extension members excluded): signature, owner, SECURITY DEFINER, language, volatility,
  *             strictness, leakproof, proconfig (search_path), md5 of the body — a trojaned definer changes the hash;
- *   trigger   every non-internal core trigger: table, name, enabled state (O/D/R/A), function — DISABLE TRIGGER shows;
+ *   trigger   every non-internal core trigger: table, name, enabled state (O/D/R/A), function — DISABLE TRIGGER shows —
+ *             and `def=`, the md5 of its definition without the table or schema name (tgtype = BEFORE/AFTER/INSTEAD OF, ROW or
+ *             STATEMENT, the events; the UPDATE OF column names; the whitespace-normalised WHEN expression; DEFERRABLE /
+ *             INITIALLY DEFERRED; the arguments; transition-table names): a trigger re-created as AFTER, with another
+ *             column list, a WHEN clause or other arguments keeps its name and function but changes this hash (DB review
+ *             F5 on PR #251, 2026-11-18; split into its own PR);
  *   rls       ENABLE / FORCE per core table;
  *   acl       the full raw ACL of every append-only core table in ACL_WATCHED_TABLES — core.audit_log and (OWNER-DB-ULTIMATE
  *             Part B, security review L6) core.upgrade_migration — table and columns, grantee:privilege:grantable: a
@@ -75,6 +80,17 @@ SELECT schema, line FROM (
    WHERE p.pronamespace = 'core'::regnamespace AND p.oid NOT IN (SELECT objid FROM ext)
   UNION ALL
   SELECT s.nspname, 'trigger|' || c.relname || '|' || t.tgname || '|enabled=' || t.tgenabled::text || '|' || t.tgfoid::regprocedure::text
+         || '|def=' || pg_catalog.md5(t.tgtype::text
+              || '|' || coalesce((SELECT pg_catalog.string_agg(a.attname::text, ',' ORDER BY a.attname::text) FROM pg_catalog.pg_attribute a
+                                   WHERE a.attrelid = t.tgrelid AND a.attnum = ANY (t.tgattr::pg_catalog.int2[])), '-')
+              -- WHEN: pg_get_expr cannot deparse it (OLD and NEW are two relations), so it is cut out of pg_get_triggerdef,
+              -- whitespace-normalised, and this schema's own QUALIFIER is removed (the schema name at the start of an
+              -- identifier and followed by '.', never a substring such as 'xcore.'), so workspace copies stay comparable.
+              || '|' || CASE WHEN t.tgqual IS NULL THEN '-' ELSE coalesce(pg_catalog.regexp_replace(pg_catalog.regexp_replace(
+                   pg_catalog.substring(pg_catalog.pg_get_triggerdef(t.oid), ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '),
+                   '\\s+', ' ', 'g'), '(^|[^[:alnum:]_.$"])' || s.nspname::text || '\\.', '\\1', 'g'), '?') END
+              || '|' || t.tgdeferrable::text || '|' || t.tginitdeferred::text || '|' || pg_catalog.encode(t.tgargs, 'hex')
+              || '|' || coalesce(t.tgoldtable::text, '-') || '|' || coalesce(t.tgnewtable::text, '-'))
     FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid JOIN sch s ON s.oid = c.relnamespace
    WHERE NOT t.tgisinternal
   UNION ALL
@@ -148,7 +164,21 @@ const sortedUnique = (lines: string[]) => [...new Set(lines)].sort();
 export async function readSemanticPosture(query: SemanticQuery, options: { ownTransaction?: boolean } = {}): Promise<SemanticPosture> {
   const own = options.ownTransaction !== false;
   if (own) await query('BEGIN READ ONLY');
+  // Rendered names (regprocedure, pg_get_function_identity_arguments, pg_get_expr, pg_get_triggerdef) are qualified relative
+  // to the session search_path, so the read pins it: a role- or database-level search_path (or a caller's SET) can never
+  // change a line. The pinned value renders exactly as the goldens were generated (a default session: `public` visible, so
+  // extension types such as citext print unqualified; `core` and workspace schemas not visible, so they print qualified);
+  // pg_catalog first, pg_temp last, so nothing in public can shadow a catalog function the read calls unqualified.
+  // Transaction-local (gone with the ROLLBACK of an own transaction); restored in `finally` for a caller that passed its own
+  // transaction. Every statement after BEGIN runs inside the try, so a failing read can never leave a transaction open on
+  // the boot-gate or monitor session.
+  let restore: string | null = null;
   try {
+    if (!own) {
+      const [{ sp }] = (await query(`SELECT pg_catalog.current_setting('search_path') AS sp`)) as Array<{ sp: string }>;
+      restore = sp;
+    }
+    await query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, public, pg_temp', true)`);
     const [{ v }] = (await query(`SELECT pg_catalog.current_setting('server_version_num')::int AS v`)) as Array<{ v: number }>;
     const objects = await query(SEMANTIC_OBJECT_SQL);
     const roles = sortedUnique((await query(SEMANTIC_ROLE_SQL)).map((r) => String(r.line)));
@@ -170,6 +200,7 @@ export async function readSemanticPosture(query: SemanticQuery, options: { ownTr
     return { core: coreLines, workspaces, roles, sha256: hash.digest('hex'), serverMajor: Math.floor(Number(v) / 10000) };
   } finally {
     if (own) await query('ROLLBACK').catch(() => undefined);
+    else if (restore !== null) await query(`SELECT pg_catalog.set_config('search_path', $1, true)`, [restore]).catch(() => undefined);
   }
 }
 
