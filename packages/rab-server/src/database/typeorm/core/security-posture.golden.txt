@@ -469,6 +469,12 @@ execute|resolve_workspace_by_host_label(text)|crewflow_app|true
 execute|resolve_workspace_by_host_label(text)|crewflow|false
 execute|staff_document_guard()|crewflow_app|false
 execute|staff_document_guard()|crewflow|true
+execute|staff_document_offer_block(uuid,text[],date)|PUBLIC|false
+execute|staff_document_offer_block(uuid,text[],date)|crewflow_app|true
+execute|staff_document_offer_block(uuid,text[],date)|crewflow|true
+execute|staff_document_record_scan(uuid,text)|PUBLIC|false
+execute|staff_document_record_scan(uuid,text)|crewflow_app|true
+execute|staff_document_record_scan(uuid,text)|crewflow|true
 execute|suspend_workspace_membership(uuid)|PUBLIC|false
 execute|suspend_workspace_membership(uuid)|crewflow_app|true
 execute|suspend_workspace_membership(uuid)|crewflow|true
@@ -702,6 +708,8 @@ owner|function|resolve_membership_for_user(uuid)|rab_secure_owner|definer=true|s
 owner|function|resolve_released_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|resolve_workspace_by_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|staff_document_guard()|crewflow|definer=false
+owner|function|staff_document_offer_block(uuid,text[],date)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|staff_document_record_scan(uuid,text)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|suspend_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|unlink_provider_identities_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|user_owns_manager_workspace(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
