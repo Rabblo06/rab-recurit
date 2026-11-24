@@ -156,6 +156,10 @@ test('flags core.<table>, any other qualifier, a QueryBuilder string table and a
   assert.deepEqual(rules("q(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);", c3), []);
   assert.deepEqual(rules("q(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);", 'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/other.ts'), ['search-path-switch']);
   assert.deepEqual(rules("q('SELECT 1 FROM core.shift');", c3), ['core-qualified']); // only the search_path pin is waived
+  // #253: the semantic posture read pins its own read-only transaction and restores a caller's value.
+  const posture = 'packages/rab-server/src/database/posture-drift/semantic-posture.ts';
+  assert.deepEqual(rules("q(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, public, pg_temp', true)`);", posture), []);
+  assert.deepEqual(rules("q('SELECT 1 FROM core.shift');", posture), ['core-qualified']); // only the search_path pin is waived
 });
 
 test('the binders may switch search_path; DDL that pins a function\'s own search_path is not a switch', () => {
