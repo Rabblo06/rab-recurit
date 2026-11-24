@@ -14,6 +14,7 @@ import { userReferenceColumns } from '../../engine/core-modules/core-references/
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
+import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import { dropWorkspaceSchema, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
@@ -76,7 +77,9 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
       const ws = await seedWorkspace(admin, `ws0a-app-${n}-${SFX}`);
       created.push(ws);
       expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
-      expect((await registryOf(admin, ws.id)).module_version).toBe(22);
+      // Built at this code's structure level (22 = 0a; 23 = C3 Q3 adds a validated CHECK, no foreign key change).
+      expect((await registryOf(admin, ws.id)).module_version).toBe(codeWorkspaceStructureLevel());
+      expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(22);
       // The owner is an internal manager of its own workspace (the manager branches of the workspace RLS).
       await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'internal', $3)`, [ws.org, ws.owner, ws.id]);
     }

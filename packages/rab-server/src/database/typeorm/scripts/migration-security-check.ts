@@ -43,6 +43,8 @@
  * MIGRATION_SECURITY_KEEP_DATABASES=true keeps the databases (marked disposable) so the integration suites can run on them;
  * their names are written to MIGRATION_SECURITY_DB_FILE when that is set.
  */
+import { CORE_SHIFT_TEAM_REVIEWED_DRIFT } from '../workspace-schema/structure-level-24';
+import { CORE_ATTENDANCE_REVIEWED_DRIFT } from '../workspace-schema/attendance-staff-scope-sql';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readdirSync, writeFileSync } from 'node:fs';
@@ -235,6 +237,19 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // #205 layer 4 (DRAFT, owner SQL review pending; release 0.7.0, structure level 24): the core copy of the staff same-shift
+  // team read policy changes ONLY its role test, from equality on the comma-joined rab.role to membership ('staff' = ANY
+  // (string_to_array(rab.role, ','))). Same table, name, command (SELECT), PERMISSIVE, TO PUBLIC, no WITH CHECK; no grant, no
+  // new policy. The migration's own check replaces only a known USING expression. Lines as measured by this harness on
+  // PostgreSQL 16 (fresh as the restricted migrator and upgrade as the bootstrap superuser: identical). The lines live in
+  // structure-level-24.ts: they quote the deparsed policy, which names core.shift / core.shift_assignment.
+  '1786721600000-StaffShiftTeamMultiRole': CORE_SHIFT_TEAM_REVIEWED_DRIFT,
+  // M4 §11 LOW finding (DRAFT, owner SQL review pending): the core copy of attendance_tenant changes ONLY its two expressions,
+  // from the tenant binding alone to the tenant binding AND (worker OR the caller's own staff profile OR a non-venue manager of
+  // the workspace OR a Venue Manager of the shift's venue). Same table, name, command (ALL), PERMISSIVE, TO PUBLIC; no grant,
+  // no new policy. The migration replaces only a known pair of expressions (semantic-golden hashes). The lines live in
+  // workspace-schema/attendance-staff-scope-sql.ts: they quote the deparsed policy, which names core.staff_profile / core.shift.
+  '1786722100000-AttendanceStaffScopeRls': CORE_ATTENDANCE_REVIEWED_DRIFT,
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

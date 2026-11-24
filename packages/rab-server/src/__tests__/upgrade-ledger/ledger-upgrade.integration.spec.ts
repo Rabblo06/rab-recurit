@@ -4,9 +4,13 @@
  * disposable databases of the test cluster, as crewflow_owner. Every case asserts the database afterwards (core.migrations,
  * core.upgrade_migration, the seeded tenant data), never only the exit code.
  *
- *   LU-1   adoption R254: exactly ONE instance is_initial row (`0.4.0_TypeOrmMigrations`, 0.4.0), then the upgrade in the same
- *          start; seeded rows, content, money, foreign keys and tenant ownership identical; a restart adds NO row.
- *   LU-2   adoption R256 -> 0.5.0, the same.
+ *   Release 0.7.0 (C3 switched on; strict upgrade from 0.6.0): the cases start from a "0.6.0-COMPLETE" template
+ *   (Cluster.build060Complete: every 0.6.0 migration, the seed, every workspace provisioned as 0.6.0 does, 0.6.0's logbook)
+ *   and every start carries a backup marker the cutover's REAL checks accept (Cluster.backupEnv). No seam skips the cutover.
+ *   The 0.6.0 adoption rules themselves are pinned by the pure decision specs (ledger-decision.spec, upgrade-version-check.spec).
+ *   LU-1   0.7.0 never adopts: an R254 / R256 history (no logbook) on a production target is refused with 65, nothing applied.
+ *   LU-2   from a 0.6.0-complete database: without the backup the cutover step fails (70, serves, nothing copied); with it
+ *          one start applies 0.7.0, every step recorded once, seeded core facts identical, a restart adds NO row.
  *   LU-3   an older history (R254 minus its last four) and a holed one -> 65, nothing applied, no logbook row.
  *   LU-4   a failed upgrade COMMAND -> `failed` attempt 1, the next start attempt 2, fixed -> completed 3; never `started`.
  *   LU-5   a crash inside the migrations step (SIGKILL on the ledger migration's start event) -> no row; the next start
@@ -30,8 +34,8 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { codeMigrationNames } from '../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
-import { ADOPTION, apiBootGateRefusal, b1, EXIT, LEDGER_MIGRATION_NAME, LedgerRow, loginOf, migrationsStep, Query, urls, withDatabase } from './ledger-contract';
-import { attemptProblems, Cluster, factDifferences, R254_LAST, R256_LAST } from './ledger-fixtures';
+import { apiBootGateRefusal, b1, EXIT, LedgerRow, loginOf, migrationsStep, Query, urls, withDatabase } from './ledger-contract';
+import { attemptProblems, Cluster, factDifferences, R254_LAST, R256_LAST, V060_LAST } from './ledger-fixtures';
 
 jest.setTimeout(1_800_000);
 
@@ -59,11 +63,14 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
   const cl = new Cluster(env.appUrl, env.adminUrl, randomBytes(4).toString('hex'));
   const TPL254 = cl.dbName('tpl254');
   const TPL256 = cl.dbName('tpl256');
+  /** 0.6.0-complete (every 0.6.0 migration), and the same one migration short (one pending for the 0.7.0 migrations step). */
+  const TPL060 = cl.dbName('tpl060');
+  const TPL060P = cl.dbName('tpl060p');
   const V = B1.currentVersion;
   const commands = B1.upgradeCommands();
   /**
-   * 0.6.0 ships no real upgrade command (UPGRADE_COMMANDS['0-6'] is empty), so the command cases use B1's test probes
-   * (interface §4): two no-op commands appended to the code version; the LAST one is the one made to fail.
+   * The command cases use B1's test probes (interface §4): two no-op commands appended to the code version (after 0.7.0's
+   * real HwsCutover); the LAST one is the one made to fail.
    */
   const PROBES = ['B2ProbeAlpha', 'B2ProbeOmega'] as const;
   const probeEnv = B1.seams.probeEnv(PROBES);
@@ -97,47 +104,89 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     await cl.seed(TPL256);
     // R254 / R256 carry no logbook: adoption reads that as "no record" (Twenty skips the check when nothing is recorded).
     expect([await cl.ledgerExists(TPL254), await cl.ledgerExists(TPL256)]).toEqual([false, false]);
+    await cl.build060Complete(TPL060);
+    await cl.build060Complete(TPL060P, V060_LAST - 1);
+    expect((await cl.migrationNames(TPL060P)).length).toBe((await cl.migrationNames(TPL060)).length - 1);
   });
 
-  afterAll(() => cl.dropAll());
+  afterAll(async () => {
+    await cl.dropAll();
+    cl.removeBackups();
+  });
 
-  async function upgradedFrom(template: string, kind: string): Promise<string> {
+  /** Per database: the backup marker env (made once, the first time a start needs it). */
+  const backups = new Map<string, Record<string, string>>();
+  const backupOf = async (db: string) => {
+    // Release 0.7.0 runs with HWS on (production compose): explicit, so an in-process run (upgrade --force) in an HWS-off CI job
+    // does not defer the cutover.
+    if (!backups.has(db)) backups.set(db, { ...(await cl.backupEnv(db)), HWS_RUNTIME_ENABLED: 'true' });
+    return backups.get(db)!;
+  };
+  /** The start path with this database's verified backup marker (the 0.7.0 cutover refuses to copy without one). */
+  const start = async (db: string, opts: Parameters<typeof B1.start>[1] = {}) => B1.start(db, { ...opts, env: { ...(await backupOf(db)), ...(opts?.env ?? {}) } });
+  /** A per-case copy of a 0.6.0-complete template. */
+  async function from060(kind: string, template: string = TPL060): Promise<string> {
     const db = cl.dbName(kind);
     await cl.createDatabase(db, template);
-    const out = await B1.start(db);
+    return db;
+  }
+  /** A 0.6.0-complete database upgraded to the code version by one start (exit 0). */
+  async function upgradedFrom(template: string, kind: string): Promise<string> {
+    const db = await from060(kind, template);
+    const out = await start(db);
     expect([out.exitCode, out.serve]).toEqual([EXIT.ok, true]);
     return db;
   }
 
   // ------------------------------------------------------------------------------------------------------- LU-1 / LU-2
-  for (const [lu, release, template, version] of [
-    [1, 'R254', () => TPL254, ADOPTION.R254],
-    [2, 'R256', () => TPL256, ADOPTION.R256],
+  for (const [release, template] of [
+    ['R254', () => TPL254],
+    ['R256', () => TPL256],
   ] as const) {
-    it(`LU-${lu} adoption ${release}: one instance is_initial row at ${version}, upgraded in the same start, data identical, a restart adds nothing`, async () => {
-      const db = cl.dbName(`adopt${release.toLowerCase()}`);
+    it(`LU-1 0.7.0 never adopts: an ${release} history (no logbook) on a production target is refused with 65, nothing applied`, async () => {
+      const db = cl.dbName(`noadopt${release.toLowerCase()}`);
       await cl.createDatabase(db, template());
-      const before = await cl.facts(db);
-      const first = await B1.start(db);
-      expect([first.exitCode, first.serve, first.upgradeStatus]).toEqual([EXIT.ok, true, 'ok']);
-      expect(first.upgrade).toMatchObject({ codeVersion: V, adoptedFrom: version, forced: false });
-      const rows = await cl.ledger(db);
-      const initial = instanceInitial(rows);
-      expect(initial).toHaveLength(1);
-      expect(initial[0]).toMatchObject({ name: migrationsStep(version), executed_by_version: version, status: 'completed', attempt: 1, forced: false, error_message: null });
-      expect(rows.filter((r) => r.status !== 'completed' || r.forced)).toEqual([]);
-      expect(attemptProblems(rows)).toEqual([]);
-      // "then upgrades in the same start": every step of the current version recorded once, the version complete.
-      for (const step of B1.stepsOf(V)) expect([step, of(rows, step)]).toEqual([step, [['completed', 1]]]);
-      expect(await complete(db)).toBe(true);
-      expect(await complete(db, version)).toBe(true);
-      expect(factDifferences(before, await cl.facts(db))).toEqual([]);
-      const again = await B1.start(db);
-      expect([again.exitCode, again.serve]).toEqual([EXIT.ok, true]);
-      expect(ids(await cl.ledger(db))).toEqual(ids(rows));
-      expect(factDifferences(before, await cl.facts(db))).toEqual([]);
+      const before = { names: await cl.migrationNames(db), facts: await cl.facts(db) };
+      const out = await B1.startProduction(db);
+      expect([out.exitCode, out.serve]).toEqual([EXIT.behind, false]);
+      expect(await cl.migrationNames(db)).toEqual(before.names);
+      expect(await cl.ledgerExists(db)).toBe(false);
+      expect(factDifferences(before.facts, await cl.facts(db))).toEqual([]);
     });
   }
+
+  it('LU-2 from a 0.6.0-complete database: no backup -> the cutover step fails (70, serves); with it one start applies 0.7.0, every step once, core facts identical, a restart adds nothing', async () => {
+    const db = await from060('from060');
+    const before = { facts: await cl.facts(db), ids: ids(await cl.ledger(db)) };
+    const cutoverStep = B1.stepsOf(V).find((n) => /_HwsCutover_/.test(n))!;
+    expect(cutoverStep).toBeTruthy();
+    // Without the backup marker: the cutover refuses to copy (owner rule), the step fails, the API serves (70).
+    const refused = await B1.start(db);
+    expect([refused.exitCode, refused.serve, refused.upgradeStatus]).toEqual([EXIT.commandFailedServing, true, 'failed']);
+    expect(of(await cl.ledger(db), cutoverStep)).toEqual([['failed', 1]]);
+    expect(factDifferences(before.facts, await cl.facts(db))).toEqual([]);
+    // With the verified backup: the release completes in one start.
+    const first = await start(db);
+    expect([first.exitCode, first.serve, first.upgradeStatus]).toEqual([EXIT.ok, true, 'ok']);
+    expect(first.upgrade).toMatchObject({ codeVersion: V, adoptedFrom: null, forced: false });
+    const rows = await cl.ledger(db);
+    expect(instanceInitial(rows)).toEqual([]);
+    expect(of(rows, migrationsStep(V))).toEqual([['completed', 1]]);
+    expect(of(rows, cutoverStep)).toEqual([['failed', 1], ['completed', 2]]);
+    expect(attemptProblems(rows)).toEqual([]);
+    expect(await complete(db)).toBe(true);
+    // The core copies are never written by the cutover: every seeded fact is identical, except the ONE insert-only audit
+    // record per verified workspace the cutover writes by design (C3: workspace.hws_cutover_verified; one per seeded org).
+    const diff = factDifferences(before.facts, await cl.facts(db));
+    expect(diff.filter((d) => !d.startsWith('rows|audit_log|'))).toEqual([]);
+    expect(diff.filter((d) => d.startsWith('rows|audit_log|')).map((d) => d.replace(/^(rows\|audit_log\|[^:]+): 0:- -> 1:[0-9a-f]{32}$/, '$1 +1'))).toEqual(
+      diff.filter((d) => d.startsWith('rows|audit_log|')).map((d) => `${d.split(':')[0]} +1`),
+    );
+    expect(before.ids.every((id) => ids(rows).includes(id))).toBe(true);
+    const again = await start(db);
+    expect([again.exitCode, again.serve]).toEqual([EXIT.ok, true]);
+    expect(ids(await cl.ledger(db))).toEqual(ids(rows));
+  });
 
   // ------------------------------------------------------------------------------------------------------------ LU-3
   it('LU-3 an older history (R254 minus its last four) is refused with 65 and nothing is applied', async () => {
@@ -168,37 +217,36 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
 
   // ------------------------------------------------------------------------------------------------------ LU-10 (66)
   it('LU-10 a failing MIGRATION is refused with 66 (never serves) and retried on the next start', async () => {
-    const db = cl.dbName('migfail');
-    await cl.createDatabase(db, TPL256);
+    const db = await from060('migfail', TPL060P);
     const before = await cl.migrationNames(db);
-    const first = await B1.start(db, { env: B1.seams.failMigrationEnv(LEDGER_MIGRATION_NAME) });
+    const pending = codeMigrationNames().find((n) => !before.includes(n))!;
+    const first = await start(db, { env: B1.seams.failMigrationEnv(pending) });
     expect([first.exitCode, first.serve]).toEqual([EXIT.migrationFailed, false]);
     // Everything before the failing migration applied and stays; the failing one and everything after it did not.
-    expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, LEDGER_MIGRATION_NAME));
-    expect(await cl.migrationNames(db)).not.toContain(LEDGER_MIGRATION_NAME);
-    // The ledger migration itself failed (rolled back), so no table and no row: "the failed row only if the table exists".
-    expect(await cl.ledgerExists(db)).toBe(false);
-    const retry = await B1.start(db);
+    expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, pending));
+    expect(await cl.migrationNames(db)).not.toContain(pending);
+    // The failed migrations step is recorded failed (the logbook exists on a 0.6.0-complete database), never completed.
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['failed', 1]]);
+    const retry = await start(db);
     expect([retry.exitCode, retry.serve]).toEqual([EXIT.ok, true]);
-    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1]]);
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['failed', 1], ['completed', 2]]);
   });
 
   // ------------------------------------------------------------------------------------------------ LU-4 / LU-10 (70)
   it('LU-4/LU-10 a failing upgrade COMMAND: 70 and serves with status failed; attempt 1, then 2; fixed -> completed 3', async () => {
     const command = lastCommand();
-    const db = cl.dbName('cmdfail');
-    await cl.createDatabase(db, TPL256);
-    const first = await B1.start(db, { env: failEnv });
+    const db = await from060('cmdfail');
+    const first = await start(db, { env: failEnv });
     expect([first.exitCode, first.serve, first.upgradeStatus]).toEqual([EXIT.commandFailedServing, true, 'failed']);
     expect(of(await cl.ledger(db), command)).toEqual([['failed', 1]]);
     expect((await cl.ledger(db)).find((r) => r.name === command)!.error_message).toBeTruthy();
     expect(await complete(db, V, PROBES)).toBe(false);
     // The first probe (before the failing one) completed once and is not re-run or re-recorded.
     expect(of(await cl.ledger(db), B1.stepsOf(V, PROBES).at(-2)!)).toEqual([['completed', 1]]);
-    const second = await B1.start(db, { env: failEnv });
+    const second = await start(db, { env: failEnv });
     expect([second.exitCode, second.serve]).toEqual([EXIT.commandFailedServing, true]);
     expect(of(await cl.ledger(db), command)).toEqual([['failed', 1], ['failed', 2]]);
-    const fixed = await B1.start(db, { env: probeEnv });
+    const fixed = await start(db, { env: probeEnv });
     expect([fixed.exitCode, fixed.serve, fixed.upgradeStatus]).toEqual([EXIT.ok, true, 'ok']);
     const all = await cl.ledger(db);
     expect(of(all, command)).toEqual([['failed', 1], ['failed', 2], ['completed', 3]]);
@@ -209,22 +257,22 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
 
   // ----------------------------------------------------------------------------------------------------------- LU-13
   it('LU-13 (CI POST-1) a version an unforced start already moved on to is retried after a post-check failure, never refused 65', async () => {
-    const db = await upgradedFrom(TPL256, 'postfail');
-    // The logbook a FRESH 0.6.0 install leaves: the current version's steps only, no previous-version row (superuser
-    // fixture: the adoption row removed). Nothing previous is complete, so the gate could only pass on this version.
-    await cl.admin(db, 'DELETE FROM core.upgrade_migration WHERE is_initial AND workspace_id IS NULL');
+    const db = await upgradedFrom(TPL060, 'postfail');
+    // The logbook a FRESH install of the code version leaves: its own steps only, no previous-version row (superuser
+    // fixture: the 0.6.0 instance row removed). Nothing previous is complete, so the gate could only pass on this version.
+    await cl.admin(db, `DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND executed_by_version = '0.6.0'`);
     expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1]]);
     await cl.admin(db, 'ALTER TABLE core.audit_log DISABLE ROW LEVEL SECURITY');
     let refused: Awaited<ReturnType<typeof B1.start>>;
     try {
-      refused = await B1.start(db);
+      refused = await start(db);
     } finally {
       await cl.admin(db, 'ALTER TABLE core.audit_log ENABLE ROW LEVEL SECURITY');
     }
     expect([refused.exitCode, refused.serve]).toEqual([EXIT.postCheck, false]);
     expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1], ['failed', 2]]);
     // Repaired: the next start retries the version (attempt 3), it is not sent back to the previous-version check.
-    const retry = await B1.start(db);
+    const retry = await start(db);
     expect([retry.exitCode, retry.serve]).toEqual([EXIT.ok, true]);
     expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1], ['failed', 2], ['completed', 3]]);
     expect(attemptProblems(await cl.ledger(db))).toEqual([]);
@@ -233,17 +281,18 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
 
   // ------------------------------------------------------------------------------------------------------------ LU-5
   it('LU-5 a crash inside the migrations step leaves no row; the next start re-runs it as attempt 1', async () => {
-    const db = cl.dbName('crash');
-    await cl.createDatabase(db, TPL256);
+    const db = await from060('crash', TPL060P);
     const before = await cl.migrationNames(db);
-    const crashed = await B1.start(db, { killOnMigration: LEDGER_MIGRATION_NAME });
+    const ledgerBefore = ids(await cl.ledger(db));
+    const pending = codeMigrationNames().find((n) => !before.includes(n))!;
+    const crashed = await start(db, { killOnMigration: pending });
     expect(crashed.killed).toBe(true);
-    expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, LEDGER_MIGRATION_NAME));
-    expect(await cl.migrationNames(db)).not.toContain(LEDGER_MIGRATION_NAME);
-    expect(await cl.ledger(db)).toEqual([]);
+    expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, pending));
+    expect(await cl.migrationNames(db)).not.toContain(pending);
+    expect(ids(await cl.ledger(db))).toEqual(ledgerBefore);
     // The session lock went with the process.
     expect(await cl.admin(db, "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668441463 AND objid = 1835624306 AND granted")).toEqual([]);
-    const resumed = await B1.start(db);
+    const resumed = await start(db);
     expect([resumed.exitCode, resumed.serve]).toEqual([EXIT.ok, true]);
     expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1]]);
     expect(await complete(db)).toBe(true);
@@ -251,29 +300,29 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
 
   // ------------------------------------------------------------------------------------------------------------ LU-6
   it('LU-6 two starts at once never duplicate an attempt (the count is taken under the migration lock)', async () => {
-    const db = cl.dbName('race');
-    await cl.createDatabase(db, TPL256);
-    const [a, b] = await Promise.all([B1.start(db), B1.start(db)]);
+    const db = await from060('race');
+    const env = await backupOf(db);
+    const [a, b] = await Promise.all([B1.start(db, { env }), B1.start(db, { env })]);
     expect([a.serve, b.serve]).toEqual([true, true]);
     const rows = await cl.ledger(db);
     expect(attemptProblems(rows)).toEqual([]);
-    expect(instanceInitial(rows)).toHaveLength(1);
+    expect(instanceInitial(rows)).toEqual([]);
     expect(rows.filter((r) => r.attempt !== 1)).toEqual([]);
   });
 
   it('LU-6 two FAILING starts at once: attempts 1 and 2, never two attempt-1 rows', async () => {
     const command = lastCommand();
-    const db = cl.dbName('racefail');
-    await cl.createDatabase(db, TPL256);
-    await Promise.all([B1.start(db, { env: failEnv }), B1.start(db, { env: failEnv })]);
+    const db = await from060('racefail');
+    const env = { ...(await backupOf(db)), ...failEnv };
+    await Promise.all([B1.start(db, { env }), B1.start(db, { env })]);
     expect(of(await cl.ledger(db), command).map((x) => x[1]).sort()).toEqual([1, 2]);
     expect(attemptProblems(await cl.ledger(db))).toEqual([]);
   });
 
   // ------------------------------------------------------------------------------------------------------------ LU-7
   it('LU-7 every upgrade command run twice is idempotent; a whole upgrade run twice records nothing new', async () => {
-    const db = await upgradedFrom(TPL256, 'idem');
-    // The real commands of this release, each run alone twice (none in 0.6.0: UPGRADE_COMMANDS['0-6'] is empty).
+    const db = await upgradedFrom(TPL060, 'idem');
+    // The real commands of this release, each run alone twice (0.7.0: HwsCutover, already completed by the start above).
     for (const cmd of commands) {
       await B1.runCommand(db, cmd.name);
       const once = await cl.facts(db);
@@ -281,10 +330,10 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
       expect([cmd.name, factDifferences(once, await cl.facts(db))]).toEqual([cmd.name, []]);
     }
     // The whole start path with the probe commands, twice: the second run re-runs nothing and records nothing.
-    const first = await B1.start(db, { env: probeEnv });
+    const first = await start(db, { env: probeEnv });
     expect([first.exitCode, first.serve]).toEqual([EXIT.ok, true]);
     const once = { ids: ids(await cl.ledger(db)), facts: await cl.facts(db) };
-    const second = await B1.start(db, { env: probeEnv });
+    const second = await start(db, { env: probeEnv });
     expect([second.exitCode, second.serve]).toEqual([EXIT.ok, true]);
     expect(ids(await cl.ledger(db))).toEqual(once.ids);
     expect(factDifferences(once.facts, await cl.facts(db))).toEqual([]);
@@ -299,7 +348,7 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
      * accepted previous version complete.
      */
     async function skippedRelease(kind: string): Promise<string> {
-      const db = await upgradedFrom(TPL256, kind);
+      const db = await upgradedFrom(TPL060, kind);
       await cl.admin(db, 'DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL');
       await cl.admin(db, "INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ('0.3.0_TypeOrmMigrations', 'completed', 1, '0.3.0', false, NULL, false)");
       return db;
@@ -308,19 +357,19 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     it('LU-8 previous version incomplete -> 65, nothing applied; then upgrade --force applies with forced = true; then normal starts serve', async () => {
       const db = await skippedRelease('skipped');
       const before = { names: await cl.migrationNames(db), ledger: ids(await cl.ledger(db)) };
-      const refused = await B1.start(db);
+      const refused = await start(db);
       expect([refused.exitCode, refused.serve]).toEqual([EXIT.behind, false]);
       expect(await cl.migrationNames(db)).toEqual(before.names);
       expect(ids(await cl.ledger(db))).toEqual(before.ledger);
 
-      const forced = await B1.forceUpgrade(db);
+      const forced = await B1.forceUpgrade(db, { env: await backupOf(db) });
       expect(forced.exitCode).toBe(EXIT.ok);
       const added = (await cl.ledger(db)).filter((r) => !before.ledger.includes(r.id));
       expect(added.length).toBeGreaterThan(0);
       expect(added.filter((r) => !r.forced)).toEqual([]);
       expect(await complete(db)).toBe(true);
 
-      const after = await B1.start(db);
+      const after = await start(db);
       expect([after.exitCode, after.serve]).toEqual([EXIT.ok, true]);
       expect((await cl.ledger(db)).length).toBe(before.ledger.length + added.length);
     });
@@ -396,7 +445,7 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
 
   // ----------------------------------------------------------------------------------------------------------- LU-11
   it('LU-11 rollback: a newer version completed in the ledger serves with a WARNING; a loosened known security object blocks', async () => {
-    const db = await upgradedFrom(TPL256, 'rollback');
+    const db = await upgradedFrom(TPL060, 'rollback');
     await cl.admin(db, "INSERT INTO core.migrations (timestamp, name) VALUES (1799999999999, 'FutureRelease1799999999999')");
     await cl.admin(db, "INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ('9.9.0_TypeOrmMigrations', 'completed', 1, '9.9.0', false, NULL, false)");
     const before = ids(await cl.ledger(db));

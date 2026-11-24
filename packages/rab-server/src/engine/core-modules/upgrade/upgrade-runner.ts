@@ -44,7 +44,7 @@
  * workspace-upgrade-command.ts).
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
-import { UpgradeCommand, UpgradeCommandHost } from './upgrade-commands/upgrade-command';
+import { UpgradeCommand, UpgradeCommandHost, UpgradeCommandResult } from './upgrade-commands/upgrade-command';
 import { createUpgradeCommandHost } from './upgrade-command-host';
 import type { WorkspaceUpgradeCommand } from './upgrade-commands/workspace-upgrade-command';
 import { UPGRADE_COMMANDS, WORKSPACE_UPGRADE_COMMANDS } from './upgrade-commands/registry';
@@ -119,6 +119,11 @@ export interface UpgradeRunReport {
   commandFailure: { name: string; errorName: string; workspaceId?: string } | null;
   /** Part C3: an instance command wrote, kept or lifted a workspace block marker (the resolver cache epoch must be bumped). */
   commandBlockChanged: boolean;
+  /**
+   * Release 0.7.0: instance commands that returned `{ deferred }` this start (step names only). Not recorded in the logbook:
+   * the step stays incomplete and runs again at the next start (upgrade-command.ts UpgradeCommandResult).
+   */
+  deferred: string[];
   /** Part D: the workspace pass (null when it did not run). Workspace ids and step names only, never a message. */
   workspaces: {
     total: number;
@@ -161,7 +166,7 @@ export class UpgradeRun {
   private minorResumed: 'ok' | 'failed' | null = null;
 
   constructor(private readonly options: UpgradeRunOptions) {
-    this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, workspaces: null };
+    this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, deferred: [], workspaces: null };
   }
 
   private get registry() {
@@ -327,6 +332,22 @@ export class UpgradeRun {
     if (!ok && pendingMigrations.length) {
       const failed = this.report.recorded.filter((r) => r.status === 'failed').slice(-1)[0];
       const step = this.report.commandFailure?.name ?? failed?.name ?? minor;
+      // Release 0.7.0: a .0 command that DEFERRED (not recorded, see runInstanceSteps) is not complete either: the same
+      // refusal (66) / --force path as a failure, worded as a deferral (nothing was recorded for it).
+      const deferredStep = !this.report.commandFailure ? this.report.deferred.slice(-1)[0] : undefined;
+      if (deferredStep) {
+        if (force) {
+          log(
+            `WARNING: upgrade --force: ${deferredStep} was deferred again (not recorded); applying ${codeVersion}'s ${pendingMigrations.length} pending migration(s) anyway. ${minor} stays incomplete until a start runs ${deferredStep}.`,
+          );
+          return;
+        }
+        throw new MinorReleaseResumeFailedError(
+          `${deferredStep} was deferred (not recorded) before any migration of this start; ${codeVersion}'s ${pendingMigrations.length} pending migration(s) were NOT applied, because ${minor} is incomplete until that step completes. Resolve the deferral's cause (see the WARNING above) and start again, or run the manual command \`upgrade --force\`.`,
+          deferredStep,
+          null,
+        );
+      }
       if (force) {
         log(
           `WARNING: upgrade --force: ${step} failed again (attempt ${failed?.attempt ?? '?'}); applying ${codeVersion}'s ${pendingMigrations.length} pending migration(s) anyway. The start serves degraded (exit 70), every row is marked forced, and the workspaces that step blocked stay blocked (503).`,
@@ -362,7 +383,7 @@ export class UpgradeRun {
       if (!(await this.runInstanceSteps(session, version))) return;
     }
     await this.runWorkspacePass(session);
-    if (!this.report.commandFailure) log(`upgrade logbook: ${codeVersion} complete`);
+    if (!this.report.commandFailure && !this.report.deferred.length) log(`upgrade logbook: ${codeVersion} complete`);
   }
 
   /**
@@ -379,10 +400,11 @@ export class UpgradeRun {
       const done = await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null }));
       if (done) continue;
       if (version !== codeVersion) log(`upgrade ${codeVersion}: re-running ${name} (an incomplete step of ${version}) under its own name`);
+      let result: void | UpgradeCommandResult;
       try {
         if (this.options.testFailCommand && this.options.testFailCommand === command.name) throw Object.assign(new Error('test seam: forced command failure'), { name: 'TestCommandFailure' });
         log(`upgrade command ${name}: running`);
-        await command.run({
+        result = await command.run({
           query: session.query,
           log,
           host: this.options.host ?? createUpgradeCommandHost(),
@@ -398,6 +420,16 @@ export class UpgradeRun {
         this.report.recorded.push({ name, status: 'failed', attempt });
         this.report.commandFailure = { name, errorName: error instanceof Error ? error.name : 'Error' };
         log(`ERROR: upgrade command ${name} FAILED (attempt ${attempt}); the schema matches this code, so the API serves with upgradeFailed:true (exit 70). The next start retries it.`);
+        return false;
+      }
+      if (result && typeof result.deferred === 'string') {
+        // Release 0.7.0 (C3 no-op fix; security review L1): NOT recorded, and the release STOPS here: no later instance
+        // command and no workspace pass run, so no later step can be recorded completed and make the version look complete.
+        // The next start runs this step again; the next release's strict previous-version check refuses (65) until it has.
+        // Returned as "not ok" (like a failed command, but nothing is recorded): afterApply stops before the workspace pass,
+        // and a patch start's resume of its .0 refuses before its migrations (resumeMinorBeforeMigrations).
+        this.report.deferred.push(name);
+        log(`WARNING: upgrade command ${name} DEFERRED, not recorded: ${result.deferred.slice(0, 300)}. ${codeVersion} stops here and stays incomplete (no later step runs); the next start runs it again.`);
         return false;
       }
       const attempt = await withUpgradeScope(session, 'upgrade', (q) =>

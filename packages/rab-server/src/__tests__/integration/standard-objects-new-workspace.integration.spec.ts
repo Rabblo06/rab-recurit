@@ -11,8 +11,8 @@ import { integrationTestDatabase, integrationTestDatabaseReady } from '../../dat
 import { WORKSPACE_TABLES } from '../../database/typeorm/workspace-schema/workspace-tables';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
-import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
-import { readAppVersion } from '../../engine/core-modules/upgrade/upgrade-version';
+import { lastStepOfVersion, stepsForVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
+import { CREWFLOW_PREVIOUS_VERSIONS, readAppVersion } from '../../engine/core-modules/upgrade/upgrade-version';
 import * as standardSyncModule from '../../engine/metadata/standard-objects/standard-object-sync';
 import { syncStandardObjectsForNewWorkspace } from '../../engine/metadata/standard-objects/standard-objects-new-workspace';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -22,7 +22,7 @@ import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Metadata engine M1 / E2: a NEW workspace gets the standard-object sync. A workspace created on this code starts at the
- * release's last upgrade step (Part B / D `is_initial` row = 0.6.0_SyncStandardObjects_…), so it never runs the workspace
+ * release's last upgrade step (Part B / D `is_initial` row, at or after 0.6.0_SyncStandardObjects_…), so it never runs the workspace
  * command; ManagerWorkspaceService.createFor writes its standard metadata in the creation transaction instead. Real HTTP, real
  * auth, the configured runtime login; the result is compared with the provisioned schema in pg_catalog, and a rolled-back
  * create leaves no metadata behind.
@@ -85,7 +85,12 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
 
     const initial = (await admin.query(`SELECT name, status FROM core.upgrade_migration WHERE workspace_id = $1 AND is_initial`, [id])).rows;
     expect(initial).toEqual([{ name: lastStepOfVersion(readAppVersion()), status: 'completed' }]);
-    expect(initial[0].name).toMatch(/^0\.6\.0_SyncStandardObjects_\d{13}$/);
+    // The sync step (0.6.0) is at or before the creation cursor (the release's last step; 0.7.0's cutover in release 0.7.0),
+    // so the new workspace never runs it: its metadata came from the creation transaction.
+    const sequence = [...CREWFLOW_PREVIOUS_VERSIONS, readAppVersion()].flatMap((v) => stepsForVersion(v));
+    const syncAt = sequence.findIndex((n) => /^0\.6\.0_SyncStandardObjects_\d{13}$/.test(n));
+    expect(syncAt).toBeGreaterThanOrEqual(0);
+    expect(sequence.indexOf(initial[0].name)).toBeGreaterThanOrEqual(syncAt);
   });
 
   it('the privileged section does not leak: after the sync the session is back to the runtime login, and a request-path write of built-in metadata is refused (42501)', async () => {
