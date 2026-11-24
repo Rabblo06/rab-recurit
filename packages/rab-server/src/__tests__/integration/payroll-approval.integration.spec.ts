@@ -3,7 +3,7 @@ import 'reflect-metadata';
 import { payForMinutes, PermissionFlag } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -15,9 +15,9 @@ import { AttendanceQrService } from '../../modules/attendance/services/attendanc
 import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { freshStepUp } from './helpers/step-up-kit';
+import { approvalGrant, dropApprovalGrant, enrolTotp, freshApprovalProof } from './helpers/step-up-kit';
+import { codeAt } from './helpers/mfa-test-kit';
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
-import { createHash } from 'node:crypto';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -65,9 +65,16 @@ describeIfDb('payroll approval (integration)', () => {
   let tokenC: string;
   let redis: AuthCacheRedisClientProvider;
   /** A fresh step-up of the session right before approving (decision 5); returns the token. */
+  /** Approvers must have 2FA (decision 5): each is enrolled once, on the session the suite uses. */
+  const secrets = new Map<string, Buffer>();
+  const ensureEnrolled = async (token: string, who: TestIdentity): Promise<Buffer> => {
+    if (!secrets.has(who.userId)) secrets.set(who.userId, await enrolTotp(app, token, who.password));
+    return secrets.get(who.userId)!;
+  };
+  /** A single-use, action-bound approval proof for this session (fixture grant; the real path is tested in (11)). */
   const stepped = async (token: string, who: TestIdentity): Promise<string> => {
-    await freshStepUp(app, token, who.password);
-    return token;
+    await ensureEnrolled(token, who);
+    return approvalGrant(redis, token, who.userId);
   };
   let staffTokens: string[];
   let venueId: string;
@@ -94,7 +101,7 @@ describeIfDb('payroll approval (integration)', () => {
     orgId = seeded.organisation.id;
     [a, b] = seeded.managers as [TestIdentity, TestIdentity];
     staff = [];
-    for (let i = 0; i < 7; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `payroll-s${i}` }));
+    for (let i = 0; i < 9; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `payroll-s${i}` }));
     // Offerable staff (the factory default employment status is not ACTIVE).
     await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     [tokenA, tokenB] = [await factory.login(a), await factory.login(b)];
@@ -234,7 +241,7 @@ describeIfDb('payroll approval (integration)', () => {
     const id = (await recordFor(worked.s0!.attendanceId))!.id as string;
     expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenB, b)))).status).toBe(404);
     expect((await http().post(`/rest/v1/payroll/records/${id}/reject`).set(auth(tokenB)).send({ reason: 'Not mine to reject' })).status).toBe(404);
-    const crossBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenB)).send({ ids: [id] });
+    const crossBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(await stepped(tokenB, b))).send({ ids: [id] });
     expect(crossBulk.status).toBe(200);
     expect(crossBulk.body).toEqual({ approved: [], blocked: [{ id, reason: 'not_found', message: expect.any(String) }] });
     const list = await http().get('/rest/v1/payroll/records').set(auth(tokenB));
@@ -439,38 +446,86 @@ describeIfDb('payroll approval (integration)', () => {
     expect((await http().post(`/rest/v1/payroll/records/${extra.attendanceId}/approve`).set(auth(tokenC))).status).toBe(404);
   });
 
-  it('(11) decision 5: whoever finalised the timesheet never approves it; approving needs a fresh step-up; no override', async () => {
-    const PREPARED = 'You finalised the timesheet for these hours, so another payroll approver must approve them.';
-    const sidOf = (token: string) => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
-    const staleGrant = (token: string) => redis.client.del(`crewflow:test:step-up:${createHash('sha256').update(sidOf(token)).digest('hex')}`);
+  it('(11) decision 5: whoever reviewed or finalised the timesheet never approves it; approving needs a fresh, single-use, action-bound 2FA proof; no override', async () => {
+    const PREPARED = 'You reviewed or finalised the timesheet for these hours, so another payroll approver must approve them.';
+    const refusals = async (userId: string) => (await adminDataSource.query(
+      `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [userId]))[0].n as number;
+    const approveAs = (token: string, id: string) => http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(token));
     worked.s6 = await workShift(6);
-    await reviewAndFinalise(worked.s6, 6); // finalised by A
+    await reviewAndFinalise(worked.s6, 6); // reviewed and finalised by A
     const id = (await recordFor(worked.s6.attendanceId))!.id as string;
-    // A prepared it (finalised the report): refused even with a fresh step-up, single and bulk; nothing written.
-    const own = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenA, a)));
+
+    // A prepared it: refused even with a valid proof, single and bulk; nothing written.
+    const own = await approveAs(await stepped(tokenA, a), id);
     expect({ status: own.status, message: own.body.message }).toEqual({ status: 403, message: PREPARED });
-    const ownBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenA)).send({ ids: [id] });
+    const ownBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(await stepped(tokenA, a))).send({ ids: [id] });
     expect(ownBulk.body).toEqual({ approved: [], blocked: [{ id, reason: 'prepared_by_you', message: PREPARED }] });
+    // The database refuses the same approval written directly by the runtime role (core.payroll_record_guard, 42501).
+    await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
+      `UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [id, a.userId]))).rejects.toMatchObject({ code: '42501' });
     expect((await recordFor(worked.s6.attendanceId))!).toMatchObject({ status: 'pending_approval', approved_by: null });
-    // C with a STALE session (grant expired = removed): 403 STEP_UP_REQUIRED, nothing written, refusal audited with the action.
-    await staleGrant(tokenC);
-    const refusalsBefore = (await adminDataSource.query(
-      `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [c.userId]))[0].n;
-    const staleSingle = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenC));
-    expect({ status: staleSingle.status, code: staleSingle.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
-    const staleBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenC)).send({ ids: [id] });
-    expect({ status: staleBulk.status, code: staleBulk.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
-    expect((await adminDataSource.query(
-      `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [c.userId]))[0].n).toBe(refusalsBefore + 2);
+
+    const secretC = await ensureEnrolled(tokenC, c);
+    // No proof for this action on C's session: 403 STEP_UP_REQUIRED (with the action), refusal audited, nothing written.
+    await dropApprovalGrant(redis, tokenC);
+    const before = await refusals(c.userId);
+    const none = await approveAs(tokenC, id);
+    expect({ status: none.status, code: none.body.code, action: none.body.action }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED', action: 'payroll.record.approve' });
+    const noneBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenC)).send({ ids: [id] });
+    expect({ status: noneBulk.status, code: noneBulk.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
+    expect(await refusals(c.userId)).toBe(before + 2);
+    // The session's ORDINARY grant — what a fresh sign-in (with its second factor) or a plain step-up records — is not a proof
+    // for approval, even with the factor in it.
+    const sid = (JSON.parse(Buffer.from(tokenC.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+    const sessionKey = `crewflow:test:step-up:${createHash('sha256').update(sid).digest('hex')}`;
+    for (const via of ['sign_in', 'password'] as const) {
+      await redis.client.set(sessionKey, JSON.stringify({ u: c.userId, mfa: true, at: Date.now(), via }), 'PX', 60_000);
+      expect((await approveAs(tokenC, id)).body.code).toBe('STEP_UP_REQUIRED');
+    }
+    // A sign-in grant planted under the action key is refused too (only a password / SSO re-auth proof with a code counts).
+    await redis.client.set(`${sessionKey}:action:payroll.record.approve`, JSON.stringify({ u: c.userId, mfa: true, at: Date.now(), via: 'sign_in' }), 'PX', 60_000);
+    expect((await approveAs(tokenC, id)).body.code).toBe('STEP_UP_REQUIRED');
+    // A proof for ANOTHER action (finalising a run) does not approve a record.
+    await approvalGrant(redis, tokenC, c.userId, 'payroll.run.finalise');
+    expect((await approveAs(tokenC, id)).body.code).toBe('STEP_UP_REQUIRED');
+    // An approver WITHOUT 2FA is refused outright, whatever grant the session holds.
+    const d = await factory.createWorkspaceCoManager({ id: orgId }, a, { label: 'payroll-d' });
+    const tokenD = await approvalGrant(redis, await factory.login(d), d.userId);
+    const unenrolled = await approveAs(tokenD, id);
+    expect({ status: unenrolled.status, code: unenrolled.body.code }).toEqual({ status: 403, code: 'STEP_UP_MFA_ENROLMENT_REQUIRED' });
     expect((await recordFor(worked.s6.attendanceId))!.status).toBe('pending_approval');
-    // Another organisation's manager: still 404 after a fresh step-up (the tenant boundary is not disclosed).
+    // Another organisation's manager with a valid proof: still 404 (the tenant boundary is not disclosed).
     const other = await factory.createOrganisationWithManagers(1, { workspace: true, permissions: 'production', label: 'payroll-other' });
     const otherToken = await factory.login(other.managers[0]!);
-    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(otherToken, other.managers[0]!)))).status).toBe(404);
-    // C, after a fresh step-up: approved.
-    const ok = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenC, c)));
+    expect((await approveAs(await stepped(otherToken, other.managers[0]!), id)).status).toBe(404);
+
+    // The real path: POST /auth/step-up with password + a current code + the action, then exactly ONE approval.
+    const proof = await freshApprovalProof(app, tokenC, c.password, codeAt(secretC, 0), 'payroll.record.approve');
+    expect(proof.status).toBe(200);
+    const ok = await approveAs(tokenC, id);
     expect(ok.status).toBe(200);
     expect((await recordFor(worked.s6.attendanceId))!).toMatchObject({ status: 'approved', approved_by: c.userId });
+    // The grant was burned: a second approval on the same proof is refused.
+    worked.s7 = await workShift(7);
+    await reviewAndFinalise(worked.s7, 7);
+    const id7 = (await recordFor(worked.s7.attendanceId))!.id as string;
+    expect((await approveAs(tokenC, id7)).body.code).toBe('STEP_UP_REQUIRED');
+    expect((await recordFor(worked.s7.attendanceId))!.status).toBe('pending_approval');
+  });
+
+  it('(11b) decision 5: a manager who REVIEWED the attendance (but did not finalise the report) cannot approve it (service 403 + DB 42501)', async () => {
+    const PREPARED = 'You reviewed or finalised the timesheet for these hours, so another payroll approver must approve them.';
+    const w = await workShift(8);
+    // A reviews the seat; the Venue Manager finalises the report: A is a preparer without being the finaliser.
+    expect((await http().post(`/rest/v1/attendance/report/shift/${w.shiftId}/staff/${staff[8]!.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
+    expect((await http().patch(`/rest/v1/attendance/report/shift/${w.shiftId}/finalise`).set(auth(tokenVm))).status).toBe(200);
+    const id = (await recordFor(w.attendanceId))!.id as string;
+    const res = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenA, a)));
+    expect({ status: res.status, message: res.body.message }).toEqual({ status: 403, message: PREPARED });
+    await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
+      `UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [id, a.userId]))).rejects.toMatchObject({ code: '42501' });
+    // C (neither reviewer nor finaliser) approves it.
+    expect((await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenC, c)))).status).toBe(200);
   });
 
   it('humans can never record a generated statement or a notification (RLS)', async () => {

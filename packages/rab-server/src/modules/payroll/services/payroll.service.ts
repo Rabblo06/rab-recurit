@@ -264,22 +264,26 @@ interface LockedRecord {
   staff_user_id: string;
   /** Who finalised the shift report that created this record (`shift_report.finalised_by`); null when not readable. */
   finalised_by: string | null;
+  /** Who reviewed this record's attendance seat (`shift_assignment.attendance_reviewed_by`); a preparer too (review of #335). */
+  reviewed_by: string | null;
 }
 
 const NOT_READY_MESSAGE = 'This payroll record is not ready for approval.';
 const OWN_HOURS_MESSAGE = 'You cannot approve payroll for your own hours.';
-const PREPARED_BY_YOU_MESSAGE = 'You finalised the timesheet for these hours, so another payroll approver must approve them.';
+const PREPARED_BY_YOU_MESSAGE = 'You reviewed or finalised the timesheet for these hours, so another payroll approver must approve them.';
 const PREPARER_UNKNOWN_MESSAGE = 'This payroll record cannot be approved because the finalised timesheet it came from could not be found.';
 const NOT_FOUND_MESSAGE = 'Payroll can\'t be approved until verified hours and pay are available.';
 
 /**
  * Owner decision 5 (2026-11-21), maker-checker, no override: the approver is never the person who prepared the pay. A record
  * is prepared by finalising its shift report (ShiftReportService.finalise creates it in the same transaction), so its preparer
- * is `shift_report.finalised_by`. Unknown preparer = refused (fail closed), never "not the caller".
+ * is `shift_report.finalised_by`; whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) prepared it
+ * too. An unknown finaliser = refused (fail closed), never "not the caller". The same rule is enforced by the database
+ * (`core.payroll_record_guard()`, PayrollMakerCheckerBackstop1786723020000).
  */
 function preparerBlock(record: LockedRecord, ctx: AuthContext): { reason: 'prepared_by_you' | 'not_ready'; message: string } | null {
   if (!record.finalised_by) return { reason: 'not_ready', message: PREPARER_UNKNOWN_MESSAGE };
-  if (record.finalised_by === ctx.userId) return { reason: 'prepared_by_you', message: PREPARED_BY_YOU_MESSAGE };
+  if (record.finalised_by === ctx.userId || record.reviewed_by === ctx.userId) return { reason: 'prepared_by_you', message: PREPARED_BY_YOU_MESSAGE };
   return null;
 }
 
@@ -563,7 +567,7 @@ export class PayrollService {
    * connection while this one is open.
    */
   async approve(ctx: AuthContext, id: string): Promise<PayrollRecordView> {
-    await this.stepUp.assertRecentStepUp(ctx, 'payroll.record.approve');
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, 'payroll.record.approve');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_APPROVE);
       const [record] = await this.lockRecords(manager, ctx, [id]);
@@ -588,7 +592,7 @@ export class PayrollService {
    */
   async bulkApprove(ctx: AuthContext, ids: string[]): Promise<BulkApproveResult> {
     // Decision 5: one fresh step-up covers the whole batch; before the transaction (see approve()).
-    await this.stepUp.assertRecentStepUp(ctx, 'payroll.record.approve');
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, 'payroll.record.approve');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_APPROVE);
       const found = new Map((await this.lockRecords(manager, ctx, ids)).map((r) => [r.id, r]));
@@ -713,7 +717,8 @@ export class PayrollService {
     const t = businessTables(manager);
     return manager.query(
       `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.amount_pence, sp.user_id AS staff_user_id,
-              (SELECT sr.finalised_by FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised') AS finalised_by
+              (SELECT sr.finalised_by FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised') AS finalised_by,
+              (SELECT sa.attendance_reviewed_by FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id WHERE a.id = pr.attendance_id) AS reviewed_by
          FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
         WHERE pr.id = ANY($1::uuid[]) AND pr.organisation_id = $2 AND pr.workspace_id = $3
         ORDER BY pr.id

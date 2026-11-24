@@ -10511,14 +10511,23 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   pay now uses a second manager of the workspace (server: realtime-c1b, w5-timeline; worker: shift-statement,
   shift-statement-wake, phase-d cutover, phase-d two-worker).
 
-SECURITY TRADE-OFF
-Decision:   "a fresh 2FA check" is implemented with the existing step-up: password always, plus the authenticator code when
-            the approver has 2FA. An approver WITHOUT 2FA is not refused.
-Reason:     decision 2 phases MFA in (owners / Initial Managers at the DigitalOcean move, other web managers 4 weeks later);
-            refusing un-enrolled approvers now would stop payroll for every organisation before that rollout.
-Risk:       an attacker with a live session AND the approver's password (no 2FA enrolled) can approve pay prepared by
-            someone else.
-Mitigation: maker-checker still needs a second person; the password is re-proved at approval; once decision 2's MFA
-            enforcement reaches managers, every approver has a factor and the code is required.
-Reversal:   refuse `payroll.record.approve` / `payroll.run.finalise` when the approver has no enabled factor (one check in
-            the two services before assertRecentStepUp), or turn on manager MFA enforcement.
+**Update after the independent review of #335 (HIGH / MEDIUM / LOW fixed; the trade-off above is withdrawn):**
+- **Fresh 2FA, bound to the action, single use:** approve / bulk-approve / finalise now call
+  `StepUpReauthService.assertFreshSecondFactorForAction(ctx, action)`. An approver with no authenticator factor is refused
+  (403 `STEP_UP_MFA_ENROLMENT_REQUIRED`, audited). The session must hold a grant written by `POST /auth/step-up` with
+  `action` set and a verified TOTP code (key `step-up:<session hash>:action:<action>`); a sign-in grant, the ordinary
+  session grant, or a grant for another action never counts; the grant is read with GETDEL, so one proof serves exactly one
+  approval call. The web dialog receives `action` in the 403 and sends it back with the proof. Lane P2's approval actions
+  use the same helper (add them to ACTION_BOUND_STEP_UP_ACTIONS).
+- **Preparers:** whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) is a preparer too.
+- **Database layer (DRAFT, new SQL, PayrollMakerCheckerBackstop1786723020000):** `core.payroll_record_guard()` (the one trigger
+  function of core AND every workspace payroll_record) refuses, at the moment `approved_by` is set, an approver who
+  finalised the report or reviewed the seat (42501; rows approved earlier are never blocked by later updates).
+  `payroll_run_update` on core.payroll_run requires `finalised_by <> prepared_by` for a finalised run (workspace copies with
+  the 0.7.0 chain). Top-up preparers of a run are still checked in the service only, from the insert-only audit row; a
+  real per-line `prepared_by` column needs a workspace structure level and is proposed for the 0.7.0 PR.
+- **Tests:** payroll-approval (11) / (11b): no proof, a sign-in or ordinary grant, a sign-in grant planted under the action
+  key, a proof for another action, an un-enrolled approver: all 403; the real step-up with code then exactly one approval,
+  a second approval on the same proof 403; a reviewer who did not finalise: service 403 and DB 42501.
+  payroll-maker-checker-rls (core, runtime login): finaliser / reviewer approving 42501, run preparer finalising 42501, a
+  third manager allowed.

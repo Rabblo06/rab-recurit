@@ -46,7 +46,8 @@ import type { ReportDocument } from '../../queues/rab-reports/render-pdf.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
-import { freshStepUp } from './helpers/step-up-kit';
+import { approvalGrant, enrolTotp } from './helpers/step-up-kit';
+import { AuthCacheRedisClientProvider } from '@rab/server/engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
@@ -697,7 +698,8 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     // after a fresh step-up of their session.
     const approver = await factory.createWorkspaceCoManager(org, manager, { label: 'w4-approver' });
     const approverToken = await factory.login(approver);
-    await freshStepUp(app, approverToken, approver.password);
+    await enrolTotp(app, approverToken, approver.password);
+    await approvalGrant(app.get(AuthCacheRedisClientProvider), approverToken, approver.userId);
     expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(approverToken))).status).toBe(200);
     return rec.id;
   }

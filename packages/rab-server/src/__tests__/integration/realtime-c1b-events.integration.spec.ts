@@ -34,7 +34,7 @@ import { Attendance } from '../../modules/attendance/entities/attendance.entity'
 import { NotificationService } from '../../modules/notification/services/notification.service';
 import { PayrollService } from '../../modules/payroll/services/payroll.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { serviceStepUpSession } from './helpers/step-up-kit';
+import { enrolTotp, serviceApprovalSession } from './helpers/step-up-kit';
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -378,8 +378,9 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
     }
     const audienceSpy = jest.spyOn(recipientsModule, 'payrollAudience');
     try {
-      // Decision 5: approving needs a fresh step-up of the session; a service-direct call carries a session with a grant.
-      const sessionId = await serviceStepUpSession(moduleRefRedis(), owner.userId);
+      // Decision 5: the approver has 2FA and a single-use proof bound to the approval action (service-direct: a session id).
+      await enrolTotp(app, await factory.login(owner), owner.password);
+      const sessionId = await serviceApprovalSession(moduleRefRedis(), owner.userId);
       const result = await payroll.bulkApprove({ ...ctxOf(owner), sessionId }, recordIds);
       expect(result.approved).toHaveLength(3);
       expect(audienceSpy).toHaveBeenCalledTimes(1);

@@ -28,7 +28,8 @@ import { renderReportPdf, ReportDocument } from '../../queues/rab-reports/render
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
-import { freshStepUp } from './helpers/step-up-kit';
+import { approvalGrant, enrolTotp } from './helpers/step-up-kit';
+import { AuthCacheRedisClientProvider } from '@rab/server/engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
@@ -87,10 +88,8 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
   // Owner decision 5 (maker-checker): A finalises the timesheets; a second manager of A's workspace approves, after a fresh step-up.
   let approver: TestIdentity;
   let approverTok: string;
-  const approverToken = async (): Promise<string> => {
-    await freshStepUp(app, approverTok, approver.password);
-    return approverTok;
-  };
+  /** A single-use, action-bound approval proof for the approver's session (decision 5; the approver is enrolled in beforeAll). */
+  const approverToken = async (): Promise<string> => approvalGrant(app.get(AuthCacheRedisClientProvider), approverTok, approver.userId);
   let venueId: string;
   let jobRoleId: string;
 
@@ -125,6 +124,7 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
     jobRoleId = role.body.id;
     approver = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'stmtwake-approver' });
     approverTok = await factory.login(approver);
+    await enrolTotp(app, approverTok, approver.password);
     const staffTokens: string[] = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
     tokens = { a: tokenA, staff: staffTokens };

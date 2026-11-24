@@ -6,7 +6,7 @@ import { AuthUser } from '../../../decorators/auth-user.decorator';
 import { PlatformAdminGuard } from '../../../guards/platform-admin.guard';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { RateLimitRequired } from '../../throttler/rab-throttler.guard';
-import { AdminMfaResetDto, MfaCodeDto, MfaEnrolmentStartDto, MfaStepUpDto } from '../dto/mfa.dto';
+import { AdminMfaResetDto, MfaCodeDto, MfaEnrolmentStartDto, MfaStepUpDto, MfaStepUpNowDto } from '../dto/mfa.dto';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { ManagerApplication } from '../guards/manager-application.decorator';
 import { MobileApplication } from '../guards/mobile-application.decorator';
@@ -88,8 +88,8 @@ export class MfaController {
   @HttpCode(HttpStatus.OK)
   @Throttle(MFA_THROTTLE)
   @RateLimitRequired()
-  stepUpNow(@AuthUser() ctx: AuthContext, @Body() dto: MfaStepUpDto) {
-    return this.stepUp.stepUp(ctx, { currentPassword: dto.currentPassword, code: dto.code });
+  stepUpNow(@AuthUser() ctx: AuthContext, @Body() dto: MfaStepUpNowDto) {
+    return this.stepUp.stepUp(ctx, { currentPassword: dto.currentPassword, code: dto.code, action: dto.action });
   }
 }
 

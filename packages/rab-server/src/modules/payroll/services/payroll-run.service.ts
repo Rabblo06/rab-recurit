@@ -218,7 +218,7 @@ export class PayrollRunService {
    * prepare writes in the same transaction as its lines). 403, no override.
    */
   async finalise(ctx: AuthContext, runId: string): Promise<RunView> {
-    await this.stepUp.assertRecentStepUp(ctx, 'payroll.run.finalise');
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, 'payroll.run.finalise');
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_APPROVE);
       const t = businessTables(m);
