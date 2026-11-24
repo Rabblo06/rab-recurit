@@ -97,6 +97,10 @@ const SEARCH_PATH_BINDERS = Object.freeze([
   // transactions to the constant 'pg_catalog, pg_temp' (every name it uses is core.-qualified or pg_catalog.); it binds no
   // business schema and never calls businessTables.
   'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover.ts',
+  // Not a business-table binder: the semantic posture read pins its own read-only transaction to the constant
+  // 'pg_catalog, public, pg_temp' so rendered catalog names never depend on a session search_path, and restores a caller's
+  // value; it reads pg_catalog only and binds no business schema (#253, review of #251 F5).
+  'packages/rab-server/src/database/posture-drift/semantic-posture.ts',
 ]);
 /**
  * Part D workspace upgrade COMMANDS: versioned, frozen DDL (`upgrade-commands/<major>-<minor>/*.ts`) whose `sql(schemaName)`
