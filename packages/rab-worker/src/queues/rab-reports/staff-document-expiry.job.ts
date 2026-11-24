@@ -61,11 +61,6 @@ export function dueThreshold(daysLeft: number): number | null {
   return reached.length ? Math.min(...reached) : null;
 }
 
-function whenText(daysLeft: number, expiresOn: string): string {
-  if (daysLeft === 0) return `expires today (${expiresOn})`;
-  return `expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'} (on ${expiresOn})`;
-}
-
 /**
  * Lane D: staff documents expiring in 30 days, 7 days and today (London calendar dates). For each held document (pending or
  * verified) the staff member and the workspace owner are notified ONCE per threshold — worker event
@@ -109,74 +104,120 @@ export async function runStaffDocumentExpiryCycle(
     options.organisationId,
   );
 
-  let notified = 0;
+  // Review L1: one notice per staff member and threshold (20 documents expiring together = 1 owner email, not 20). Each
+  // document still has its own worker_event claim, so idempotency stays per document and threshold.
+  const groups = new Map<
+    string,
+    { c: Candidate; threshold: number; daysLeft: number; docs: Candidate[] }
+  >();
   for (const c of candidates) {
     const daysLeft = calendarDaysBetween(today, c.expires_on);
     const threshold = dueThreshold(daysLeft);
     if (threshold === null) continue;
-    const label =
-      STAFF_DOCUMENT_TYPE_LABELS[c.document_type] ?? c.document_type;
-    let done: boolean;
+    const key = `${c.workspace_id}:${c.staff_user_id}:${threshold}`;
+    const g = groups.get(key);
+    if (g) {
+      g.docs.push(c);
+      g.daysLeft = Math.min(g.daysLeft, daysLeft);
+    } else groups.set(key, { c, threshold, daysLeft, docs: [c] });
+  }
+
+  let notified = 0;
+  for (const g of groups.values()) {
+    let sent: number;
     try {
-      done = await tenantContext.runInTenantContext(
+      sent = await tenantContext.runInTenantContext(
         {
-          organisationId: c.organisation_id,
-          workspaceId: c.workspace_id,
+          organisationId: g.c.organisation_id,
+          workspaceId: g.c.workspace_id,
           userId: '',
           role: '',
           actorType: 'worker',
         },
         async (m) => {
-          const eventId = await claimWorkerEvent(m, {
-            organisationId: c.organisation_id,
-            workspaceId: c.workspace_id,
-            eventKey: `staff-document-expiry:${c.document_id}:${threshold}`,
-            eventType: 'staff-document-expiry',
-            entityType: 'staff_document',
-            entityId: c.document_id,
-          });
-          if (!eventId) return false;
-          // Re-read under the same transaction: a document revoked since discovery gets no notice.
-          const [still] = await m.query(
-            `SELECT 1 FROM core.staff_document WHERE id = $1 AND status IN ('pending', 'verified') AND expires_on = $2::date`,
-            [c.document_id, c.expires_on],
-          );
-          if (still) {
+          const fresh: Candidate[] = [];
+          const claims: string[] = [];
+          for (const d of g.docs) {
+            const eventId = await claimWorkerEvent(m, {
+              organisationId: d.organisation_id,
+              workspaceId: d.workspace_id,
+              eventKey: `staff-document-expiry:${d.document_id}:${g.threshold}`,
+              eventType: 'staff-document-expiry',
+              entityType: 'staff_document',
+              entityId: d.document_id,
+            });
+            if (!eventId) continue;
+            claims.push(eventId);
+            // Re-read under the same transaction: a document revoked since discovery gets no notice.
+            const [still] = await m.query(
+              `SELECT 1 FROM core.staff_document WHERE id = $1 AND status IN ('pending', 'verified') AND expires_on = $2::date`,
+              [d.document_id, d.expires_on],
+            );
+            if (still) fresh.push(d);
+          }
+          if (fresh.length) {
+            const labels = [
+              ...new Set(
+                fresh.map(
+                  (d) =>
+                    STAFF_DOCUMENT_TYPE_LABELS[d.document_type] ??
+                    d.document_type,
+                ),
+              ),
+            ];
+            const earliest = fresh.reduce((x, d) =>
+              d.expires_on < x.expires_on ? d : x,
+            );
+            const daysLeft = calendarDaysBetween(today, earliest.expires_on);
+            const what =
+              labels.length === 1
+                ? labels[0]!
+                : `${labels.length} documents (${labels.join(', ')})`;
+            const verb = labels.length === 1 ? 'expires' : 'expire';
+            const when =
+              daysLeft === 0
+                ? `${verb} today (${earliest.expires_on})`
+                : `${verb} in ${daysLeft} day${daysLeft === 1 ? '' : 's'} (from ${earliest.expires_on})`;
+            const related =
+              fresh.length === 1
+                ? {
+                    relatedEntityType: 'staff_document',
+                    relatedEntityId: earliest.document_id,
+                  }
+                : {};
             await notifications.notify(m, {
-              organisationId: c.organisation_id,
-              userId: c.staff_user_id,
+              organisationId: g.c.organisation_id,
+              userId: g.c.staff_user_id,
               type: NotificationType.STAFF_DOCUMENT_EXPIRING,
               title:
                 daysLeft === 0
-                  ? `Your ${label} expires today`
-                  : `Your ${label} expires soon`,
-              message: `Your ${label} ${whenText(daysLeft, c.expires_on)}. Upload a renewed document in the Crewflow app so you can keep receiving shifts.`,
-              relatedEntityType: 'staff_document',
-              relatedEntityId: c.document_id,
+                  ? `Your ${what} ${verb} today`
+                  : `Your ${what} ${verb} soon`,
+              message: `Your ${what} ${when}. Upload a renewed document in the Crewflow app so you can keep receiving shifts.`,
+              ...related,
               forceEmail: true,
             });
-            if (c.owner && c.owner !== c.staff_user_id) {
+            if (g.c.owner && g.c.owner !== g.c.staff_user_id) {
               await notifications.notify(m, {
-                organisationId: c.organisation_id,
-                userId: c.owner,
+                organisationId: g.c.organisation_id,
+                userId: g.c.owner,
                 type: NotificationType.STAFF_DOCUMENT_EXPIRING,
-                title: `Staff ${label} ${daysLeft === 0 ? 'expires today' : 'expiring soon'}`,
-                message: `A staff member's ${label} ${whenText(daysLeft, c.expires_on)}. Open the staff member's documents in Users to review.`,
-                relatedEntityType: 'staff_document',
-                relatedEntityId: c.document_id,
+                title: `Staff ${what} ${daysLeft === 0 ? `${verb} today` : 'expiring soon'}`,
+                message: `A staff member's ${what} ${when}. Open the staff member's documents in Users to review.`,
+                ...related,
                 forceEmail: true,
               });
             }
           }
-          await completeWorkerEvent(m, eventId);
-          return Boolean(still);
+          for (const id of claims) await completeWorkerEvent(m, id);
+          return fresh.length;
         },
       );
     } catch (error) {
       if (isNotYetRoutableWorkspace(error)) continue;
       throw error;
     }
-    if (done) notified += 1;
+    notified += sent;
   }
   return { notified, candidates: candidates.length };
 }
