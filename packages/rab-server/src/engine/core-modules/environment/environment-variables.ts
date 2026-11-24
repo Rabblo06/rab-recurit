@@ -699,15 +699,9 @@ export class EnvironmentVariables {
   @IsString()
   WORKER_SHUTDOWN_TIMEOUT_MS?: string;
 
-  /**
-   * PDF renderer P5 (owner decision D10): every report renders natively (@react-pdf/renderer, no browser). The key is
-   * kept for ONE release and accepts only `native` (unset or empty = native); `chromium` refuses to boot, because this
-   * Worker has no browser (roll back by redeploying the previous image). Delete the key in the release after.
-   */
-  @IsOptional()
-  @Transform(({ value }) => (value === '' ? undefined : value))
-  @IsIn(['native'], { message: 'PDF_RENDERER must be exactly native (chromium was retired in P5: the Worker has no browser)' })
-  PDF_RENDERER?: 'native' = 'native';
+  // PDF_RENDERER is deleted (Phase X X5.4), as owner decision D10 planned for the release after P5: every report renders
+  // natively and there is nothing to choose. The Worker logs one warning at boot if a deployment still sets it
+  // (rab-worker render-pdf.util.ts `retiredPdfRendererWarning`); the value is ignored.
 
   /**
    * PDF renderer P1 — size of the native renderer's worker_threads pool (rab-worker queues/rab-reports/native/runtime,
@@ -719,7 +713,7 @@ export class EnvironmentVariables {
   PDF_NATIVE_CONCURRENCY?: '1' | '2' | '3' | '4';
 
   /**
-   * PDF renderer P1 (F3) — render threads started at Worker boot when PDF_RENDERER=native (`pdfNativePrewarm`, rab-worker
+   * PDF renderer P1 (F3) — render threads started at Worker boot (`pdfNativePrewarm`, rab-worker
    * native/runtime/render-pool.ts). Unset → min(2, PDF_NATIVE_CONCURRENCY); exactly "0".."4" ("0" = none); more than the
    * pool size refuses to start (checked at Worker boot, where the pool size is known); anything else refuses to boot.
    */
