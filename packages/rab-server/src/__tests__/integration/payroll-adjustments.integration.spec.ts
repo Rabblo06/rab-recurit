@@ -329,6 +329,12 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     // segregation CHECK cannot be dodged with a mismatched user id.
     await expect(insert(a.userId, { staff_user_id: staff[2]!.userId })).rejects.toMatchObject({ code: '23514' });
     await expect(insert(a.userId, { staff_profile_id: randomUUID() })).rejects.toMatchObject({ code: '23514' });
+    // Re-review item 4: a correction must point at an approved record of the SAME staff member (s1's record, staff 0: refused).
+    await expect(asUser(a.userId, `INSERT INTO core.payroll_adjustment (organisation_id, workspace_id, staff_profile_id, staff_user_id, kind, amount_pence, reason, corrects_payroll_record_id, created_by)
+      VALUES ($1, $2, $3, $4, 'correction', -1, 'Wrong person', $5, $6)`, [orgId, a.workspaceId, staff[0]!.profileId, staff[0]!.userId, s1Record.id, a.userId])).rejects.toMatchObject({ code: '23514' });
+    // Re-review item 1: run facts cannot be forged: an `opened` fact for an invented run is refused (42501).
+    await expect(asUser(a.userId, `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, created_by) VALUES ($1, $2, $3, 'opened', $4)`,
+      [orgId, a.workspaceId, randomUUID(), a.userId])).rejects.toMatchObject({ code: '42501' });
     // Run facts are insert-only: no UPDATE / DELETE for the runtime (owner) login.
     await expect(asUser(c.userId, `UPDATE core.payroll_run_event SET event = 'opened'`)).rejects.toMatchObject({ code: '42501' });
     await expect(asUser(c.userId, `DELETE FROM core.payroll_run_event`)).rejects.toMatchObject({ code: '42501' });
@@ -360,6 +366,13 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     const included = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_run.adjustments_included' AND entity_id = $1`, [runId]);
     expect(included[0].metadata).toMatchObject({ adjustments: 3, carriedForward: 0 });
 
+    // Re-review item 1: a `finalised` fact cannot be written early for this still-prepared run (it would block the real one),
+    // neither with its exact line set nor with an arbitrary record list.
+    const [line] = await adminDataSource.query(`SELECT payroll_record_id FROM ${businessTable(a.workspaceId!, 'payroll_run_line')} WHERE run_id = $1`, [runId]);
+    for (const records of [[line.payroll_record_id], [randomUUID()]]) {
+      await expect(asUser(c.userId, `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, payroll_record_ids, created_by) VALUES ($1, $2, $3, 'finalised', $4::uuid[], $5)`,
+        [orgId, a.workspaceId, runId, records, c.userId])).rejects.toMatchObject({ code: '42501' });
+    }
     const csv = await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenA));
     expect(csv.status).toBe(200);
     const lines = (csv.text as string).split('\n');
