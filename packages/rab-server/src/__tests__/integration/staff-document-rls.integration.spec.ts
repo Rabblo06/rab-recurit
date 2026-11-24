@@ -9,6 +9,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
@@ -96,8 +97,8 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
   /** A STAFF_DOCUMENT file row written as `who` (stored_file's own policy: tenant + workspace). */
   async function fileRow(m: EntityManager, who: TestIdentity): Promise<string> {
     const [row] = await m.query(
-      `INSERT INTO core.stored_file (organisation_id, workspace_id, kind, resource_type, resource_id, storage_driver, object_key, original_filename, mime_type, size_bytes, status, created_by)
-       VALUES ($1, $2, 'STAFF_DOCUMENT', 'staff_document', $3, 'LOCAL', $4, 'doc.pdf', 'application/pdf', 10, 'AVAILABLE', $3) RETURNING id`,
+      `INSERT INTO core.stored_file (organisation_id, workspace_id, kind, resource_type, resource_id, storage_driver, object_key, original_filename, mime_type, size_bytes, sha256, status, created_by)
+       VALUES ($1, $2, 'STAFF_DOCUMENT', 'staff_document', $3, 'LOCAL', $4, 'doc.pdf', 'application/pdf', 10, repeat('a', 64), 'AVAILABLE', $3) RETURNING id`,
       [
         who.organisationId,
         who.workspaceId,
@@ -144,7 +145,7 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

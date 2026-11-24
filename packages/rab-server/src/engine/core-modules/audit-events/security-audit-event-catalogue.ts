@@ -160,6 +160,10 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   // Revoking an attendance credential (every printed Shift QR for one shift), same trust class as the venue geofence.
   'shift.qr_rotated': c('security_configuration', 'warning'),
   'report.integrity_failed': c('security_configuration', 'critical'),
+  // Lane D staff documents: a file refused by the virus scanner, and a change of the REQUIRED document types (it decides who
+  // can be offered work). Proposed classification, OWNER-visible.
+  'staff_document.upload_rejected': c('security_configuration', 'warning'),
+  'staff_document.requirements_changed': c('security_configuration', 'warning'),
 });
 
 /**
@@ -198,6 +202,10 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   'payroll_record.shift_statement_retry_requested',
   'payroll_calendar.imported',
   'payslip.uploaded',
+  'staff_document.uploaded',
+  'staff_document.verified',
+  'staff_document.rejected',
+  'staff_document.revoked',
   'shift_review.saved',
   'venue.archived',
   'venue.restored',
