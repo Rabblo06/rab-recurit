@@ -329,6 +329,7 @@ describeIfDb('reports: background CSV exports (integration)', () => {
     // The definers keep their callers apart: a person cannot store or purge a file, the Worker cannot issue or take a link.
     expect(pgCode(await asUser(manager, (m) => m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, 'x')`, [randomUUID(), manager.userId])).catch((e) => e))).toBe('42501');
     expect(pgCode(await asUser(manager, (m) => m.query(`SELECT core.report_export_file_purge($1::uuid)`, [id])).catch((e) => e))).toBe('42501');
+    expect(pgCode(await asUser(manager, (m) => m.query(`SELECT core.report_export_file_sweep_expired(500)`)).catch((e) => e))).toBe('42501');
     expect((await asWorker(manager, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, repeat('a', 64)) AS ok`, [id])))[0].ok).toBe(false);
     // Another user of the organisation gets nothing from the definers.
     expect((await asUser(other, (m) => m.query(`SELECT core.report_export_file_issue_link($1::uuid, repeat('a', 64)) AS ok`, [id])))[0].ok).toBe(false);

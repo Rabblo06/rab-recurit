@@ -159,6 +159,31 @@ describeIfDb('report export Worker cycle (integration)', () => {
     expect((await rowOf(victim.id)).status).toBe('ready');
   });
 
+  it('the sweep clears an expired file whatever its export status (a file stored for a failed export does not stay at rest)', async () => {
+    const stray = await exportsService.request(ctxOf(a), { reportKey: ReportKey.FILL_RATE_BY_VENUE, periodFrom: '2026-11-09', periodTo: '2026-11-10' });
+    // Simulate the Worker bug: a file is stored, then the export is marked failed, so the status-based purge never sees it.
+    await tenantContext.runInTenantContext({ organisationId: a.organisationId, workspaceId: a.workspaceId, userId: '', role: '', actorType: 'worker' }, async (m) => {
+      await m.query(`SELECT core.report_export_file_put($1::uuid, $2::uuid, 'stray,content')`, [stray.id, a.userId]);
+      await m.query(`UPDATE core.report_export SET status = 'failed', error_code = 'build_failed' WHERE id = $1`, [stray.id]);
+    });
+    // Not yet expired: the sweep leaves it alone.
+    await runReportExportCycle(dataSource, tenantContext, notifications, audit, { lateGraceMinutes: 10, organisationId: a.organisationId, sweepExpiredFiles: true });
+    expect((await adminDataSource.query(`SELECT csv_content FROM core.report_export_file WHERE export_id = $1`, [stray.id]))[0].csv_content).toBe('stray,content');
+    // 24 h later (aged as the table owner, triggers off for this one statement; the CHECKs still hold).
+    await adminDataSource.transaction(async (m) => {
+      await m.query(`SET LOCAL session_replication_role = replica`);
+      await m.query(`UPDATE core.report_export_file SET created_at = now() - interval '25 hours', file_expires_at = now() - interval '1 hour' WHERE export_id = $1`, [stray.id]);
+    });
+    // The status-based cycle alone does not touch a failed export's file...
+    await cycle();
+    expect((await adminDataSource.query(`SELECT csv_content FROM core.report_export_file WHERE export_id = $1`, [stray.id]))[0].csv_content).toBe('stray,content');
+    // ...the sweep does.
+    const swept = await runReportExportCycle(dataSource, tenantContext, notifications, audit, { lateGraceMinutes: 10, organisationId: a.organisationId, sweepExpiredFiles: true });
+    expect(swept.swept).toBeGreaterThanOrEqual(1);
+    expect(await adminDataSource.query(`SELECT csv_content, purged_at IS NOT NULL AS purged FROM core.report_export_file WHERE export_id = $1`, [stray.id])).toEqual([{ csv_content: null, purged: true }]);
+    expect((await rowOf(stray.id)).status).toBe('failed');
+  });
+
   it('a build that cannot succeed fails at once (not_found), audited, never retried', async () => {
     // A row for a payroll run that does not exist, written as the requester (the service would have refused it with 404).
     const [{ id }] = await tenantContext.runInTenantContext({ organisationId: a.organisationId, workspaceId: a.workspaceId, userId: a.userId, role: '' }, (m) =>

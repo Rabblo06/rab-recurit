@@ -462,6 +462,9 @@ execute|report_export_file_purge(uuid)|crewflow|false
 execute|report_export_file_put(uuid,uuid,text)|PUBLIC|false
 execute|report_export_file_put(uuid,uuid,text)|crewflow_app|true
 execute|report_export_file_put(uuid,uuid,text)|crewflow|false
+execute|report_export_file_sweep_expired(integer)|PUBLIC|false
+execute|report_export_file_sweep_expired(integer)|crewflow_app|true
+execute|report_export_file_sweep_expired(integer)|crewflow|false
 execute|report_export_file_take(uuid,text)|PUBLIC|false
 execute|report_export_file_take(uuid,text)|crewflow_app|true
 execute|report_export_file_take(uuid,text)|crewflow|false
@@ -711,6 +714,7 @@ owner|function|replay_failed_email(uuid,boolean)|crewflow|definer=false
 owner|function|report_export_file_issue_link(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|report_export_file_purge(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|report_export_file_put(uuid,uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|report_export_file_sweep_expired(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|report_export_file_take(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|report_export_guard()|crewflow|definer=false
 owner|function|reset_attendance_post_shift()|crewflow|definer=false
