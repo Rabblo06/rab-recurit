@@ -463,6 +463,21 @@ describeIfDb('payroll approval (integration)', () => {
     // The database refuses the same approval written directly by the runtime role (core.payroll_record_guard, 42501).
     await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
       `UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [id, a.userId]))).rejects.toMatchObject({ code: '42501' });
+    // Workspace copy, tampering: A re-points the report's finaliser and the seat's reviewer to C (the live who-prepared columns
+    // are writable). The guard still refuses A, from the insert-only audit history of the finalisation and the review.
+    const reportTable = businessTable(a.workspaceId!, 'shift_report');
+    const seatTable = businessTable(a.workspaceId!, 'shift_assignment');
+    await adminDataSource.query(`UPDATE ${reportTable} SET finalised_by = $2 WHERE shift_id = $1`, [worked.s6.shiftId, c.userId]);
+    await adminDataSource.query(`UPDATE ${seatTable} SET attendance_reviewed_by = $2 WHERE shift_id = $1`, [worked.s6.shiftId, c.userId]);
+    try {
+      await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
+        `UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [id, a.userId]))).rejects.toMatchObject({ code: '42501' });
+      const tampered = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(await stepped(tokenA, a)));
+      expect({ status: tampered.status, message: tampered.body.message }).toEqual({ status: 403, message: PREPARED });
+    } finally {
+      await adminDataSource.query(`UPDATE ${reportTable} SET finalised_by = $2 WHERE shift_id = $1`, [worked.s6.shiftId, a.userId]);
+      await adminDataSource.query(`UPDATE ${seatTable} SET attendance_reviewed_by = $2 WHERE shift_id = $1`, [worked.s6.shiftId, a.userId]);
+    }
     expect((await recordFor(worked.s6.attendanceId))!).toMatchObject({ status: 'pending_approval', approved_by: null });
 
     const secretC = await ensureEnrolled(tokenC, c);

@@ -54,7 +54,6 @@ import { DataSourceOptions } from 'typeorm';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
 import { METADATA_TABLES } from '../core/metadata-tables-sql';
-import { CORE_PAYROLL_MAKER_CHECKER_REVIEWED_DRIFT } from '../workspace-schema/payroll-maker-checker-sql';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
 import {
   PHASE_0B_MIGRATION_TIMESTAMP,
@@ -236,10 +235,6 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
-  // Decision 5 (DRAFT, owner SQL review pending): core.payroll_run's payroll_run_update changes ONLY its WITH CHECK (the old
-  // expression plus "a finalised run's finaliser is not its preparer"). Same table, name, command, PERMISSIVE, TO PUBLIC,
-  // USING; no grant. The guard-function body change is pinned by the semantic goldens and the migration's own hash checks.
-  '1786723020000-PayrollMakerCheckerBackstop': CORE_PAYROLL_MAKER_CHECKER_REVIEWED_DRIFT,
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
