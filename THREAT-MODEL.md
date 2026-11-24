@@ -10541,13 +10541,18 @@ workspace-table shape (structure level 27) is the reviewed alternative.
     is gone is never used; deactivated/archived staff cannot be offered; an archived job role takes no new rate (409).
   - *Audit*: `staff_role_rate.created|updated|deleted` in the same transaction, with staff member, job role and dates —
     never an amount; not shipped to the security sink (same class as `venue_role_rate.*`).
-- **Flagged assumptions (owner):** decision 39 — the £0 fallback of `resolvePayRate` is kept; decision 40 — the
-  rate period comparison is the venue rate's (calendar date of the start instant, UTC ISO string, both ends inclusive),
-  unchanged; decision 41 — a staff role rate in force wins at confirmation even over a manually typed shift rate (the
-  shift does not record whether its rate was typed); permission flags reused (no new flag): read `payroll.view`, write
-  `staff.edit` + `payroll.view`; the offer summary's `payRatePence` now shows the seat's rate (the rate the estimate was
-  computed from) instead of the shift's; `£1,000,000.00`/h CHECK ceiling is a sanity bound, not a business rule;
-  retention of rate rows follows the staff member's (no automatic purge).
+- **Owner decisions applied (decided 2026-11-22; DECISIONS-PENDING.md 39, 40, 41, 48):** 48 — core tables, not workspace
+  tables; 39 — never a £0 rate (shifts refused by fix/pay-rate-decisions-39-40; a staff role rate must be > 0, CHECK and
+  DTO); 40 — rate periods are judged on the seat start's organisation-local date (`core.organisation.timezone`), both
+  ends inclusive, for the staff rate exactly as for the venue rate; 41 — a rate typed on the shift wins over a staff role
+  rate: `SchedulingService.insertNewShiftTx` writes a marker row in `core.shift_explicit_rate` (migration
+  `ShiftExplicitRate1786722220000`) in the same transaction when `payRatePence` was given, and `resolveSeatPayRate` uses the
+  shift's own rate when the marker exists. The marker table: organisation + workspace, ENABLE + FORCE RLS, tenant +
+  non-venue manager on SELECT and INSERT (INSERT also `created_by = core.current_uid()`), INSERT-only (no UPDATE / DELETE
+  grant; the owner login refused UPDATE, DELETE and TRUNCATE by the reviewed parity guard), no amount stored.
+  Remaining assumptions: permission flags reused (read `payroll.view`, write `staff.edit` + `payroll.view`); the offer
+  summary's `payRatePence` shows the seat's rate; the £1,000,000/h CHECK ceiling is a sanity bound; retention of rate rows
+  follows the staff member's (no automatic purge).
 - **Residual:** no foreign key from `staff_role_rate` to `staff_profile` / `job_role`: integrity of those ids rests on the
   service scope checks (layer 3) and RLS cannot verify them; a rate row of a hard-deleted profile stays until a manager
   deletes it (never read). A confirming session that is not a non-venue manager would see no staff rate and snapshot the

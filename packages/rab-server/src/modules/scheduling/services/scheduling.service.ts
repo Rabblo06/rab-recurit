@@ -5,6 +5,7 @@ import { SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from './sent-shifts-s
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { isJobRoleInScope } from '../utils/job-role-scope';
 import { assertPayRateSet, organisationLocalDate } from '../utils/pay-rate-rules';
+import { recordExplicitShiftRate } from '../../staff/services/staff-role-rate-resolution';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
 import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
 import { venueSummaryCached } from '../../venue/services/venue-summary-cache';
@@ -783,6 +784,9 @@ export class SchedulingService {
       createdBy: ctx.userId,
     });
     const saved = await manager.save(shift);
+    // Owner decision 41: a rate typed on the shift wins over a staff role rate at confirmation. The shift row stores only
+    // the resolved number, so an explicit rate is marked in core.shift_explicit_rate, in this same transaction.
+    if (input.payRatePence !== undefined) await recordExplicitShiftRate(manager, saved);
     // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
     await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
       entityType: 'shift',

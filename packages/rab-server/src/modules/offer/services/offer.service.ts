@@ -622,6 +622,7 @@ export class OfferService {
     // shift's rate), so the offer's estimate matches what the staff member is confirmed at. Confirmation re-reads it and is
     // the authority (applyOfferConfirmation).
     const seatRate = await resolveSeatPayRate(manager, {
+      shiftId: shift.id,
       staffProfileId,
       jobRoleId: shift.jobRoleId,
       startsAt: time.startsAt,

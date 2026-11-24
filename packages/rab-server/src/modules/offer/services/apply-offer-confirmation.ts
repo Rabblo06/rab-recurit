@@ -202,11 +202,12 @@ export async function applyOfferConfirmation(
     );
   }
 
-  // Snapshotted at confirmation, not at send or staff-accept (§1 A6): the staff member's own rate for this job role in
-  // force on the seat's (booked) start if one exists, otherwise the shift's rate re-read from the row just locked by the
-  // UPDATE above, in case it changed since the offer was sent. Written once here and never recalculated (Lane C,
-  // resolveSeatPayRate; owner decisions 40 / 41 pending, see that function).
+  // Snapshotted at confirmation, not at send or staff-accept (§1 A6): a rate typed on the shift (decision 41), else the
+  // staff member's own rate for this job role in force on the seat's (booked) start, organisation-local date (decision 40),
+  // else the shift's rate re-read from the row just locked by the UPDATE above. Written once here and never recalculated
+  // (resolveSeatPayRate).
   const seatRate = await resolveSeatPayRate(manager, {
+    shiftId: shift.id,
     staffProfileId: assignment.staffProfileId,
     jobRoleId: shift.jobRoleId,
     startsAt: effectiveAssignmentTime(assignment, shift).startsAt,

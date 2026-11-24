@@ -25,7 +25,8 @@
  *     (core.owner_login_grant_parity_guard(), an allow-list row trigger) — no new function;
  *   - no two periods of one (workspace, staff member, job role) overlap: EXCLUDE USING gist (btree_gist, InitSchema), both
  *     ends inclusive (the venue rate's own `effective_from <= start AND (effective_to IS NULL OR effective_to >= start)`);
- *   - 0 <= pay_rate_pence <= 100,000,000 (£1,000,000.00 an hour, a sanity ceiling, not a business rule) and
+ *   - 0 < pay_rate_pence <= 100,000,000 (owner decision 39: never a £0 rate; the ceiling, £1,000,000.00 an hour, is a
+ *     sanity bound, not a business rule) and
  *     effective_to >= effective_from.
  *
  * ACCESS: owned by crewflow (handed over inside withCrewflowCoreCreate); crewflow_app holds SELECT, INSERT, DELETE and the
@@ -69,7 +70,7 @@ CREATE TABLE core.staff_role_rate (
   CONSTRAINT staff_role_rate_pkey PRIMARY KEY (id),
   CONSTRAINT staff_role_rate_organisation_id_fkey FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE,
   CONSTRAINT staff_role_rate_workspace_fkey FOREIGN KEY (workspace_id, organisation_id) REFERENCES core.manager_workspace(id, organisation_id) ON DELETE CASCADE,
-  CONSTRAINT staff_role_rate_pay_rate_check CHECK (pay_rate_pence >= 0 AND pay_rate_pence <= ${STAFF_ROLE_RATE_MAX_PENCE}),
+  CONSTRAINT staff_role_rate_pay_rate_check CHECK (pay_rate_pence > 0 AND pay_rate_pence <= ${STAFF_ROLE_RATE_MAX_PENCE}),
   CONSTRAINT staff_role_rate_dates_check CHECK (effective_to IS NULL OR effective_to >= effective_from),
   CONSTRAINT staff_role_rate_no_overlap EXCLUDE USING gist (
     workspace_id WITH =,

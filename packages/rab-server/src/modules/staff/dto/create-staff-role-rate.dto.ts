@@ -25,7 +25,7 @@ export class CreateStaffRoleRateDto {
 
   @Type(() => Number)
   @IsInt()
-  @Min(0)
+  @Min(1) // owner decision 39: never a £0 rate
   @Max(STAFF_ROLE_RATE_MAX_PENCE)
   payRatePence!: number;
 

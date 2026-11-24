@@ -39,7 +39,7 @@ describe('core.staff_role_rate SQL', () => {
       expect(t).toContain(col);
     }
     expect(t).toContain(
-      `CHECK (pay_rate_pence >= 0 AND pay_rate_pence <= ${STAFF_ROLE_RATE_MAX_PENCE})`,
+      `CHECK (pay_rate_pence > 0 AND pay_rate_pence <= ${STAFF_ROLE_RATE_MAX_PENCE})`,
     );
     expect(t).toContain(
       'CHECK (effective_to IS NULL OR effective_to >= effective_from)',

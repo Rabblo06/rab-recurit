@@ -453,6 +453,7 @@ describeIfDb(
       // A seat priced by a Venue Manager session could never see the rate either (fail closed to the shift rate).
       const seen = await as(vm, (m) =>
         resolveSeatPayRate(m, {
+          shiftId: randomUUID(),
           staffProfileId: plain.profileId!,
           jobRoleId: role,
           startsAt: new Date(),
@@ -862,6 +863,197 @@ describeIfDb(
       ).rejects.toBeDefined();
       expect(await seatOf(shift2.id, leaver.profileId!)).toBeUndefined();
       expect(await rowCount(leaver.profileId!)).toBe(1);
+    });
+
+    // ------------------------------------------------------------------------------------------------ decision 41 (explicit shift rate wins)
+
+    it('decision 41: a rate typed on the shift wins over the staff role rate at send and at confirmation; without it the staff rate wins', async () => {
+      const role = await newRole(1400);
+      await rates.create(ctxA, worker.profileId!, {
+        jobRoleId: role,
+        payRatePence: 2300,
+        effectiveFrom: day(-10),
+      });
+      const start = new Date(Date.now() + shiftDay++ * 86_400_000);
+      const typed = await scheduling.create(ctxA, {
+        venueId,
+        jobRoleId: role,
+        startsAt: start.toISOString(),
+        endsAt: new Date(start.getTime() + 6 * 3_600_000).toISOString(),
+        requiredCount: 1,
+        breakMinutes: 0,
+        payRatePence: 1777,
+      } as never);
+      expect(
+        await admin.query(
+          `SELECT created_by FROM core.shift_explicit_rate WHERE shift_id = $1`,
+          [typed.id],
+        ),
+      ).toEqual([{ created_by: a.userId }]);
+      await scheduling.publish(ctxA, typed.id);
+      const offer = await offers.send(ctxA, typed.id, {
+        staffProfileId: worker.profileId!,
+      } as never);
+      expect(
+        (await seatOf(typed.id, worker.profileId!)).pay_rate_snapshot_pence,
+      ).toBe('1777');
+      expect(await offerEstimate(typed.id, offer.id)).toBe(
+        String(payForMinutes(1777, 360)),
+      );
+      await offers.staffAccept(ctxOf(worker), offer.id);
+      await offers.managerConfirm(ctxA, offer.id);
+      expect(await seatOf(typed.id, worker.profileId!)).toEqual({
+        status: 'confirmed',
+        pay_rate_snapshot_pence: '1777',
+      });
+      // A staff rate edit afterwards changes nothing (the snapshot is never recalculated).
+      const [existing] = await rates
+        .list(ctxA, worker.profileId!)
+        .then((r) => r.filter((x) => x.jobRoleId === role));
+      await rates.update(ctxA, worker.profileId!, existing!.id, {
+        payRatePence: 2900,
+      });
+      expect(
+        (await seatOf(typed.id, worker.profileId!)).pay_rate_snapshot_pence,
+      ).toBe('1777');
+
+      // The same role and staff member on a shift whose rate was NOT typed: the staff rate (now 2900) wins.
+      const resolved = await newShift(role);
+      expect(
+        await admin.query(
+          `SELECT 1 FROM core.shift_explicit_rate WHERE shift_id = $1`,
+          [resolved.id],
+        ),
+      ).toHaveLength(0);
+      await scheduling.publish(ctxA, resolved.id);
+      await sendAcceptConfirm(resolved.id, worker);
+      expect(
+        (await seatOf(resolved.id, worker.profileId!)).pay_rate_snapshot_pence,
+      ).toBe('2900');
+    });
+
+    it('decision 41 marker: zero rows without tenant context; only a non-venue manager of the workspace reads it; insert-only; WITH CHECK names the author', async () => {
+      const shift = await scheduling.create(ctxA, {
+        venueId,
+        jobRoleId: await newRole(1400),
+        startsAt: new Date(Date.now() + shiftDay++ * 86_400_000).toISOString(),
+        endsAt: new Date(
+          Date.now() + (shiftDay - 1) * 86_400_000 + 3_600_000,
+        ).toISOString(),
+        requiredCount: 1,
+        payRatePence: 1600,
+      } as never);
+      expect(
+        await dataSource.manager.query(
+          `SELECT shift_id FROM core.shift_explicit_rate`,
+        ),
+      ).toHaveLength(0);
+      const visible = (who: TestIdentity) =>
+        as(
+          who,
+          async (m) =>
+            (
+              await m.query(
+                `SELECT 1 FROM core.shift_explicit_rate WHERE shift_id = $1`,
+                [shift.id],
+              )
+            ).length,
+        );
+      expect(await visible(a)).toBe(1);
+      for (const who of [b, other, vm, worker])
+        expect(await visible(who)).toBe(0);
+      expect(
+        await sqlState(
+          as(a, (m) =>
+            m.query(
+              `UPDATE core.shift_explicit_rate SET created_by = $2 WHERE shift_id = $1`,
+              [shift.id, b.userId],
+            ),
+          ),
+        ),
+      ).toBe('42501');
+      expect(
+        await sqlState(
+          as(a, (m) =>
+            m.query(
+              `DELETE FROM core.shift_explicit_rate WHERE shift_id = $1`,
+              [shift.id],
+            ),
+          ),
+        ),
+      ).toBe('42501');
+      const forged = (who: TestIdentity, createdBy: string) =>
+        as(who, (m) =>
+          m.query(
+            `INSERT INTO core.shift_explicit_rate (shift_id, organisation_id, workspace_id, created_by) VALUES ($1, $2, $3, $4)`,
+            [randomUUID(), who.organisationId, who.workspaceId, createdBy],
+          ),
+        );
+      expect(await sqlState(forged(a, b.userId))).toBe('42501');
+      expect(await sqlState(forged(vm, vm.userId))).toBe('42501');
+      expect(await sqlState(forged(worker, worker.userId))).toBe('42501');
+    });
+
+    // ------------------------------------------------------------------------------------------------ decision 40 (org-local date)
+
+    it('decision 40: the staff rate period is judged on the organisation-local date — 23:30 UTC on D is D+1 in a UTC+1 organisation', async () => {
+      const role = await newRole(1400);
+      const at = new Date(Date.now() + 70 * 86_400_000);
+      at.setUTCHours(23, 30, 0, 0);
+      const d = at.toISOString().slice(0, 10);
+      const next = new Date(at.getTime() + 86_400_000)
+        .toISOString()
+        .slice(0, 10);
+      await rates.create(ctxA, plain.profileId!, {
+        jobRoleId: role,
+        payRatePence: 2100,
+        effectiveFrom: day(-10),
+        effectiveTo: d,
+      });
+      await rates.create(ctxA, plain.profileId!, {
+        jobRoleId: role,
+        payRatePence: 2900,
+        effectiveFrom: next,
+      });
+      const shiftId = randomUUID(); // no marker: not an explicit rate
+      const seat = () =>
+        as(a, (m) =>
+          resolveSeatPayRate(m, {
+            shiftId,
+            staffProfileId: plain.profileId!,
+            jobRoleId: role,
+            startsAt: at,
+            fallbackPence: 1400,
+          }),
+        );
+      const [{ timezone: before }] = await admin.query(
+        `SELECT timezone FROM core.organisation WHERE id = $1`,
+        [a.organisationId],
+      );
+      try {
+        // Africa/Lagos is UTC+1 all year (no daylight saving), so the expectation never depends on the test date.
+        await admin.query(
+          `UPDATE core.organisation SET timezone = 'Africa/Lagos' WHERE id = $1`,
+          [a.organisationId],
+        );
+        expect(await seat()).toEqual({
+          payRatePence: 2900,
+          source: 'staff_role_rate',
+        });
+        await admin.query(
+          `UPDATE core.organisation SET timezone = 'UTC' WHERE id = $1`,
+          [a.organisationId],
+        );
+        expect(await seat()).toEqual({
+          payRatePence: 2100,
+          source: 'staff_role_rate',
+        }); // inclusive end date: D still uses the rate ending on D
+      } finally {
+        await admin.query(
+          `UPDATE core.organisation SET timezone = $2 WHERE id = $1`,
+          [a.organisationId, before],
+        );
+      }
     });
   },
 );
