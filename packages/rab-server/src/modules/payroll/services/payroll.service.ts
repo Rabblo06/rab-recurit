@@ -686,6 +686,7 @@ export class PayrollService {
   private async notifyRejection(manager: EntityManager, ctx: AuthContext, record: LockedRecord, reason: string): Promise<void> {
     const t = businessTables(manager);
     const [row] = await manager.query(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `SELECT sr.finalised_by, u.first_name, u.last_name, v.name AS venue_name,
               to_char((${assignmentTimeSql().start}) AT TIME ZONE COALESCE(NULLIF(o.timezone, ''), 'Europe/London'), 'YYYY-MM-DD') AS work_date
          FROM ${t.payroll_record} pr
