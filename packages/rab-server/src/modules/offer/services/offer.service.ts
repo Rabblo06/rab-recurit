@@ -308,6 +308,21 @@ function throwIfEveryRecipientPastDeadline(results: BulkOfferResult['results']):
   }
 }
 
+/**
+ * Per-recipient windows on the Manager send paths (sendBulk, createShiftAndSend) must sit INSIDE the shift's own window
+ * (its original bounds): a window starting before it or ending after it is a 400, and the shift is never extended by
+ * them — scheduled hours and the estimated pay can only shrink, never grow, from an individual time. FLAGGED pay
+ * assumption for the owner (security review, 2026-11-24). The Venue-Manager request path keeps its own, wider rule
+ * (venue-manager-scoping.integration.spec.ts), so this is not in the shared validateAssignmentTime helper.
+ */
+function assertWindowInsideShift(shift: Shift, window: ScheduledWindow): ScheduledWindow {
+  const bounds = defaultAssignmentTime(shift);
+  if (window.startsAt.getTime() < bounds.startsAt.getTime() || window.endsAt.getTime() > bounds.endsAt.getTime()) {
+    throw new BadRequestException('Each staff member’s time must be within the shift.');
+  }
+  return window;
+}
+
 @Injectable()
 export class OfferService {
   constructor(
@@ -814,7 +829,7 @@ export class OfferService {
       const windows = new Map<string, ScheduledWindow & { breakMinutes?: number | null }>();
       for (const row of dto.staffAssignments ?? []) {
         if (!dto.staffProfileIds.includes(row.staffProfileId) || windows.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
-        windows.set(row.staffProfileId, { ...validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift)), breakMinutes: row.breakMinutes });
+        windows.set(row.staffProfileId, { ...assertWindowInsideShift(shift, validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift))), breakMinutes: row.breakMinutes });
       }
       // Whole-batch availability pre-check BEFORE any recipient is processed: an unacknowledged conflict returns one 409
       // listing every affected recipient, and nothing is sent — never a silently thinned batch.
@@ -1080,7 +1095,7 @@ export class OfferService {
       const windows = new Map<string, ScheduledWindow & { breakMinutes?: number | null }>();
       for (const row of dto.staffAssignments ?? []) {
         if (!dto.staffProfileIds.includes(row.staffProfileId) || windows.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
-        windows.set(row.staffProfileId, { ...validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift)), breakMinutes: row.breakMinutes });
+        windows.set(row.staffProfileId, { ...assertWindowInsideShift(shift, validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift))), breakMinutes: row.breakMinutes });
       }
       // Same whole-batch pre-check as sendBulk; a 409 here also rolls back the just-inserted shift row.
       const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];

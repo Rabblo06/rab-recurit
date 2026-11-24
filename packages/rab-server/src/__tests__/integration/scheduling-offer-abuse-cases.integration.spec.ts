@@ -215,6 +215,34 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     return { email, staffProfileId };
   }
 
+  /**
+   * A second Manager of an EXISTING workspace (same org_admin role and permissions as the owner, its own membership and
+   * internal manager profile), who did not create the shift: the "same workspace, not the creator" abuse actor.
+   */
+  async function seedCoManager(organisation: Organisation): Promise<{ email: string }> {
+    const email = `admin-co-${randomUUID()}@example.test`;
+    const [{ id: workspaceId, owner_user_id: ownerUserId }] = await adminDataSource.manager.query<[{ id: string; owner_user_id: string }]>(
+      `SELECT id, owner_user_id FROM core.manager_workspace WHERE organisation_id = $1`,
+      [organisation.id],
+    );
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId, userId: ownerUserId, role: '' }, async (manager) => {
+      const role = await manager.findOneOrFail(Role, { where: { organisationId: organisation.id, key: 'org_admin' } });
+      const userResult = await manager.insert(User, {
+        organisationId: organisation.id,
+        email,
+        passwordHash: await passwordHashing.hash(password),
+        firstName: 'Co',
+        lastName: 'Manager',
+        status: UserStatus.ACTIVE,
+      });
+      const userId = userResult.identifiers[0]!.id as string;
+      await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
+      await insertMembership(manager, organisation.id, userId, workspaceId);
+      await manager.insert(ManagerProfile, { organisationId: organisation.id, userId, type: ManagerType.INTERNAL, workspaceId });
+    });
+    return { email };
+  }
+
   /** Accounts minted by this suite's own seeds: `staff-…` sign into the staff app like the real mobile client; `admin-…` (canonical `org_admin`) into the console. */
   async function login(email: string): Promise<string> {
     return factory.login({ kind: email.startsWith('staff-') ? 'staff' : 'org_admin', email, password }, {});
@@ -344,6 +372,38 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect((await shiftRow(shift.id)).required_count).toBe(1);
     });
 
+    it('a second manager of the SAME workspace (not the creator) gets 404 on the resize and on the pipeline; nothing changes', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token);
+      const staff = await seedStaff(own.organisation);
+      const co = await seedCoManager(own.organisation);
+      const coToken = await login(co.email);
+      expect((await bulk(shift.id, coToken, { staffProfileIds: [staff.staffProfileId], requiredCount: 2, expectedRequiredCount: 1 })).status).toBe(404);
+      expect((await request(app.getHttpServer()).get(`/rest/v1/shifts/${shift.id}/pipeline`).set('Authorization', `Bearer ${coToken}`)).status).toBe(404);
+      expect((await shiftRow(shift.id)).required_count).toBe(1);
+    });
+
+    it('per-recipient windows on sendBulk must sit inside the shift: before its start or after its end is 400 and nothing is sent or extended', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
+      const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token, { startsAt, endsAt });
+      const staff = await seedStaff(own.organisation);
+      const window = (from: Date, to: Date) => ({ staffProfileIds: [staff.staffProfileId], staffAssignments: [{ staffProfileId: staff.staffProfileId, startsAt: from.toISOString(), endsAt: to.toISOString() }] });
+      expect((await bulk(shift.id, token, window(new Date(startsAt.getTime() - 3600_000), endsAt))).status).toBe(400);
+      expect((await bulk(shift.id, token, window(startsAt, new Date(endsAt.getTime() + 3600_000)))).status).toBe(400);
+      const table = await businessTableOf(adminDataSource.manager, 'shift', shift.id);
+      const [row] = await adminDataSource.query(`SELECT starts_at, ends_at FROM ${table} WHERE id = $1`, [shift.id]);
+      expect(new Date(row.starts_at).toISOString()).toBe(startsAt.toISOString());
+      expect(new Date(row.ends_at).toISOString()).toBe(endsAt.toISOString());
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${siblingTable(table, 'shift_assignment')} WHERE shift_id = $1`, [shift.id]);
+      expect(n).toBe(0);
+      // Inside the shift is accepted.
+      expect((await bulk(shift.id, token, window(new Date(startsAt.getTime() + 3600_000), endsAt))).status).toBe(201);
+    });
+
     it('another organisation gets 404, a shrink or same count is 400, and replacement + headcount is 400', async () => {
       const own = await seedOrg(MANAGER_PERMS);
       const other = await seedOrg(MANAGER_PERMS);
@@ -385,6 +445,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId, staffA.staffProfileId] })).status).toBe(400);
       const outside = new Date(end.getTime() + 3600000).toISOString();
       expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId], staffAssignments: [{ staffProfileId: staffA.staffProfileId, startsAt: start.toISOString(), endsAt: outside }] })).status).toBe(400);
+      expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId], staffAssignments: [{ staffProfileId: staffA.staffProfileId, startsAt: new Date(start.getTime() - 3600000).toISOString(), endsAt: end.toISOString() }] })).status).toBe(400);
       expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId], staffAssignments: [{ staffProfileId: staffB.staffProfileId, startsAt: start.toISOString(), endsAt: end.toISOString() }] })).status).toBe(400);
       const [{ n: none }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(own.venue.workspaceId!, 'shift')} WHERE venue_id = $1`, [own.venue.id]);
       expect(none).toBe(0);

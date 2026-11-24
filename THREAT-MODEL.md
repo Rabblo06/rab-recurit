@@ -10500,3 +10500,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` (concurrent resize, stale guard, rollback, foreign 404,
   shrink 400, replacement 400, missing schedule.create 403, direct-shift pipeline owner-only).
 
+- **Review fix (2026-11-24):** per-recipient windows on sendBulk and create-with-offers must sit inside the shift's own
+  window (400 otherwise) and never extend the shift, so scheduled hours and estimated pay cannot grow from an individual
+  time (FLAGGED pay assumption for the owner). The Venue-Manager request path keeps its wider rule. Tests: windows before
+  the start / after the end refused with the shift and assignments unchanged; a second manager of the same workspace gets
+  404 on the resize and on the pipeline.
