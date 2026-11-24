@@ -53,24 +53,6 @@ export class AdminUsersService {
     private readonly securityVersion: SecurityVersionService,
   ) {}
 
-  async memberDirectory(actor: Actor, search = '', page = 1, limit = 25) {
-    await assertActivePlatformAdmin(this.platformAdmin, actor);
-    if (search.length > 100 || !Number.isInteger(page) || page < 1 || page > 1000000 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
-      throw new BadRequestException('Invalid directory pagination.');
-    }
-    return this.actorTx(actor, async manager => {
-      const [row] = await manager.query('SELECT core.admin_member_directory($1,$2,$3) AS result', [search.trim(), page, limit]);
-      const result = row.result;
-      await recordAdminPanelAudit(this.audit, manager, actor, ADMIN_PANEL_AUDIT_ACTION.USER_SEARCHED, {
-        metadata: { kind: 'member_directory', page, resultCount: result.data.length },
-      });
-      return { total: Number(result.total), page, limit, data: result.data.map((item: Record<string, unknown>) => ({
-        id: item.id, userId: item.userId, kind: item.kind, firstName: item.firstName, lastName: item.lastName,
-        email: item.email, status: item.status, organisationName: item.organisationName, expiresAt: item.expiresAt,
-      })) };
-    });
-  }
-
   private actorTx<T>(actor: Actor, fn: (m: EntityManager) => Promise<T>): Promise<T> {
     return this.tenantContext.runInTenantContext({ organisationId: actor.organisationId, workspaceId: null, userId: actor.userId, role: '' }, fn);
   }

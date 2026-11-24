@@ -125,9 +125,6 @@ execute|admin_list_platform_admins()|crewflow|false
 execute|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|PUBLIC|false
 execute|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|crewflow_app|true
 execute|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|crewflow|false
-execute|admin_member_directory(text,integer,integer)|PUBLIC|false
-execute|admin_member_directory(text,integer,integer)|crewflow_app|true
-execute|admin_member_directory(text,integer,integer)|crewflow|false
 execute|admin_platform_overview()|PUBLIC|false
 execute|admin_platform_overview()|crewflow_app|true
 execute|admin_platform_overview()|crewflow|false
@@ -551,9 +548,6 @@ execute|worker_resolve_workspace_organisation(uuid)|crewflow|true
 execute|worker_workspace_provisioning_health()|PUBLIC|false
 execute|worker_workspace_provisioning_health()|crewflow_app|true
 execute|worker_workspace_provisioning_health()|crewflow|false
-execute|workspace_member_directory(text,integer,integer)|PUBLIC|false
-execute|workspace_member_directory(text,integer,integer)|crewflow_app|true
-execute|workspace_member_directory(text,integer,integer)|crewflow|false
 execute|workspace_metadata_state_guard()|crewflow_app|false
 execute|workspace_metadata_state_guard()|crewflow|true
 execute|workspace_schema_fingerprint(uuid)|crewflow_app|false
@@ -577,7 +571,6 @@ execute|workspace_subdomain_taken(citext,uuid)|crewflow|true
 owner|function|admin_list_audit_events(text[],uuid,timestamp with time zone,uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_list_platform_admins()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_list_workspace_schemas(text,uuid,timestamp with time zone,uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
-owner|function|admin_member_directory(text,integer,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_platform_overview()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_search_users(text,text,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|admin_workspace_in_org(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
@@ -734,7 +727,6 @@ owner|function|worker_release_dispatch_claim(text,uuid,uuid,integer)|rab_secure_
 owner|function|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_resolve_workspace_organisation(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_workspace_provisioning_health()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
-owner|function|workspace_member_directory(text,integer,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|workspace_metadata_state_guard()|crewflow|definer=false
 owner|function|workspace_schema_fingerprint(uuid)|crewflow|definer=false
 owner|function|workspace_schema_fingerprint_lines(uuid)|crewflow|definer=false
