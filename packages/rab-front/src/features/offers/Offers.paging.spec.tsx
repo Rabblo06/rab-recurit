@@ -27,3 +27,24 @@ it('Phase C1: the Staff Offers table requests an explicit page of 50 and its pag
   await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
   await waitFor(() => expect(lastOffersParams()).toMatchObject({ page: 2, limit: 50 }));
 });
+
+it('decision 60: page 1 shows the exact total; a later page answers total null, so the footer says "N of many" and Next follows hasMore', async () => {
+  get.mockImplementation(async (url: string, config?: { params?: Record<string, unknown> }) => {
+    if (url === '/auth/me') return { data: { roles: ['manager'] } };
+    if (url === '/job-roles') return { data: [] };
+    if (url !== '/offers') return { data: { data: [], total: 0 } };
+    const page = Number(config?.params?.page ?? 1);
+    const rows = Array.from({ length: page < 3 ? 50 : 7 }, (_, i) => ({ id: `o${page}-${i}`, status: 'pending', staffName: 'Casey', shiftId: 's', sentAt: new Date().toISOString(), expiresAt: new Date().toISOString() }));
+    return { data: { data: rows, total: page === 1 ? 107 : null, hasMore: page < 3 } };
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter><Offers /></MemoryRouter></QueryClientProvider>);
+  expect(await screen.findByText('107 records')).toBeInTheDocument();
+  expect(screen.getByText('Page 1 of 3')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('100 of many')).toBeInTheDocument();
+  expect(screen.getByText('Page 2')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Next page' })).toBeEnabled();
+  await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(await screen.findByText('107 of many')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+});

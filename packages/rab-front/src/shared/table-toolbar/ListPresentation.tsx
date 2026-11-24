@@ -70,20 +70,28 @@ export function ListViewSelect({ label, value, options, onChange }: {
  * Only counts returned by the API. `pageSize` is the `limit` the list was requested with (or the one the server echoed
  * back) — Phase C1: every table names it explicitly (`LIST_PAGE_SIZE`, 50) instead of relying on a server default.
  */
-export function RecordFooter({ total, page = 1, onPage, pageSize = LIST_PAGE_SIZE, loaded, children }: {
-  total: number; page?: number; onPage?: (page: number) => void; pageSize?: number; loaded?: number; children?: ReactNode;
+/**
+ * A list's footer. `total` is the exact count when the server sent one; `null` on a later page of a list that counts on
+ * page 1 only (owner decision 60): the footer then says "N of many" (rows up to the end of this page) and the pager
+ * follows the server's `hasMore` instead of a page count. `pageRows` is the number of rows on the current page.
+ */
+export function RecordFooter({ total, page = 1, onPage, pageSize = LIST_PAGE_SIZE, loaded, hasMore, pageRows, children }: {
+  total: number | null; page?: number; onPage?: (page: number) => void; pageSize?: number; loaded?: number; hasMore?: boolean; pageRows?: number; children?: ReactNode;
 }) {
   const [countVisible, setCountVisible] = useState(false);
-  const pages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
+  const known = typeof total === 'number';
+  const pages = known ? Math.max(1, Math.ceil(total / Math.max(1, pageSize))) : null;
+  const shownUpTo = (page - 1) * pageSize + (pageRows ?? 0);
+  const canGoNext = pages !== null ? page < pages : hasMore === true;
   return <div className="list-footer">
-    <span>{total.toLocaleString()} record{total === 1 ? '' : 's'}</span>
-    {onPage && pages > 1 && <div className="record-pagination">
+    <span>{known ? `${total.toLocaleString()} record${total === 1 ? '' : 's'}` : `${shownUpTo.toLocaleString()} of many`}</span>
+    {onPage && (pages === null ? page > 1 || canGoNext : pages > 1) && <div className="record-pagination">
       <button className="btn-icon" aria-label="Previous page" disabled={page <= 1} onClick={() => onPage(page - 1)}><IconChevronLeft size={14} /></button>
-      <span>Page {page} of {pages}</span>
-      <button className="btn-icon" aria-label="Next page" disabled={page >= pages} onClick={() => onPage(page + 1)}><IconChevronRight size={14} /></button>
+      <span>{pages === null ? `Page ${page}` : `Page ${page} of ${pages}`}</span>
+      <button className="btn-icon" aria-label="Next page" disabled={!canGoNext} onClick={() => onPage(page + 1)}><IconChevronRight size={14} /></button>
     </div>}
     <div className="record-calculation">{children}
-      {countVisible && <span role="status">{loaded === undefined ? 'Count all' : 'Count on page'} <strong>{loaded ?? total}</strong></span>}
+      {countVisible && <span role="status">{loaded === undefined ? 'Count all' : 'Count on page'} <strong>{loaded ?? (known ? total : 'many')}</strong></span>}
       <button onClick={() => setCountVisible(value => !value)} aria-expanded={countVisible}>Calculate <IconChevronDown size={12} /></button>
     </div>
   </div>;

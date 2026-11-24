@@ -15,18 +15,19 @@ export class ListTooLargeError extends Error {
 
 /**
  * Every row of an offset-paged list endpoint (`{ data, total }`), fetched in pages of 200 so nothing is silently
- * truncated. Stops at the first short page or once `total` rows are in hand. A bare-array answer (an endpoint that does
- * not page) is returned as is.
+ * truncated. Stops at the first short page, once `total` rows are in hand, or when the server says `hasMore: false`.
+ * `total` may be on page 1 only (`null` afterwards, owner decision 60), so a later page never stops the walk by itself.
+ * A bare-array answer (an endpoint that does not page) is returned as is.
  */
 export async function fetchAllPages<T>(url: string, params: Record<string, unknown> = {}): Promise<T[]> {
   const rows: T[] = [];
   for (let page = 1; page <= MAX_WALK_PAGES; page++) {
-    const { data } = await api.get<{ data: T[]; total?: number } | T[]>(url, { params: { ...params, page, limit: MAX_PAGE_SIZE } });
+    const { data } = await api.get<{ data: T[]; total?: number | null; hasMore?: boolean } | T[]>(url, { params: { ...params, page, limit: MAX_PAGE_SIZE } });
     if (Array.isArray(data)) return rows.concat(data);
     const batch = Array.isArray(data?.data) ? data.data : [];
     rows.push(...batch);
     const total = typeof data?.total === 'number' ? data.total : undefined;
-    if (batch.length < MAX_PAGE_SIZE || (total !== undefined && rows.length >= total)) return rows;
+    if (batch.length < MAX_PAGE_SIZE || data?.hasMore === false || (total !== undefined && rows.length >= total)) return rows;
   }
   throw new ListTooLargeError(url);
 }

@@ -89,6 +89,16 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Something went wrong.';
 }
 
+/**
+ * `GET /offers` (manager list). `total` is the exact count on page 1 only and `null` on every later page (owner decision
+ * 60); `hasMore` says on every page whether another page follows.
+ */
+export interface OfferListPage {
+  data: OfferSummary[];
+  total: number | null;
+  hasMore: boolean;
+}
+
 export interface OfferSummary {
   id: string;
   status: string;
@@ -348,12 +358,12 @@ export class OfferService {
    * always came back empty for them, a real bug fixed alongside the
    * identical one in SchedulingService.list).
    */
-  list(ctx: AuthContext, dto: ListOffersDto = {}): Promise<{ data: OfferSummary[]; total: number }> {
+  list(ctx: AuthContext, dto: ListOffersDto = {}): Promise<OfferListPage> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // SF-2 layer 2: the route's schedule.view, before any row is read (jobs / other services skip the guard).
       await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
-      if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0, hasMore: false };
 
       // Existing ownership/venue-assignment scoping is the FIRST condition,
       // never replaced — every filter below is ANDed onto it, so a caller
@@ -389,26 +399,35 @@ export class OfferService {
       const sortColumn = OFFER_SORT_COLUMNS[dto.sort ?? 'sentAt'] ?? OFFER_SORT_COLUMNS.sentAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+      // Owner decision 60 (21 Nov): the exact total is counted for page 1 only. Counting every matching row was 18% of
+      // database time at the load-test spike; a later page only needs to know whether another page follows, which the one
+      // extra row fetched below answers. Page 2+ answers `total: null` ("50 of many" in the console).
       const t = businessTables(manager);
-      const [{ count }] = await manager.query(
-        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        `SELECT count(*)::int AS count FROM ${t.job_offer} o
-           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
-           JOIN ${t.shift} s ON s.id = sa.shift_id
-           JOIN ${t.venue} v ON v.id = s.venue_id
-           JOIN ${t.job_role} jr ON jr.id = s.job_role_id
-           JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
-           JOIN core."user" u ON u.id = sp.user_id
-         ${where}`,
-        params,
-      );
+      let total: number | null = null;
+      if ((dto.page ?? 1) === 1) {
+        const [{ count }] = await manager.query(
+          // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
+          `SELECT count(*)::int AS count FROM ${t.job_offer} o
+             JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+             JOIN ${t.shift} s ON s.id = sa.shift_id
+             JOIN ${t.venue} v ON v.id = s.venue_id
+             JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+             JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
+             JOIN core."user" u ON u.id = sp.user_id
+           ${where}`,
+          params,
+        );
+        total = count;
+      }
 
       const { skip, take } = paginationSkipTake(dto);
-      const takeIdx = nextParam(take);
+      const takeIdx = nextParam(take + 1);
       const skipIdx = nextParam(skip);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${offerSummarySelect(manager)} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
-      return { data: rows.map((r: Record<string, unknown>) => toOfferSummary(r, { kind: 'manager', viewerUserId: ctx.userId })), total: count };
+      const fetched = await manager.query(`${offerSummarySelect(manager)} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
+      const hasMore = fetched.length > take;
+      const rows = hasMore ? fetched.slice(0, take) : fetched;
+      return { data: rows.map((r: Record<string, unknown>) => toOfferSummary(r, { kind: 'manager', viewerUserId: ctx.userId })), total, hasMore };
     }, { useReplica: true });
   }
 

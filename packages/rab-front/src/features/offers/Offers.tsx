@@ -1,7 +1,7 @@
 import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
 import { NavLink } from 'react-router-dom';
 import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   IconClock, IconBan, IconCheck, IconX, IconUsers,
@@ -157,11 +157,19 @@ export default function Offers() {
   const params = { page, limit: LIST_PAGE_SIZE, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
   const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['offers', params],
-    queryFn: async () => { const { data } = await api.get<{ data: Offer[]; total: number }>('/offers', { params }); return data; },
+    queryFn: async () => { const { data } = await api.get<{ data: Offer[]; total: number | null; hasMore?: boolean }>('/offers', { params }); return data; },
   });
   const offers = data?.data ?? [];
   const selection = useRecordSelection(offers.map(row=>row.id));
-  const total = data?.total ?? 0;
+  // Owner decision 60: the server counts the exact total on page 1 only (`null` later). The tab keeps the last page-1
+  // count for the same filters; the footer says "N of many" on later pages.
+  const filterKey = JSON.stringify({ ...params, page: undefined });
+  const [firstPageTotal, setFirstPageTotal] = useState<{ key: string; total: number } | null>(null);
+  useEffect(() => {
+    if (page === 1 && typeof data?.total === 'number') setFirstPageTotal({ key: filterKey, total: data.total });
+  }, [page, data?.total, filterKey]);
+  const total = typeof data?.total === 'number' ? data.total : page === 1 && !data ? 0 : null;
+  const tabTotal = typeof total === 'number' ? total : firstPageTotal?.key === filterKey ? firstPageTotal.total : null;
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['offers'] });
@@ -238,7 +246,7 @@ export default function Offers() {
     <div className="page">
       <PageHeader title="Offers"
         tabs={<>
-        <NavLink className="tab-link active" to="/offers">Staff Offers <span className="tab-count">· {total}</span></NavLink>
+        <NavLink className="tab-link active" to="/offers">Staff Offers {tabTotal !== null && <span className="tab-count">· {tabTotal}</span>}</NavLink>
         <NavLink className="tab-link" to="/venue-offers">Venue Offers</NavLink>
         </>}
       />
@@ -380,7 +388,7 @@ export default function Offers() {
           </table>
         )}
       </div>
-<RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />
+<RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} hasMore={data?.hasMore} pageRows={offers.length} />
     </div>
   );
 }

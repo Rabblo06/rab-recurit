@@ -433,7 +433,8 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
         const res = await http().get(path).query({ limit: 3, page }).set(auth(fx.managerToken));
         expect(res.status).toBe(200);
         ids.push(...res.body.data.map((r: { id: string }) => r.id).filter((id: string) => keep.includes(id)));
-        if (page * 3 >= res.body.total) break;
+        // A short page ends the walk; `total` is only on page 1 for lists that count once (owner decision 60).
+        if (res.body.data.length < 3 || (typeof res.body.total === 'number' && page * 3 >= res.body.total)) break;
       }
       return ids;
     };

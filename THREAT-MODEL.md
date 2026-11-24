@@ -10506,3 +10506,14 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## Offers list total on page 1 only — decision 60, offers part (branch perf/offers-total-first-page, 2026-11-24; no SQL)
+- **Change:** `GET /rest/v1/offers` counts the exact total for page 1 only; later pages answer `total: null`, and every
+  page carries `hasMore` (one extra row fetched and dropped). The console's footer shows "N of many" on later pages and
+  its pager follows `hasMore`; `fetchAllPages` stops on `hasMore: false` (the same change as #333).
+- **Threats and controls:** a performance change only. The read scope (`offerReadScopeCondition`) is still the first
+  condition of both the count and the page query, unchanged; the extra row is never returned. No new input is accepted.
+- **Tests:** `offers-total-first-page.integration.spec.ts` (page 1 total, later pages null, hasMore on every page, no
+  row repeated or leaked across pages, filters still narrow the count, another manager sees none of the offers);
+  `Offers.paging.spec.tsx` ("107 records", then "100 of many" / "Page 2" / Next enabled, then Next disabled on the last
+  page); the c1 keyset walk tolerates a null total.
