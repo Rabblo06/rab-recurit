@@ -60,7 +60,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ env.PUBLISH == 'true' }}
         with:
           persist-credentials: false
@@ -125,7 +125,7 @@ jobs:
             echo "::error::Docker Hub credentials are missing: create the variable DOCKERHUB_USERNAME and the secret DOCKERHUB_PUSH_TOKEN in the GitHub environment 'release' (policy section 9). Nothing was pushed."
             exit 1
           fi
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Review F1, repeated at the point of use: a candidate from another run is published only if that run proves its

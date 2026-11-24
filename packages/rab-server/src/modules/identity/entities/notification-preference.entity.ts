@@ -1,7 +1,7 @@
 import { NotificationTypeType } from '@rab/shared';
 import { Column, Entity, JoinColumn, ManyToOne, PrimaryColumn } from 'typeorm';
 
-import { User } from './user.entity';
+import { User } from '../../../engine/core-modules/identity/entities/user.entity';
 
 /**
  * Consulted by NotificationService.notify() before it inserts a row or
