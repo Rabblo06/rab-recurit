@@ -237,8 +237,9 @@ export class StaffTimeOffService {
         .orderBy('t.startsOn', 'DESC')
         .addOrderBy('t.createdAt', 'DESC')
         .addOrderBy('t.id', 'ASC')
-        .skip(skip)
-        .take(take)
+        // The join is one profile per row (no fan-out), so a plain OFFSET / LIMIT pages it exactly.
+        .offset(skip)
+        .limit(take)
         .getManyAndCount();
       return { data: rows.map(toView), total };
     });
