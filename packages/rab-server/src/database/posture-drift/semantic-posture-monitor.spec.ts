@@ -26,6 +26,11 @@ function fakeDb(initial: { roles: string[]; core?: string[] }) {
   };
   const query = async (sql: string) => {
     if (sql === 'BEGIN READ ONLY' || sql === 'ROLLBACK') return [];
+    // readSemanticPosture's transaction-local search_path pin (#253), and the read / restore it uses only inside a caller's
+    // transaction. Exact statements; anything else still throws below.
+    if (sql === `SELECT pg_catalog.set_config('search_path', 'pg_catalog, public, pg_temp', true)`) return [{ set_config: 'pg_catalog, public, pg_temp' }];
+    if (sql === `SELECT pg_catalog.current_setting('search_path') AS sp`) return [{ sp: '"$user", public' }];
+    if (sql === `SELECT pg_catalog.set_config('search_path', $1, true)`) return [{ set_config: '"$user", public' }];
     if (sql.includes("current_setting('server_version_num')")) return [{ v: 160016 }];
     if (sql === SEMANTIC_OBJECT_SQL) return state.core.map((line) => ({ schema: 'core', line }));
     if (sql === SEMANTIC_ROLE_SQL) return state.roles.map((line) => ({ line }));

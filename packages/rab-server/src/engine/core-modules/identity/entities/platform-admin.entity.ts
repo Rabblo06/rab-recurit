@@ -1,6 +1,6 @@
 import { Column, CreateDateColumn, Entity, JoinColumn, ManyToOne, PrimaryColumn } from 'typeorm';
 
-import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
+import { bigintAsNumber } from '../../../utils/bigint-transformer';
 import { User } from './user.entity';
 
 /**
