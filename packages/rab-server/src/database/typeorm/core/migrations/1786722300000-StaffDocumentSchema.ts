@@ -7,6 +7,8 @@ import {
   STAFF_DOCUMENT_DOWN_UNFORCE_SQL,
   STAFF_DOCUMENT_FUNCTION_STATE_SQL,
   STAFF_DOCUMENT_GUARD_FUNCTION_SQL,
+  STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL,
+  STAFF_DOCUMENT_RECORD_SCAN_FUNCTION_SQL,
   STAFF_DOCUMENT_OWNERSHIP_SQL,
   STAFF_DOCUMENT_ROWS_SQL,
   STAFF_DOCUMENT_SECURITY_SQL,
@@ -39,6 +41,8 @@ export class StaffDocumentSchema1786722300000 implements MigrationInterface {
     await this.pinSearchPath(queryRunner);
     await queryRunner.query(STAFF_DOCUMENT_TABLES_SQL);
     await queryRunner.query(STAFF_DOCUMENT_GUARD_FUNCTION_SQL);
+    await queryRunner.query(STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL);
+    await queryRunner.query(STAFF_DOCUMENT_RECORD_SCAN_FUNCTION_SQL);
     for (const sql of STAFF_DOCUMENT_SECURITY_SQL) await queryRunner.query(sql);
     await withCrewflowCoreCreate(queryRunner, async () => {
       for (const sql of STAFF_DOCUMENT_OWNERSHIP_SQL)
@@ -48,10 +52,8 @@ export class StaffDocumentSchema1786722300000 implements MigrationInterface {
     const rows = (await queryRunner.query(
       STAFF_DOCUMENT_STATE_SQL,
     )) as StaffDocumentTableState[];
-    const [fn] = (await queryRunner.query(
-      STAFF_DOCUMENT_FUNCTION_STATE_SQL,
-    )) as Array<Record<string, unknown>>;
-    const problems = staffDocumentStateProblems(rows, fn);
+    const fns = (await queryRunner.query(STAFF_DOCUMENT_FUNCTION_STATE_SQL)) as Array<Record<string, unknown>>;
+    const problems = staffDocumentStateProblems(rows, fns);
     if (problems.length)
       throw new Error(
         `${this.name}: unexpected state after create (rolled back):\n  ${problems.join('\n  ')}`,

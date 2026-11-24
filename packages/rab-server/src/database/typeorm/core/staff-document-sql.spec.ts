@@ -15,6 +15,9 @@ import {
   STAFF_DOCUMENT_TYPES_1786722300000,
   STAFF_DOCUMENT_UPDATABLE_COLUMNS,
   staffDocumentStateProblems,
+  EXPECTED_STAFF_DOCUMENT_FUNCTIONS,
+  STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL,
+  STAFF_DOCUMENT_RECORD_SCAN_FUNCTION_SQL,
 } from './staff-document-sql';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -54,7 +57,7 @@ describe('staff document SQL (StaffDocumentSchema1786722300000)', () => {
     const policies = STAFF_DOCUMENT_SECURITY_SQL.filter((s) =>
       s.startsWith('CREATE POLICY'),
     );
-    expect(policies).toHaveLength(7);
+    expect(policies).toHaveLength(9);
     for (const p of policies)
       expect(p).toContain('organisation_id = core.current_org()');
     for (const p of policies.filter((x) =>
@@ -66,9 +69,9 @@ describe('staff document SQL (StaffDocumentSchema1786722300000)', () => {
   it('no DELETE on documents: neither a policy nor a grant (history is retained)', () => {
     const sql = STAFF_DOCUMENT_SECURITY_SQL.join('\n');
     expect(sql).not.toMatch(/staff_document_delete/);
-    expect(sql).not.toMatch(
-      /GRANT[^;]*DELETE[^;]*ON TABLE core\.staff_document TO/,
-    );
+    for (const g of STAFF_DOCUMENT_SECURITY_SQL.filter((x) => x.startsWith('GRANT') && x.includes('ON TABLE core.staff_document TO'))) {
+      expect(g).not.toContain('DELETE');
+    }
     expect(EXPECTED_STAFF_DOCUMENT_STATE.staff_document.acl).not.toContain(
       'DELETE',
     );
@@ -84,7 +87,8 @@ describe('staff document SQL (StaffDocumentSchema1786722300000)', () => {
       s.startsWith('CREATE POLICY staff_document_insert'),
     )!;
     expect(insert).toContain("status = 'pending'::text");
-    expect(insert).toContain("ARRAY['not_scanned'::text, 'clean'::text]");
+    expect(insert).toContain("(scan_status = 'not_scanned'::text)");
+    expect(insert).not.toContain("'clean'");
     expect(insert).toContain('uploaded_by = core.current_uid()');
   });
 
@@ -122,29 +126,50 @@ describe('staff document SQL (StaffDocumentSchema1786722300000)', () => {
     );
   });
 
+  it('review M1 / M3: the guard enforces clean-before-verify, decider = current user, maker-checker, and the scanner-only path', () => {
+    for (const fragment of [
+      "IF NEW.scan_status IS DISTINCT FROM 'clean' THEN",
+      'IF NEW.verified_by IS DISTINCT FROM v_uid THEN',
+      'IF NEW.verified_by = NEW.uploaded_by THEN',
+      "ELSIF NEW.status = 'rejected' AND NEW.rejected_by IS DISTINCT FROM v_uid THEN",
+      "ELSIF NEW.status = 'revoked' AND NEW.revoked_by IS DISTINCT FROM v_uid THEN",
+      "IF current_user IS DISTINCT FROM 'crewflow'::name OR OLD.scan_status <> 'not_scanned'",
+      'NEW.created_at := pg_catalog.now();',
+    ]) {
+      expect(STAFF_DOCUMENT_GUARD_FUNCTION_SQL).toContain(fragment);
+    }
+    expect(STAFF_DOCUMENT_SECURITY_SQL).toContain(
+      'CREATE TRIGGER staff_document_guard BEFORE INSERT OR UPDATE ON core.staff_document FOR EACH ROW EXECUTE FUNCTION core.staff_document_guard()',
+    );
+    expect(STAFF_DOCUMENT_UPDATABLE_COLUMNS).not.toContain('scan_status');
+    expect(STAFF_DOCUMENT_RECORD_SCAN_FUNCTION_SQL).toContain('AND uploaded_by = core.current_uid() AND status = \'pending\' AND scan_status = \'not_scanned\' AND created_at = pg_catalog.now()');
+  });
+
+  it('review H1 / H2: the offer-block definer is tenant-pinned, fails closed without a tenant, and only a VERIFIED replacement lifts a block', () => {
+    expect(STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL).toContain('SECURITY DEFINER');
+    expect(STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL).toContain('SET search_path = pg_catalog, pg_temp');
+    expect(STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL).toContain('IF v_org IS NULL OR v_ws IS NULL');
+    expect(STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL).toContain("v.status = 'verified' AND (v.expires_on IS NULL OR v.expires_on >= p_on_date)");
+    expect(STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL).toContain('RETURNS TABLE (document_type text, expired_on date)');
+  });
+
+  it('review M2: only the CEO or the current Initial Manager writes requirements', () => {
+    for (const p of STAFF_DOCUMENT_SECURITY_SQL.filter((x) => /POLICY staff_document_requirement_(insert|update|delete)/.test(x))) {
+      expect(p).toContain("(mp.type = 'ceo'::text) OR ((mp.type = 'internal'::text) AND mp.is_initial_manager AND (mp.superseded_at IS NULL))");
+    }
+  });
+
   it('staffDocumentStateProblems accepts exactly the expected state and reports any drift', () => {
     const rows = Object.entries(EXPECTED_STAFF_DOCUMENT_STATE).map(
       ([tbl, s]) => ({ tbl, ...s }),
     );
-    const fn = {
-      owner: 'crewflow',
-      definer: false,
-      config: 'search_path=pg_catalog, pg_temp',
-      app_execute: false,
-      public_revoked: true,
-    };
-    expect(staffDocumentStateProblems(rows, fn)).toEqual([]);
-    expect(
-      staffDocumentStateProblems(
-        rows.map((r) =>
-          r.tbl === 'staff_document' ? { ...r, force: false } : r,
-        ),
-        fn,
-      ),
-    ).toEqual(['core.staff_document.force: expected true, found false']);
-    expect(
-      staffDocumentStateProblems(rows, { ...fn, definer: true }),
-    ).toHaveLength(1);
+    const fns = Object.entries(EXPECTED_STAFF_DOCUMENT_FUNCTIONS).map(([fn, f]) => ({ fn, ...f }));
+    expect(staffDocumentStateProblems(rows, fns)).toEqual([]);
+    expect(staffDocumentStateProblems(rows.map((r) => (r.tbl === 'staff_document' ? { ...r, force: false } : r)), fns)).toEqual([
+      'core.staff_document.force: expected true, found false',
+    ]);
+    expect(staffDocumentStateProblems(rows, fns.map((f) => (f.fn === 'core.staff_document_guard()' ? { ...f, definer: true } : f)))).toHaveLength(1);
+    expect(staffDocumentStateProblems(rows, fns.slice(1))).toEqual(['core.staff_document_guard(): missing']);
   });
 
   it('the migration follows the post-Phase-0b source rules (ownership handed over inside withCrewflowCoreCreate)', () => {
