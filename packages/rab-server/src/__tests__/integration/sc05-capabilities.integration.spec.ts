@@ -25,7 +25,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
  *
  * Parity: for every identity shape (role grants, few grants, override grant, override revoke, venue manager, platform
  * admin, inspected target) the response equals one `userHasPermission` per flag, the old implementation's exact semantics,
- * and `effectivePermissionsTx` equals per-flag `userHasPermissionTx` for all 46 flags.
+ * and `effectivePermissionsTx` equals per-flag `userHasPermissionTx` for all 50 flags.
  */
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -136,8 +136,8 @@ describeIfDb('SC-05 GET /auth/capabilities answers from the resolved permission 
     expect((await capabilities(staff))[PermissionFlag.PAYROLL_VIEW]).toBe(true);
   });
 
-  it('effectivePermissionsTx equals per-flag userHasPermissionTx for all 46 flags, for every identity shape', async () => {
-    expect(ALL_FLAGS).toHaveLength(46);
+  it('effectivePermissionsTx equals per-flag userHasPermissionTx for all 50 flags, for every identity shape', async () => {
+    expect(ALL_FLAGS).toHaveLength(50);
     for (const identity of [admin, manager, staff, venueManager, overridden]) {
       const ctx = ctxOf(identity);
       const [set, flags] = await tenantContext.runInTenantContext(ctx, async (m) => {
