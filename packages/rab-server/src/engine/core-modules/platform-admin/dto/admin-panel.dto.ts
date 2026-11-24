@@ -154,9 +154,3 @@ export class AdminWorkspacesQueryDto {
  * requires a recent step-up of this session ('organisation.reactivate').
  */
 export class ReactivateOrganisationDto extends AdminReasonDto {}
-
-export class AdminMemberDirectoryQueryDto {
-  @IsOptional() @IsString() @MaxLength(100) search?: string;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(1000000) page?: number;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number;
-}

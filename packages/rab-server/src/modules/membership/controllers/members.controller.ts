@@ -20,7 +20,6 @@ export class ListMembersDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(1000000)
   page?: number;
 
   @IsOptional()
@@ -39,38 +38,32 @@ export class ChangeMemberRoleDto {
 /** Settings → Members → Team. The workspace owner's view of their workspace's members; see MembersService. */
 @ManagerApplication()
 @Controller('rest/v1/members')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard(PermissionFlag.ROLE_VIEW))
 export class MembersController {
   constructor(private readonly members: MembersService) {}
 
-  @Get("directory")
-  directory(@AuthUser() ctx: AuthContext, @Query() query: ListMembersDto) {
-    return this.members.directory(ctx, query);
-  }
-
   @Get()
-  @UseGuards(PermissionGuard(PermissionFlag.ROLE_VIEW))
   list(@AuthUser() ctx: AuthContext, @Query() query: ListMembersDto) {
     return this.members.list(ctx, { search: query.search, page: query.page ?? 1, limit: query.limit ?? 25 });
   }
 
   @Patch(':userId/role')
   @HttpCode(204)
-  @UseGuards(PermissionGuard(PermissionFlag.ROLE_VIEW), PermissionGuard(PermissionFlag.ROLE_MANAGE))
+  @UseGuards(PermissionGuard(PermissionFlag.ROLE_MANAGE))
   changeRole(@AuthUser() ctx: AuthContext, @Param('userId', new ParseUUIDPipe()) userId: string, @Body() dto: ChangeMemberRoleDto) {
     return this.members.changeRole(ctx, userId, dto.roleId);
   }
 
   @Post(':userId/suspend')
   @HttpCode(204)
-  @UseGuards(PermissionGuard(PermissionFlag.ROLE_VIEW), PermissionGuard(PermissionFlag.ROLE_MANAGE))
+  @UseGuards(PermissionGuard(PermissionFlag.ROLE_MANAGE))
   suspend(@AuthUser() ctx: AuthContext, @Param('userId', new ParseUUIDPipe()) userId: string) {
     return this.members.suspend(ctx, userId);
   }
 
   @Post(':userId/reinstate')
   @HttpCode(204)
-  @UseGuards(PermissionGuard(PermissionFlag.ROLE_VIEW), PermissionGuard(PermissionFlag.ROLE_MANAGE))
+  @UseGuards(PermissionGuard(PermissionFlag.ROLE_MANAGE))
   reinstate(@AuthUser() ctx: AuthContext, @Param('userId', new ParseUUIDPipe()) userId: string) {
     return this.members.reinstate(ctx, userId);
   }

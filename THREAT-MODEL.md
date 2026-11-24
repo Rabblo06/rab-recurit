@@ -10526,28 +10526,3 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` (concurrent resize, stale guard, rollback, foreign 404,
   shrink 400, replacement 400, missing schedule.create 403, direct-shift pipeline owner-only).
 
-## 2026-11-24 — Members directory and platform-admin member directory (DRAFT SQL AdminMemberDirectory1786723400000)
-
-- **Asset:** names and email addresses of workspace members; across organisations, every user's name, email, status and
-  organisation name plus pending invitation emails.
-- **Threat:** a workspace member enumerates another workspace's or organisation's members; a non-admin reaches the
-  cross-organisation list; private profile fields, tokens or invitation secrets leak; the call works with no tenant context.
-- **Controls:** `GET /rest/v1/members/directory`: `JwtAuthGuard` + `@ManagerApplication()`; service requires a bound
-  workspace and an ACTIVE membership row; the SECURITY DEFINER function re-checks the active membership from
-  `core.current_uid/current_org/current_workspace` (never a parameter) and projects only userId, firstName, lastName, email.
-  `GET /rest/v1/admin/users/directory`: `JwtAuthGuard` + `PlatformAdminGuard`, `assertActivePlatformAdmin` in the service,
-  `core.is_active_platform_admin(core.current_uid())` in the function; audited as `admin.user_searched`
-  (kind member_directory, page, count; never the search text). Both: `search_path = pg_catalog, pg_temp`, owner
-  rab_secure_owner, EXECUTE revoked from PUBLIC and crewflow, granted to crewflow_app only; page ≤ 1,000,000, limit ≤ 100,
-  search ≤ 100 chars (DTO 400 and function 22023). No token, hash or credential column is read.
-- **New policy:** `workspace_directory_definer_select` (SELECT, TO rab_secure_owner) on `core.workspace_membership`,
-  bound organisation + workspace. It widens what ANY rab_secure_owner definer may read from that table to the bound
-  workspace's memberships (before: only the caller's own row through `*_self_select`). workspace_membership is already in
-  the frozen R4 list.
-- **SECURITY TRADE-OFF (for owner accept/veto):** `members/directory` drops the class-level `PermissionGuard(ROLE_VIEW)`
-  for this one route: any active workspace member (not only role managers) can list the names and emails of the other
-  members of their own workspace. The other Members routes keep ROLE_VIEW (and ROLE_MANAGE for writes). Stricter
-  alternative: keep ROLE_VIEW on the directory too (the new UI's member pickers then show nothing for non-role-viewers).
-- **Tests:** `member-directory.integration.spec.ts` (401, foreign workspace and organisation absent, four fields only,
-  paging/organisationId 400, non-admin 403, 42501 with no context and with a foreign workspace bound);
-  `admin-panel-routes.integration.spec.ts` (401/403 lists and layer-2 refusal include the new route/service).
