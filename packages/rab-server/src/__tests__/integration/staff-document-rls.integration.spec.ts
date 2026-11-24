@@ -421,4 +421,20 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
     );
     expect(deleted[1]).toBe(0);
   });
+
+  it('v2 re-review: SET LOCAL ROLE crewflow cannot write a scan verdict for somebody else's upload, nor in a later transaction', async () => {
+    const w = await world();
+    const d = await insertDoc(w.a, w.s1.userId);
+    const asCrewflow = (who: TestIdentity) =>
+      as(who, async (m) => {
+        await m.query(`SET LOCAL ROLE crewflow`);
+        return m.query(`UPDATE core.staff_document SET scan_status = 'clean', scan_engine = 'forged', scanned_at = now() WHERE id = $1`, [d]);
+      });
+    // A non-uploader in the same tenant, even as crewflow.
+    expect(await sqlState(asCrewflow(w.s1))).toBe('42501');
+    // The uploader, but in a later transaction than the upload.
+    expect(await sqlState(asCrewflow(w.a))).toBe('42501');
+    const [row] = await adminDataSource.query(`SELECT scan_status FROM core.staff_document WHERE id = $1`, [d]);
+    expect(row.scan_status).toBe('not_scanned');
+  });
 });
