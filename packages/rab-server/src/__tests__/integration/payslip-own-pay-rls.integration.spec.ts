@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { corePolicyStateSql, PAYSLIP_OWN_PAY_HASHES } from '../../database/typeorm/core/payslip-own-pay-rls-sql';
+import { corePolicyStateSql, PAYSLIP_OWN_PAY_HASHES } from '../../database/typeorm/workspace-schema/payslip-own-pay-rls-sql';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**

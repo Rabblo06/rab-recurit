@@ -54,7 +54,7 @@ import { DataSourceOptions } from 'typeorm';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
 import { METADATA_TABLES } from '../core/metadata-tables-sql';
-import { CORE_PAYSLIP_OWN_PAY_REVIEWED_DRIFT } from '../core/payslip-own-pay-rls-sql';
+import { CORE_PAYSLIP_OWN_PAY_REVIEWED_DRIFT } from '../workspace-schema/payslip-own-pay-rls-sql';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
 import {
   PHASE_0B_MIGRATION_TIMESTAMP,

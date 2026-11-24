@@ -58,7 +58,7 @@ describe('payslip own-pay RLS SQL (decision 51)', () => {
     expect(sql.match(/ALTER POLICY/g)).toHaveLength(2);
     expect(sql).not.toMatch(/\bUSING\s*\(/);
     expect(sql).not.toMatch(/\b(GRANT|REVOKE|CREATE|DROP|OWNER|ROLE|FUNCTION|TRIGGER)\b/i);
-    const migration = readFileSync(join(__dirname, 'migrations', '1786723000000-PayslipOwnPayRls.ts'), 'utf8');
+    const migration = readFileSync(join(__dirname, '..', 'core', 'migrations', '1786723000000-PayslipOwnPayRls.ts'), 'utf8');
     expect(migration).not.toMatch(/\b(GRANT|REVOKE|CREATE POLICY|DROP POLICY|OWNER TO)\b/);
   });
 

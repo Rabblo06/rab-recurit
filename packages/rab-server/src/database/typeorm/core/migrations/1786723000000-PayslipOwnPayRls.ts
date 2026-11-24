@@ -2,7 +2,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 import { secureOwnerInvariantViolations } from '../secure-owner-invariants';
 import { BOOTSTRAP_IDENTITY_SQL, BootstrapIdentityFacts, bootstrapIdentityProblems } from '../worker-dispatch-pointer-sql';
-import { corePolicyStateSql, PAYSLIP_OWN_PAY_HASHES, payslipDocumentInsertCheckSql, payslipUpdateCheckSql } from '../payslip-own-pay-rls-sql';
+import { corePolicyStateSql, PAYSLIP_OWN_PAY_HASHES, payslipDocumentInsertCheckSql, payslipUpdateCheckSql } from '../../workspace-schema/payslip-own-pay-rls-sql';
 
 interface PolicyStep {
   label: string;
