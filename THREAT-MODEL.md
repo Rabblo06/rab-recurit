@@ -10469,6 +10469,43 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `field-policy.service.spec.ts` (` =1+1`, fullwidth `＝1+1`, ` @x`, NBSP + zero-width, a control character,
   `a;=1+1`, `a,+1`, a line break, benign text quoted only); `payroll-runs.integration.spec.ts` header now quoted.
 
+
+## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
+- **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
+  Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager
+  context). Action: `UPDATE` or `DELETE` (or `TRUNCATE`) on `attendance_correction`. Consequence before: allowed. The
+  runtime login crewflow_owner inherits the table owner (owner-login BC-01 / BC-13), so the original `REVOKE UPDATE, DELETE`
+  never bound it; the schema role crewflow_app still held both (copied-grant drift); the tenant policy is FOR ALL; TRUNCATE is
+  never filtered by RLS. A correction row is the audit record of a pay change ("original values are never overwritten in
+  place"), so rewriting or removing it hides who changed someone's hours. Root cause: insert-only was only a grant.
+- **Change.** Migration AttendanceCorrectionInsertOnly1786722110000: three statement-level BEFORE UPDATE / DELETE / TRUNCATE
+  triggers on `core.attendance_correction` calling the existing, unchanged `core.owner_login_grant_parity_guard()` (the PAY-1
+  guard). The runtime login gets 42501 per statement, even when RLS leaves no row; INSERT and SELECT are unchanged. Definers,
+  the workspace migrator and foreign-key actions (they run as the table owner) and superusers pass.
+- **Retention unchanged (flagged for the owner).** Because FK actions pass, deleting the parent attendance (or the
+  organisation) still CASCADEs its corrections exactly as before. No code path deletes attendance today, and a
+  `payroll_record` already RESTRICTs deleting approved attendance. Making `attendance_correction.attendance_id` RESTRICT (as
+  the owner chose for breaks and receipts) would also block that path; it is a retention decision, so it is proposed, not done.
+- **Not in this PR.** `REVOKE UPDATE, DELETE ... FROM crewflow_app`: tools/check-rls-coverage.ts requires workspace grants to
+  equal core's, so that cosmetic schema-role grant moves with the workspace-schema copies (0.7.0 workspace command, after
+  #175 / #177 / #243). The workspace copies (HWS on) get the same three triggers then; until then they keep today's state.
+- **Residual risk.** An injected statement can `SET ROLE crewflow` or disable the trigger (BC-01); the semantic posture
+  monitor pins the three trigger lines (detection, not prevention).
+- **Tests.** `attendance-correction-insert-only.integration.spec.ts`, as the runtime login (asserted crewflow_owner, a
+  member of crewflow, not superuser / BYPASSRLS): a Manager who can read the correction gets 42501 for UPDATE and DELETE of
+  it, for an UPDATE / DELETE matching no row, and for TRUNCATE (with and without tenant context); the stored row is
+  unchanged; INSERT still works; `SET ROLE crewflow` (definer / FK-action path) can still delete (rolled back); zero rows
+  with no tenant context; down() / up() round trip (rolled back) and a re-run of up() is a no-op.
+  `attendance-correction-insert-only-sql.spec.ts`: statement shape, end-state check, goldens.
+- **Security review fix (2026-11-21, Medium; owner decision 46).** The reviewer showed corrections still vanished through
+  `attendance_correction.attendance_id ON DELETE CASCADE` when the runtime deleted the parent attendance (core.attendance has
+  a FOR ALL policy and no delete guard; the FK action runs as the owner and passes the guard). New migration
+  AttendanceCorrectionEvidenceRestrict1786722115000 makes that key ON DELETE RESTRICT (the pay-evidence principle the owner
+  approved for breaks and receipts). Such a delete now fails (23503, or 23001 on PostgreSQL 18) and the correction stays;
+  a hard user delete that would reach it already falls back to a soft delete on a foreign-key refusal. The organisation
+  CASCADE (tenant offboarding, LC-2) is unchanged. Tests: the runtime's delete of an attendance with a correction is refused
+  and both rows remain; a real FK cascade started by the runtime login passes the guard (probe table, rolled back) while
+  its direct DELETE gets 42501. The workspace copies get the same key change with the level-26 command (#310).
 ## CF-23 — notes on the user profile page no longer persist to browser storage (branch fix/cf23-staff-notes-no-browser-storage, 2026-11-21; no SQL, no server change)
 - **Finding (CF-23, LOW):** `packages/rab-front/src/features/users/UserProfile.tsx` (`/users/:id`) kept notes about a
   person in `localStorage` under `user-notes-<userId>`. Browser storage outlives logout and is shared by every account
@@ -10518,3 +10555,83 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
+- **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
+  clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It
+  touches attendance and therefore pay. Owner HARD RULE: offline stays off everywhere until M5 payroll adjustments
+  exist and the sync route is pen-tested.
+- **Controls:** (1) Off by construction: saving needs the Info.plist build switch `CrewflowOfflineAttendance` (set in no
+  configuration), a device-key signer (none exists until the server's device-key route; the live instance passes
+  `signer: nil`), the server's `offline.enabled: true` plus a well-formed ticket from `/attendance/me/active`, and a
+  ticket received in this boot less than 16 h ago; anything else fails closed (older server, reboot, malformed ticket,
+  ticket fetch > 10 s). (2) No paid time on the phone: the only time evidence is the boot clock (`CLOCK_MONOTONIC`,
+  counts sleep, + `kern.bootsessionuuid`); `ProcessInfo.systemUptime` is not used (stops in sleep, would date a punch
+  earlier); the wall clock is copied only as `deviceWallClockAt` diagnostics. (3) Entries carry exactly the DESIGN §3.2
+  members, never `organisationId` / `workspaceId` / `staffProfileId` / `status` / `clockInAt` / `clockOutAt` / money.
+  (4) Encrypted at rest in the Keychain (`AfterFirstUnlockThisDeviceOnly`, not synchronizable), keyed by user id, so a
+  second user on the phone never reads, sends or overwrites it; never overwritten when unreadable. (5) D5 limits: 30
+  entries / 48 KB per user, 72 h maximum age on the server-anchored clock (too-old entries are never sent).
+  (6) `clientSeq` is persisted before use and never reused. (7) Each entry is signed over its RFC 8785 canonical bytes
+  (minus `sig`), so a queue edited in storage fails `SIGNATURE_INVALID` on the server.
+- **Tests:** `CrewflowTests/Staff/OfflineSync/OfflinePunchQueueTests.swift` (gate shut by default and in the live build;
+  each gate condition; server `enabled: false` / absent fields / malformed ticket close it; 10 s fetch rule; 16 h and
+  reboot refusals; entry members exact and boot-clock elapsed; no forbidden field; `clientSeq` monotonic across a
+  restart; per-user storage; unreadable queue kept; 30-entry and byte limits; 72 h; dependency checks; settle) and
+  `OfflineCanonicalJSONTests.swift` (RFC 8785 numbers, ordering, escaping, signature input excludes `sig`, tampering
+  changes the bytes). Built and run by `ci-iphone` on macOS (no Swift toolchain on the authoring machine).
+- **Residual:** a jailbroken, hooked app can sign false elapsed times within the server's bounds (DESIGN §2 trade-off:
+  schedule clamp D3, untrusted clock-out never applied D4, manager review before payroll). An encrypted backup restored
+  to the same device can bring back an old queue; the server refuses it after 72 h. The Secure Enclave signer and its
+  registration are not built (server route missing).
+
+## iPhone offline sync client for POST /attendance/me/sync, partial success and backoff (branch feat/iphone-offline-sync-client, 2026-11-21; M4 Lane B iPhone 2/3, stacked on feat/iphone-offline-queue; no SQL, no server code)
+- **Surface:** the iPhone app's client for the DESIGN §7 contract (route not merged on the server; nothing calls it
+  while offline mode is off). It sends the caller's own saved attendance actions and reads per-item outcomes.
+- **Controls:** body is `{entries}` only, 1-25 entries in `clientSeq` order, one request at a time; no identifier the
+  server derives is sent. An entry is deleted only on an explicit `applied` / `duplicate` / `replayed` for its own
+  idempotency key; an unknown outcome, a result for another key, an undecodable answer or a timeout keeps it pending
+  (fail closed: never assumed received), and a resend is safe because the server answers `replayed` for a seen key.
+  An unanswered entry ends the run, so no later batch can overtake it. The signed-in user must equal the queue's owner
+  before every request. Rejection codes are stored only when they match the receipt CHECK shape (at most 49
+  characters); staff text comes from a client table, never from the server. Size limits apply to appends only.
+  400/413/422 for a batch: one-by-one resend, the offender parked as undeliverable (still blocks sign-out). 429 honours
+  `Retry-After` (capped at 15 min) for every trigger; failures back off 1 s to 5 min. A ticket in the answer renews
+  an open gate only (10 s rule), so the sync route can never switch offline on.
+- **Tests:** `CrewflowTests/Staff/OfflineSync/OfflineSyncEngineTests.swift` with a mocked URLProtocol through the real
+  APIClient: partial success; 25-entry batches in order with no forbidden member; whole-batch 400; 429 for automatic and
+  manual triggers; `Retry-After` cap; no later batch after an unanswered entry; owner mismatch sends nothing;
+  exponential backoff and its 5-minute cap; 404/500/503; timeout then `replayed` with the same keys; a
+  replayed rejection keeps its code; unknown outcome and malformed code; undecodable 200; 72 h entries never sent;
+  ticket renewal only on an open gate; single flight.
+- **Residual:** a server that answers `applied` for an entry it did not apply would make the phone drop it; the server
+  is the authority and keeps the receipt.
+
+## iPhone Staff clock screen saves unanswered clock actions offline, no timer until confirmed, sign-out guard (branch feat/iphone-offline-clock-wiring, 2026-11-21; M4 Lane B iPhone 3/3, stacked on feat/iphone-offline-sync-client; no SQL, no server code)
+- **Surface:** the Staff clock flow (check-in, clock-in, clock-out) can fall back to the offline queue, the Profile
+  screen lists saved actions, and Log out is guarded. Attendance and pay; the gate is shut in every build (HARD RULE).
+- **Controls:** (1) Online first; an action is saved only when the gate is open AND the online request got no HTTP
+  answer (connection / DNS / TLS failure, connection lost, or the client's own timeout); any HTTP answer, a server or
+  proxy 408 included (now `.http(408)`, distinct from the client timeout), is shown as today and never saved. While
+  saved actions wait, a new punch sends them first; only when that gets no HTTP answer is it saved behind them (or
+  refused with the gate shut). On any answer it goes online (server decides; out of order only pays less, D3), so a
+  server fault can never lock staff out of clocking (security review MEDIUM). The sync request is bound to the queue
+  owner where the bearer token is read; a failed Keychain read is never taken for an empty queue (review LOW). (2) `Idempotency-Key` only while the
+  gate is open, shared by the online attempt and the saved copy (D17), so the server applies it at most once; with the
+  gate shut no request changes. (3) Nothing optimistic: no attendance until the server answers; a saved clock-in shows
+  fixed text, never a ticking timer (D10), with the server-anchored time. (4) `RequestOptions.headers` cannot replace
+  transport headers (Authorization, platform, background flag). (5) D18: Log out with unsent actions asks first (Send
+  now / Discard and log out / Cancel); discard is explicit and never sends; an unreadable queue is never discarded
+  ("Log out and keep them"). (7) Every sync request first checks that the signed-in user owns the queue. (6) An `/attendance/me/active` answer
+  without `offline.enabled: true` + ticket (today's server) shuts the gate and forgets the ticket.
+- **Tests:** `CrewflowTests/Staff/OfflineSync/StaffOfflineStoreTests.swift`: gate shut = no header, nothing saved,
+  today's uncertain message; gate open = saved with the same key, never resent online, no live attendance; timeout
+  saved with the transport retry sharing the key; 409 never saved; a successful read sends and then shows the server's
+  attendance; today's `/me/active` shuts the gate; a 408 answer is never saved; held behind saved ones only when the
+  sync gets no answer (gate shut + no network: refused); any sync answer (500, 429, 400, unknown outcome, undecodable
+  200, gate open or shut) lets the punch go online; an unreadable queue survives sign-out; clock-out after a saved clock-in (still offline, and after the
+  clock-in is received); sign-out count and discard; D10 words; transport headers cannot be forged. The existing
+  StaffStoreTests (no offline wiring) keep proving today's behaviour.
+- **Residual:** offers are not persisted, so after the app is killed while offline the clock screen has no shift to
+  act on (offline capture then needs the app to have been opened online first in that run). No UI test drives the
+  offline path (it needs a canned backend that toggles connectivity and the offline flag).
