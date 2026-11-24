@@ -48,9 +48,19 @@ runs:
           .yarn/install-state.gz
         key: ${{ steps.node-modules-key.outputs.key }}
 
+    # On the run that will SAVE the node_modules entry (a push to main with no exact hit), `--check-cache` also re-fetches
+    # every package and compares it with the lockfile checksums, so the tree every later job restores was built from
+    # verified archives, not from whatever the Yarn zip cache held. Every other run is the plain immutable install.
     - name: Install dependencies
       shell: bash
-      run: yarn install --immutable
+      env:
+        YARN_CHECK_CACHE: ${{ steps.node-modules.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      run: |
+        if [ "$YARN_CHECK_CACHE" = true ]; then
+          yarn install --immutable --check-cache
+        else
+          yarn install --immutable
+        fi
 
     # Saved right after the install, before any job step can write into node_modules, and only by pushes to main (as the
     # Nx cache, S6): a pull request restores main's entry and never writes one, so a PR cannot plant node_modules for
