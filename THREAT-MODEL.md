@@ -10507,6 +10507,35 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
+- **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
+  clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It
+  touches attendance and therefore pay. Owner HARD RULE: offline stays off everywhere until M5 payroll adjustments
+  exist and the sync route is pen-tested.
+- **Controls:** (1) Off by construction: saving needs the Info.plist build switch `CrewflowOfflineAttendance` (set in no
+  configuration), a device-key signer (none exists until the server's device-key route; the live instance passes
+  `signer: nil`), the server's `offline.enabled: true` plus a well-formed ticket from `/attendance/me/active`, and a
+  ticket received in this boot less than 16 h ago; anything else fails closed (older server, reboot, malformed ticket,
+  ticket fetch > 10 s). (2) No paid time on the phone: the only time evidence is the boot clock (`CLOCK_MONOTONIC`,
+  counts sleep, + `kern.bootsessionuuid`); `ProcessInfo.systemUptime` is not used (stops in sleep, would date a punch
+  earlier); the wall clock is copied only as `deviceWallClockAt` diagnostics. (3) Entries carry exactly the DESIGN §3.2
+  members, never `organisationId` / `workspaceId` / `staffProfileId` / `status` / `clockInAt` / `clockOutAt` / money.
+  (4) Encrypted at rest in the Keychain (`AfterFirstUnlockThisDeviceOnly`, not synchronizable), keyed by user id, so a
+  second user on the phone never reads, sends or overwrites it; never overwritten when unreadable. (5) D5 limits: 30
+  entries / 48 KB per user, 72 h maximum age on the server-anchored clock (too-old entries are never sent).
+  (6) `clientSeq` is persisted before use and never reused. (7) Each entry is signed over its RFC 8785 canonical bytes
+  (minus `sig`), so a queue edited in storage fails `SIGNATURE_INVALID` on the server.
+- **Tests:** `CrewflowTests/Staff/OfflineSync/OfflinePunchQueueTests.swift` (gate shut by default and in the live build;
+  each gate condition; server `enabled: false` / absent fields / malformed ticket close it; 10 s fetch rule; 16 h and
+  reboot refusals; entry members exact and boot-clock elapsed; no forbidden field; `clientSeq` monotonic across a
+  restart; per-user storage; unreadable queue kept; 30-entry and byte limits; 72 h; dependency checks; settle) and
+  `OfflineCanonicalJSONTests.swift` (RFC 8785 numbers, ordering, escaping, signature input excludes `sig`, tampering
+  changes the bytes). Built and run by `ci-iphone` on macOS (no Swift toolchain on the authoring machine).
+- **Residual:** a jailbroken, hooked app can sign false elapsed times within the server's bounds (DESIGN §2 trade-off:
+  schedule clamp D3, untrusted clock-out never applied D4, manager review before payroll). An encrypted backup restored
+  to the same device can bring back an old queue; the server refuses it after 72 h. The Secure Enclave signer and its
+  registration are not built (server route missing).
+
 ## Staff documents with expiry (Lane D, branches feat/staff-documents-*, 2026-11-21; DRAFT, new SQL for owner review)
 - **Asset:** a staff member's identity and compliance evidence (passport, right-to-work, visa, DBS, licences): highly
   sensitive personal data of ANOTHER person, plus the compliance decision built on it (an expired required document
