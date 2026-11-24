@@ -66,7 +66,8 @@ jobs:
       # Owner-login architecture (owner decision 2026-11-04): the suites run on a database built the way every install is
       # now built: the provider SQL (01-crewflow-owner.sql, psql as the cluster superuser) and Agent 1's migrate child as
       # crewflow_owner, followed by the head-state checks (ledger = chain, 1786721330000 absent, B3, reachability, golden
-      # posture). The legacy restricted-migrator build (CF-41) keeps its own job in ci-migration-security.yaml until PR #9.
+      # posture). The legacy restricted-migrator build (CF-41) keeps its own job in ci-migration-security.yaml until
+      # the separated-mode retirement, Phase X X5.1 / LEGACY-NAMES-PLAN PR F.
       - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
@@ -86,7 +87,7 @@ jobs:
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
           # JSON results (one file per project) and a per-file summary: the classification of the owner-login differences
-          # (behaviour-change catalogue / schema-role test / removed in PR #9) is made from these, not from truncated output.
+          # (behaviour-change catalogue / schema-role test / removed in X5.1) is made from these, not from truncated output.
           status=0
           mkdir -p "${RUNNER_TEMP}/jest-results"
           if [ "${{ matrix.shard }}" = 1 ]; then
