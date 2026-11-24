@@ -10521,13 +10521,15 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   use the same helper (add them to ACTION_BOUND_STEP_UP_ACTIONS).
 - **Preparers:** whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) is a preparer too.
 - **Database layer (DRAFT, new SQL, PayrollMakerCheckerBackstop1786723020000):** `core.payroll_record_guard()` (the one trigger
-  function of core AND every workspace payroll_record), whenever `approved_by` changes: a human session may only record
-  itself (`core.current_uid()`) and only once (never replaced or cleared); the record's finalised report and its seat must
-  both be readable (fail closed: hidden or missing refuses); the approver is neither the report's finaliser nor the seat's
-  reviewer (42501; rows approved earlier are never blocked by later updates). `payroll_run_update` on core.payroll_run
-  requires a finalised run's `finalised_by` = the caller and <> `prepared_by` (workspace copies with the 0.7.0 chain);
-  `prepared_by` is not updatable by the runtime role (column grants; the owner-login grant-parity trigger for crewflow_owner). Top-up preparers of a run are still checked in the service only, from the insert-only audit row; a
-  real per-line `prepared_by` column needs a workspace structure level and is proposed for the 0.7.0 PR.
+  function of core AND every workspace payroll_record). On the move to `approved`: `approved_by` must be the signed-in caller
+  (no worker exemption: the worker never writes it and the marker is a plain GUC); the record's finalised report and seat
+  must be readable with a non-null finaliser and reviewer (fail closed); the approver is neither of them; and because those
+  live columns are writable by managers, the insert-only `core.audit_log` must hold the finalisation and the review, and
+  none of those history rows may name the approver (re-pointing `finalised_by` or the reviewer afterwards does not help).
+  Outside that move `approved_by` never changes (so a two-step "set approved_by, then flip status" is refused at step one).
+  The service mirrors the same rule (live columns + history, null reviewer refused). The payroll_run finaliser rule (core
+  and workspace copies, plus a real per-line `prepared_by`) moves to a follow-up blocked on the 0.7.0 chain; until then the
+  run rule is service-only (creator via `prepared_by`, top-ups via the audit row).
 - **Tests:** payroll-approval (11) / (11b): no proof, a sign-in or ordinary grant, a sign-in grant planted under the action
   key, a proof for another action, an un-enrolled approver: all 403; the real step-up with code then exactly one approval,
   a second approval on the same proof 403; a reviewer who did not finalise: service 403 and DB 42501.

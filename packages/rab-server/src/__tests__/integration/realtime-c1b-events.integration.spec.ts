@@ -370,10 +370,14 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
         [org.id, owner.workspaceId, att.id, shiftId, who.profileId],
       );
       // Decision 5 (maker-checker): the timesheet that prepared the record was finalised by someone other than the approver.
-      await admin.query(
-        `INSERT INTO ${businessTable(owner.workspaceId!, 'shift_report')} (organisation_id, workspace_id, shift_id, status, finalised_at, finalised_by) VALUES ($1, $2, $3, 'finalised', now(), $4)`,
+      const [report] = await admin.query(
+        `INSERT INTO ${businessTable(owner.workspaceId!, 'shift_report')} (organisation_id, workspace_id, shift_id, status, finalised_at, finalised_by) VALUES ($1, $2, $3, 'finalised', now(), $4) RETURNING id`,
         [org.id, owner.workspaceId, shiftId, vm.userId],
       );
+      await admin.query(`UPDATE ${businessTable(owner.workspaceId!, 'shift_assignment')} SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [assignment.id, vm.userId]);
+      // ...and the insert-only history the real review / finalise writes (the maker-checker checks read it, fail closed).
+      await admin.query(`INSERT INTO core.audit_log (organisation_id, actor_user_id, entity_type, entity_id, action, metadata) VALUES ($1, $2, 'shift_assignment', $3, 'attendance.reviewed', '{}')`, [org.id, vm.userId, assignment.id]);
+      await admin.query(`INSERT INTO core.audit_log (organisation_id, actor_user_id, entity_type, entity_id, action, metadata) VALUES ($1, $2, 'shift_report', $3, 'attendance.report_finalised', '{}')`, [org.id, vm.userId, report.id]);
       recordIds.push(record.id);
     }
     const audienceSpy = jest.spyOn(recipientsModule, 'payrollAudience');
