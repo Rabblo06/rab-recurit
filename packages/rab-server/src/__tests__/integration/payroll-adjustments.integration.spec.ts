@@ -348,6 +348,16 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
       await adminDataSource.query(`DELETE FROM core.hws_cutover_state WHERE workspace_id = $1`, [a.workspaceId]);
       await adminDataSource.query(`DELETE FROM core.payroll_run WHERE id = $1`, [fake.id]);
     }
+    // Fourth review (a): the cutover state the guards route on cannot be written by the bare runtime login (42501), so a
+    // session cannot mark its workspace 'verified' or activate the cutover to steer a guard to another copy.
+    await expect(asUser(a.userId, `INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at) VALUES ($1, $2, 'verified', now())`,
+      [a.workspaceId, orgId])).rejects.toMatchObject({ code: '42501' });
+    await expect(asUser(a.userId, `INSERT INTO core.hws_cutover_activation DEFAULT VALUES`)).rejects.toMatchObject({ code: '42501' });
+    // An UPDATE is refused (crewflow_app: no grant, 42501) or changes nothing (owner login: the policy admits only crewflow itself).
+    const upd = await tenantContext.runInTenantContext(ctxOf(a.userId), (m) =>
+      m.query(`UPDATE core.hws_cutover_state SET state = 'started' WHERE organisation_id = $1`, [orgId])).then((r: unknown) => (r as [unknown, number])[1], (e: { code: string }) => e.code);
+    expect([0, '42501']).toContain(upd);
+    await expect(asUser(a.userId, `DELETE FROM core.hws_cutover_activation`)).rejects.toMatchObject({ code: '42501' });
     // Run facts are insert-only: no UPDATE / DELETE for the runtime (owner) login.
     await expect(asUser(c.userId, `UPDATE core.payroll_run_event SET event = 'opened'`)).rejects.toMatchObject({ code: '42501' });
     await expect(asUser(c.userId, `DELETE FROM core.payroll_run_event`)).rejects.toMatchObject({ code: '42501' });

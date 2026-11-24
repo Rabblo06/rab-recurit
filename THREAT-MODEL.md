@@ -10610,6 +10610,11 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   cannot see, so before the cutover a guard reads the workspace schema when it holds the row, otherwise core. A manager
   with raw runtime-login SQL could plant a prepared run in the copy the application does NOT use and park an approved
   line there (unpaid, never paid twice). This closes when 0.7.0 activates the cutover (owner: 0.7.0 before any real data).
+- **Accepted (G-02):** the guards' copy routing and the core fence both read core.hws_cutover_state /
+  core.hws_cutover_activation. The bare runtime login cannot write them (42501, regression test), but a session that can
+  `SET ROLE crewflow` (the owner login's inherited role) could change them and so steer routing or lift the fence. This is
+  the accepted G-02 / BC-01 class (an injected SET ROLE defeats the owner-login guards too); the semantic posture monitor
+  detects the drift afterwards.
 - **Residual (inherited, 0.7.0 follow-up with Lane P1):** payroll_run has no status-transition guard (#335 moved its run
   rule to the 0.7.0 structure follow-up: a trigger on the workspace copies needs the structure chain), so a session with
   DML on payroll_run could flip prepared/finalised and then write a matching fact. The adjustment guard's live-status
