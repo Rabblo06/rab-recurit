@@ -80,7 +80,7 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
                   AND physical_table = ANY($2::text[]))::int AS system_locked`,
       [id, ['attendance', 'attendance_correction', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document']],
     )).rows[0];
-    expect(counts).toEqual({ objects: 25, fields: 344, system_locked: 7 });
+    expect(counts).toEqual({ objects: 27, fields: 393, system_locked: 7 });
     expect(await metadataCatalogDifferences(admin, { id, org: ws.org, schema: `workspace_${id.replace(/-/g, '')}` }, WORKSPACE_TABLES)).toEqual([]);
 
     const initial = (await admin.query(`SELECT name, status FROM core.upgrade_migration WHERE workspace_id = $1 AND is_initial`, [id])).rows;

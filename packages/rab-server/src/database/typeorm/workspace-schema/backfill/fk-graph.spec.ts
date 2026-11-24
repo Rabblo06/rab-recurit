@@ -1,10 +1,10 @@
 import { computeWorkspaceTableCopyOrder, FkGraphCycleError, TableEdge, WORKSPACE_FK_EDGES, WORKSPACE_TABLE_COPY_ORDER } from './fk-graph';
-import { WORKSPACE_TABLES } from '../provision-workspace-schema';
+import { WORKSPACE_TEMPLATE_TABLES } from '../provision-workspace-schema';
 
 describe('computeWorkspaceTableCopyOrder', () => {
   it('produces every one of the 21 workspace tables, each exactly once', () => {
     expect(new Set(WORKSPACE_TABLE_COPY_ORDER).size).toBe(21);
-    expect([...WORKSPACE_TABLE_COPY_ORDER].sort()).toEqual([...WORKSPACE_TABLES].sort());
+    expect([...WORKSPACE_TABLE_COPY_ORDER].sort()).toEqual([...WORKSPACE_TEMPLATE_TABLES].sort());
   });
 
   it('places every table strictly after everything it depends on (the actual safety property, not just "some order")', () => {
@@ -15,7 +15,7 @@ describe('computeWorkspaceTableCopyOrder', () => {
   });
 
   it('is deterministic — recomputing from the same input always returns the same order', () => {
-    const again = computeWorkspaceTableCopyOrder([...WORKSPACE_TABLES]);
+    const again = computeWorkspaceTableCopyOrder([...WORKSPACE_TEMPLATE_TABLES]);
     expect(again).toEqual(WORKSPACE_TABLE_COPY_ORDER);
   });
 

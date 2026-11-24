@@ -10803,3 +10803,48 @@ This entry covers only what release 0.7.0 adds to switch it on.
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## Attendance breaks, sync receipts and device keys: the database objects (branch feat/m4-breaks-receipts-db, 2026-11-24; core migration AttendanceBreaksReceipts1786722140000 + structure level 27 WorkspaceAttendanceBreaksReceipts1786722150000; DRAFT: new SQL, owner review first; "[after 0.7.0 cutover]", owner decision 44; stacked on #310)
+- **What:** M4 design §13 PR 2 (Appendix A with the owner's A.7 changes). Schema only: no route, service or job writes these
+  tables yet (PRs 3-6), and offline clock-in stays off until M5 adjustments and the /me/sync pen test (D12, HARD RULE).
+  `core` and every workspace schema get `attendance_break` and `attendance_sync_receipt`, plus attendance (+5 columns),
+  shift_assignment (+1) and venue (+1, default off); `core` alone gets `attendance_device_key`. WORKSPACE_TABLES 21 -> 23;
+  the C3 cutover copy list stays at the 21 template tables (decision 44).
+- **Threats and controls (runtime login crewflow_owner inherits the table owner, so grants never bind it; A.7):**
+  - Staff A reads or writes Staff B's breaks / receipts in the same workspace -> FORCE RLS, staff-own branch on every policy
+    (layer 5); SELECT also admits the workspace Manager, the shift's Venue Manager and the worker marker (read only).
+  - A break added to a closed / reviewed / approved attendance (payroll tampering) -> INSERT policy requires the staff
+    member's OWN attendance in `clocked_in` / `on_break`; UPDATE requires it open or `missing_clock_out`.
+  - A break moved or re-sized after the fact -> row-level allow-list guard (only `ended_at`, `end_source`, `updated_at`
+    may change: 42501 otherwise); DELETE / TRUNCATE refused per statement (42501).
+  - A staff member back-dating or future-dating a break online -> `core.attendance_break_time_guard()`: a `staff` start or
+    end more than 120 s from `now()` is 23514 (a CHECK cannot read now()); offline / manager / clock-out sources are bounded
+    by their own rules (PR 6).
+  - Receipts (idempotency + offline evidence) edited or deleted -> no UPDATE / DELETE policy and statement-level guards
+    (42501 even on zero rows); INSERT only by the staff member's own session (`user_id = current_uid()` AND own profile).
+  - Pay evidence lost through a cascade -> every evidence key ON DELETE RESTRICT (attendance, staff profile, shift, break).
+  - A device key swapped to sign forged offline punches -> own-row policy; row allow-list guard (only last_used_at /
+    revoked_at / revoked_reason change); TRUNCATE refused.
+  - No tenant context -> zero rows on every new table (tested on each copy).
+- **SECURITY TRADE-OFFS / assumptions (flagged for veto):**
+  - The SELECT policies admit the worker marker (`rab.actor_type = 'worker'`, as attendance since #305) so post-shift and
+    payroll jobs can read breaks; it can never write them. Not in Appendix A.
+  - `request_sha256` is `text` (64 lower-case hex, CHECK) instead of `bytea` (the metadata catalogue has no bytea type).
+  - `attendance_device_key` DELETE stays open to the own-row policy (the D15 purge, PR 10, decides how it deletes).
+  - Organisation hard delete: core.organisation -> attendance CASCADE meets attendance <- break / receipt RESTRICT, so
+    deleting an organisation that has breaks or receipts is refused (same as corrections since #306). Tenant offboarding
+    (LC-2) must delete or anonymise evidence explicitly. Workspace schemas have no organisation key (level 22).
+  - Workspace copies have no key to core."user" for `attendance_sync_receipt.user_id` (level 22 rule); the frozen orphan
+    check does not list it yet.
+  - The metadata catalogue lists the two tables as ordinary locked standard objects without custom fields (decision 45;
+    `NO_CUSTOM_FIELD_TABLES`, decision 91 pending). Their inverse relation fields are not flagged sensitive (that rule keys
+    on system objects in engine/metadata, unchanged).
+- **UserDeletionService:** breaks and receipts count as history that blocks the never-activated-invite hard delete (soft
+  delete instead; A11 anonymise, retain); a READY workspace still below level 27 is treated as unverifiable (soft delete),
+  never a 500.
+- **Tests:** `attendance-breaks-receipts.integration.spec.ts` (core) and `ws-attendance-breaks-receipts.integration.spec.ts`
+  (level 27: fingerprint `[l27-fp]`, runner + both provisioners, verify counts, bound CHECKs, no core key, migration
+  guards) share `helpers/attendance-break-abuse.ts`: staff isolation both ways, the open-attendance insert rule, one open
+  break / no overlap, the allow-list, ±2 min, insert-only receipts, CHECKs, RESTRICT, exact crewflow_app grants, zero rows
+  without context, the runtime login is crewflow_owner. `structure-level-27.spec.ts` (static).
+- **Residual:** fingerprints for PostgreSQL 16/17/18 and the posture / semantic goldens are measured by CI on this DRAFT.

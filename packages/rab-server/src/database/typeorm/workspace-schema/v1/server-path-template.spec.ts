@@ -1,4 +1,4 @@
-import { V1_EXPECTED, WORKSPACE_TABLES } from '../provision-workspace-schema';
+import { V1_EXPECTED, WORKSPACE_TEMPLATE_TABLES } from '../provision-workspace-schema';
 import {
   composeServerPathTemplateV1,
   SERVER_PATH_EXPECTED_V1,
@@ -17,8 +17,8 @@ describe('server-path provisioning template (frozen with 1786719500000)', () => 
     expect(SERVER_PATH_EXPECTED_V1).toEqual({ ...V1_EXPECTED });
   });
 
-  it('table list equals WORKSPACE_TABLES, in order', () => {
-    expect([...SERVER_PATH_TABLES_V1]).toEqual([...WORKSPACE_TABLES]);
+  it('table list equals WORKSPACE_TEMPLATE_TABLES (the frozen template), in order', () => {
+    expect([...SERVER_PATH_TABLES_V1]).toEqual([...WORKSPACE_TEMPLATE_TABLES]);
   });
 
   it('the composed template targets only the sentinel schema and cannot break out of the function body', () => {

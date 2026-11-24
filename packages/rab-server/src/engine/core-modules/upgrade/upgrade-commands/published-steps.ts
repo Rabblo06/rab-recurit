@@ -21,5 +21,6 @@ export const PUBLISHED_VERSION_STEPS: Readonly<Record<string, readonly string[]>
     '0.7.0_ShiftTeamSelectMultiRole_1786721600000',
     '0.7.0_AttendanceStaffScope_1786722120000',
     '0.7.0_AttendanceCorrectionInsertOnly_1786722130000',
+    '0.7.0_AttendanceBreaksReceipts_1786722150000',
   ]),
 });

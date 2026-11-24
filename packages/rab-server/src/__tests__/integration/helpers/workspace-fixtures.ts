@@ -1,6 +1,6 @@
 import { Client } from 'pg';
 
-import { ProvisionOptions, provisionWorkspaceSchema, WORKSPACE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
+import { ProvisionOptions, provisionWorkspaceSchema, WORKSPACE_TEMPLATE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
 import { modulesThrough } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 
 /**
@@ -81,7 +81,7 @@ export async function provisionLegacyV14(adminUrl: string, ws: SeededWorkspace):
     await c.query('BEGIN');
     await c.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ws.org]);
     for (const m of modulesThrough(14)) await c.query(m.sql(ws.schema));
-    for (const t of WORKSPACE_TABLES) {
+    for (const t of WORKSPACE_TEMPLATE_TABLES) {
       await c.query(
         `ALTER TABLE ${ws.schema}.${t} ADD CONSTRAINT ${t}_workspace_bound CHECK (workspace_id IS NOT NULL AND workspace_id = '${ws.id}'::uuid)`,
       );

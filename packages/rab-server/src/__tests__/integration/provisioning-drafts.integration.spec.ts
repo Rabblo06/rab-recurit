@@ -37,6 +37,8 @@ import { composeServerPathTemplateLevel24 } from '../../database/typeorm/workspa
 import { STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/staff-profile-shift-team-multi-role';
 import { composeServerPathTemplateLevel25 } from '../../database/typeorm/workspace-schema/structure-level-25';
 import { composeServerPathTemplateLevel26 } from '../../database/typeorm/workspace-schema/structure-level-26';
+import { composeServerPathTemplateLevel27 } from '../../database/typeorm/workspace-schema/structure-level-27';
+import { ATTENDANCE_BREAKS_RECEIPTS } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-breaks-receipts';
 import { ATTENDANCE_CORRECTION_INSERT_ONLY } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-correction-insert-only';
 import { ATTENDANCE_STAFF_SCOPE } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
@@ -69,7 +71,17 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *   v20: WorkspaceGrantParityGuards1786721430000 (owner-login PAY-1, re-frozen in place 2026-11-04 for PAY-1b): the v19
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
-function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26): string {
+function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27): string {
+  // M4 §13 PR 2, structure level 27 (WorkspaceAttendanceBreaksReceipts1786722150000; DRAFT SQL, owner review first): the same
+  // guarded v3 body over template(26) + the level-27 statements, derived exactly as that migration derives it.
+  if (through === 27) {
+    const structure = ATTENDANCE_BREAKS_RECEIPTS.structure!;
+    const fp = structure.fingerprints[workspaceFingerprintMajor()];
+    if (!fp) throw new Error('no declared level-27 fingerprint for this PostgreSQL major');
+    const sql27 = provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel27(), modulesThrough(20).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) })), 27, fp, structure.provisionFunctionLiteral!);
+    const open27 = 'AS $provision$';
+    return sql27.slice(sql27.indexOf(open27) + open27.length, sql27.lastIndexOf('$provision$'));
+  }
   // S11, structure level 26 (WorkspaceAttendanceCorrectionInsertOnly1786722130000; DRAFT SQL, owner review first): the same
   // guarded v3 body over template(25) + the level-26 statements, derived exactly as that migration derives it.
   if (through === 26) {
@@ -240,7 +252,8 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const l24 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'StaffShiftTeamMultiRole1786721600000'`);
       const l25 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceStaffScope1786722120000'`);
       const l26 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceCorrectionInsertOnly1786722130000'`);
-      expect(prosrc).toBe(approvedProvisionBody(l26.length === 1 ? 26 : l25.length === 1 ? 25 : l24.length === 1 ? 24 : l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
+      const l27 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceBreaksReceipts1786722150000'`);
+      expect(prosrc).toBe(approvedProvisionBody(l27.length === 1 ? 27 : l26.length === 1 ? 26 : l25.length === 1 ? 25 : l24.length === 1 ? 24 : l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
     const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'core'::regnamespace AND proname = 'worker_record_workspace_schema_drift'`);

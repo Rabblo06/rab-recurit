@@ -15,8 +15,8 @@ const ENTITIES = new Set(['Shift', 'Venue', 'StaffProfile']);
 const FILE = 'packages/rab-server/src/modules/x/services/x.service.ts';
 const rules = (src, file = FILE) => check.scanSource(file, src, TABLES, ENTITIES).map((s) => s.rule);
 
-test('the table list is the 21 WORKSPACE_TABLES', () => {
-  assert.equal(TABLES.length, 21);
+test('the table list is the 23 WORKSPACE_TABLES', () => {
+  assert.equal(TABLES.length, 23);
   for (const t of ['shift', 'shift_assignment', 'staff_profile', 'payslip_document', 'venue_manager_staff']) assert.ok(TABLES.includes(t), t);
 });
 

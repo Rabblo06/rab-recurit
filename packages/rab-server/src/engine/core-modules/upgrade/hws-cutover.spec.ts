@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { HWS_CUTOVER_EXPECTED_STATE, HWS_CUTOVER_FUNCTIONS, HWS_CUTOVER_TABLES, hwsCutoverStateProblems } from '../../../database/typeorm/workspace-schema/backfill/hws-cutover-sql';
 import { WORKSPACE_TABLE_COPY_ORDER } from '../../../database/typeorm/workspace-schema/backfill/fk-graph';
-import { WORKSPACE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
+import { WORKSPACE_TABLES, WORKSPACE_TEMPLATE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
 import { CUTOVER_BACKUP_MARKER_ENV, parseCutoverBackupMarker, verifyCutoverBackup } from './upgrade-commands/0-7/hws-cutover-backup';
 import { createHwsCutoverCommand, HWS_CUTOVER_BLOCK_PREFIX, HWS_CUTOVER_NAME, hwsCutoverBlockMarker } from './upgrade-commands/0-7/hws-cutover';
 import { HWS_CUTOVER_COPY_ORDER, HWS_CUTOVER_TABLE_LIST } from './upgrade-commands/0-7/hws-cutover-tables';
@@ -18,8 +18,9 @@ import { join } from 'node:path';
 /** OWNER-DB-ULTIMATE Part C3 (option A′, pending owner choice): the pure parts of the HWS cutover command. */
 describe('C3 HWS cutover: frozen lists stay equal to their sources', () => {
   it('the command table list, the SQL closed list and WORKSPACE_TABLES are the same 21 tables', () => {
-    expect([...HWS_CUTOVER_TABLE_LIST]).toEqual([...WORKSPACE_TABLES]);
-    expect([...HWS_CUTOVER_TABLES]).toEqual([...WORKSPACE_TABLES]);
+    // Owner decision 44: the cutover copies the 21 template tables; tables added by a later structure level (27+) never are.
+    expect([...HWS_CUTOVER_TABLE_LIST]).toEqual([...WORKSPACE_TEMPLATE_TABLES]);
+    expect([...HWS_CUTOVER_TABLES]).toEqual([...WORKSPACE_TEMPLATE_TABLES]);
     expect(new Set(HWS_CUTOVER_TABLE_LIST).size).toBe(21);
   });
 

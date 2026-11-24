@@ -41,7 +41,7 @@ import {
   selectWorkspaceFingerprintMajor,
 } from '../workspace-schema/v1/expected-fingerprints';
 import { appendToTableSource, buildPlaceholders, missingVersions, planAppend } from '../workspace-schema/v1/fingerprint-append';
-import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../workspace-schema/provision-workspace-schema';
+import { provisionWorkspaceSchema, WORKSPACE_TEMPLATE_TABLES } from '../workspace-schema/provision-workspace-schema';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, modulesThrough } from '../workspace-schema/workspace-schema-modules';
 import { runMigrateOnStart } from './migrate/owner-login/migrate-on-start';
@@ -165,8 +165,8 @@ async function legacyV14(c: Client, ws: Ws): Promise<void> {
     await c.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ws.org]);
     for (const m of modulesThrough(14)) await c.query(m.sql(ws.schema));
     if (!/^workspace_[0-9a-f]{32}$/.test(ws.schema) || ws.schema !== `workspace_${ws.id.replace(/-/g, '')}`) throw new Error('unexpected workspace schema name');
-    for (const t of WORKSPACE_TABLES) {
-      // sql-injection-reviewed: ws.schema is validated just above (workspace_<32 hex> of this uuid); t is the frozen WORKSPACE_TABLES constant
+    for (const t of WORKSPACE_TEMPLATE_TABLES) {
+      // sql-injection-reviewed: ws.schema is validated just above (workspace_<32 hex> of this uuid); t is the frozen WORKSPACE_TEMPLATE_TABLES constant
       await c.query(`ALTER TABLE ${ws.schema}.${t} ADD CONSTRAINT ${t}_workspace_bound CHECK (workspace_id IS NOT NULL AND workspace_id = '${ws.id}'::uuid)`);
     }
     await c.query('SELECT core.mark_workspace_schema_ready($1, 1)', [ws.id]);

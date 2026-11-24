@@ -4,7 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { SchemaResolverService, WorkspaceRoutingError } from '../../../../engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '../../../../engine/core-modules/tenant/tenant-context.service';
-import { WORKSPACE_TABLES } from '../provision-workspace-schema';
+import { WORKSPACE_TEMPLATE_TABLES } from '../provision-workspace-schema';
 import { WORKSPACE_TABLE_COPY_ORDER } from './fk-graph';
 import { PRIVILEGED_COPY_AUDIT_ACTION, PRIVILEGED_COPY_ORDER } from './privileged-copy';
 import { resolveUserNoteWorkspace } from './user-note-mapping';
@@ -132,7 +132,7 @@ export interface WorkspaceVerifyResult {
 }
 
 /** `core` column names for each of the 14 workspace tables that already carry `workspace_id` in `core` (everything except `user_note` — see `user-note-mapping.ts`). */
-const DIRECT_WORKSPACE_COLUMN_TABLES = WORKSPACE_TABLES.filter((t) => t !== 'user_note');
+const DIRECT_WORKSPACE_COLUMN_TABLES = WORKSPACE_TEMPLATE_TABLES.filter((t) => t !== 'user_note');
 
 export class HwsBackfillError extends Error {
   constructor(message: string) {

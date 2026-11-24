@@ -149,9 +149,9 @@ describeIfDb('M1 / E2: standard objects synced into metadata (integration)', () 
          FROM (SELECT unnest($1::uuid[]) AS workspace_id) w ORDER BY 1`,
       [[a.id, b.id]],
     )).rows as Array<{ objects: number; fields: number }>;
-    for (const c of counts) expect({ objects: c.objects, fields: c.fields }).toEqual({ objects: 25, fields: 344 });
+    for (const c of counts) expect({ objects: c.objects, fields: c.fields }).toEqual({ objects: 27, fields: 393 });
     // eslint-disable-next-line no-console
-    console.log(`[m1-sync-equivalence] ${created.length} workspaces x ${WORKSPACE_TABLES.length} tables: 0 differences; 25 objects, 344 fields each`);
+    console.log(`[m1-sync-equivalence] ${created.length} workspaces x ${WORKSPACE_TABLES.length} tables: 0 differences; 27 objects, 393 fields each`);
   });
 
   it('the §0.3 locks hold in the stored rows: seven system objects, no custom fields, every built-in field locked, read-only where required', async () => {

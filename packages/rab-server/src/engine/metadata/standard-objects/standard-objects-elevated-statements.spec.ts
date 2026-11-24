@@ -36,7 +36,7 @@ describe('owner condition 3b: only the fixed, parameterised sync statements run 
       throw new Error(`unexpected statement: ${sql.slice(0, 80)}`);
     };
     const report = await syncStandardObjectsForNewWorkspace(query, WS);
-    expect(report.objectsInserted).toBe(25);
+    expect(report.objectsInserted).toBe(27);
     expect(s).toMatchObject({ role: 'none', ws: 'prior' });
 
     const elevated = sent.filter((x) => x.elevated);

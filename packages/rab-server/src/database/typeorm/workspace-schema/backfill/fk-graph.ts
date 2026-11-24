@@ -1,6 +1,6 @@
 import { Client } from 'pg';
 
-import { WORKSPACE_TABLES } from '../provision-workspace-schema';
+import { WORKSPACE_TEMPLATE_TABLES } from '../provision-workspace-schema';
 
 /**
  * The workspace→workspace edges of the Workspace Schema V1 FK graph (HWS backfill tool, Part 1/13).
@@ -108,7 +108,7 @@ export function computeWorkspaceTableCopyOrder(tables: readonly string[], edges:
 }
 
 /** The canonical order for all 15 workspace tables, computed once at module load — the single source every caller uses. */
-export const WORKSPACE_TABLE_COPY_ORDER: readonly string[] = computeWorkspaceTableCopyOrder(WORKSPACE_TABLES as readonly string[]);
+export const WORKSPACE_TABLE_COPY_ORDER: readonly string[] = computeWorkspaceTableCopyOrder(WORKSPACE_TEMPLATE_TABLES as readonly string[]);
 
 /**
  * Re-derives the table-level edge list from a LIVE, READY workspace schema's actual catalog —

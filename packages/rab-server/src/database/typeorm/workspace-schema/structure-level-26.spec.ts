@@ -32,10 +32,10 @@ describe('S11: attendance_correction insert-only in workspace schemas (structure
     expect(t26.slice(t25.length)).toBe(`;\n${workspaceCorrectionInsertOnlySql(SERVER_PATH_SENTINEL_SCHEMA)}`);
   });
 
-  it('release 0.7.0 registers it as level 26, last, with its drop declared and its provision literal mapped to 26', () => {
+  it('release 0.7.0 registers it as level 26, with its drop declared and its provision literal mapped to 26', () => {
     const list = WORKSPACE_UPGRADE_COMMANDS['0-7']!;
-    expect(list[list.length - 1]).toBe(ATTENDANCE_CORRECTION_INSERT_ONLY);
-    expect(codeWorkspaceStructureLevel()).toBe(26);
+    expect(list).toContain(ATTENDANCE_CORRECTION_INSERT_ONLY);
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(26);
     expect(declaredProvisionLiterals()['db:provision_workspace@WorkspaceAttendanceCorrectionInsertOnly1786722130000']).toBe(26);
     expect(ATTENDANCE_CORRECTION_INSERT_ONLY).toMatchObject({ name: 'AttendanceCorrectionInsertOnly', timestamp: 1786722130000 });
     expect(ATTENDANCE_CORRECTION_INSERT_ONLY.structure?.mayDrop).toBe(true);

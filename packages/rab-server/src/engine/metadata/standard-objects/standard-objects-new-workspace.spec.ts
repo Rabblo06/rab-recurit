@@ -11,7 +11,7 @@ jest.mock('./standard-object-sync', () => ({ syncStandardObjects: (...a: unknown
 import { STANDARD_SYNC_SAVEPOINT, syncStandardObjectsForNewWorkspace } from './standard-objects-new-workspace';
 
 const WS = { id: '11111111-1111-4111-8111-111111111111', organisationId: '22222222-2222-4222-8222-222222222222' };
-const REPORT = { objectsInserted: 25, objectsUpdated: 0, fieldsInserted: 344, fieldsUpdated: 0, optionsInserted: 0, optionsUpdated: 0 };
+const REPORT = { objectsInserted: 27, objectsUpdated: 0, fieldsInserted: 393, fieldsUpdated: 0, optionsInserted: 0, optionsUpdated: 0 };
 
 function fakeConnection(opts: { role?: string; canSet?: boolean; failRestore?: boolean } = {}) {
   const s = { role: opts.role ?? 'none', ws: 'prior-ws', aborted: false, saved: [] as Array<{ role: string; ws: string }>, log: [] as string[] };
