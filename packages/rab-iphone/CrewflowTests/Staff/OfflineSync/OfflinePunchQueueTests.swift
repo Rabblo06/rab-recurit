@@ -5,10 +5,10 @@ import XCTest
 /// condition holds, entries carry the boot clock and never a wall-clock time
 /// or a server-derived field, storage is per user and encrypted (Keychain via
 /// SecureStore), and the D5 limits hold.
-@MainActor
 final class OfflinePunchQueueTests: XCTestCase {
     // MARK: The gate (fail closed)
 
+    @MainActor
     func testTheGateIsShutByDefaultAndInTheLiveBuild() {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -24,6 +24,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertTrue(live.queue.items.isEmpty)
     }
 
+    @MainActor
     func testTheGateNeedsTheBuildSwitchASignerAndTheServerFlag() {
         for (build, hasSigner) in [(false, true), (true, false)] {
             let clock = FakeBootClock()
@@ -37,6 +38,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertTrue(offline.canCapture)
     }
 
+    @MainActor
     func testTheServerTurningOfflineOffOrAnOlderServerClosesTheGateAndForgetsTheTicket() {
         let store = InMemorySecureStore()
         let clock = FakeBootClock()
@@ -56,6 +58,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertFalse(offline.canCapture, "a malformed ticket is never stored")
     }
 
+    @MainActor
     func testATicketWhoseFetchTookOverTenSecondsIsThrownAway() {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -66,6 +69,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertFalse(offline.canCapture)
     }
 
+    @MainActor
     func testCaptureIsRefusedSixteenHoursAfterTheTicketAndAfterAReboot() throws {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -91,6 +95,7 @@ final class OfflinePunchQueueTests: XCTestCase {
 
     // MARK: The entry
 
+    @MainActor
     func testAnEntryCarriesTheBootClockTheTicketAndASignatureOverItsCanonicalBytes() throws {
         let clock = FakeBootClock()
         let signer = FakeSigner()
@@ -122,6 +127,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertFalse(entry.sig.isEmpty)
     }
 
+    @MainActor
     func testAnEntryNeverCarriesAServerDerivedFieldOrATime() throws {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -137,6 +143,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         ], "exactly the DESIGN §3.2 members; nil members are omitted, never null")
     }
 
+    @MainActor
     func testClientSeqIsStrictlyIncreasingAndNeverReusedEvenAfterTheQueueEmpties() throws {
         let store = InMemorySecureStore()
         let clock = FakeBootClock()
@@ -152,6 +159,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertGreaterThan(third.entry.clientSeq, second.entry.clientSeq, "the counter lives in the secure store, not in the queue")
     }
 
+    @MainActor
     func testASigningFailureSavesNothing() {
         let clock = FakeBootClock()
         let signer = FakeSigner()
@@ -166,6 +174,7 @@ final class OfflinePunchQueueTests: XCTestCase {
 
     // MARK: Storage (encrypted, per user)
 
+    @MainActor
     func testTheQueueIsStoredPerUserInTheSecureStoreAndSurvivesARestart() throws {
         let store = InMemorySecureStore()
         let clock = FakeBootClock()
@@ -184,6 +193,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertFalse(otherUser.canCapture)
     }
 
+    @MainActor
     func testAnUnreadableStoredQueueIsNeverOverwrittenAndStillBlocksSignOut() {
         let store = InMemorySecureStore([OfflinePunchStorage.queueKey(OfflineFixtures.userId): "{not json"])
         let clock = FakeBootClock()
@@ -261,6 +271,7 @@ final class OfflinePunchQueueTests: XCTestCase {
 
     // MARK: Limits (D5, §3.4)
 
+    @MainActor
     func testTheQueueHoldsAtMostThirtyEntries() throws {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -275,6 +286,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertEqual(offline.queue.items.count, 30)
     }
 
+    @MainActor
     func testTheQueueHoldsAtMostItsByteLimit() throws {
         var limits = OfflineQueueLimits.standard
         limits.maxBytes = 3_000
@@ -289,6 +301,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertEqual(offline.queue.items.count, 1)
     }
 
+    @MainActor
     func testEntriesOlderThanSeventyTwoHoursOnTheServerClockAreNotSent() throws {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -308,6 +321,7 @@ final class OfflinePunchQueueTests: XCTestCase {
 
     // MARK: Local dependency checks (UX only)
 
+    @MainActor
     func testDependencyChecks() throws {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
@@ -350,6 +364,7 @@ final class OfflinePunchQueueTests: XCTestCase {
         XCTAssertNoThrow(try other.capture(.make(.clockOut), context: OfflineAttendanceContext(activeShiftId: OfflineFixtures.shiftId)))
     }
 
+    @MainActor
     func testSettleRemovesReceivedRejectsWithACodeAndKeepsTheRest() throws {
         let clock = FakeBootClock()
         let offline = makeOfflineAttendance(clock: clock)
