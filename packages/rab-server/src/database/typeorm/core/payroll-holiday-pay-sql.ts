@@ -32,6 +32,8 @@
  * records approved after it.
  */
 
+import { AUTHORITATIVE_COPIES_SQL } from './payroll-adjustment-sql';
+
 export const HOLIDAY_SETTING_TABLE = 'organisation_payroll_setting';
 export const HOLIDAY_SNAPSHOT_TABLE = 'payroll_record_holiday_pay';
 
@@ -98,8 +100,9 @@ export const HOLIDAY_PAY_INSERT_GUARD_FUNCTION = 'core.payroll_record_holiday_pa
  * the database's own facts, so a manager session cannot insert an arbitrary line:
  *   - a payroll record that a FINALISED run holds (core.payroll_run_event `finalised` fact) is refused: a locked run's
  *     totals never change;
- *   - the record is read in the copy the application uses (the workspace schema's `payroll_record` when it holds the
- *     record, otherwise core's; the schema name derives from the uuid, so `%I` only quotes hex): it must exist in this
+ *   - the record is read in the ONE authoritative copy (AUTHORITATIVE_COPIES_SQL of PayrollAdjustmentSchema: chosen from the
+ *     cutover state, no core fallback once cut over; the schema name derives from the uuid, so `%I` only quotes hex), and
+ *     share-locked (FOR SHARE OF pr), so a concurrent finalise is waited for and its 'processing' is re-read: it must exist in this
  *     organisation and workspace, be `approved`, and its staff_profile_id, staff user (staff_profile.user_id) and approved
  *     gross (amount_pence = base_pence) must equal the line's;
  *   - mode and rate must equal the organisation's setting row (no row = `provider`, rate NULL; holiday_pay_pence is then
@@ -117,6 +120,8 @@ DECLARE
   rec_user uuid;
   set_mode text;
   set_rate integer;
+  cut_state text;
+  copies text[];
 BEGIN
   NEW.created_at := pg_catalog.now();
   IF EXISTS (SELECT 1 FROM core.payroll_run_event e
@@ -124,9 +129,10 @@ BEGIN
                 AND NEW.payroll_record_id = ANY (e.payroll_record_ids)) THEN
     RAISE EXCEPTION 'holiday pay of payroll record % cannot be added: its payroll run is finalised', NEW.payroll_record_id USING ERRCODE = '42501';
   END IF;
-  FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP
+  ${AUTHORITATIVE_COPIES_SQL}
+  FOREACH sch IN ARRAY copies LOOP
     CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_record', sch)) IS NULL;
-    EXECUTE pg_catalog.format('SELECT pr.id, pr.status, pr.staff_profile_id, pr.amount_pence, sp.user_id FROM %I.payroll_record pr JOIN %I.staff_profile sp ON sp.id = pr.staff_profile_id WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch, sch)
+    EXECUTE pg_catalog.format('SELECT pr.id, pr.status, pr.staff_profile_id, pr.amount_pence, sp.user_id FROM %I.payroll_record pr JOIN %I.staff_profile sp ON sp.id = pr.staff_profile_id WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3 FOR SHARE OF pr', sch, sch)
       INTO rec_id, rec_status, rec_staff, rec_amount, rec_user USING NEW.payroll_record_id, NEW.organisation_id, NEW.workspace_id;
     EXIT WHEN rec_id IS NOT NULL;
   END LOOP;

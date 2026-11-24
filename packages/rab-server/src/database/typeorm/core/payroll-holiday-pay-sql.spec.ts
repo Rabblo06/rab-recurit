@@ -1,5 +1,6 @@
 import { rolledUpHolidayPayPence } from '@rab/shared';
 
+import { AUTHORITATIVE_COPIES_SQL } from './payroll-adjustment-sql';
 import {
   EXPECTED_HOLIDAY_PAY_STATE,
   HOLIDAY_PAY_INSERT_GUARD_FUNCTION_SQL,
@@ -84,8 +85,10 @@ describe('holiday pay SQL (owner decision 4)', () => {
     expect(g).toContain("IF EXISTS (SELECT 1 FROM core.payroll_run_event e WHERE e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'finalised' AND NEW.payroll_record_id = ANY (e.payroll_record_ids)) THEN");
     expect(g).toContain("USING ERRCODE = '42501'");
     // Re-review item 2: the record (approved, staff, user, gross) and the setting (mode, rate; no row = provider) bind the line.
-    expect(g).toContain("FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP");
-    expect(g).toContain("pg_catalog.format('SELECT pr.id, pr.status, pr.staff_profile_id, pr.amount_pence, sp.user_id FROM %I.payroll_record pr JOIN %I.staff_profile sp ON sp.id = pr.staff_profile_id WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch, sch)");
+    // Third review: the ONE authoritative copy (no core fallback once cut over), the record share-locked against a finalise.
+    expect(g).toContain(flat(AUTHORITATIVE_COPIES_SQL));
+    expect(g).toContain('FOREACH sch IN ARRAY copies LOOP');
+    expect(g).toContain("pg_catalog.format('SELECT pr.id, pr.status, pr.staff_profile_id, pr.amount_pence, sp.user_id FROM %I.payroll_record pr JOIN %I.staff_profile sp ON sp.id = pr.staff_profile_id WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3 FOR SHARE OF pr', sch, sch)");
     expect(g).toContain("IF rec_id IS NULL OR rec_status IS DISTINCT FROM 'approved' OR rec_staff IS DISTINCT FROM NEW.staff_profile_id OR rec_amount IS DISTINCT FROM NEW.base_pence OR rec_user IS DISTINCT FROM NEW.staff_user_id THEN");
     expect(g).toContain("IF set_mode IS NULL THEN set_mode := 'provider'; set_rate := NULL; END IF;");
     expect(g).toContain('IF NEW.mode IS DISTINCT FROM set_mode OR NEW.rate_bps IS DISTINCT FROM set_rate THEN');
