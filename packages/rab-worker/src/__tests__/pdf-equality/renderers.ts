@@ -13,7 +13,8 @@ import { renderCall, RenderPdfOptions, ReportDocument } from './documents';
  *                                     is the HTML the Chromium path prints; `NATIVE_KINDS` the kinds with a native layout.
  *                                     BOTH renderers go through `renderReportPdf` (P0 §5.2 step 2), with PDF_RENDERER
  *                                     passed per call in `env` (never by mutating process.env, so renders cannot race).
- *   native-only (P5, #61 merged)      `renderReportPdf` + `NATIVE_KINDS`; no `renderHtmlToPdf` / `htmlFor`. The Chromium
+ *   native-only (P5, #61 merged)      `renderReportPdf(doc)` + `NATIVE_KINDS` (no `env` since PDF_RENDERER was retired,
+ *                                     Phase X X5.4); no `renderHtmlToPdf` / `htmlFor`. The Chromium
  *                                     renderer FAILS LOUDLY (ChromiumRemovedError) — run with PDF_EQUALITY_MODE=native-only
  *                                     (mode.ts), which never calls it.
  *
@@ -112,7 +113,7 @@ export function loadNativeRenderer(): Renderer | { unavailable: string } {
     render: async (doc) => {
       const s = seamDocument(doc);
       if (!kinds.has(s.kind)) throw new NativeNotConvertedError(doc.kind, `"${s.kind}" is not in NATIVE_KINDS`);
-      return render(s, { ...process.env, PDF_RENDERER: 'native' });
+      return render(s);
     },
   };
 }

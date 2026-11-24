@@ -11,14 +11,13 @@ import { renderReportPdf } from '../render-pdf.util';
 import { STATEMENT_PAGE_MARGIN } from './approved-shift-statement.native';
 
 /**
- * Approved Shift Statement, native renderer (PDF_RENDERER=native; no browser, no database). The layout prints the
+ * Approved Shift Statement, native renderer (no browser, no database). The layout prints the
  * shared view-model and nothing else: every printed string is a view-model string, every money value parses back to the
  * record's exact pence, user text is printed literally, nothing is fetched, the output is deterministic (D7), and the
  * page has the owner-approved 12 mm margins (D9). Chromium-vs-native comparison evidence: the P2 compare run.
  */
 jest.setTimeout(60_000);
 
-const NATIVE = { PDF_RENDERER: 'native' } as NodeJS.ProcessEnv;
 const base: ApprovedShiftStatementData = {
   statementReference: 'ASS-20261020-1A2B3C4D',
   employerName: 'Adolphus Group Ltd',
@@ -44,7 +43,7 @@ const base: ApprovedShiftStatementData = {
   generatedAt: '2026-10-22T10:05:00.000Z',
 };
 
-const render = (data: ApprovedShiftStatementData) => renderReportPdf({ kind: 'approved-shift-statement', data }, NATIVE);
+const render = (data: ApprovedShiftStatementData) => renderReportPdf({ kind: 'approved-shift-statement', data });
 const squash = (s: string) => s.replace(/\s+/g, '');
 /** "£1,234.56" → 123456n, with no float arithmetic. */
 const pence = (s: string): bigint => {

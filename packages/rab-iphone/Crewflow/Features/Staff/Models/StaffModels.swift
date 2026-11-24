@@ -268,15 +268,25 @@ struct StaffLocationEvidenceLimits: Decodable, Hashable, Sendable {
     let maxFutureSkewSeconds: Int
 }
 
+/// `offline` in `GET /attendance/me/active` (DESIGN M4 §3.1): whether the
+/// server allows offline punches for the caller. Absent or malformed = off.
+struct StaffOfflineStatus: Decodable, Hashable, Sendable {
+    let enabled: Bool
+}
+
 /// `GET /attendance/me/active`.
 struct StaffActiveAttendance: Decodable, Sendable {
     let attendance: StaffAttendanceSummary?
     let serverNow: Date?
     let clockInEarlyMinutes: Int?
     let locationEvidence: StaffLocationEvidenceLimits?
+    /// M4 offline (server not merged): nil from today's server, which keeps
+    /// offline mode off.
+    let offline: StaffOfflineStatus?
+    let offlineTicket: String?
 
     enum CodingKeys: String, CodingKey {
-        case attendance, serverNow, clockInEarlyMinutes, locationEvidence
+        case attendance, serverNow, clockInEarlyMinutes, locationEvidence, offline, offlineTicket
     }
 
     init(from decoder: Decoder) throws {
@@ -287,6 +297,8 @@ struct StaffActiveAttendance: Decodable, Sendable {
         // Flutter: `early is int && early >= 0 ? early : null`.
         clockInEarlyMinutes = early.flatMap { $0 >= 0 ? $0 : nil }
         locationEvidence = try? c.decodeIfPresent(StaffLocationEvidenceLimits.self, forKey: .locationEvidence)
+        offline = try? c.decodeIfPresent(StaffOfflineStatus.self, forKey: .offline)
+        offlineTicket = try? c.decodeIfPresent(String.self, forKey: .offlineTicket)
     }
 }
 
@@ -374,18 +386,27 @@ struct StaffLocationFix: Equatable, Sendable {
     /// Server anchor minus the fix's age (Flutter `LocationFix.fromPosition`):
     /// a wrong device clock cancels out of the age subtraction.
     let capturedAt: Date
+    /// How old the fix was when it was taken in hand (an age, never a time).
+    /// An offline entry turns it into the fix's boot-clock reading. Not sent
+    /// online.
+    var ageSeconds: Double = 0
+    /// iOS 15+ `CLLocationSourceInformation.isSimulatedBySoftware`. Offline
+    /// entries carry it as evidence (DESIGN §5.1). Not sent online.
+    var mock: Bool = false
 
     /// - Parameters:
     ///   - timestamp: when the device took the fix (device wall clock).
     ///   - trustedNow: the server-anchored clock; device time when unknown.
     ///   - deviceNow: the device wall clock now (same clock as `timestamp`).
-    static func make(latitude: Double, longitude: Double, accuracy: Double, timestamp: Date, trustedNow: Date?, deviceNow: Date) -> StaffLocationFix {
+    static func make(latitude: Double, longitude: Double, accuracy: Double, timestamp: Date, trustedNow: Date?, deviceNow: Date, simulated: Bool = false) -> StaffLocationFix {
         let age = max(0, deviceNow.timeIntervalSince(timestamp))
         return StaffLocationFix(
             lat: latitude,
             lng: longitude,
             accuracyM: accuracy,
-            capturedAt: (trustedNow ?? deviceNow).addingTimeInterval(-age)
+            capturedAt: (trustedNow ?? deviceNow).addingTimeInterval(-age),
+            ageSeconds: age,
+            mock: simulated
         )
     }
 }
