@@ -10582,6 +10582,17 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Note (4c):** the adjustment REASON text is hidden from staff by the API projection only; RLS returns the staff
   member's whole approved rows (reason included) to a direct query in their own session. Acceptable today (no staff path
   runs raw SQL); a column-level split would be needed if staff ever get a generic query surface.
-- **Residual (run facts):** the database cannot prove that an `opened` fact names a run that really exists in the
-  workspace schema (no cross-schema key); a manager writing raw SQL could park an approved line in an invented open run
-  (it would then be paid nowhere, never paid twice). Runs finalised before this migration have no `finalised` fact.
+- **Re-review fixes:** run facts can no longer be forged: `core.payroll_run_event_insert_guard()` (BEFORE INSERT) reads
+  the payroll run in the copy the application uses (workspace schema when it holds the run, else core) and accepts
+  `opened` only for a `prepared` run of the same organisation and workspace and `finalised` only for a `finalised` run
+  with EXACTLY its line set; a correction is bound to an approved record of the SAME staff member (insert guard).
+- **Residual (run facts):** runs finalised before this migration have no `finalised` fact (no back-fill: a migration
+  binds no tenant and the workspace payroll tables are FORCE RLS); they stay protected because no `opened` fact can be
+  written for a non-prepared run, and a holiday-pay line requires an `approved` record. The "copy the application uses"
+  rule assumes a populated workspace schema is authoritative (HWS on after the C3 cutover); an HWS-off deployment whose
+  workspace schemas hold stale back-filled copies would read the stale copy.
+- **Not done here (re-review item 3, follow-up):** staff still read their whole approved adjustment rows through RLS (reason,
+  created_by, decided_by included); the API projection returns line fields only. A column-limited staff path needs a
+  view or definer, and under FORCE RLS a view's owner is itself subject to the table's policies, so it needs a dedicated
+  NOLOGIN owner role plus a policy branch for it, or a SECURITY DEFINER read function owned by a role that is not
+  `crewflow`. That is new role SQL of its own, so it is logged as a follow-up rather than added to this PR.

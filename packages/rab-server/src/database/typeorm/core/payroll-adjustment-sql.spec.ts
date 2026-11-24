@@ -3,6 +3,7 @@ import {
   EXPECTED_PAYROLL_ADJUSTMENT_STATE,
   PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL,
   PAYROLL_ADJUSTMENT_INSERT_GUARD_FUNCTION_SQL,
+  PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL,
   PAYROLL_ADJUSTMENT_MAX_PENCE,
   PAYROLL_ADJUSTMENT_OWNERSHIP_SQL,
   PAYROLL_ADJUSTMENT_PARITY_TRIGGERS,
@@ -144,6 +145,21 @@ describe('core.payroll_adjustment SQL (owner decision 3)', () => {
     expect(g).toContain('IF (core_user IS NULL AND ws_user IS NULL) OR (core_user IS NOT NULL AND core_user IS DISTINCT FROM NEW.staff_user_id) OR (ws_user IS NOT NULL AND ws_user IS DISTINCT FROM NEW.staff_user_id) THEN');
     expect(g).toContain('NEW.created_at := pg_catalog.now();');
     expect(security).toContain('CREATE TRIGGER payroll_adjustment_insert_guard BEFORE INSERT ON core.payroll_adjustment FOR EACH ROW EXECUTE FUNCTION core.payroll_adjustment_insert_guard()');
+    // Re-review item 4: a correction is bound to an approved record of the SAME staff member in this workspace.
+    expect(g).toContain("pg_catalog.format('SELECT pr.id, pr.staff_profile_id, pr.status FROM %I.payroll_record pr WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch)");
+    expect(g).toContain("IF rec_id IS NULL OR rec_staff IS DISTINCT FROM NEW.staff_profile_id OR rec_status NOT IN ('approved', 'processing', 'paid') THEN");
+  });
+
+  it('re-review item 1: a run fact must match the payroll run (opened = prepared; finalised = finalised with EXACTLY its line set)', () => {
+    const g = flat(PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL);
+    expect(g).toContain('SET search_path = pg_catalog, core');
+    expect(g).not.toMatch(/SECURITY DEFINER/);
+    expect(g).toContain("FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP");
+    expect(g).toContain('ARRAY(SELECT l.payroll_record_id FROM %I.payroll_run_line l WHERE l.run_id = r.id ORDER BY l.payroll_record_id) FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3');
+    expect(g).toContain("OR (NEW.event = 'opened' AND run_status IS DISTINCT FROM 'prepared')");
+    expect(g).toContain("OR (NEW.event = 'finalised' AND (run_status IS DISTINCT FROM 'finalised' OR run_records IS DISTINCT FROM ARRAY(SELECT x FROM pg_catalog.unnest(NEW.payroll_record_ids) AS x ORDER BY x)))");
+    expect(g).toContain("USING ERRCODE = '42501'");
+    expect(security).toContain('CREATE TRIGGER payroll_run_event_insert_guard BEFORE INSERT ON core.payroll_run_event FOR EACH ROW EXECUTE FUNCTION core.payroll_run_event_insert_guard()');
   });
 
   it('grant parity with the reviewed function: UPDATE allow-list = the runtime columns, DELETE and TRUNCATE refused', () => {
@@ -162,6 +178,7 @@ describe('core.payroll_adjustment SQL (owner decision 3)', () => {
       'ALTER TABLE core.payroll_run_event OWNER TO crewflow',
       'ALTER FUNCTION core.payroll_adjustment_guard() OWNER TO crewflow',
       'ALTER FUNCTION core.payroll_adjustment_insert_guard() OWNER TO crewflow',
+      'ALTER FUNCTION core.payroll_run_event_insert_guard() OWNER TO crewflow',
     ]);
   });
 

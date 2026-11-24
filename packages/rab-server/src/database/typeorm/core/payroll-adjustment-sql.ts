@@ -49,7 +49,14 @@
  *     (PayrollHolidayPay1786723110000) uses the `finalised` facts to refuse lines of a locked run.
  *   - core.payroll_adjustment_insert_guard() (BEFORE INSERT): staff_user_id must be the user of staff_profile_id in the
  *     bound workspace (the core table and, when it exists, the workspace schema's copy must agree), so the segregation
- *     CHECK cannot be bypassed with a mismatched user id; created_at / updated_at are the database clock.
+ *     CHECK cannot be bypassed with a mismatched user id; a correction must point at an approved / processing / paid
+ *     record of the SAME staff member in this workspace; created_at / updated_at are the database clock.
+ *   - core.payroll_run_event_insert_guard() (BEFORE INSERT, re-review): a fact must match the payroll run itself (see the
+ *     function), so `opened` / `finalised` facts cannot be forged by a manager session.
+ *   - Runs finalised BEFORE this migration get no `finalised` fact (no back-fill: a migration binds no tenant, and the
+ *     workspace payroll tables are FORCE RLS). They stay protected: an adjustment cannot join them (no `opened` fact can be
+ *     written for a run that is not `prepared`), and a holiday-pay line needs its record to be `approved`
+ *     (PayrollHolidayPay1786723110000), which a finalised run's records are not.
  */
 
 export const PAYROLL_ADJUSTMENT_TABLE = 'payroll_adjustment';
@@ -204,6 +211,10 @@ DECLARE
   ws_schema text := 'workspace_' || pg_catalog.replace(NEW.workspace_id::text, '-', '');
   core_user uuid;
   ws_user uuid;
+  sch text;
+  rec_id uuid;
+  rec_staff uuid;
+  rec_status text;
 BEGIN
   NEW.created_at := pg_catalog.now();
   NEW.updated_at := pg_catalog.now();
@@ -217,6 +228,55 @@ BEGIN
      OR (core_user IS NOT NULL AND core_user IS DISTINCT FROM NEW.staff_user_id)
      OR (ws_user IS NOT NULL AND ws_user IS DISTINCT FROM NEW.staff_user_id) THEN
     RAISE EXCEPTION 'payroll_adjustment staff_user_id must be the user of staff_profile_id in this workspace' USING ERRCODE = '23514';
+  END IF;
+  IF NEW.corrects_payroll_record_id IS NOT NULL THEN
+    -- The copy the application uses: the workspace schema's when it holds the record, otherwise core's.
+    FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP
+      CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_record', sch)) IS NULL;
+      EXECUTE pg_catalog.format('SELECT pr.id, pr.staff_profile_id, pr.status FROM %I.payroll_record pr WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch)
+        INTO rec_id, rec_staff, rec_status USING NEW.corrects_payroll_record_id, NEW.organisation_id, NEW.workspace_id;
+      EXIT WHEN rec_id IS NOT NULL;
+    END LOOP;
+    IF rec_id IS NULL OR rec_staff IS DISTINCT FROM NEW.staff_profile_id OR rec_status NOT IN ('approved', 'processing', 'paid') THEN
+      RAISE EXCEPTION 'a correction must point at an approved payroll record of the same staff member in this workspace' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$fn$`;
+
+export const PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION = 'core.payroll_run_event_insert_guard()';
+
+/**
+ * Review 2, item 1: run facts cannot be forged. BEFORE INSERT on core.payroll_run_event, the fact must match the payroll
+ * run itself, read in the copy the application uses (the workspace schema's `payroll_run` when it holds the run, otherwise
+ * core's; the schema name is derived from the uuid, so `%I` only ever quotes hex):
+ *   - `opened`: the run exists in this organisation and workspace and is `prepared`;
+ *   - `finalised`: the run is `finalised` and payroll_record_ids is EXACTLY its line set (sorted, no extra, none missing).
+ * An invented run, an early `finalised` (which would block the real one through the UNIQUE key) or a list of arbitrary
+ * records is refused (42501). The application writes `opened` at prepare and `finalised` right after the run's status
+ * change in the same transaction, so the real writes always match. created_at is the database clock.
+ */
+export const PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL = `CREATE FUNCTION core.payroll_run_event_insert_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, core AS $fn$
+DECLARE
+  ws_schema text := 'workspace_' || pg_catalog.replace(NEW.workspace_id::text, '-', '');
+  sch text;
+  run_found uuid;
+  run_status text;
+  run_records uuid[];
+BEGIN
+  NEW.created_at := pg_catalog.now();
+  FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP
+    CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_run', sch)) IS NULL;
+    EXECUTE pg_catalog.format('SELECT r.id, r.status, ARRAY(SELECT l.payroll_record_id FROM %I.payroll_run_line l WHERE l.run_id = r.id ORDER BY l.payroll_record_id) FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3', sch, sch)
+      INTO run_found, run_status, run_records USING NEW.run_id, NEW.organisation_id, NEW.workspace_id;
+    EXIT WHEN run_found IS NOT NULL;
+  END LOOP;
+  IF run_found IS NULL
+     OR (NEW.event = 'opened' AND run_status IS DISTINCT FROM 'prepared')
+     OR (NEW.event = 'finalised' AND (run_status IS DISTINCT FROM 'finalised'
+         OR run_records IS DISTINCT FROM ARRAY(SELECT x FROM pg_catalog.unnest(NEW.payroll_record_ids) AS x ORDER BY x))) THEN
+    RAISE EXCEPTION 'a payroll run fact must match its payroll run' USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
 END
@@ -260,6 +320,10 @@ export const PAYROLL_ADJUSTMENT_SECURITY_SQL: readonly string[] = Object.freeze(
   `CREATE POLICY payroll_run_event_insert ON core.payroll_run_event AS PERMISSIVE FOR INSERT TO PUBLIC
   WITH CHECK (${TENANT} AND ${WORKSPACE_MANAGER} AND (created_by = core.current_uid()))`,
   'GRANT SELECT, INSERT ON TABLE core.payroll_run_event TO crewflow_app',
+  PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL,
+  'REVOKE ALL ON FUNCTION core.payroll_run_event_insert_guard() FROM PUBLIC',
+  'GRANT EXECUTE ON FUNCTION core.payroll_run_event_insert_guard() TO crewflow, crewflow_app',
+  'CREATE TRIGGER payroll_run_event_insert_guard BEFORE INSERT ON core.payroll_run_event FOR EACH ROW EXECUTE FUNCTION core.payroll_run_event_insert_guard()',
   // guard functions and triggers
   PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL,
   'REVOKE ALL ON FUNCTION core.payroll_adjustment_guard() FROM PUBLIC',
@@ -283,6 +347,7 @@ export const PAYROLL_ADJUSTMENT_OWNERSHIP_SQL: readonly string[] = Object.freeze
   'ALTER TABLE core.payroll_run_event OWNER TO crewflow',
   'ALTER FUNCTION core.payroll_adjustment_guard() OWNER TO crewflow',
   'ALTER FUNCTION core.payroll_adjustment_insert_guard() OWNER TO crewflow',
+  'ALTER FUNCTION core.payroll_run_event_insert_guard() OWNER TO crewflow',
 ]);
 
 /** Pre-flight facts: what the migration relies on, and whether its objects already exist. */
@@ -291,6 +356,7 @@ SELECT pg_catalog.to_regclass('core.payroll_adjustment') IS NOT NULL AS table_pr
        pg_catalog.to_regclass('core.payroll_run_event') IS NOT NULL AS event_present,
        pg_catalog.to_regprocedure('core.payroll_adjustment_guard()') IS NOT NULL AS guard_present,
        pg_catalog.to_regprocedure('core.payroll_adjustment_insert_guard()') IS NOT NULL AS insert_guard_present,
+       pg_catalog.to_regprocedure('core.payroll_run_event_insert_guard()') IS NOT NULL AS event_guard_present,
        pg_catalog.to_regprocedure('core.owner_login_grant_parity_guard()') IS NOT NULL AS parity_guard,
        pg_catalog.to_regprocedure('core.current_org()') IS NOT NULL AND pg_catalog.to_regprocedure('core.current_workspace()') IS NOT NULL
          AND pg_catalog.to_regprocedure('core.current_uid()') IS NOT NULL AS tenant_functions,
@@ -315,6 +381,7 @@ export const PAYROLL_ADJUSTMENT_DOWN_SQL: readonly string[] = Object.freeze([
   'DROP TABLE core.payroll_run_event',
   'DROP FUNCTION core.payroll_adjustment_guard()',
   'DROP FUNCTION core.payroll_adjustment_insert_guard()',
+  'DROP FUNCTION core.payroll_run_event_insert_guard()',
 ]);
 
 /** Post-condition per table: owner, RLS, ACL (non-owner grantees), column ACL, policies, triggers. */
@@ -346,7 +413,8 @@ SELECT p.proname::text AS name,
           SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END AS v
             FROM pg_catalog.aclexplode(p.proacl) a WHERE a.privilege_type = 'EXECUTE') x), '') AS state
   FROM pg_catalog.pg_proc p
- WHERE p.oid IN (pg_catalog.to_regprocedure('core.payroll_adjustment_guard()'), pg_catalog.to_regprocedure('core.payroll_adjustment_insert_guard()'))
+ WHERE p.oid IN (pg_catalog.to_regprocedure('core.payroll_adjustment_guard()'), pg_catalog.to_regprocedure('core.payroll_adjustment_insert_guard()'),
+                 pg_catalog.to_regprocedure('core.payroll_run_event_insert_guard()'))
  ORDER BY p.proname`;
 
 export interface PayrollAdjustmentTableState {
@@ -380,13 +448,14 @@ export const EXPECTED_PAYROLL_ADJUSTMENT_STATE: Readonly<Record<string, Omit<Pay
     acl: 'crewflow_app:INSERT,crewflow_app:SELECT',
     column_acl: '',
     policies: 'payroll_run_event_insert:a,payroll_run_event_select:r',
-    triggers: parity('payroll_run_event').join(','),
+    triggers: [...parity('payroll_run_event'), `payroll_run_event_insert_guard:O:${PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION}`].join(','),
   },
 });
 
 export const EXPECTED_PAYROLL_ADJUSTMENT_FUNCTIONS: Readonly<Record<string, string>> = Object.freeze({
   payroll_adjustment_guard: 'crewflow:definer=false:crewflow,crewflow_app',
   payroll_adjustment_insert_guard: 'crewflow:definer=false:crewflow,crewflow_app',
+  payroll_run_event_insert_guard: 'crewflow:definer=false:crewflow,crewflow_app',
 });
 
 /** Every difference between the catalog and the reviewed state (empty = as reviewed). */

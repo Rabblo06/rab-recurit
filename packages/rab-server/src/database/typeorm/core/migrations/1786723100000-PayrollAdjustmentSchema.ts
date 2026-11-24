@@ -81,6 +81,7 @@ export class PayrollAdjustmentSchema1786723100000 implements MigrationInterface 
       event_present: boolean;
       guard_present: boolean;
       insert_guard_present: boolean;
+      event_guard_present: boolean;
       core_staff_profile: boolean;
       parity_guard: boolean;
       tenant_functions: boolean;
@@ -97,7 +98,7 @@ export class PayrollAdjustmentSchema1786723100000 implements MigrationInterface 
       if (!f.manager_archived_at) problems.push('core.manager_profile.archived_at must exist (ArchiveAndSearchSchema1786719920000 first)');
       if (!f.workspace_key) problems.push('core.manager_workspace must have a UNIQUE (id, organisation_id) key (the tenant FK target)');
       if (!f.core_staff_profile) problems.push('core.staff_profile must exist (the insert guard resolves the staff user)');
-      const present = [f.table_present, f.event_present, f.guard_present, f.insert_guard_present];
+      const present = [f.table_present, f.event_present, f.guard_present, f.insert_guard_present, f.event_guard_present];
       if (direction === 'up' && present.some(Boolean)) problems.push('a payroll adjustment table or guard function already exists');
       if (direction === 'down' && !present.every(Boolean)) problems.push('a payroll adjustment table or guard function does not exist');
     }
