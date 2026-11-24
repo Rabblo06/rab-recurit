@@ -580,7 +580,12 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     // migrations or the gates refuses (the C3 continue path and CREWFLOW_UPGRADE_FAILURE are removed: a failed
     // migration never serves). The logbook already holds the failed row (UpgradeRun.onApplyFailure); the next start is
     // attempt N+1. Only a failed upgrade COMMAND serves (exit 70), decided above in the success path.
-    if (error instanceof MinorReleaseResumeFailedError) {
+    if (error instanceof MinorReleaseResumeFailedError && error.deferred) {
+      // Release 0.7.0: the .0 step deferred (not recorded), it did not fail.
+      log(
+        `ERROR: the upgrade command ${error.step} was DEFERRED again (not recorded) before any migration of this start; no migration was applied (${pending.length} pending); refusing to start (exit 66). The next start runs it again.`,
+      );
+    } else if (error instanceof MinorReleaseResumeFailedError) {
       log(
         `ERROR: the upgrade command ${error.step} (attempt ${error.attempt ?? '?'}) failed again before any migration of this start; no migration was applied (${pending.length} pending); refusing to start (exit 66). The next start retries it.`,
       );

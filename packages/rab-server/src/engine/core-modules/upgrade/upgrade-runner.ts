@@ -33,7 +33,14 @@
  * runs. If a .0 command fails again with migrations pending: an unforced start is refused (MinorReleaseResumeFailedError,
  * exit 66, fail closed: this code cannot serve with its migrations unapplied); a --force start goes on (review B of #240:
  * the migrations apply and it serves degraded, exit 70, every row forced; the blocked workspace stays 503). With nothing
- * pending it serves degraded (exit 70). A degraded start does not record the patch's own step. A .0 command left with its
+ * pending it serves degraded (exit 70). A degraded start does not record the patch's own step. Release 0.7.0: a .0 command
+ * that DEFERS on that retry (returns `{ deferred }`, e.g. the HWS cutover with HWS off and nothing pending) is not complete
+ * either, but it is no failure: with migrations pending an unforced start is refused the same way (66; the error carries
+ * `deferred: true`; nothing applied, nothing recorded); a --force start records ONE forced marker for the step (a 'failed'
+ * attempt, error `DeferredUnderForce: ...`; it keeps #240's forced trace, so the later retry on the schema this start moves
+ * past the .0 is recorded forced too, and /healthz reads 'failed' meanwhile), applies the migrations and ends there: no patch
+ * migrations step, no workspace pass, outcome ok (exit 0, "schema current"; no command FAILED). With nothing pending a
+ * deferral records nothing and stops the start the same way (exit 0). A .0 command left with its
  * migrations step incomplete refuses 65 ("Nothing was applied") unless --force: the hotfix case (a .0 migration failed and
  * the patch ships the fix) therefore needs --force when the .0 has instance commands, because the .0's commands must not
  * run on a schema whose .0 migrations are not all applied, and the patch can only apply them together with its own. Two documented exceptions run the .0's
@@ -97,6 +104,8 @@ export class MinorReleaseResumeFailedError extends Error {
     /** The .0 step that failed again (a step name, never a message) and the attempt recorded for it. */
     readonly step: string,
     readonly attempt: number | null,
+    /** Release 0.7.0: the .0 step DEFERRED (returned `{ deferred }`, not recorded) rather than failed. */
+    readonly deferred: boolean = false,
   ) {
     super(message);
     this.name = 'MinorReleaseResumeFailedError';
@@ -164,6 +173,8 @@ export class UpgradeRun {
   private decision: UpgradeStartDecision | null = null;
   /** A patch start already resumed its minor .0's instance commands in beforeApply: 'ok' or 'failed' (null: not done there). */
   private minorResumed: 'ok' | 'failed' | null = null;
+  /** Release 0.7.0: the last instance command that returned `{ deferred }` this start, and its reason (log / marker text). */
+  private lastDeferral: { name: string; reason: string } | null = null;
 
   constructor(private readonly options: UpgradeRunOptions) {
     this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, deferred: [], workspaces: null };
@@ -294,6 +305,11 @@ export class UpgradeRun {
    * UpgradeVersionTooOldError (65) when the .0's migrations step is not completed (unless --force: then they run in
    * afterApply, after every migration, with a WARNING); MinorReleaseResumeFailedError (66) when a command fails again while
    * migrations are pending, unless --force (review B: then the migrations apply and the start serves degraded, 70).
+   * Release 0.7.0, a .0 command that DEFERS here (see the header): with migrations pending, unforced → the same 66 with
+   * `deferred: true` (nothing applied, nothing recorded); --force → one forced 'failed' marker row for the step (error
+   * `DeferredUnderForce: ...`, so anyForcedInstanceAttempt finds it on the later retry), the migrations apply, and afterApply
+   * stops (no patch migrations step, no workspace pass; exit 0 "schema current"). Nothing pending: nothing recorded, afterApply
+   * stops the same way.
    */
   private async resumeMinorBeforeMigrations(session: UpgradeSession, minor: string, pendingMigrations: readonly string[]): Promise<void> {
     const { codeVersion, force, log } = this.options;
@@ -333,19 +349,27 @@ export class UpgradeRun {
       const failed = this.report.recorded.filter((r) => r.status === 'failed').slice(-1)[0];
       const step = this.report.commandFailure?.name ?? failed?.name ?? minor;
       // Release 0.7.0: a .0 command that DEFERRED (not recorded, see runInstanceSteps) is not complete either: the same
-      // refusal (66) / --force path as a failure, worded as a deferral (nothing was recorded for it).
-      const deferredStep = !this.report.commandFailure ? this.report.deferred.slice(-1)[0] : undefined;
-      if (deferredStep) {
+      // refusal (66, flagged deferred) as a failure; under --force a forced marker row keeps the forced trace (see the header).
+      const deferral = !this.report.commandFailure && this.lastDeferral ? this.lastDeferral : null;
+      if (deferral) {
         if (force) {
+          // Review of the #175 refresh: without a row, anyForcedInstanceAttempt would find nothing at the later retry, and the
+          // step would be recorded forced = false on a schema this --force start moved past the .0 (#240's invariant).
+          const marker = Object.assign(new Error(`deferred under --force: ${deferral.reason}`), { name: 'DeferredUnderForce' });
+          const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
+            recordUpgradeMigration(q, { name: deferral.name, status: 'failed', executedByVersion: codeVersion, forced: true, error: marker }),
+          );
+          this.report.recorded.push({ name: deferral.name, status: 'failed', attempt });
           log(
-            `WARNING: upgrade --force: ${deferredStep} was deferred again (not recorded); applying ${codeVersion}'s ${pendingMigrations.length} pending migration(s) anyway. ${minor} stays incomplete until a start runs ${deferredStep}.`,
+            `WARNING: upgrade --force: ${deferral.name} was deferred again; recorded as a forced marker (attempt ${attempt}, DeferredUnderForce) and applying ${codeVersion}'s ${pendingMigrations.length} pending migration(s) anyway. ${minor} stays incomplete: no ${codeVersion} migrations step and no workspace pass until a start runs ${deferral.name}.`,
           );
           return;
         }
         throw new MinorReleaseResumeFailedError(
-          `${deferredStep} was deferred (not recorded) before any migration of this start; ${codeVersion}'s ${pendingMigrations.length} pending migration(s) were NOT applied, because ${minor} is incomplete until that step completes. Resolve the deferral's cause (see the WARNING above) and start again, or run the manual command \`upgrade --force\`.`,
-          deferredStep,
+          `${deferral.name} was deferred (not recorded) before any migration of this start; ${codeVersion}'s ${pendingMigrations.length} pending migration(s) were NOT applied, because ${minor} is incomplete until that step completes. Resolve the deferral's cause (${deferral.reason}) and start again, or run the manual command \`upgrade --force\`.`,
+          deferral.name,
           null,
+          true,
         );
       }
       if (force) {
@@ -429,6 +453,7 @@ export class UpgradeRun {
         // Returned as "not ok" (like a failed command, but nothing is recorded): afterApply stops before the workspace pass,
         // and a patch start's resume of its .0 refuses before its migrations (resumeMinorBeforeMigrations).
         this.report.deferred.push(name);
+        this.lastDeferral = { name, reason: result.deferred.slice(0, 300) };
         log(`WARNING: upgrade command ${name} DEFERRED, not recorded: ${result.deferred.slice(0, 300)}. ${codeVersion} stops here and stays incomplete (no later step runs); the next start runs it again.`);
         return false;
       }
