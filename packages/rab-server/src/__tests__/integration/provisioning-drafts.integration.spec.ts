@@ -31,6 +31,8 @@ import { STAFF_PROFILE_MEMBER_SELECT } from '../../engine/core-modules/upgrade/u
 import { composeServerPathTemplateLevel21, provisionWorkspaceFunctionLevelSql } from '../../database/typeorm/workspace-schema/structure-level-21';
 import { composeServerPathTemplateLevel22 } from '../../database/typeorm/workspace-schema/structure-level-22';
 import { WORKSPACE_CORE_FK_REMOVAL } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
+import { composeServerPathTemplateLevel23 } from '../../database/typeorm/workspace-schema/structure-level-23';
+import { STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/staff-profile-workspace-required-validate';
 import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { composeServerPathTemplateV1GrantParity } from '../../database/typeorm/workspace-schema/v1/server-path-template-grant-parity';
 import { composeServerPathTemplateV1StatementPointer } from '../../database/typeorm/workspace-schema/v1/server-path-template-statement-pointer';
@@ -61,7 +63,17 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *   v20: WorkspaceGrantParityGuards1786721430000 (owner-login PAY-1, re-frozen in place 2026-11-04 for PAY-1b): the v19
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
-function approvedProvisionBody(through: 19 | 20 | 21 | 22): string {
+function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23): string {
+  // C3 Q3 structure level 23 (WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000; DRAFT SQL, owner review first): the
+  // same guarded v3 body over template(22) + the VALIDATE, derived exactly as that migration derives it.
+  if (through === 23) {
+    const structure = STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure!;
+    const fp = structure.fingerprints[workspaceFingerprintMajor()];
+    if (!fp) throw new Error('no declared level-23 fingerprint for this PostgreSQL major');
+    const sql23 = provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel23(), modulesThrough(20).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) })), 23, fp, structure.provisionFunctionLiteral!);
+    const open23 = 'AS $provision$';
+    return sql23.slice(sql23.indexOf(open23) + open23.length, sql23.lastIndexOf('$provision$'));
+  }
   // Part D 0a structure level 22 (WorkspaceCoreForeignKeyRemoval1786721530000; SQL pending owner OK): the same guarded v3 body over
   // template(21) + the foreign key removal, derived exactly as that migration derives it.
   if (through === 22) {
@@ -188,7 +200,8 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const l21 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffMemberSelect1786721480000'`);
       const [{ prosrc }] = await admin.query(`SELECT p.prosrc FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`);
       const l22 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceCoreForeignKeyRemoval1786721530000'`);
-      expect(prosrc).toBe(approvedProvisionBody(l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
+      const l23 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000'`);
+      expect(prosrc).toBe(approvedProvisionBody(l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
     const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'core'::regnamespace AND proname = 'worker_record_workspace_schema_drift'`);

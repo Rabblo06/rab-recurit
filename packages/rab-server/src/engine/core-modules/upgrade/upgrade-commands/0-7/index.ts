@@ -1,6 +1,7 @@
 import type { UpgradeCommand } from '../upgrade-command';
 import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
 import { createHwsCutoverCommand } from './hws-cutover';
+import { STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE } from './staff-profile-workspace-required-validate';
 
 /**
  * Release 0.7.0's upgrade commands (OWNER-DB-ULTIMATE Part C3). Registered in ../registry.ts by the 0.7.0 release PR
@@ -12,5 +13,9 @@ import { createHwsCutoverCommand } from './hws-cutover';
  */
 export const UPGRADE_COMMANDS_0_7: readonly UpgradeCommand[] = Object.freeze([createHwsCutoverCommand()]);
 
-/** Release 0.7.0's workspace commands: none from C3 (the cutover writes core rows, so it is an instance command). */
-export const WORKSPACE_UPGRADE_COMMANDS_0_7: readonly WorkspaceUpgradeCommand[] = Object.freeze([]);
+/**
+ * Release 0.7.0's workspace commands, run per workspace AFTER the release's instance commands (so after the HwsCutover copy):
+ *   - level 23: ValidateStaffProfileWorkspaceRequired (C3 owner decision Q3; DRAFT SQL, owner review first).
+ * The cutover itself writes core rows, so it is an instance command, not one of these.
+ */
+export const WORKSPACE_UPGRADE_COMMANDS_0_7: readonly WorkspaceUpgradeCommand[] = Object.freeze([STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE]);
