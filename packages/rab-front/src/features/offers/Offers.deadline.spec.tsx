@@ -54,20 +54,27 @@ function mount(path = '/offers') {
   );
 }
 const row = async (name: string) => (await screen.findByText(name)).closest('tr') as HTMLElement;
+// New UI: a row's actions live in its "Actions for <name>" menu (Confirm shift / Reject only while the offer may be decided).
+const menu = async (r: HTMLElement, name: string) => {
+  await userEvent.click(within(r).getByRole('button', { name: `Actions for ${name}` }));
+  return { confirm: screen.queryByRole('button', { name: /Confirm shift/ }), reject: screen.queryByRole('button', { name: /^Reject/ }) };
+};
 
 it('shows the server deadline on an accepted offer the manager can confirm, and offers Confirm and Reject', async () => {
   mount();
   const r = await row('Amelia Mine');
   expect(within(r).getByText(`Confirm by ${formatApprovalDeadline(DEADLINE)}`)).toBeInTheDocument();
-  expect(within(r).getByTitle('Confirm shift')).toBeInTheDocument();
-  expect(within(r).getByTitle('Reject')).toBeInTheDocument();
+  const m = await menu(r, 'Amelia Mine');
+  expect(m.confirm).toBeInTheDocument();
+  expect(m.reject).toBeInTheDocument();
 });
 
 it('hides Confirm and Reject when canConfirm is false (another manager sent it)', async () => {
   mount();
   const r = await row('Bilal Other');
-  expect(within(r).queryByTitle('Confirm shift')).toBeNull();
-  expect(within(r).queryByTitle('Reject')).toBeNull();
+  const m = await menu(r, 'Bilal Other');
+  expect(m.confirm).toBeNull();
+  expect(m.reject).toBeNull();
 });
 
 it('past the deadline (server projection, Worker not yet run): "Not confirmed in time", no deadline promise, no Confirm', async () => {
@@ -77,7 +84,7 @@ it('past the deadline (server projection, Worker not yet run): "Not confirmed in
   expect(within(r).getByText(CONFIRMATION_DEADLINE_LABELS.CONSOLE_DETAIL)).toBeInTheDocument();
   expect(within(r).queryByText(/^Confirm by/)).toBeNull();
   expect(within(r).queryByText(/staff accepted/i)).toBeNull();
-  expect(within(r).queryByTitle('Confirm shift')).toBeNull();
+  expect((await menu(r, 'Chen Late')).confirm).toBeNull();
 });
 
 it('a withdrawn offer reads "Not confirmed in time" with the console detail, never the stored reason code', async () => {
@@ -86,29 +93,30 @@ it('a withdrawn offer reads "Not confirmed in time" with the console detail, nev
   expect(within(r).getByText('Not confirmed in time')).toHaveClass('badge');
   expect(within(r).getByText('Withdrawn — not confirmed before the approval deadline')).toBeInTheDocument();
   expect(within(r).queryByText('confirmation_deadline_passed')).toBeNull();
-  expect(within(r).queryByText('manager rejected')).toBeNull();
+  expect(within(r).queryByText('Manager rejected')).toBeNull();
 });
 
 it('an ordinary manager rejection is unchanged', async () => {
   mount();
   const r = await row('Finn Rejected');
-  expect(within(r).getByText('manager rejected')).toBeInTheDocument();
+  expect(within(r).getByText('Manager rejected')).toBeInTheDocument();
   expect(within(r).getByText('Venue reduced headcount')).toBeInTheDocument();
 });
 
 it('tolerates an older API without the fields: today\'s Confirm and Reject, and no invented deadline', async () => {
   mount();
   const r = await row('Eve Legacy');
-  expect(within(r).getByTitle('Confirm shift')).toBeInTheDocument();
-  expect(within(r).getByTitle('Reject')).toBeInTheDocument();
   expect(within(r).queryByText(/^Confirm by/)).toBeNull();
+  const m = await menu(r, 'Eve Legacy');
+  expect(m.confirm).toBeInTheDocument();
+  expect(m.reject).toBeInTheDocument();
 });
 
 it('opening Confirm passes the server deadline fields to the drawer', async () => {
   const opened = jest.fn();
   document.addEventListener('open-offer-confirm', opened);
   mount();
-  await userEvent.click(within(await row('Amelia Mine')).getByTitle('Confirm shift'));
+  await userEvent.click((await menu(await row('Amelia Mine'), 'Amelia Mine')).confirm!);
   expect(opened).toHaveBeenCalledTimes(1);
   expect((opened.mock.calls[0][0] as CustomEvent).detail.offer).toMatchObject({ id: 'o-mine', approvalDeadlineAt: DEADLINE, canConfirm: true });
   document.removeEventListener('open-offer-confirm', opened);
