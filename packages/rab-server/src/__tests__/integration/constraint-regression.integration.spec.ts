@@ -258,6 +258,8 @@ describeIfDb('constraint + state regression in core and every workspace schema (
       { name: 'AI_PROPOSAL_TRANSITIONS', table: 'ai_action_proposal', column: 'status', transitions: shared.AI_PROPOSAL_TRANSITIONS, coreOnly: true },
       // Batch 3 S7: questions / forms (`ai_input_request_state_check`; mirrored by its guard trigger). Core-only table.
       { name: 'AI_INPUT_REQUEST_TRANSITIONS', table: 'ai_input_request', column: 'state', transitions: shared.AI_INPUT_REQUEST_TRANSITIONS, coreOnly: true },
+      // Lane D: staff document verification (`staff_document_status_check`; mirrored by core.staff_document_guard()). Core-only table.
+      { name: 'STAFF_DOCUMENT_TRANSITIONS', table: 'staff_document', column: 'status', transitions: shared.STAFF_DOCUMENT_TRANSITIONS, coreOnly: true },
     ];
     /** Exported transition tables with NO persisted column (documented gap, see WAVE2_LANE_S2_REPORT.md). */
     // ARCHIVE_TRANSITIONS (wave 5, DATA lane): the state is persisted as archived_at nullness, guarded by the

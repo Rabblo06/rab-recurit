@@ -45,6 +45,7 @@ import { SchedulingModule } from './modules/scheduling/scheduling.module';
 import { SearchModule } from './modules/search/search.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { StaffModule } from './modules/staff/staff.module';
+import { StaffDocumentModule } from './modules/staff/staff-document.module';
 import { VenueModule } from './modules/venue/venue.module';
 import { AiModule } from './modules/ai/ai.module';
 import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-params.interceptor';
@@ -83,6 +84,7 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     // attempt per start, fail closed without a crash loop). API only: CommandModule and WorkerModule never import it.
     PlatformAdminBootstrapModule,
     StaffModule,
+    StaffDocumentModule,
     ManagerModule,
     MembershipModule,
     ManagerWorkspaceModule,

@@ -81,7 +81,8 @@ const STAFF_SORT_COLUMNS: Record<string, string> = {
 };
 
 export const STAFF_ROLE_KEY = 'staff';
-export const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
+// STAFF_DOCUMENT_OWN: StaffDocumentPermissions1786722310000 (own documents: view + upload, never verify; OWNER DECISION).
+export const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK, PermissionFlag.STAFF_DOCUMENT_OWN];
 const MAX_SEND_ATTEMPTS = 3;
 
 /**

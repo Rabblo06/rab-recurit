@@ -1703,6 +1703,30 @@ export class EnvironmentVariables {
   @IsString()
   STORAGE_LOCAL_ROOT: string = './storage';
 
+  /**
+   * Virus scanning of uploaded staff documents (Lane D). Host of a ClamAV `clamd` daemon reachable over TCP (INSTREAM).
+   * Unset = no scanner: every upload stays `not_scanned` and stays HIDDEN (no download, no verification) — never marked
+   * clean without a real scan. Which scanner and where it runs is an OWNER DECISION (recommended: ClamAV on our own server).
+   */
+  @IsOptional()
+  @IsString()
+  CLAMAV_HOST?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(1)
+  @Max(65535)
+  CLAMAV_PORT: number = 3310;
+
+  /** Whole-scan deadline (connect + stream + verdict). A timeout is "scanner unavailable", never "clean". */
+  @IsOptional()
+  @Transform(({ value }) => Number(value))
+  @IsInt()
+  @Min(1000)
+  @Max(120000)
+  CLAMAV_TIMEOUT_MS: number = 30000;
+
   /** First path segment of every object key (e.g. `prod`, `staging`) so environments can share one bucket safely. Never authorization. */
   @IsOptional()
   @IsString()
