@@ -43,6 +43,7 @@
  * MIGRATION_SECURITY_KEEP_DATABASES=true keeps the databases (marked disposable) so the integration suites can run on them;
  * their names are written to MIGRATION_SECURITY_DB_FILE when that is set.
  */
+import { CORE_ATTENDANCE_REVIEWED_DRIFT } from '../workspace-schema/attendance-staff-scope-sql';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readdirSync, writeFileSync } from 'node:fs';
@@ -235,6 +236,12 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // M4 §11 LOW finding (DRAFT, owner SQL review pending): the core copy of attendance_tenant changes ONLY its two expressions,
+  // from the tenant binding alone to the tenant binding AND (worker OR the caller's own staff profile OR a non-venue manager of
+  // the workspace OR a Venue Manager of the shift's venue). Same table, name, command (ALL), PERMISSIVE, TO PUBLIC; no grant,
+  // no new policy. The migration replaces only a known pair of expressions (semantic-golden hashes). The lines live in
+  // workspace-schema/attendance-staff-scope-sql.ts: they quote the deparsed policy, which names core.staff_profile / core.shift.
+  '1786722100000-AttendanceStaffScopeRls': CORE_ATTENDANCE_REVIEWED_DRIFT,
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
