@@ -10081,6 +10081,27 @@ Mitigation: default off; exactly true/false; one value for both services; still 
 Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and revert the two gates' AI_ENABLED rules.
 ```
 
+## Semantic posture: trigger definition hash, and a pinned search_path for the read (branch feat/posture-trigger-def-hash, 2026-11-18; split from #251 review F5; no migration)
+
+- **Finding (security finding format, §5.8).** Severity: Low (detection gap).
+  - **Actor:** anyone who can re-create a trigger. In the owner-login build that includes an injected statement as crewflow_owner (the owner-accepted G-02/G-03 class).
+  - **Action:** `DROP TRIGGER` plus `CREATE TRIGGER` under the same name and function, but with a different definition: AFTER instead of BEFORE, another `UPDATE OF` list, a WHEN clause that never matches, or other arguments (for example a widened grant-parity allow-list).
+  - **Consequence:** the guard silently stops guarding, and the semantic posture monitor (`posture-drift/semantic-posture.ts`) reports nothing.
+- **Root cause.** The trigger line was `trigger|table|name|enabled=…|function`. It pinned the name, the enabled state and the function, but not the definition.
+- **Fix.** Every trigger line now ends in `|def=<md5>`. The hash covers:
+  - tgtype (timing, level and events);
+  - the `UPDATE OF` column names;
+  - the whitespace-normalised WHEN text. It is cut out of `pg_get_triggerdef`, because `pg_get_expr` cannot deparse OLD and NEW together. Only an anchored qualifier of the trigger's own schema is removed;
+  - DEFERRABLE and INITIALLY DEFERRED;
+  - the arguments;
+  - the transition-table names.
+
+  No table or schema name goes into the hash, so workspace copies stay comparable. The PG16/17/18 goldens are regenerated from a migrations-only database, and only the `def=` suffix changes.
+- **Also.** `readSemanticPosture` pins `search_path = pg_catalog, public, pg_temp` for the read and restores a caller's value afterwards. Rendered names (regprocedure, pg_get_expr, pg_get_triggerdef) are qualified relative to search_path, so a role-level or database-level search_path can no longer change a line. Residual (security review L-3): `public` stays in the path so extension types such as citext render unqualified, as in the goldens, so operator and overload resolution through `public` remains a residual risk for this read until the L-3 follow-up lands (a session-level pin and/or OPERATOR(pg_catalog.…) in this query).
+- **Tests.**
+  - `semantic-posture-trigger-def.integration.spec.ts` (rolled back): re-creating a probe trigger as AFTER, with another column list, with a WHEN clause, with other arguments or with other events keeps the line prefix and changes `def=`. Re-creating the original definition restores the original line. A search_path that includes core renders the same lines, and the caller's value is restored.
+  - `semantic-posture-trigger-def.spec.ts` (static): SQL shape, the anchored strip, the goldens, and the pin/restore order.
+
 ## Upgrade runner — reviewed upgrade-from lists, and a patch resumes its failed `.0` step (branch feat/runner-cross-upgrade, 2026-11-18; owner decisions 2026-11-18; no SQL)
 - **Threat:** (1) after #219, a minor release accepted only the LAST published version. Once 0.6.1 is published, a database
   still at 0.6.0 is refused by 0.7.0 (65), so the operator's only way forward is an extra hop or `--force`, which skips the
