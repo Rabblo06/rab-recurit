@@ -1,10 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { Organisation } from '../../../../modules/identity/entities/organisation.entity';
-import { PlatformAdmin } from '../../../../modules/identity/entities/platform-admin.entity';
-import { Role } from '../../../../modules/identity/entities/role.entity';
-import { User } from '../../../../modules/identity/entities/user.entity';
+import { Organisation, PlatformAdmin, Role, User } from '../../identity/entities';
 import { forgetTxPermissions } from '../../permissions/tx-permission-memo';
 
 /**

@@ -59,6 +59,7 @@ import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
   FingerprintMajor,
   selectWorkspaceFingerprintsForServer,
+  workspaceFingerprintMajor,
 } from '../../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 
@@ -780,7 +781,9 @@ export class WorkspaceCommandRunner {
   }
 
   private expectedFingerprint(level: number): string | undefined {
-    const major = this.major ?? 16;
+    // No PostgreSQL 16 default (it was the PG17/18 bug of PR #227): the major run() selected for its workspaces, else the
+    // process's selection, else WorkspaceFingerprintMajorNotSelectedError.
+    const major = this.major ?? workspaceFingerprintMajor();
     if (this.options.expectedFingerprint) return this.options.expectedFingerprint(level, major);
     if (level <= LATEST_WORKSPACE_MODULE_VERSION) return EXPECTED_WORKSPACE_FINGERPRINTS[level];
     return declaredFingerprint(level, major, this.options.workspaceRegistry);
