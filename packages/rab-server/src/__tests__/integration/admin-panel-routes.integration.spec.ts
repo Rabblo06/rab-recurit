@@ -39,6 +39,7 @@ const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
 
 const GET_ROUTES = [
   '/rest/v1/admin/users/search?q=example',
+  '/rest/v1/admin/users/directory',
   `/rest/v1/admin/users/${randomUUID()}/summary`,
   '/rest/v1/admin/platform-admins',
   '/rest/v1/admin/lookup/organisations?q=test',
@@ -146,6 +147,7 @@ describeIfDb('admin panel routes (integration)', () => {
     const config = app.get(AdminConfigService);
     const calls: Array<[string, () => Promise<unknown>]> = [
       ['searchUsers', () => users.searchUsers(actor, target.email)],
+      ['memberDirectory', () => users.memberDirectory(actor)],
       ['userSummary', () => users.userSummary(actor, target.userId)],
       ['revokeSessions', () => users.revokeSessions(actor, target.userId, 'layer two')],
       ['listPlatformAdmins', () => users.listPlatformAdmins(actor)],

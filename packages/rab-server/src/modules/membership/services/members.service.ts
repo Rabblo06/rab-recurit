@@ -152,6 +152,16 @@ export class MembersService {
     return { membershipStatus: row.status, customRoleIds: row.custom_role_ids ?? [] };
   }
 
+  async directory(ctx: AuthContext, opts: { search?: string; page?: number; limit?: number }) {
+    if (!ctx.workspaceId || !ctx.userId || !ctx.organisationId) throw new ForbiddenException();
+    return this.tenantContext.runInTenantContext(ctx, async manager => {
+      const [membership] = await manager.query("SELECT 1 FROM core.workspace_membership WHERE user_id=$1 AND workspace_id=$2 AND organisation_id=$3 AND status='active'", [ctx.userId,ctx.workspaceId,ctx.organisationId]);
+      if (!membership) throw new ForbiddenException();
+      const [row] = await manager.query('SELECT core.workspace_member_directory($1,$2,$3) AS result', [opts.search ?? '',opts.page ?? 1,opts.limit ?? 25]);
+      return row.result;
+    });
+  }
+
   async list(ctx: AuthContext, opts: { search?: string; page: number; limit: number }): Promise<{ data: MemberListItem[]; total: number; page: number; limit: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const workspace = { owner_user_id: (await this.assertOwnerTx(manager, ctx, PermissionFlag.ROLE_VIEW)).ownerUserId };
