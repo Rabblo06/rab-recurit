@@ -206,7 +206,7 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
     });
     if (!prepared) return 'stale';
 
-    // Data in, PDF out: renderReportPdf builds the ONE view-model and renders it with the renderer PDF_RENDERER selects.
+    // Data in, PDF out: renderReportPdf builds the ONE view-model and renders it natively.
     const doc: ReportDocument = { kind: 'approved-shift-statement', data: prepared.data };
     const buffer = deps.render ? await deps.render(doc) : await renderReportPdf(doc);
     uploaded = await deps.files.putObject({

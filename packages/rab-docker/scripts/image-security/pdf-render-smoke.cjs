@@ -9,7 +9,7 @@
  *                                      the production compose contract): renders the real pre-shift report
  *                                      (the same synthetic data as before P5) through the production data-in seam
  *                                      (compiled rab-worker render-pdf.util `renderReportPdf({ kind, data })`, owner
- *                                      decision D1) with PDF_RENDERER=native, and prints JSON with the PDF (base64),
+ *                                      decision D1; native is the only renderer), and prints JSON with the PDF (base64),
  *                                      render time and runtime facts.
  *
  * The synthetic staff names include markup (`<script>`, `<img src=http://…>`): the native renderer draws plain text and
@@ -62,9 +62,8 @@ async function render() {
     ],
   };
   const started = process.hrtime.bigint();
-  // The same request the shift-report scheduler makes; PDF_RENDERER=native explicitly (a P1/P2 Worker still has the
-  // switch; after D10 it accepts only native or is gone).
-  const pdf = await util.renderReportPdf({ kind: 'pre-shift', data }, { ...process.env, PDF_RENDERER: 'native' });
+  // The same request the shift-report scheduler makes (native only; the PDF_RENDERER switch is retired).
+  const pdf = await util.renderReportPdf({ kind: 'pre-shift', data });
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   writeResult(JSON.stringify({
     marker: MARKER,
