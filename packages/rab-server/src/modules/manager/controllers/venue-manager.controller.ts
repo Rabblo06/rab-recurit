@@ -18,7 +18,6 @@ import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
 import { AssignVenueTeamStaffDto } from '../dto/assign-venue-team-staff.dto';
-import { StepUpReauthDto } from '../../../engine/core-modules/auth/dto/step-up-reauth.dto';
 import { VenueManagerService } from '../services/venue-manager.service';
 
 /** Normal Manager flow: a Venue Manager inside the caller's own workspace. See VenueManagerService. */
@@ -111,10 +110,10 @@ export class VenueManagerController {
     return this.venueManagers.listEmails(ctx, id);
   }
 
-  /** Step-up reauth: `currentPassword` is verified (in ManagerService.deleteUser) before anything else runs. */
+  /** Deletion uses session authorization and protected-account checks. */
   @Delete(':id')
-  deleteUser(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @Body() dto: StepUpReauthDto) {
-    return this.venueManagers.deleteUser(ctx, id, dto.currentPassword);
+  deleteUser(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.venueManagers.deleteUser(ctx, id);
   }
 
   /** Profile photo, same limits as the Staff avatar (size and image type checked again by the storage layer). */
