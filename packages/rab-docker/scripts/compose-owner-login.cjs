@@ -535,6 +535,17 @@ const AI_ENABLED_EXPR = '${AI_ENABLED:-false}';
 /** The value AI_ENABLED renders when compose.env does not set it: off. */
 const AI_ENABLED_DEFAULT = 'false';
 /**
+ * Owner decision 2 (2026-11-21): platform administrators MUST use MFA in production. In compose text the switch is only
+ * ever committed as PLATFORM_ADMIN_MFA_EXPR (default on; docker-compose.production.yml must carry it) or a literal true;
+ * `false`, another default, `:?` or a bare `${...}` are refused. In an env file it may only be exactly `true` (an empty
+ * value would fall back to the code default, false). The other AUTH_MFA_ENFORCE_* switches are the owner's staged rollout
+ * and are not pinned here.
+ */
+const PLATFORM_ADMIN_MFA_KEY = 'AUTH_MFA_ENFORCE_PLATFORM_ADMIN';
+const PLATFORM_ADMIN_MFA_EXPR = '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}';
+const PLATFORM_ADMIN_MFA_TEXT_VALUES = Object.freeze([PLATFORM_ADMIN_MFA_EXPR, 'true', '"true"', "'true'"]);
+const PLATFORM_ADMIN_MFA_MESSAGE = 'owner decision 2 (2026-11-21): platform administrators must use MFA in production; it can never be committed or set to false';
+/**
  * BC-07: the external security audit sink, required in production by security-audit-sink.ts (securityAuditSinkConfig).
  * The values are the code's own: CREWFLOW_AUDIT_SINK none | stdout | file, of which production accepts only stdout;
  * CREWFLOW_AUDIT_SINK_FAILURE refuse | log, of which production accepts only refuse (unset = refuse);
@@ -1511,6 +1522,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
     // Owner decision 2026-11-20: the AI switch is compose.env's (exactly true or false: the STRICT_SWITCHES check above).
     if (key === AI_ENABLED_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): the committed ${AI_ENABLED_EXPR} on rab-api and rab-worker would silently override a value here`);
+    // Owner decision 2: an env file may only turn platform-admin MFA ON (empty would mean the code default, false).
+    if (key === PLATFORM_ADMIN_MFA_KEY && value !== 'true') problems.push(`${key}: must be exactly true (${PLATFORM_ADMIN_MFA_MESSAGE}; value not shown)`);
     if (kind === 'compose') {
       // DB-SETUP (T-1 / T-2): the two database values are the only secrets compose.env holds; everything else stays
       // CREWFLOW_* and secret-free.
@@ -1673,6 +1686,27 @@ function aiEnabledExpressionProblems(rel, text, { required = false } = {}) {
 }
 
 /**
+ * Owner decision 2 (2026-11-21), platform-admin MFA in raw compose text: every uncommented AUTH_MFA_ENFORCE_PLATFORM_ADMIN
+ * line is PLATFORM_ADMIN_MFA_EXPR or a literal true (a list form, false, another default, `:?` or a bare `${...}` are
+ * refused). `required`: the file must carry it as exactly PLATFORM_ADMIN_MFA_EXPR (docker-compose.production.yml).
+ */
+function platformAdminMfaProblems(rel, text, { required = false } = {}) {
+  const problems = [];
+  let exact = 0;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/^\s*#/.test(line)) continue;
+    const m = /^\s*(-\s*)?(["']?)AUTH_MFA_ENFORCE_PLATFORM_ADMIN\2\s*[:=]\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    if (m[3] === PLATFORM_ADMIN_MFA_EXPR) exact += 1;
+    if (m[1] || m[2] || !/^\s*AUTH_MFA_ENFORCE_PLATFORM_ADMIN:/.test(line) || !PLATFORM_ADMIN_MFA_TEXT_VALUES.includes(m[3])) {
+      problems.push(`${rel}: ${PLATFORM_ADMIN_MFA_KEY} must be committed as exactly ${PLATFORM_ADMIN_MFA_KEY}: ${PLATFORM_ADMIN_MFA_EXPR} (or a literal true) (${PLATFORM_ADMIN_MFA_MESSAGE})`);
+    }
+  }
+  if (required && exact === 0) problems.push(`${rel}: ${PLATFORM_ADMIN_MFA_KEY} is missing (commit ${PLATFORM_ADMIN_MFA_KEY}: ${PLATFORM_ADMIN_MFA_EXPR}; ${PLATFORM_ADMIN_MFA_MESSAGE})`);
+  return problems;
+}
+
+/**
  * Owner decision 2026-11-20, default OFF: problems of a model rendered from the gate's own sentinel compose.env, which sets
  * no AI_ENABLED, so rab-api and rab-worker must render the default, "false" (a committed literal true, another default, or
  * a missing key does not). Only for those renders: an operator's compose.env may set true (checkModel accepts it).
@@ -1709,6 +1743,7 @@ function lintComposeText(rel, text) {
     if (m[1] !== APPROVAL_MODE_EXPR) problems.push(`${rel}: ${APPROVAL_MODE_KEY} must be exactly ${APPROVAL_MODE_EXPR} (an opt-in of compose.env)`);
   }
   problems.push(...aiEnabledExpressionProblems(rel, text));
+  problems.push(...platformAdminMfaProblems(rel, text));
   if (/^\s*privileged\s*:\s*true/m.test(text)) problems.push(`${rel}: privileged: true`);
   return problems;
 }
@@ -1804,6 +1839,7 @@ function staticProblems() {
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...databaseExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...bootstrapAdminComposeTextProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...aiEnabledExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8'), { required: true }));
+  if (fs.existsSync(PRODUCTION_FILE)) problems.push(...platformAdminMfaProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8'), { required: true }));
   // ADMIN_URL_PLACEMENT, every compose file of the repository (dev, QA, test overlays included), not only the deploy files.
   for (const file of composeFilesInRepo()) {
     problems.push(...adminUrlPlacementProblems(path.relative(path.resolve(DOCKER_DIR, '../..'), file).split(path.sep).join('/'), fs.readFileSync(file, 'utf8')));
@@ -1877,6 +1913,7 @@ module.exports = {
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   ROTATE_KEY, ROTATE_EXPR, ROTATE_VALUES,
   AI_ENABLED_KEY, AI_ENABLED_EXPR, AI_ENABLED_DEFAULT, aiEnabledExpressionProblems, aiDefaultOffProblems,
+  PLATFORM_ADMIN_MFA_KEY, PLATFORM_ADMIN_MFA_EXPR, platformAdminMfaProblems,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,

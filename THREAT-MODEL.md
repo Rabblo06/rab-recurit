@@ -10498,4 +10498,12 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   it.
 - **Residual:** a server whose `runtime.env` was written before this change has no line, and the image compose has no
   default, so rab-api keeps the code default (`false`) until the operator adds the line (checklist step 1). The switch
-  stays operator-settable (`false` on the server turns it off again); no gate refuses `false` today.
+  can still be turned off on the server itself (a platform variable or an edited file the lint never sees); the gate below
+  refuses every committed or linted `false`.
+- **Gate (lead request, same PR):** `scripts/compose-owner-login.cjs` refuses any committed
+  `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` other than `${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}` or a literal `true` in the deploy
+  compose files (`false`, `:-false`, `:-`, a bare `${...}`, `:?`, the list form and a quoted key are refused), requires
+  docker-compose.production.yml to carry exactly that expression, and refuses the key in any env file unless it is exactly
+  `true` (an empty value would mean the code default, false). Messages name the key, never the value. Tests: two cases
+  in `compose-owner-login.test.cjs` (every refused form, the accepted forms, the committed production file passes and the
+  same file turned off fails; env-file values; the other three switches still accept false).
