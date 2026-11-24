@@ -1,6 +1,5 @@
 import { ManagerApplication } from '../../../engine/core-modules/auth/guards/manager-application.decorator';
 import { PermissionFlag } from '@rab/shared';
-import { Throttle } from '@nestjs/throttler';
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
@@ -74,9 +73,8 @@ export class OfferController {
    */
   @Post('offers/send-to-shifts')
   @ManagerApplication()
-  // Route-level per-IP cap of the EXPENSIVE class (10/min); the per-user and per-organisation buckets are debited in the
-  // service, where every caller (not only HTTP) is metered.
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  // The §5.5 EXPENSIVE limit is the per-user and per-organisation bucket debited in the service (every caller, not only
+  // HTTP). No extra per-IP cap: managers behind one office NAT would share it (security re-review of #294).
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
   sendOffersToShifts(@AuthUser() ctx: AuthContext, @Body() dto: SendOffersToShiftsDto) {
     return this.offerService.sendOffersToShifts(ctx, dto);
