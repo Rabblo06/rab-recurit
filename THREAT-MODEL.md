@@ -10147,6 +10147,27 @@ Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and
   calls act or return data); with only the email-change scope check removed, every `EmailChangeService.request` refusal
   fails (a request is written).
 
+## Semantic posture: trigger definition hash, and a pinned search_path for the read (branch feat/posture-trigger-def-hash, 2026-11-18; split from #251 review F5; no migration)
+
+- **Finding (security finding format, §5.8).** Severity: Low (detection gap).
+  - **Actor:** anyone who can re-create a trigger. In the owner-login build that includes an injected statement as crewflow_owner (the owner-accepted G-02/G-03 class).
+  - **Action:** `DROP TRIGGER` plus `CREATE TRIGGER` under the same name and function, but with a different definition: AFTER instead of BEFORE, another `UPDATE OF` list, a WHEN clause that never matches, or other arguments (for example a widened grant-parity allow-list).
+  - **Consequence:** the guard silently stops guarding, and the semantic posture monitor (`posture-drift/semantic-posture.ts`) reports nothing.
+- **Root cause.** The trigger line was `trigger|table|name|enabled=…|function`. It pinned the name, the enabled state and the function, but not the definition.
+- **Fix.** Every trigger line now ends in `|def=<md5>`. The hash covers:
+  - tgtype (timing, level and events);
+  - the `UPDATE OF` column names;
+  - the whitespace-normalised WHEN text. It is cut out of `pg_get_triggerdef`, because `pg_get_expr` cannot deparse OLD and NEW together. Only an anchored qualifier of the trigger's own schema is removed;
+  - DEFERRABLE and INITIALLY DEFERRED;
+  - the arguments;
+  - the transition-table names.
+
+  No table or schema name goes into the hash, so workspace copies stay comparable. The PG16/17/18 goldens are regenerated from a migrations-only database, and only the `def=` suffix changes.
+- **Also.** `readSemanticPosture` pins `search_path = pg_catalog, public, pg_temp` for the read and restores a caller's value afterwards. Rendered names (regprocedure, pg_get_expr, pg_get_triggerdef) are qualified relative to search_path, so a role-level or database-level search_path can no longer change a line. Residual (security review L-3): `public` stays in the path so extension types such as citext render unqualified, as in the goldens, so operator and overload resolution through `public` remains a residual risk for this read until the L-3 follow-up lands (a session-level pin and/or OPERATOR(pg_catalog.…) in this query).
+- **Tests.**
+  - `semantic-posture-trigger-def.integration.spec.ts` (rolled back): re-creating a probe trigger as AFTER, with another column list, with a WHEN clause, with other arguments or with other events keeps the line prefix and changes `def=`. Re-creating the original definition restores the original line. A search_path that includes core renders the same lines, and the caller's value is restored.
+  - `semantic-posture-trigger-def.spec.ts` (static): SQL shape, the anchored strip, the goldens, and the pin/restore order.
+
 ## Upgrade runner — reviewed upgrade-from lists, and a patch resumes its failed `.0` step (branch feat/runner-cross-upgrade, 2026-11-18; owner decisions 2026-11-18; no SQL)
 - **Threat:** (1) after #219, a minor release accepted only the LAST published version. Once 0.6.1 is published, a database
   still at 0.6.0 is refused by 0.7.0 (65), so the operator's only way forward is an extra hop or `--force`, which skips the
@@ -10501,6 +10522,32 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   trigger, permissions and wiring; publish-image still starts on `release: published`.
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
+
+## CF-23 — notes on the user profile page no longer persist to browser storage (branch fix/cf23-staff-notes-no-browser-storage, 2026-11-21; no SQL, no server change)
+- **Finding (CF-23, LOW):** `packages/rab-front/src/features/users/UserProfile.tsx` (`/users/:id`) kept notes about a
+  person in `localStorage` under `user-notes-<userId>`. Browser storage outlives logout and is shared by every account
+  that signs in on the same browser profile, so a note written by one console user was shown to the next one on a shared
+  device and stayed readable in devtools indefinitely. It was also fake persistence: nothing reached the server.
+- **Control:** notes on that page live in React component memory only, keyed by the profile's user id (a note added on
+  one person's page is never shown on another's), and are lost on navigation or reload. The page says so ("Notes on
+  this page are not saved...") and the button reads "Add note", not "Save note". At app start-up (App.tsx, whatever page
+  opens first) and again when the page mounts, every `user-notes-*` key an older build left in `localStorage` is removed
+  (other keys untouched; `features/users/legacyNotes.ts`); storage errors (private mode,
+  blocked storage) are swallowed because nothing was stored there. No new table, endpoint or SQL.
+- **Assumption (data retention, flagged):** purging the legacy `user-notes-*` keys deletes notes a console user may
+  believe they saved. They existed only on that one browser, never on the server, and keeping them is the leak this
+  finding is about, so they are deleted rather than migrated. Veto if those notes must be kept.
+- **Note:** the server has no `/users/:id` route today (staff and manager notes go through the RLS-scoped
+  `/staff/:id/notes`, `/managers/:id/notes`, `/venue-managers/:id/notes` endpoints used by `UserDetailPanel`), so this
+  page currently renders "User not found" and the notes tab is unreachable in a live console. The fix still applies so
+  the page cannot leak if it is wired up again, and the purge cleans devices used with older builds.
+- **Tests:** `packages/rab-front/src/features/users/UserProfile.spec.tsx`: adding a note shows it while
+  `Storage.prototype.setItem` and `sessionStorage.setItem` are never called and both storages stay empty; notes seeded
+  under `user-notes-*` by an older build are not shown and are removed on mount, an unrelated key survives; a note added
+  on user A's page is not shown after navigating to user B's page. `App.spec.tsx`: rendering `<App>` (the login page) with
+  a seeded `user-notes-x` key removes it and keeps an unrelated key (fails without the start-up purge).
+- **Residual:** notes on this page are not saved at all until a server-side, RLS-scoped notes store backs it (a new
+  table = owner SQL review).
 
 ## engine/ stops importing modules/ — identity entities, venue resource scope, entity cache (branches refactor/engine-owns-identity-entities, refactor/engine-modules-scope-and-cache, refactor/engine-modules-venue-summary, 2026-11-21; no migration)
 - **Finding:** CLAUDE.md's "engine/ never imports from modules/" had 24 production violations (ratchet baseline
