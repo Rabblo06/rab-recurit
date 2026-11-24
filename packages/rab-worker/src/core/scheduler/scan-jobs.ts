@@ -185,6 +185,8 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
   job(SCAN_QUEUES.shifts, 'shift-scan-combined', 'shift scan (combined)', { kind: 'combined-shift-scan' }, 'lastShiftScanCombinedAt', 'shiftScanCombinedFailures', true, {
     shiftScanMode: 'combined',
   }),
+  // Lane D (staff documents): expiry alerts at 30 / 7 / 0 days, appended last so every earlier scan keeps its index.
+  job(SCAN_QUEUES.reports, 'staff-document-expiry', 'staff document expiry', envSeconds('WORKER_STAFF_DOCUMENT_EXPIRY_INTERVAL_SECONDS'), 'lastStaffDocumentExpiryAt', 'staffDocumentExpiryFailures'),
 ]);
 
 /**

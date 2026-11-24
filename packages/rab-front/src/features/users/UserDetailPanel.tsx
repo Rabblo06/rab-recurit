@@ -9,6 +9,8 @@ import DetailTabs from './DetailTabs';
 import { AnimatePresence, motion } from 'framer-motion';
 import { contentSwap } from '../../shared/motion';
 import StaffReviewsTab from './StaffReviewsTab';
+import StaffDocumentsSection from './documents/StaffDocumentsSection';
+import { IconFileText } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { lastAnsweredAt, pollingOptions, settlingInterval } from '../../shared/lib/polling';
 import Drawer from '../../shared/components/Drawer';
@@ -25,7 +27,7 @@ import VenueManagerTeamSection from './VenueManagerTeamSection';
 import { getApiErrorCode, getApiErrorMessage } from '../../shared/lib/apiError';
 
 type UserType = 'staff' | 'manager';
-type DetailTab = 'home' | 'timeline' | 'email' | 'note' | 'staff' | 'reviews';
+type DetailTab = 'home' | 'timeline' | 'email' | 'note' | 'staff' | 'reviews' | 'documents';
 
 /** Same suggestion lists as CreateUserModal's own — kept in sync, not re-derived from a shared module (three short arrays, not worth a new shared file for). */
 const EMPLOYMENT_TYPES = ['Full-time', 'Part-time', 'Temporary', 'Casual', 'Contract'];
@@ -788,6 +790,7 @@ export default function UserDetailPanel() {
               { id: 'note', label: 'Notes', icon: <IconNotes size={14} /> },
               ...(teamApiBase ? [{ id: 'staff' as const, label: 'Assigned staff', icon: <IconUsersGroup size={14} /> }] : []),
               ...(userType === 'staff' ? [{ id: 'reviews' as const, label: 'Staff reviews', icon: <IconStar size={14} /> }] : []),
+              ...(userType === 'staff' ? [{ id: 'documents' as const, label: 'Documents', icon: <IconFileText size={14} /> }] : []),
             ]}
             value={tab}
             onChange={setTab}
@@ -989,6 +992,7 @@ export default function UserDetailPanel() {
             )}
 
             {tab === 'reviews' && userType === 'staff' && id && <StaffReviewsTab staffId={id} staffName={name} />}
+            {tab === 'documents' && userType === 'staff' && id && <StaffDocumentsSection staffId={id} staffName={name} />}
             {tab === 'staff' && teamApiBase && id && (
               <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} apiBase={teamApiBase} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
             )}

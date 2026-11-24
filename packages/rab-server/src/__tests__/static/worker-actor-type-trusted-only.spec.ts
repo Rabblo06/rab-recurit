@@ -123,6 +123,10 @@ const WORKER_ACTOR_TYPE_ALLOWLIST: Allowlist = {
       'level-22 cleanup (withLevel22Visibility): the worker scan plus the workspace owner for one workspace of the ' +
       "candidate's own organisation (owner decision 0a-T2), bound through bindMaintenanceSessionGucs and bound back after",
   },
+  'queues/rab-reports/staff-document-expiry.job.ts': {
+    sites: 1,
+    why: 'staff document expiry alerts: candidates from the worker discovery scan; no human actor behind the job',
+  },
   'queues/rab-reports/shift-statement.job.ts': {
     sites: 1,
     why: 'pay statement generation (`workerCtx`): scope from the claimed payroll row / discovery, never from the payload alone',

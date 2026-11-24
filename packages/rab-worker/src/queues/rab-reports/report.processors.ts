@@ -6,6 +6,7 @@ import { CONSUMER_QUEUES, SCAN_QUEUES } from '../../core/scheduler/queue-registr
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runFinalTimesheetCycle } from './final-timesheet.job';
 import { runPayrollPeriodAttentionCycle } from './payroll-period-attention.job';
+import { runStaffDocumentExpiryCycle } from './staff-document-expiry.job';
 import { runShiftReportSchedulerCycle } from './shift-report-scheduler.job';
 import { enqueueShiftStatement } from './shift-statement-enqueue';
 import { processShiftStatementJob, runShiftStatementDispatchCycle } from './shift-statement.job';
@@ -65,6 +66,13 @@ export class ReportScanProcessor {
     const { runtimeDataSource, tenantContext, notificationService, logger } = this.deps.get();
     const result = await runPayrollPeriodAttentionCycle(runtimeDataSource, tenantContext, notificationService);
     if (result.notified) logger.log(`payroll period attention: notified=${result.notified}`);
+  }
+
+  @Process('staff-document-expiry')
+  async staffDocumentExpiry(): Promise<void> {
+    const { runtimeDataSource, tenantContext, notificationService, logger } = this.deps.get();
+    const result = await runStaffDocumentExpiryCycle(runtimeDataSource, tenantContext, notificationService);
+    if (result.notified) logger.log(`staff document expiry: notified=${result.notified}`);
   }
 }
 

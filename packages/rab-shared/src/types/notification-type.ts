@@ -60,6 +60,9 @@ export const NotificationType = {
   PAYSLIP_AVAILABLE: 'payslip_available',
   // ...and a calendar period ended with records still waiting for a timesheet or approval (workspace owner).
   PAYROLL_PERIOD_ATTENTION: 'payroll_period_attention',
+  // StaffDocumentSchema1786722300000 (widens the preference CHECK): a staff document expires in 30 / 7 days or today
+  // (worker, once per document and threshold) — to the staff member and to the workspace owner.
+  STAFF_DOCUMENT_EXPIRING: 'staff_document_expiring',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

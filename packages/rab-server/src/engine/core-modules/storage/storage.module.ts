@@ -6,13 +6,14 @@ import { FileKind } from './file-kinds';
 import { FileService } from './file.service';
 import { FilesController } from './files.controller';
 import { StorageDriverFactory } from './storage-driver.factory';
+import { VirusScanner } from './virus-scan/virus-scanner';
 
 @Global()
 @Module({
   imports: [AuthModule],
   controllers: [FilesController],
-  providers: [StorageDriverFactory, FileService, FileAccessRegistry],
-  exports: [FileService, FileAccessRegistry, StorageDriverFactory],
+  providers: [StorageDriverFactory, FileService, FileAccessRegistry, VirusScanner],
+  exports: [FileService, FileAccessRegistry, StorageDriverFactory, VirusScanner],
 })
 export class StorageModule implements OnModuleInit {
   constructor(private readonly registry: FileAccessRegistry) {}

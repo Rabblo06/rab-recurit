@@ -22,19 +22,20 @@ const HISTORICAL_SECONDS: Record<string, number> = {
   'late-clock-in': 120, 'shift-cancellation-followup': 60, 'offer-expiry': 60, 'manager-confirmation-timeout': 60,
   'replacement-staff': 120, 'token-cleanup': 86_400, 'storage-cleanup': 86_400, 'shift-report-scheduler': 300,
   'final-timesheet': 300, 'shift-statement-dispatch': 5, 'payroll-period-attention': 1_800, 'realtime-outbox-publish': 2,
+  'staff-document-expiry': 3_600, // Lane D: new scan (not a former constant)
 };
 
 describe('Phase A scan interval settings', () => {
-  it('maps the 17 former constants one-to-one onto WORKER_<JOB>_INTERVAL_SECONDS keys; the 3 minutes keys are unchanged', () => {
+  it('maps the 17 former constants (plus Lane D staff-document-expiry) one-to-one onto WORKER_<JOB>_INTERVAL_SECONDS keys; the 3 minutes keys are unchanged', () => {
     const secondsDefs = SCAN_JOBS.filter((d) => d.interval.kind === 'env-seconds');
-    expect(secondsDefs).toHaveLength(17);
+    expect(secondsDefs).toHaveLength(18);
     // Phase B P8 (owner decision C): the one constant is the daily counts-only provisioning health alert. Making it an env
     // setting needs a WORKER_*_INTERVAL_SECONDS key in the environment layer (coordinator-owned; flagged, not done here).
     expect(SCAN_JOBS.filter((d) => d.interval.kind === 'constant').map((d) => [d.jobName, d.interval])).toEqual([
       ['workspace-provisioning-health', { kind: 'constant', ms: 86_400_000 }],
     ]);
     const keys = secondsDefs.map((d) => (d.interval as { key: string }).key);
-    expect(new Set(keys).size).toBe(17);
+    expect(new Set(keys).size).toBe(18);
     expect([...keys].sort()).toEqual([...WORKER_SCAN_INTERVAL_KEYS].sort());
     for (const def of secondsDefs) {
       const key = (def.interval as { key: keyof typeof WORKER_SCAN_INTERVAL_SETTINGS }).key;
@@ -135,7 +136,7 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     expect(result.disabled).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention', 'ai-stale-turn-sweep', 'shift-scan-combined']);
     const expected = SCAN_JOBS.filter((d) => !gated.includes(d.jobName));
     expect(calls.map((c) => c.metricKey)).toEqual(expected.map((d) => d.jobName));
-    expect(new Set(calls.map((c) => c.name)).size).toBe(17);
+    expect(new Set(calls.map((c) => c.name)).size).toBe(18);
     calls.forEach((c, i) => expect(c.intervalMs).toBe(resolveIntervalMs(expected[i]!, env)));
     // Phase D (D3): only the three daily scans start one interval late.
     expect(calls.filter((c) => c.firstRunAfterInterval).map((c) => c.metricKey)).toEqual(['token-cleanup', 'storage-cleanup', 'workspace-provisioning-health']);
@@ -168,7 +169,7 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     expect(bad.calls).toHaveLength(0);
     // ...and the refused runtime was not marked registered, so a corrected boot path could still register once.
     registerIntervalScans(bad.runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env));
-    expect(bad.calls).toHaveLength(23); // no enable predicate given: every scan, the D-Q4a combined one included
+    expect(bad.calls).toHaveLength(24); // no enable predicate given: every scan, the D-Q4a combined one included
   });
 
   it('loopOptionsOf carries firstRunAfterInterval only when the scan opts in (default shape unchanged)', () => {

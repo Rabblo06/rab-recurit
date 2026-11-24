@@ -94,6 +94,13 @@ export class FileService {
       if (!buffer.subarray(0, 5).equals(PDF_MAGIC)) throw new BadRequestException('The content is not a valid PDF.');
       return { ext: 'pdf', mimeType: 'application/pdf' };
     }
+    if (rules.content === 'document') {
+      // A PDF or a PNG / JPEG scan — never WEBP, GIF, SVG, HTML or an office file, whatever the filename or Content-Type says.
+      if (buffer.subarray(0, 5).equals(PDF_MAGIC)) return { ext: 'pdf', mimeType: 'application/pdf' };
+      const scan = sniffImageType(buffer);
+      if (scan && (scan.mimetype === 'image/png' || scan.mimetype === 'image/jpeg')) return { ext: scan.ext, mimeType: scan.mimetype };
+      throw new BadRequestException('Unsupported file type. Only PDF, PNG and JPEG documents are accepted.');
+    }
     const sniffed = sniffImageType(buffer);
     if (!sniffed) throw new BadRequestException('Unsupported file type. Only PNG, JPG and WEBP images are accepted.');
     return { ext: sniffed.ext, mimeType: sniffed.mimetype };
@@ -226,8 +233,14 @@ export class FileService {
     if (head.sizeBytes !== file.sizeBytes) throw new StorageError(StorageErrorCode.INTEGRITY_FAILED, 'The stored object failed its integrity check.', false);
   }
 
+  /** The presigned lifetime for this file: the env TTL, or the kind's own shorter one (FILE_KIND_RULES.signedUrlTtlSeconds). */
+  signedUrlTtlFor(kind: string): number {
+    const own = FILE_KIND_RULES[kind as FileKindType]?.signedUrlTtlSeconds;
+    return own ? Math.min(own, this.signedUrlTtlSeconds) : this.signedUrlTtlSeconds;
+  }
+
   async signedDownloadUrl(file: StoredFile, filename: string, contentType: string): Promise<string> {
-    return this.driver.signedGetUrl(file.objectKey, { ttlSeconds: this.signedUrlTtlSeconds, filename, contentType });
+    return this.driver.signedGetUrl(file.objectKey, { ttlSeconds: this.signedUrlTtlFor(file.kind), filename, contentType });
   }
 
   // ---------------------------------------------------------------------------------------------- lifecycle
@@ -275,7 +288,8 @@ export class FileService {
     if (!Number.isInteger(input.sizeBytes) || input.sizeBytes <= 0 || input.sizeBytes > limit) {
       throw new BadRequestException(`The file size must be between 1 byte and ${Math.floor(limit / (1024 * 1024))}MB.`);
     }
-    const allowedTypes = rules.content === 'pdf' ? ['application/pdf'] : ['image/png', 'image/jpeg', 'image/webp'];
+    const allowedTypes =
+      rules.content === 'pdf' ? ['application/pdf'] : rules.content === 'document' ? ['application/pdf', 'image/png', 'image/jpeg'] : ['image/png', 'image/jpeg', 'image/webp'];
     if (!allowedTypes.includes(input.contentType)) throw new BadRequestException('Unsupported file type.');
 
     // Abuse control: a user cannot mint unlimited abandoned uploads.
