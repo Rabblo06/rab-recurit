@@ -24,6 +24,8 @@ const productionEnv = {
   // Phase B (B1): production takes PG_DATABASE_URL only and refuses the legacy DATABASE_URL.
   PG_DATABASE_URL: 'postgres://rab:rab@db.example.com:5432/rab?sslmode=verify-full',
   DATABASE_URL: undefined,
+  // Owner decision 2 (review of #327): production refuses to boot with platform-admin MFA off.
+  AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'true',
 };
 
 describe('validate', () => {

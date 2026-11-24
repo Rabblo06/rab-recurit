@@ -669,7 +669,7 @@ test('J2: `--lint-env-file runtime` refuses PUSH_ENABLED=true while the committe
     assert.equal(gate.main(['--lint-env-file', 'runtime', file]), 1);
     assert.ok(logs.some((l) => /FAIL runtime env file: default: rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/.test(l)), logs.join('\n'));
     logs.length = 0;
-    fsx.writeFileSync(file, 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=false\n');
+    fsx.writeFileSync(file, 'CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true\nPUSH_ENABLED=false\n');
     assert.equal(gate.main(['--lint-env-file', 'runtime', file]), 0);
   } finally {
     console.log = original;
@@ -690,7 +690,7 @@ test('J2-1: `--lint-env-file runtime` reads switches as Compose does: commented 
     const logs = [];
     console.log = (m) => logs.push(String(m));
     try {
-      fsx.writeFileSync(file, `CREWFLOW_AUDIT_SINK=stdout\n${line}\n`);
+      fsx.writeFileSync(file, `CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true\n${line}\n`);
       return { code: gate.main(['--lint-env-file', 'runtime', file]), out: logs.join('\n') };
     } finally {
       console.log = original;

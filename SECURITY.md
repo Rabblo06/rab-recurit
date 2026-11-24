@@ -103,7 +103,8 @@ addresses behave the same:
 - **Enforcement:** every flag defaults to **off** in code: `AUTH_MFA_ENFORCE_PLATFORM_ADMIN`, `_ORGANISATION_OWNER`,
   `_INITIAL_MANAGER` and `_OTHER_WEB_USERS`. Production turns `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` **on** (owner decision
   2, 21 Nov 2026: `docker-compose.production.yml` defaults it to true and `env/runtime.env.example` sets it), and the
-  first-admin bootstrap refuses to run without it. The other three stay off until the owner's scheduled rollout
+  first-admin bootstrap refuses to run without it. A production API or Worker refuses to boot with it off, unless the
+  audited break-glass override `AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE` (a written reason) is set. The other three stay off until the owner's scheduled rollout
   (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Two-step sign-in (MFA) rollout").
 - **Mobile:** mobile sign-ins are **not** challenged (`AUTH_MFA_MOBILE_POLICY`=exempt).
 - **Managing MFA:** turning it off or regenerating codes always needs the password and a current code.

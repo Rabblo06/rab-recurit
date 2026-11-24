@@ -1380,6 +1380,16 @@ export class EnvironmentVariables {
   AUTH_MFA_ENFORCE_OTHER_WEB_USERS: boolean = false;
 
   /**
+   * Break-glass only (owner decision 2 + review of #327): production refuses to boot with AUTH_MFA_ENFORCE_PLATFORM_ADMIN
+   * off unless this holds a written reason (at least 20 characters; platform-admin-mfa-production.ts). The API logs it and
+   * sends a critical audit event at every start while it is active. It does not turn enforcement off by itself.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE?: string;
+
+  /**
    * `exempt` (default): sign-ins to the mobile apps (staff_app / venue_manager_app) are never challenged — the mobile
    * apps have no second-factor screen yet. `require`: an ENROLLED user (or an enforced role) is challenged on mobile too,
    * which a mobile client without MFA support cannot complete. See WAVE4_LANE_MFA_REPORT.md (security trade-off).

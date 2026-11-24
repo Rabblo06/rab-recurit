@@ -965,9 +965,13 @@ never change them, and the compose defaults for them stay `false`.**
   `docker-compose.production.yml` defaults it to `true`; for `docker-compose.image.yml` it is the active line in
   `env/runtime.env.example`, so copy it into `${CREWFLOW_SECRETS_DIR}/runtime.env` (an existing `runtime.env` written
   before this change does NOT have it: add the line, lint the file, then `docker compose up -d`). The first platform admin
-  (`BOOTSTRAP_ADMIN_EMAIL` or `bootstrap-admin`) is refused without it. The gate refuses it off: `compose-owner-login.cjs` (also `--lint-env-file runtime`) fails on a committed
-  or linted `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` that is not `true`. Check: Admin panel, Configuration, MFA shows
-  enforcement on for platform admins; a platform admin without an authenticator is asked to enrol at the next sign-in.
+  (`BOOTSTRAP_ADMIN_EMAIL` or `bootstrap-admin`) is refused without it. **Fail closed (review of #327):** rab-api and
+  rab-worker refuse to boot in production with it off or missing (env validation), and the gate refuses it too:
+  `compose-owner-login.cjs` fails on a committed value that is not `true`, and `--lint-env-file runtime` fails on a
+  `runtime.env` that does not set it to exactly `true`. The only exception is the audited break-glass override below.
+  Check: Admin panel, Configuration, MFA shows enforcement on for platform admins; a platform admin without an
+  authenticator is asked to enrol at the next sign-in. **Keep at least two platform admins, both enrolled, from this step
+  on** (`grant-platform-admin` on a second active, email-verified manager account), so one can always reset the other.
 - [ ] **Step 2, at the DigitalOcean move, before any real data: organisation owners and the Initial Manager.** On rab-api
   set `AUTH_MFA_ENFORCE_ORGANISATION_OWNER=true` (role `ceo`) and `AUTH_MFA_ENFORCE_INITIAL_MANAGER=true` in the new
   server's `runtime.env` (or the platform's rab-api variables), lint, deploy. Before the switch: tell those users they will
@@ -981,8 +985,27 @@ never change them, and the compose defaults for them stay `false`.**
 - [ ] **Step 4: mobile staff and Venue Managers are not forced.** `AUTH_MFA_MOBILE_POLICY` stays `exempt`: the mobile app
   has no enrol-at-sign-in screen yet. Revisit only after mobile enrolment is built (optional follow-up of decision 2).
 
-Rollback of any step: set that switch back to `false` and redeploy. Nobody's enrolment is removed; enrolled users keep
-being asked for the code.
+Rollback of steps 2 and 3: set that switch back to `false` and redeploy. Nobody's enrolment is removed; enrolled users
+keep being asked for the code. Step 1 has no plain rollback in production: see the override below.
+
+**Break-glass recovery: the only platform admin lost the authenticator AND the recovery codes.** Setting
+`AUTH_MFA_ENFORCE_PLATFORM_ADMIN=false` does **not** help: that account is enrolled, and an enrolled user is always asked for
+the code whatever the switches say. The path is a second account:
+1. `grant-platform-admin` (owner CLI one-off on rab-api, section 7 "Operations commands") on a second ACTIVE,
+   email-verified account that has a manager profile.
+2. That account signs in and enrols an authenticator (forced by step 1).
+3. It runs the audited MFA reset on the locked-out admin (the Admin panel user search, or `POST
+   /rest/v1/admin/users/:userId/mfa/reset` with a written reason, its own password and its current code). The reset revokes the
+   target's sessions and is in the audit log and the external audit sink.
+4. The locked-out admin signs in and enrols again. Revoke the second account's platform-admin grant if it was temporary.
+
+**The override (last resort, audited):** `AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE=<a written reason, at least 20
+characters, e.g. the incident number>` in `runtime.env`, together with `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=false`, lets rab-api
+and rab-worker start with platform-admin MFA off (an unenrolled platform admin is then not forced to enrol; an enrolled one
+is still asked). While it is set, rab-api logs a `[platform-admin-mfa] WARNING` line and sends a critical
+`security.mfa.platform_admin_enforcement_overridden` event, with the reason, to the external audit sink at every start; if
+that event cannot be written the API refuses to start. The lint accepts the switch off only with a valid override. Remove
+both lines and redeploy as soon as the incident is over.
 
 
 ### Operations commands (containment, session backfill, HWS backfill) under the owner login

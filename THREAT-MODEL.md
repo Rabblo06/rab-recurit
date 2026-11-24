@@ -10493,13 +10493,27 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   was forced). The code default stays `false` (development and tests); the other three enforcement switches keep their
   `false` defaults: organisation owners and the Initial Manager are switched on by the owner at the DigitalOcean move,
   other web users about 4 weeks later, mobile stays exempt (deploy checklist in OWNER-LOGIN-DEPLOYMENT.md section 7).
+- **Tests (boot):** `platform-admin-mfa-production.spec.ts` (the problem function; `validate()` refuses false and missing
+  in production, accepts true, accepts false only with a 20+ character reason, development unaffected; the override is
+  logged once and audited once with the truncated reason, nothing is reported when the switch is on or outside
+  production, and an unwritable audit event throws); `admin-config-mfa-tone.spec.ts` (the Security tab row: ok when
+  platform admins are forced, warn otherwise, strict true only, 403 before any setting is read for a non-admin).
 - **Tests:** `compose-owner-login.test.cjs` pins the five production defaults (platform admin `true`, the other three
   `false`, mobile `exempt`), that the runtime template assigns only the platform-admin switch, and that the lint accepts
   it.
-- **Residual:** a server whose `runtime.env` was written before this change has no line, and the image compose has no
-  default, so rab-api keeps the code default (`false`) until the operator adds the line (checklist step 1). The switch
-  can still be turned off on the server itself (a platform variable or an edited file the lint never sees); the gate below
-  refuses every committed or linted `false`.
+- **Fail closed at boot (review of #327, Medium):** `env.validation.ts` refuses a production boot (API and Worker share it)
+  with `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` off or missing (`platform-admin-mfa-production.ts`), so a server whose
+  `runtime.env` predates this change, or a platform variable set to false, no longer starts silently without platform-admin
+  MFA. The only exception is the break-glass override `AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE=<written reason, 20+
+  characters>`: the process starts, and rab-api logs a WARNING line and sends a critical
+  `security.mfa.platform_admin_enforcement_overridden` event (with the reason, truncated to 200) to the external audit sink
+  at every start; an event that cannot be written refuses the start. `--lint-env-file runtime` refuses a runtime.env
+  without the switch set to exactly `true`, unless the override with a reason is present; the override is refused in any
+  other env file. Break-glass recovery when the only platform admin lost the authenticator and recovery codes (the switch
+  does not help: an enrolled account is always challenged) is documented in OWNER-LOGIN-DEPLOYMENT.md section 7:
+  `grant-platform-admin` on a second account, which enrols and runs the audited reset; keep two enrolled platform admins.
+- **Residual:** an operator with write access to the server can still set the override; that is visible (log line, critical
+  audit event every start) rather than silent.
 - **Gate (lead request, same PR):** `scripts/compose-owner-login.cjs` refuses any committed
   `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` other than `${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}` or a literal `true` in the deploy
   compose files (`false`, `:-false`, `:-`, a bare `${...}`, `:?`, the list form and a quoted key are refused), requires

@@ -546,6 +546,18 @@ const PLATFORM_ADMIN_MFA_EXPR = '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}';
 const PLATFORM_ADMIN_MFA_TEXT_VALUES = Object.freeze([PLATFORM_ADMIN_MFA_EXPR, 'true', '"true"', "'true'"]);
 const PLATFORM_ADMIN_MFA_MESSAGE = 'owner decision 2 (2026-11-21): platform administrators must use MFA in production; it can never be committed or set to false';
 /**
+ * The break-glass override (review of #327): rab-api and rab-worker refuse to boot in production with platform-admin MFA
+ * off unless runtime.env carries this variable with a reason of at least PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON characters;
+ * the API then logs and audits it at every start. The same rule here: runtime.env must set the switch to exactly true, or
+ * carry the override with a reason (names only, never the reason or the value).
+ */
+const PLATFORM_ADMIN_MFA_OVERRIDE_KEY = 'AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE';
+const PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON = 20;
+/** True when the parsed env file carries the override with a long-enough reason. Pure. */
+function platformAdminMfaOverrideReasonOk(entries) {
+  return entries.some((e) => e.key === PLATFORM_ADMIN_MFA_OVERRIDE_KEY && String(e.value ?? '').trim().length >= PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON);
+}
+/**
  * BC-07: the external security audit sink, required in production by security-audit-sink.ts (securityAuditSinkConfig).
  * The values are the code's own: CREWFLOW_AUDIT_SINK none | stdout | file, of which production accepts only stdout;
  * CREWFLOW_AUDIT_SINK_FAILURE refuse | log, of which production accepts only refuse (unset = refuse);
@@ -1522,8 +1534,15 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
     // Owner decision 2026-11-20: the AI switch is compose.env's (exactly true or false: the STRICT_SWITCHES check above).
     if (key === AI_ENABLED_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): the committed ${AI_ENABLED_EXPR} on rab-api and rab-worker would silently override a value here`);
-    // Owner decision 2: an env file may only turn platform-admin MFA ON (empty would mean the code default, false).
-    if (key === PLATFORM_ADMIN_MFA_KEY && value !== 'true') problems.push(`${key}: must be exactly true (${PLATFORM_ADMIN_MFA_MESSAGE}; value not shown)`);
+    // Owner decision 2: an env file may only turn platform-admin MFA ON (empty would mean the code default, false), unless
+    // runtime.env carries the audited break-glass override with a reason.
+    if (key === PLATFORM_ADMIN_MFA_KEY && value !== 'true' && !(kind === 'runtime' && platformAdminMfaOverrideReasonOk(entries))) {
+      problems.push(`${key}: must be exactly true (${PLATFORM_ADMIN_MFA_MESSAGE}; value not shown)`);
+    }
+    if (key === PLATFORM_ADMIN_MFA_OVERRIDE_KEY && kind !== 'runtime') problems.push(`${key}: belongs in runtime.env only (rab-api and rab-worker read it at boot)`);
+    if (key === PLATFORM_ADMIN_MFA_OVERRIDE_KEY && kind === 'runtime' && value.trim().length < PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON) {
+      problems.push(`${key}: must be a reason of at least ${PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON} characters (break-glass only; logged and audited at every start; value not shown)`);
+    }
     if (kind === 'compose') {
       // DB-SETUP (T-1 / T-2): the two database values are the only secrets compose.env holds; everything else stays
       // CREWFLOW_* and secret-free.
@@ -1572,6 +1591,11 @@ function lintEnvText(kind, text, { template = false } = {}) {
   if (caInline && !(template && isPlaceholder(caInline.value))) {
     const problem = pgCaPemProblem(caInline.value, 'PG_SSL_CA_CERT');
     if (problem) problems.push(`${problem} (in an env file: the PEM text on one line with \\n escapes; value not shown)`);
+  }
+  // Owner decision 2 + review of #327 (fail closed): the image deployment has no compose default for the switch, so a
+  // runtime.env without it would boot with the code default (false), which rab-api / rab-worker refuse in production.
+  if (kind === 'runtime' && !entries.some((e) => e.key === PLATFORM_ADMIN_MFA_KEY) && !platformAdminMfaOverrideReasonOk(entries)) {
+    problems.push(`${PLATFORM_ADMIN_MFA_KEY}: missing (set ${PLATFORM_ADMIN_MFA_KEY}=true; ${PLATFORM_ADMIN_MFA_MESSAGE})`);
   }
   if (kind === 'runtime' && !entries.some((e) => e.key === AUDIT_SINK_KEY)) {
     problems.push(`${AUDIT_SINK_KEY}: missing (BC-07: production refuses to start without an external audit sink; set stdout with an off-host append-only log shipper)`);
@@ -1913,7 +1937,7 @@ module.exports = {
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   ROTATE_KEY, ROTATE_EXPR, ROTATE_VALUES,
   AI_ENABLED_KEY, AI_ENABLED_EXPR, AI_ENABLED_DEFAULT, aiEnabledExpressionProblems, aiDefaultOffProblems,
-  PLATFORM_ADMIN_MFA_KEY, PLATFORM_ADMIN_MFA_EXPR, platformAdminMfaProblems,
+  PLATFORM_ADMIN_MFA_KEY, PLATFORM_ADMIN_MFA_EXPR, PLATFORM_ADMIN_MFA_OVERRIDE_KEY, PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON, platformAdminMfaProblems,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
