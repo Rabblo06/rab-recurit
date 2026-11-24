@@ -235,6 +235,15 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // Lane P2 payroll adjustments (DRAFT, owner SQL review pending; THREAT-MODEL "Payroll adjustments"): the three policies
+  // of core.payroll_adjustment, added only (tenant + a non-venue, non-archived manager of the bound workspace; staff read
+  // their own approved lines; INSERT only an undecided line naming its real author). Owner, FORCE RLS, grants, the guard
+  // trigger and the grant-parity triggers are pinned by the golden posture and the migration's own post-condition.
+  '1786723100000-PayrollAdjustmentSchema': [
+    "+ policy|payroll_adjustment|payroll_adjustment_insert|a|permissive=true|roles=public|using=|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))) AND (created_by = core.current_uid()) AND (status = 'pending_approval'::text) AND (decided_by IS NULL) AND (decided_at IS NULL) AND (rejection_reason IS NULL) AND (run_id IS NULL) AND (included_at IS NULL) AND (locked_at IS NULL))",
+    "+ policy|payroll_adjustment|payroll_adjustment_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ((EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))) OR ((staff_user_id = core.current_uid()) AND (status = 'approved'::text))))|check=",
+    "+ policy|payroll_adjustment|payroll_adjustment_update|w|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

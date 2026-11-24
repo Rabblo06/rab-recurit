@@ -6,6 +6,7 @@ import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { isJobRoleInScope } from '../utils/job-role-scope';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
 import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
+import { venueSummaryCached } from '../../venue/services/venue-summary-cache';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { PermissionFlag } from '@rab/shared';
 import { ForbiddenException } from '@nestjs/common';
@@ -1238,7 +1239,7 @@ export class SchedulingService {
       // Redis checkpoint — Core Entity Cache: pure display-only interpolation into a notification
       // message, never an authorization decision — see CoreEntityCacheService's own doc comment.
       const [venue, jobRole] = await Promise.all([
-        this.entityCache.getVenueSummary(manager, shift.venueId),
+        venueSummaryCached(this.entityCache, manager, shift.venueId),
         manager.findOne(JobRole, { where: { id: shift.jobRoleId } }),
       ]);
       const when = shift.startsAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
@@ -1587,7 +1588,7 @@ export class SchedulingService {
 
       if (shift.requestedBy) {
         // Redis checkpoint — Core Entity Cache: display-only, see the identical comment above in this file.
-        const venue = await this.entityCache.getVenueSummary(manager, shift.venueId);
+        const venue = await venueSummaryCached(this.entityCache, manager, shift.venueId);
         await this.notificationService.notify(manager, {
           organisationId: ctx.organisationId!,
           userId: shift.requestedBy,
