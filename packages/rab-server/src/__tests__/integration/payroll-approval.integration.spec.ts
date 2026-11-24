@@ -456,10 +456,10 @@ describeIfDb('payroll approval (integration)', () => {
     await staleGrant(tokenC);
     const refusalsBefore = (await adminDataSource.query(
       `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [c.userId]))[0].n;
-    for (const req of [http().post(`/rest/v1/payroll/records/${id}/approve`), http().post('/rest/v1/payroll/records/bulk-approve').send({ ids: [id] })]) {
-      const stale = await req.set(auth(tokenC));
-      expect({ status: stale.status, code: stale.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
-    }
+    const staleSingle = await http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenC));
+    expect({ status: staleSingle.status, code: staleSingle.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
+    const staleBulk = await http().post('/rest/v1/payroll/records/bulk-approve').set(auth(tokenC)).send({ ids: [id] });
+    expect({ status: staleBulk.status, code: staleBulk.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
     expect((await adminDataSource.query(
       `SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.record.approve'`, [c.userId]))[0].n).toBe(refusalsBefore + 2);
     expect((await recordFor(worked.s6.attendanceId))!.status).toBe('pending_approval');

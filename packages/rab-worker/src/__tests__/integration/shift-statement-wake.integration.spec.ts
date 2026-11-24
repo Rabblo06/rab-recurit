@@ -223,8 +223,10 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
   it('rollback: an approval that fails after its UPDATE publishes NO wake and leaves the record untouched', async () => {
     const rec = await pendingRecordFor(1);
     const before = (await wakeJobs()).length;
+    // Step up BEFORE the audit spy: the step-up writes its own audit row (decision 5), which must not take the failure.
+    const token = await approverToken();
     const spy = jest.spyOn(audit, 'record').mockRejectedValueOnce(new Error('audit unavailable'));
-    const res = await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(await approverToken()));
+    const res = await http().post(`/rest/v1/payroll/records/${rec}/approve`).set(auth(token));
     spy.mockRestore();
     expect(res.status).toBeGreaterThanOrEqual(500);
     await settleMs(1_500);
