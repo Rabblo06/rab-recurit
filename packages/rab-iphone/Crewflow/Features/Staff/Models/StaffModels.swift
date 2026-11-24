@@ -268,15 +268,25 @@ struct StaffLocationEvidenceLimits: Decodable, Hashable, Sendable {
     let maxFutureSkewSeconds: Int
 }
 
+/// `offline` in `GET /attendance/me/active` (DESIGN M4 §3.1): whether the
+/// server allows offline punches for the caller. Absent or malformed = off.
+struct StaffOfflineStatus: Decodable, Hashable, Sendable {
+    let enabled: Bool
+}
+
 /// `GET /attendance/me/active`.
 struct StaffActiveAttendance: Decodable, Sendable {
     let attendance: StaffAttendanceSummary?
     let serverNow: Date?
     let clockInEarlyMinutes: Int?
     let locationEvidence: StaffLocationEvidenceLimits?
+    /// M4 offline (server not merged): nil from today's server, which keeps
+    /// offline mode off.
+    let offline: StaffOfflineStatus?
+    let offlineTicket: String?
 
     enum CodingKeys: String, CodingKey {
-        case attendance, serverNow, clockInEarlyMinutes, locationEvidence
+        case attendance, serverNow, clockInEarlyMinutes, locationEvidence, offline, offlineTicket
     }
 
     init(from decoder: Decoder) throws {
@@ -287,6 +297,8 @@ struct StaffActiveAttendance: Decodable, Sendable {
         // Flutter: `early is int && early >= 0 ? early : null`.
         clockInEarlyMinutes = early.flatMap { $0 >= 0 ? $0 : nil }
         locationEvidence = try? c.decodeIfPresent(StaffLocationEvidenceLimits.self, forKey: .locationEvidence)
+        offline = try? c.decodeIfPresent(StaffOfflineStatus.self, forKey: .offline)
+        offlineTicket = try? c.decodeIfPresent(String.self, forKey: .offlineTicket)
     }
 }
 

@@ -188,6 +188,29 @@ everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has
   (Send now skips the backoff, never `Retry-After`). A timeout is an uncertain outcome: the entry is kept and resent
   with the same key (the server answers `replayed`). A ticket in a sync answer only renews an open gate, never opens a
   closed one, and obeys the same 10 s rule. Never auto-retried by the transport (`RetryPolicy.never`).
+- **Clock screen wiring (`StaffStore`, `StaffClockFlow`, `StaffClockScreen`, Profile).** Online first, always. Only
+  while the gate is open does a check-in / clock-in / clock-out carry an `Idempotency-Key` (UUID v4 made at the tap);
+  if that request gets no answer (offline) or times out after sending (uncertain), the action is saved with the SAME key
+  so the server applies it at most once (D17). Only a genuine no-response failure is saved (`APIError.isNoResponse`:
+  connection, DNS, TLS, connection lost, or the client's own timeout); any HTTP answer is not, and a server or proxy
+  408 now maps to `.http(408)`, kept apart from the client timeout (still an uncertain outcome that reloads, never a
+  resend). While saved actions are waiting, a new punch first sends them; it is held back (saved behind them with the
+  gate open, refused with it shut) ONLY when that attempt got no HTTP answer at all. On any answer (4xx, 429, 5xx, an
+  unknown outcome, an undecodable 200) it goes online and the server decides: out of order can only pay less (D3), and
+  a server fault never locks anyone out of clocking. With the gate shut
+  (every build today) requests carry no header and the existing uncertain-outcome handling is unchanged. Nothing is
+  optimistic: no attendance is shown until the server answers; a saved clock-in replaces the running timer with fixed
+  text "Clocked in 09:02, saved on this phone, not yet confirmed" (D10; the time is the server-anchored estimate, never
+  the wall clock). A clock-out after a saved clock-in first sends what is saved; it becomes an ordinary online clock-out
+  if the clock-in reaches the server, otherwise it is saved too. Sending is triggered by every successful
+  `/attendance/me/active` read (30 s reconcile, resume, refresh) and "Send now"; afterwards the server state is re-read.
+  `RequestOptions.headers` can never set or replace `Authorization`, `Content-Type`, `Accept`, `Cookie`, `Host`,
+  `X-Client-*` or `X-Crewflow-Background`.
+- **Sign-out (D18).** While any action is unsent (pending, too old, undeliverable, or an unreadable queue), Log out
+  asks first: Send now, Discard and log out (explicit; discarded actions are never sent and the manager is not told),
+  or Cancel. An unreadable stored queue is never discarded (not even explicitly): the dialog offers "Log out and keep
+  them" instead, and the item stays under the user's id. A forced sign-out (session ended by the server) does not discard: the queue stays in the Keychain under
+  that user's id and is sent after the same user signs in again (or ages out after 72 h).
 - **Integrity signal.** `rootedSignal` is a weak client-asserted jailbreak path check, a flag on the receipt only (D11).
 - **Residual.** A jailbroken, hooked app can sign lies within the server's bounds (DESIGN §2 trade-off: schedule clamp,
   no untrusted clock-out, manager review). Keychain `ThisDeviceOnly` items are restored by an encrypted backup to the

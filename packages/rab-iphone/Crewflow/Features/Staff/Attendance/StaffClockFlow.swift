@@ -167,7 +167,8 @@ final class StaffClockFlow: ObservableObject {
             accuracy: raw.horizontalAccuracy,
             timestamp: raw.timestamp,
             trustedNow: store.attendanceNow,
-            deviceNow: deviceNow()
+            deviceNow: deviceNow(),
+            simulated: raw.simulated
         ))
     }
 
@@ -216,8 +217,14 @@ final class StaffClockFlow: ObservableObject {
     }
 
     /// Clock Out: confirmation, evidence, QR scan, one POST. Never retried.
+    /// With no server-confirmed attendance but a clock-in saved on this phone
+    /// (M4 offline, off everywhere today), the clock-out is saved too.
     func clockOut() async {
-        guard !busy, !confirming, !store.attendanceBusy, let active = store.liveAttendance else { return }
+        guard !busy, !confirming, !store.attendanceBusy else { return }
+        guard let active = store.liveAttendance else {
+            await clockOutSavedShift()
+            return
+        }
         confirming = true
         let confirmed = await prompts.confirmClockOut()
         confirming = false
@@ -230,6 +237,26 @@ final class StaffClockFlow: ObservableObject {
         guard let token = await prompts.scanQR() else { return }
         if await store.clockOut(qrToken: token, location: fix) {
             completedAttendanceId = active.id
+            await store.loadOffers(silent: true)
+        }
+    }
+
+    /// The clock-in is still only on this phone: the same confirmation,
+    /// evidence and QR scan, then `StaffStore.clockOutSavedShift` sends what
+    /// is saved first and saves the clock-out only if still offline.
+    private func clockOutSavedShift() async {
+        guard let shiftId = store.savedOpenShiftId else { return }
+        confirming = true
+        let confirmed = await prompts.confirmClockOut()
+        confirming = false
+        guard confirmed, store.savedOpenShiftId == shiftId else { return }
+        busy = true
+        defer { busy = false }
+        let offer = store.offer(forShift: shiftId)
+        let (ok, fix) = await evidence(geofenceEnforced: store.geofenceEnforced(shiftId: shiftId, offer: offer))
+        guard ok else { return }
+        guard let token = await prompts.scanQR() else { return }
+        if await store.clockOutSavedShift(shiftId: shiftId, qrToken: token, location: fix) {
             await store.loadOffers(silent: true)
         }
     }
