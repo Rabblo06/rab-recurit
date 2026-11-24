@@ -7,7 +7,12 @@
  *
  * It replaces a Crewflow "workspace module" (workspace-schema-modules.ts, frozen at 20): new workspace DDL ships here, never
  * as a 21st module. Rules every workspace command must follow (D-RUNNER.md §4 / §5.3):
- *   - IDEMPOTENT: a crash leaves no logbook row (or the row is lost after COMMIT), so the command runs again;
+ *   - IDEMPOTENT: a crash leaves no logbook row (or the row is lost after COMMIT), so the command runs again; a FAILED step
+ *     is rolled back whole (one transaction) and retried by the next start of its release or of a patch release of it, under
+ *     its own step name (owner decision 2026-11-18). Audit 2026-11-18 of the registered 0.6.0 commands: StaffProfileMemberSelect
+ *     (CREATE POLICY guarded by IF NOT EXISTS), DropWorkspaceCoreForeignKeys (DROP CONSTRAINT IF EXISTS) and SyncStandardObjects
+ *     (plans nothing on a re-run) are each proven to re-run as a no-op (ws-staff-member-select, ws-core-fk-removal,
+ *     standard-objects-catalog integration specs);
  *   - it touches ONLY its own workspace schema (`ctx.schemaName`): the runner refuses SQL naming another workspace schema,
  *     binds the tenant to this workspace (FORCE RLS), and rolls back any catalog change outside the schema;
  *   - it never ends, commits or re-binds the transaction, never changes the role or search_path (checked after it runs);
