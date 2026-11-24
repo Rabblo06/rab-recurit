@@ -39,7 +39,7 @@ runs:
         if [ -f /.dockerenv ]; then where=container; else where=host; fi
         echo "key=node-modules-${RUNNER_OS}-${RUNNER_ARCH}-${where}-$(node -p process.version)-${{ hashFiles('yarn.lock', '.yarnrc.yml') }}" >> "$GITHUB_OUTPUT"
 
-    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       id: node-modules
       with:
         path: |
@@ -55,7 +55,7 @@ runs:
     # Saved right after the install, before any job step can write into node_modules, and only by pushes to main (as the
     # Nx cache, S6): a pull request restores main's entry and never writes one, so a PR cannot plant node_modules for
     # another ref, and dependency-bump PRs do not fill the 10 GB Actions cache with one tree each.
-    - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       if: steps.node-modules.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
       with:
         path: |
