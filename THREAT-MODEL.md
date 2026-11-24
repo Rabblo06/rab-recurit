@@ -10457,6 +10457,42 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
+- **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
+  Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager
+  context). Action: `UPDATE` or `DELETE` (or `TRUNCATE`) on `attendance_correction`. Consequence before: allowed. The
+  runtime login crewflow_owner inherits the table owner (owner-login BC-01 / BC-13), so the original `REVOKE UPDATE, DELETE`
+  never bound it; the schema role crewflow_app still held both (copied-grant drift); the tenant policy is FOR ALL; TRUNCATE is
+  never filtered by RLS. A correction row is the audit record of a pay change ("original values are never overwritten in
+  place"), so rewriting or removing it hides who changed someone's hours. Root cause: insert-only was only a grant.
+- **Change.** Migration AttendanceCorrectionInsertOnly1786722110000: three statement-level BEFORE UPDATE / DELETE / TRUNCATE
+  triggers on `core.attendance_correction` calling the existing, unchanged `core.owner_login_grant_parity_guard()` (the PAY-1
+  guard). The runtime login gets 42501 per statement, even when RLS leaves no row; INSERT and SELECT are unchanged. Definers,
+  the workspace migrator and foreign-key actions (they run as the table owner) and superusers pass.
+- **Retention unchanged (flagged for the owner).** Because FK actions pass, deleting the parent attendance (or the
+  organisation) still CASCADEs its corrections exactly as before. No code path deletes attendance today, and a
+  `payroll_record` already RESTRICTs deleting approved attendance. Making `attendance_correction.attendance_id` RESTRICT (as
+  the owner chose for breaks and receipts) would also block that path; it is a retention decision, so it is proposed, not done.
+- **Not in this PR.** `REVOKE UPDATE, DELETE ... FROM crewflow_app`: tools/check-rls-coverage.ts requires workspace grants to
+  equal core's, so that cosmetic schema-role grant moves with the workspace-schema copies (0.7.0 workspace command, after
+  #175 / #177 / #243). The workspace copies (HWS on) get the same three triggers then; until then they keep today's state.
+- **Residual risk.** An injected statement can `SET ROLE crewflow` or disable the trigger (BC-01); the semantic posture
+  monitor pins the three trigger lines (detection, not prevention).
+- **Tests.** `attendance-correction-insert-only.integration.spec.ts`, as the runtime login (asserted crewflow_owner, a
+  member of crewflow, not superuser / BYPASSRLS): a Manager who can read the correction gets 42501 for UPDATE and DELETE of
+  it, for an UPDATE / DELETE matching no row, and for TRUNCATE (with and without tenant context); the stored row is
+  unchanged; INSERT still works; `SET ROLE crewflow` (definer / FK-action path) can still delete (rolled back); zero rows
+  with no tenant context; down() / up() round trip (rolled back) and a re-run of up() is a no-op.
+  `attendance-correction-insert-only-sql.spec.ts`: statement shape, end-state check, goldens.
+- **Security review fix (2026-11-21, Medium; owner decision 46).** The reviewer showed corrections still vanished through
+  `attendance_correction.attendance_id ON DELETE CASCADE` when the runtime deleted the parent attendance (core.attendance has
+  a FOR ALL policy and no delete guard; the FK action runs as the owner and passes the guard). New migration
+  AttendanceCorrectionEvidenceRestrict1786722115000 makes that key ON DELETE RESTRICT (the pay-evidence principle the owner
+  approved for breaks and receipts). Such a delete now fails (23503, or 23001 on PostgreSQL 18) and the correction stays;
+  a hard user delete that would reach it already falls back to a soft delete on a foreign-key refusal. The organisation
+  CASCADE (tenant offboarding, LC-2) is unchanged. Tests: the runtime's delete of an attendance with a correction is refused
+  and both rows remain; a real FK cascade started by the runtime login passes the guard (probe table, rolled back) while
+  its direct DELETE gets 42501. The workspace copies get the same key change with the level-26 command (#310).
 ## CF-23 — notes on the user profile page no longer persist to browser storage (branch fix/cf23-staff-notes-no-browser-storage, 2026-11-21; no SQL, no server change)
 - **Finding (CF-23, LOW):** `packages/rab-front/src/features/users/UserProfile.tsx` (`/users/:id`) kept notes about a
   person in `localStorage` under `user-notes-<userId>`. Browser storage outlives logout and is shared by every account
