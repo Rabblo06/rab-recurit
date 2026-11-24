@@ -31,6 +31,7 @@ import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, registry
  *    HWS-off copy): Staff A cannot read, update or insert Staff B's attendance in the same workspace; a Manager of the
  *    workspace reads every row; a Venue Manager reads only the rows of shifts at their own venues; the worker marker reads
  *    every row; an unrelated user, a manager of another workspace, another organisation and no tenant context read nothing;
+ *    attendance_correction inherits the same scope (Staff A reads 0 of Staff B's corrections, and cannot write one);
  *  - the migration replaces only a known core expression; down() refuses while a level-25 workspace exists (nothing changed).
  * The `[l25-fp]` log line prints the measured level-25 v2 fingerprint of this major (the declared value's source).
  */
@@ -187,6 +188,7 @@ describeIfDb('M4 §11: attendance staff-own-or-manager RLS predicate, structure 
       otherManager: '',
     };
     const att = { xA: '', xB: '', yB: '' };
+    const corrections = { a: '', b: '' };
     let profileB = '';
     let assignmentFree = '';
     let shiftX = '';
@@ -255,6 +257,13 @@ describeIfDb('M4 §11: attendance staff-own-or-manager RLS predicate, structure 
       // A seat with no attendance yet, for the insert cases (Staff B's own booking on shift Y is attended below).
       att.yB = await attend(shiftY, profileB);
       assignmentFree = await seat(shiftX, freeProfile);
+      for (const [a, label] of [[att.xA, 'a'], [att.xB, 'b']] as const) {
+        corrections[label] = await one(
+          `INSERT INTO ${q}.attendance_correction (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
+           VALUES ($1, $2, $3, 'breakMinutes', '30', '45', 'longer break agreed with the venue', $4) RETURNING id`,
+          [w.org, w.id, a, w.owner],
+        );
+      }
     });
 
     /** Runs `fn` as the runtime login with the given GUCs, inside a transaction that is always rolled back. */
@@ -273,6 +282,11 @@ describeIfDb('M4 §11: attendance staff-own-or-manager RLS predicate, structure 
     const visible = (o: Parameters<typeof as>[0]) =>
       as(o, async () => (await app.query(`SELECT id FROM ${q}.attendance WHERE shift_id = ANY($1::uuid[]) OR id = ANY($2::uuid[]) ORDER BY id`, [[shiftX], Object.values(att)])).rows.map((r) => String(r.id)).sort());
     const sorted = (...ids: string[]) => [...ids].sort();
+
+    it('the runtime login is crewflow_owner (the owner login), not SUPERUSER / BYPASSRLS: what the policy binds', async () => {
+      const { rows } = await app.query(`SELECT current_user AS who, r.rolsuper AS su, r.rolbypassrls AS bypass FROM pg_roles r WHERE r.rolname = current_user`);
+      expect(rows[0]).toMatchObject({ who: 'crewflow_owner', su: false, bypass: false });
+    });
 
     it('Staff A sees only their own attendance (never Staff B\'s, same workspace)', async () => {
       expect(await visible({ user: users.staffA })).toEqual([att.xA]);
@@ -320,6 +334,31 @@ describeIfDb('M4 §11: attendance staff-own-or-manager RLS predicate, structure 
       expect(await visible({ user: users.manager, org: other.org, workspace: other.id })).toEqual([]);
       expect(await visible({ user: users.manager, workspace: other.id })).toEqual([]);
       expect(await visible({ user: '', actor: 'worker', workspace: other.id })).toEqual([]);
+    });
+
+    it('corrections inherit the attendance scope in the workspace schema: Staff A reads 0 of Staff B corrections, and cannot write one', async () => {
+      const corr = (o: Parameters<typeof as>[0]) =>
+        as(o, async () => (await app.query(`SELECT id FROM ${q}.attendance_correction WHERE id = ANY($1::uuid[]) ORDER BY id`, [Object.values(corrections)])).rows.map((r) => String(r.id)).sort());
+      expect(await corr({ user: users.staffA })).toEqual([corrections.a]);
+      expect(await as({ user: users.staffA }, async () => (await app.query(`SELECT id FROM ${q}.attendance_correction WHERE id = $1`, [corrections.b])).rows)).toEqual([]);
+      expect(await corr({ user: users.staffB })).toEqual([corrections.b]);
+      expect(await corr({ user: users.manager })).toEqual(sorted(corrections.a, corrections.b));
+      expect(await corr({ user: users.vmX })).toEqual(sorted(corrections.a, corrections.b));
+      expect(await corr({ user: users.vmY })).toEqual([]);
+      expect(await corr({ user: '', actor: 'worker' })).toEqual(sorted(corrections.a, corrections.b));
+      expect(await corr({ user: users.stranger })).toEqual([]);
+      expect(await corr({ user: users.otherManager })).toEqual([]);
+      expect(await corr({ user: users.manager, workspace: other.id })).toEqual([]);
+      expect(await corr({ bind: false })).toEqual([]);
+      await expect(
+        as({ user: users.staffA }, () =>
+          app.query(
+            `INSERT INTO ${q}.attendance_correction (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
+             VALUES ($1, $2, $3, 'breakMinutes', '30', '0', 'no break taken at all', $4)`,
+            [w.org, w.id, att.xB, users.staffA],
+          ),
+        ),
+      ).rejects.toMatchObject({ code: '42501' });
     });
 
     it('zero rows with no tenant context bound (runtime login)', async () => {
