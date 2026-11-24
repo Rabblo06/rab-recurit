@@ -263,7 +263,7 @@ flutter run --dart-define=API_URL=http://10.0.2.2:3000/rest/v1   # Android emula
 | `yarn lint` | Typecheck every package |
 | `yarn test` | Run the Jest suites across the monorepo |
 | `yarn check-rls` | Fail if any tenant table lacks Row-Level Security |
-| `yarn mobile` | Start the Flutter app through Nx |
+| `yarn mobile` | Run the Flutter app (`flutter run` in `packages/rab-mobile`; arguments pass through, e.g. `yarn mobile --dart-define=API_URL=...`) |
 
 ## Project structure
 
