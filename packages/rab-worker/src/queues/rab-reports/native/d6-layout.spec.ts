@@ -6,7 +6,7 @@ import { shutdownRenderPool } from './runtime/render-pool';
 
 /**
  * Owner decision D6 (approved WITH CONDITIONS, 2026-11-04) and "notes keep their line breaks", proven on the native
- * output of all three production documents, through the production seam (`renderReportPdf`, PDF_RENDERER=native,
+ * output of all three production documents, through the production seam (`renderReportPdf`, native,
  * render pool) and the position-aware PDF reader:
  *   - no name is truncated and no character disappears or is added: every name prints in full, character for
  *     character, and a hyphenated name wraps only after its OWN hyphen (no second "-");
@@ -85,7 +85,7 @@ beforeAll(async () => {
     ...fixtures.filter((f) => f.scenario === 'long-text').map((f): [string, ReportDocument] => [`${f.id}+no-space-hyphenated-name`, hyphenVariant(f)]),
   ];
   for (const [id, doc] of docs) {
-    const pdf = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
+    const pdf = await renderReportPdf(doc);
     rendered.set(id, { doc, pages: inspectPdfLayout(pdf).pages });
   }
 });

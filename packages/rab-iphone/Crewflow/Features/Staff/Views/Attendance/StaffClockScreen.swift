@@ -98,6 +98,11 @@ private struct StaffClockContent: View {
         let address: String?
         let schedule: String?
         let isToday: Bool
+        /// M4 offline (off everywhere): a clock-in / clock-out saved on this
+        /// phone and not yet confirmed, and every saved action of the shift.
+        let savedClockIn: OfflineQueuedPunch?
+        let savedClockOut: OfflineQueuedPunch?
+        let savedItems: [OfflineQueuedPunch]
     }
 
     private func snapshotState() -> Snapshot {
@@ -118,7 +123,10 @@ private struct StaffClockContent: View {
         let clockable = state == .clockIn && live == nil
         let checkInRequired = selected.map { store.checkInRequired($0) } ?? false
         let checkedInAt = selected.flatMap { store.checkedInAt($0) }
-        let needsCheckIn = clockable && checkInRequired && checkedInAt == nil
+        let savedCheckIn = shiftId.flatMap { store.savedPunch(.checkIn, shiftId: $0) }
+        let savedClockIn = live == nil ? shiftId.flatMap { store.savedPunch(.clockIn, shiftId: $0) } : nil
+        let savedClockOut = savedClockIn == nil ? nil : shiftId.flatMap { store.savedPunch(.clockOut, shiftId: $0) }
+        let needsCheckIn = clockable && checkInRequired && checkedInAt == nil && savedCheckIn == nil
         let noShift = state == nil && selected == nil && record == nil
         var errorText = store.attendanceError?.message
         if errorText == nil, state == .error {
@@ -129,6 +137,12 @@ private struct StaffClockContent: View {
             isToday = StaffFormat.london.isDate(now, inSameDayAs: starts)
         }
         let address = selected?.venueAddress?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let action: StaffClockAction
+        if savedClockIn != nil {
+            action = savedClockOut == nil ? .clockOut : .savedOffline
+        } else {
+            action = StaffClockAction.resolve(state: state, noShift: noShift, live: live != nil, needsCheckIn: needsCheckIn, completed: completed, teams: teams)
+        }
         return Snapshot(
             state: state,
             selected: selected,
@@ -145,14 +159,17 @@ private struct StaffClockContent: View {
             status: StaffClockTimerModel.statusText(state),
             canTeam: selected != nil && (confirmed || live != nil),
             needsCheckIn: needsCheckIn,
-            showCheckInNote: clockable && checkInRequired,
+            showCheckInNote: clockable && checkInRequired && savedCheckIn == nil,
             checkedInAt: checkedInAt,
-            action: StaffClockAction.resolve(state: state, noShift: noShift, live: live != nil, needsCheckIn: needsCheckIn, completed: completed, teams: teams),
+            action: action,
             error: errorText,
             venue: record?.venueName ?? selected?.venueName ?? "Your shift",
             address: (address?.isEmpty ?? true) ? nil : address,
             schedule: (starts != nil && ends != nil) ? StaffFormat.timeSpan(starts!, ends!) : nil,
-            isToday: isToday
+            isToday: isToday,
+            savedClockIn: savedClockIn,
+            savedClockOut: savedClockOut,
+            savedItems: shiftId.map { store.savedActions(forShift: $0) } ?? []
         )
     }
 
@@ -163,7 +180,7 @@ private struct StaffClockContent: View {
     var body: some View {
         let s = snapshotState()
         VStack(spacing: 0) {
-            StaffScreenHeader(title: teams ? "Teams" : (s.live != nil ? "Clock out" : (s.needsCheckIn ? "Check in" : "Clock in")))
+            StaffScreenHeader(title: teams ? "Teams" : (s.live != nil || s.savedClockIn != nil ? "Clock out" : (s.needsCheckIn ? "Check in" : "Clock in")))
             if teams {
                 teamsBody(s)
             } else {
@@ -220,6 +237,9 @@ private struct StaffClockContent: View {
                 HStack(alignment: .top) {
                     if s.awaitingMetrics {
                         StaffClockStatusBadge(label: "Clocked Out")
+                    } else if let saved = s.savedClockIn {
+                        // D10: no ticking timer until the server confirms.
+                        StaffSavedClockInCard(punch: saved)
                     } else {
                         StaffHeroTimer(snapshot: timerInput(s))
                     }
@@ -395,6 +415,14 @@ private struct StaffClockContent: View {
 
     private func bottomArea(_ s: Snapshot) -> some View {
         VStack(spacing: 8) {
+            if !teams {
+                StaffSavedActionsList(
+                    items: s.savedItems,
+                    sending: store.sendingSaved,
+                    onSend: { Task { await store.syncOffline(trigger: .manual) } },
+                    onDismiss: { store.dismissSaved(id: $0) }
+                )
+            }
             if let error = s.error {
                 MessageCard(title: "Attendance update unsuccessful", message: error, kind: .error)
                     .accessibilityIdentifier("staff.clock.error")
@@ -453,6 +481,12 @@ private struct StaffClockContent: View {
             }
             .disabled(busy)
             .accessibilityIdentifier("staff.clock.primary")
+        case .savedOffline:
+            // Both ends of the shift are saved on this phone; they are sent
+            // when the phone is back online (nothing more to tap).
+            PrimaryButton("Saved on this phone") {}
+                .disabled(true)
+                .accessibilityIdentifier("staff.clock.savedOffline")
         case .back(let title):
             PrimaryButton(title) {
                 if s.completed && !teams {

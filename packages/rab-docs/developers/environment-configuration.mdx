@@ -61,7 +61,6 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | `CLOCK_IN_CONFIRM_FLOOR_HOURS` | 12 | Hard floor (1-48 hours before the staff member's start) for a manager-entered clock-in; between it and `CLOCK_IN_EARLY_MINUTES` the manager must confirm. |
 | `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
 | `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
-| `PDF_RENDERER` | `native` | How the Worker renders report PDFs: `native` (pure JavaScript with `@react-pdf/renderer`, no browser) is the only accepted value. The Chromium renderer was retired (P5) and the Worker image contains no browser, so `chromium` or any other value refuses to boot. Leave it unset. |
 | `GEOFENCE_MAX_ACCURACY_M` | 100 | Worst acceptable GPS accuracy at enforced venues. |
 | `LATE_CLOCK_IN_GRACE_MINUTES` | 10 | When a confirmed person counts as late. |
 

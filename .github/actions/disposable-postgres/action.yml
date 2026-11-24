@@ -7,7 +7,8 @@ description: >-
   per run and masked before first use. Nothing is printed. CREWFLOW_OWNER_BOOTSTRAP_PASSWORD is the crewflow_owner password
   the owner-login test database build (twenty-mode-check.ts ci-db, through 01-crewflow-owner.sql) gives the one runtime
   login. CREWFLOW_WORKER_BOOTSTRAP_PASSWORD (E5) is the password the legacy M2 harness gives crewflow_worker when it creates
-  that role; only the legacy restricted-migrator build still uses it (until PR #9).
+  that role; only the legacy restricted-migrator build still uses it (until the separated-mode retirement, Phase X
+  X5.1 / LEGACY-NAMES-PLAN PR F; the former placeholder "PR #9" is an unrelated merged PR).
 
 inputs:
   postgres-major:

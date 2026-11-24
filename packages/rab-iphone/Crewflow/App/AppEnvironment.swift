@@ -84,6 +84,9 @@ public final class AppEnvironment: ObservableObject {
     public let toastPresenter: ToastPresenter
     public let temporaryFiles: TemporaryFiles
     public let pushDevice: PushDeviceIdentity
+    /// Device-scoped Keychain service (`<bundle id>.device`): biometric
+    /// binding, push identity, and the per-user offline punch queue.
+    public let deviceStore: any SecureStore
     /// APNs registration path (prepared, not activated: see PushRegistrar).
     let push: PushRegistrar
 
@@ -119,6 +122,7 @@ public final class AppEnvironment: ObservableObject {
         self.toastPresenter = ToastPresenter(center: toasts)
         self.temporaryFiles = temporaryFiles
         self.pushDevice = pushDevice
+        self.deviceStore = deviceStore
         let push = PushRegistrar(
             api: api,
             identity: pushDevice,
