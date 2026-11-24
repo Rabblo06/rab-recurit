@@ -9,8 +9,8 @@ import { addDays, zonedMidnight } from '../../ai/tools/ai-date-range';
  * client). No I/O here: the service supplies the existing-shift keys, the target checks and `now`.
  */
 
-/** The most rows one preview or one confirm may plan (bounded work per request; a bigger rota is split by venue). */
-export const DRAFT_BATCH_MAX_ROWS = 500;
+/** The most rows one preview or one confirm may plan (§5.5 caps bulk scheduling at 200 shifts per call; a bigger rota is split by venue). */
+export const DRAFT_BATCH_MAX_ROWS = 200;
 
 /** Statuses of an existing shift that make an identical new one a duplicate (a cancelled/declined shift does not). */
 export const DUPLICATE_BLOCKING_STATUSES: readonly string[] = [
@@ -41,6 +41,8 @@ export type DraftBatchSkipReason =
   | 'already_exists'
   | 'duplicate_in_batch'
   | 'starts_in_past'
+  | 'invalid_local_time'
+  | 'break_too_long'
   | 'venue_unavailable'
   | 'venue_archived'
   | 'job_role_unavailable'
@@ -100,7 +102,7 @@ export function weekCopyWindows(weekStart: string, timeZone: string): { source: 
 
 /**
  * Marks each candidate `create` or `skip`, in this order of reasons: not selected (confirm named a subset) → venue /
- * job role unusable → starts in the past → an identical live shift already exists → an identical row earlier in this
+ * job role unusable → no real length (a clock-change gap) → break not shorter than the real length → starts in the past → an identical live shift already exists → an identical row earlier in this
  * same batch. Order of the input is kept.
  */
 export function planDrafts(
@@ -114,6 +116,11 @@ export function planDrafts(
     const target = input.targetChecks.get(targetKey(candidate.venueId, candidate.jobRoleId));
     if (target === undefined) return skip('venue_unavailable'); // fail closed: an unchecked target is never created
     if (target) return skip(target);
+    // Judged on the REAL instants, not the wall clock: across the spring clock change a 01:00-02:00 local shift has no
+    // length at all (both ends resolve to the same instant), and any shift that night is an hour shorter than it looks.
+    const realMinutes = (candidate.endsAt.getTime() - candidate.startsAt.getTime()) / 60_000;
+    if (!(realMinutes > 0)) return skip('invalid_local_time');
+    if (candidate.breakMinutes >= realMinutes) return skip('break_too_long');
     if (candidate.startsAt.getTime() <= input.now.getTime()) return skip('starts_in_past');
     const slot = slotKey(candidate.venueId, candidate.jobRoleId, candidate.startsAt, candidate.endsAt);
     if (input.existingSlots.has(slot)) return skip('already_exists');

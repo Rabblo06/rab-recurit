@@ -1,4 +1,5 @@
 import { ShiftPatternDefinition, patternDefinitionError, patternOccurrences, weekdayOf, zonedInstant } from './shift-pattern-plan';
+import { planDrafts } from './draft-batch-plan';
 
 const LONDON = 'Europe/London';
 const base: ShiftPatternDefinition = {
@@ -67,5 +68,21 @@ describe('patternDefinitionError', () => {
     [{ chargeRatePence: 1.5 }, 'whole number of pence'],
   ])('refuses %j', (patch, message) => {
     expect(patternDefinitionError({ ...base, ...(patch as Partial<ShiftPatternDefinition>) })).toContain(message);
+  });
+});
+
+describe('the spring clock change (29 March 2026, Europe/London)', () => {
+  it('a 01:00-02:00 occurrence has no real length and a 00:30-03:00 one is an hour shorter; planDrafts skips them by their real instants', () => {
+    const gap = patternOccurrences({ ...base, startDate: '2026-03-29', endDate: '2026-03-29', weekdays: ['Sunday'], startTime: '01:00', endTime: '02:00', breakMinutes: 0 }, LONDON);
+    expect(gap[0]!.endsAt.getTime() - gap[0]!.startsAt.getTime()).toBe(0);
+    const short = patternOccurrences({ ...base, startDate: '2026-03-29', endDate: '2026-03-29', weekdays: ['Sunday'], startTime: '00:30', endTime: '03:00', breakMinutes: 120 }, LONDON);
+    expect(short[0]!.endsAt.getTime() - short[0]!.startsAt.getTime()).toBe(90 * 60_000);
+    const checks = new Map([['v1|r1', null]]);
+    const now = new Date('2026-01-01T00:00:00Z');
+    expect(planDrafts(gap, { existingSlots: new Set(), targetChecks: checks, now })[0]).toMatchObject({ outcome: 'skip', reason: 'invalid_local_time' });
+    expect(planDrafts(short, { existingSlots: new Set(), targetChecks: checks, now })[0]).toMatchObject({ outcome: 'skip', reason: 'break_too_long' });
+    // The week after, the same pattern is a normal one-hour shift and is created.
+    const after = patternOccurrences({ ...base, startDate: '2026-04-05', endDate: '2026-04-05', weekdays: ['Sunday'], startTime: '01:00', endTime: '02:00', breakMinutes: 0 }, LONDON);
+    expect(planDrafts(after, { existingSlots: new Set(), targetChecks: checks, now })[0]).toMatchObject({ outcome: 'create' });
   });
 });

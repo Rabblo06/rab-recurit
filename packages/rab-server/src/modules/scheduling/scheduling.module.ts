@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../../engine/core-modules/auth/auth.module';
 import { EntityCacheModule } from '../../engine/core-modules/entity-cache/entity-cache.module';
+import { RateLimitModule } from '../../engine/core-modules/rate-limit/rate-limit.module';
 import { NotificationModule } from '../notification/notification.module';
 import { VenueModule } from '../venue/venue.module';
 import { SchedulingController } from './controllers/scheduling.controller';
@@ -11,7 +12,7 @@ import { SchedulingService } from './services/scheduling.service';
 import { DraftShiftBatchService } from './services/draft-shift-batch.service';
 
 @Module({
-  imports: [AuthModule, NotificationModule, VenueModule, EntityCacheModule],
+  imports: [AuthModule, NotificationModule, VenueModule, EntityCacheModule, RateLimitModule],
   controllers: [SchedulingController],
   providers: [SchedulingService, AvailabilityService, SchedulingAssistantService, DraftShiftBatchService],
   // SchedulingAssistantService: AI Phase 3 read tools (find_shifts, count_shifts, get_rota_coverage_gaps, get_venue_summary).

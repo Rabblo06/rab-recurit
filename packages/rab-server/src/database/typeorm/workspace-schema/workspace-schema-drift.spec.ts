@@ -3,6 +3,10 @@ import { Client } from 'pg';
 import { EXPECTED_WORKSPACE_FINGERPRINTS } from './v1/expected-fingerprints';
 import { checkWorkspaceSchemaDrift } from './workspace-schema-drift';
 import { codeWorkspaceStructureLevel } from '../../../engine/core-modules/upgrade/workspace-structure-level';
+import { selectWorkspaceFingerprintMajorForUnitTests } from '../../../__tests__/helpers/workspace-fingerprint-major';
+
+// The fake server below is PostgreSQL 16 (no default major: an unselected read throws).
+selectWorkspaceFingerprintMajorForUnitTests(16);
 
 /** Phase B: the drift detector reports a workspace above this code's newest module as AHEAD, never as OK. Fake client. */
 function fakeClient(rows: Array<{ id: string; status: string; version: number; fingerprint: string | null }>): Client {

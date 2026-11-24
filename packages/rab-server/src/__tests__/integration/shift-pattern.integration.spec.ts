@@ -152,6 +152,17 @@ describeIfDb('Recurring shift pattern (integration)', () => {
     expect(result.rows.filter((r) => r.reason === 'not_selected')).toHaveLength(preview.rows.length - 1);
   });
 
+  it('abuse: SCHEDULE_BULK revoked (SCHEDULE_CREATE kept) -> 403 at the route and in the service; nothing written', async () => {
+    const def = pattern();
+    await withRevoked(a, PermissionFlag.SCHEDULE_BULK, async () => {
+      await expect(batch.previewShiftPattern(ctxA, def)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(batch.generateShiftPattern(ctxA, def)).rejects.toBeInstanceOf(ForbiddenException);
+      const token = await factory.login(a);
+      expect((await http().post('/rest/v1/shifts/pattern').set('Authorization', `Bearer ${token}`).send(def)).status).toBe(403);
+    });
+    expect(await shiftCount(ctxA, def.startDate, addDays(def.endDate, 1))).toBe(0);
+  });
+
   it('abuse: SCHEDULE_CREATE revoked -> the SERVICE refuses with 403 and writes nothing', async () => {
     const def = pattern();
     await withRevoked(a, PermissionFlag.SCHEDULE_CREATE, async () => {

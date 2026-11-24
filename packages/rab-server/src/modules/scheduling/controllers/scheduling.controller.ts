@@ -156,28 +156,28 @@ export class SchedulingController {
   // Static paths before `shifts/:id/...`. Named actions (never a status): preview writes nothing; confirm creates DRAFTs.
   @Post('shifts/copy-previous-week/preview')
   @ManagerApplication()
-  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
   previewCopyPreviousWeek(@AuthUser() ctx: AuthContext, @Body() dto: CopyPreviousWeekDto) {
     return this.draftBatch.previewCopyPreviousWeek(ctx, dto);
   }
 
   @Post('shifts/copy-previous-week')
   @ManagerApplication()
-  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
   copyPreviousWeek(@AuthUser() ctx: AuthContext, @Body() dto: CopyPreviousWeekDto) {
     return this.draftBatch.copyPreviousWeek(ctx, dto);
   }
 
   @Post('shifts/pattern/preview')
   @ManagerApplication()
-  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
   previewShiftPattern(@AuthUser() ctx: AuthContext, @Body() dto: ShiftPatternDto) {
     return this.draftBatch.previewShiftPattern(ctx, dto);
   }
 
   @Post('shifts/pattern')
   @ManagerApplication()
-  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), RequireWorkspaceGuard)
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
   generateShiftPattern(@AuthUser() ctx: AuthContext, @Body() dto: ShiftPatternDto) {
     return this.draftBatch.generateShiftPattern(ctx, dto);
   }
