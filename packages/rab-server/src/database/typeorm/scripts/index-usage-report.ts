@@ -4,6 +4,7 @@
  *
  *   INDEX_REPORT_DATABASE_URL=postgres://... ts-node index-usage-report.ts          # summary, unused and largest indexes
  *   INDEX_REPORT_DATABASE_URL=postgres://... ts-node index-usage-report.ts --full   # every index
+ *   ... --show-query                                                                   # also the text of top DML statements
  *
  * Prints, for `core` and every `workspace_<32 hex>` schema (canonicalised to WS, summed over workspaces):
  *   - when the statistics were last reset (idx_scan counts only since then; on a replica they are that replica's own);
@@ -13,7 +14,11 @@
  *   - the largest indexes with their scan counts;
  *   - with pgstattuple installed: leaf density and fragmentation of the 10 largest btree indexes (bloat);
  *   - with pg_stat_statements installed (it must be in shared_preload_libraries): the 20 statements with the most total
- *     execution time (normalised text, constants already replaced by $n, cut to 160 characters).
+ *     execution time, as queryid, calls and timings only. Statement text is printed only with --show-query, and then only
+ *     for SELECT / WITH / INSERT / UPDATE / DELETE / MERGE (cut to 160 characters): utility statements (SET LOCAL of a
+ *     tenant setting, ALTER ROLE ... PASSWORD, ...) can keep literal values in pg_stat_statements depending on the
+ *     PostgreSQL version, so their text is never printed.
+ * The extension functions and views are called schema-qualified, in the schema pg_extension records for them.
  * Each optional section says so when its extension is missing instead of failing. Every statement is a SELECT, run in a
  * READ ONLY session (the connection factory's `default_transaction_read_only`); the URL is read only from
  * INDEX_REPORT_DATABASE_URL. Never point it at production without the owner's go-ahead: it is safe to run, but production
@@ -40,7 +45,12 @@ const USAGE_SQL = `
    WHERE s.schemaname = 'core' OR s.schemaname ~ '^workspace_[0-9a-f]{32}$'`;
 
 const STATS_RESET_SQL = `SELECT coalesce(stats_reset::text, 'never (since cluster creation)') AS reset FROM pg_catalog.pg_stat_database WHERE datname = current_database()`;
-const EXTENSIONS_SQL = `SELECT extname::text AS name FROM pg_catalog.pg_extension WHERE extname IN ('pgstattuple', 'pg_stat_statements')`;
+const EXTENSIONS_SQL = `SELECT e.extname::text AS name, n.nspname::text AS schema
+    FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+   WHERE e.extname IN ('pgstattuple', 'pg_stat_statements')`;
+
+/** An extension's schema, used as a qualifier only when it is a plain lower-case identifier (else the section is skipped). */
+const PLAIN_SCHEMA = /^[a-z_][a-z0-9_]{0,62}$/;
 
 function mb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -50,6 +60,7 @@ async function main(): Promise<void> {
   const url = process.env.INDEX_REPORT_DATABASE_URL?.trim();
   if (!url) throw new Error('INDEX_REPORT_DATABASE_URL is required. There is no fallback.');
   const full = process.argv.includes('--full');
+  const showQuery = process.argv.includes('--show-query');
   const client = createPgClientForUrl(url, 'the index report database URL', { purpose: 'index-report', readOnly: true, statementTimeoutMs: 120_000 });
   await client.connect();
   try {
@@ -76,30 +87,45 @@ async function main(): Promise<void> {
     console.log(full ? 'every index, largest first:' : 'largest 20 indexes:');
     for (const i of full ? all : all.slice(0, 20)) console.log(line(i));
 
-    const extensions = new Set((await client.query<{ name: string }>(EXTENSIONS_SQL)).rows.map((r) => r.name));
-    if (extensions.has('pgstattuple')) {
+    const extensions = new Map((await client.query<{ name: string; schema: string }>(EXTENSIONS_SQL)).rows.map((r) => [r.name, r.schema] as const));
+    for (const [name, schema] of extensions) {
+      if (!PLAIN_SCHEMA.test(schema)) {
+        console.log(`${name}: installed in a schema whose name is not a plain identifier; section skipped`);
+        extensions.delete(name);
+      }
+    }
+    const stattuple = extensions.get('pgstattuple');
+    const statements = extensions.get('pg_stat_statements');
+    if (stattuple) {
       console.log('btree bloat (pgstattuple, 10 largest btree indexes):');
       const bloat = await client.query<{ name: string; density: string; fragmentation: string }>(
+        // sql-injection-reviewed: the only interpolation is the extension's schema from pg_extension, accepted only as a plain lower-case identifier (PLAIN_SCHEMA).
         `SELECT n.nspname || '.' || c.relname AS name, (s).avg_leaf_density::text AS density, (s).leaf_fragmentation::text AS fragmentation
            FROM (SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace JOIN pg_catalog.pg_am am ON am.oid = c.relam
                   WHERE c.relkind = 'i' AND am.amname = 'btree' AND (n.nspname = 'core' OR n.nspname ~ '^workspace_[0-9a-f]{32}$')
                   ORDER BY pg_catalog.pg_relation_size(c.oid) DESC LIMIT 10) big
            JOIN pg_catalog.pg_class c ON c.oid = big.oid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace,
-                LATERAL (SELECT pgstatindex(big.oid) AS s) x`,
+                LATERAL (SELECT ${stattuple}.pgstatindex(big.oid) AS s) x`,
       );
       for (const b of bloat.rows) console.log(`  ${b.name}  leaf density=${b.density}%  fragmentation=${b.fragmentation}%`);
     } else {
       console.log('btree bloat: pgstattuple is not installed in this database (CREATE EXTENSION pgstattuple, an owner decision)');
     }
-    if (extensions.has('pg_stat_statements')) {
-      console.log('top 20 statements by total execution time (pg_stat_statements):');
-      const top = await client.query<{ calls: string; total_ms: string; mean_ms: string; query: string }>(
-        `SELECT calls::text, round(total_exec_time)::text AS total_ms, round(mean_exec_time::numeric, 2)::text AS mean_ms,
-                left(regexp_replace(query, '\\s+', ' ', 'g'), 160) AS query
-           FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+    if (statements) {
+      console.log(`top 20 statements by total execution time (pg_stat_statements${showQuery ? '; text of DML statements only' : '; queryid only, --show-query adds DML text'}):`);
+      const top = await client.query<{ queryid: string; calls: string; total_ms: string; mean_ms: string; query: string | null }>(
+        // sql-injection-reviewed: the only interpolation is the extension's schema from pg_extension, accepted only as a plain lower-case identifier (PLAIN_SCHEMA); $1 is bound.
+        `SELECT queryid::text, calls::text, round(total_exec_time)::text AS total_ms, round(mean_exec_time::numeric, 2)::text AS mean_ms,
+                CASE WHEN $1::boolean AND query ~* '^\\s*(SELECT|WITH|INSERT|UPDATE|DELETE|MERGE)\\M'
+                     THEN left(regexp_replace(query, '\\s+', ' ', 'g'), 160) END AS query
+           FROM ${statements}.pg_stat_statements WHERE dbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
           ORDER BY total_exec_time DESC LIMIT 20`,
+        [showQuery],
       );
-      for (const t of top.rows) console.log(`  total=${t.total_ms} ms  calls=${t.calls}  mean=${t.mean_ms} ms  ${t.query}`);
+      for (const t of top.rows) {
+        const text = showQuery ? `  ${t.query ?? '(utility statement: text not printed)'}` : '';
+        console.log(`  queryid=${t.queryid}  total=${t.total_ms} ms  calls=${t.calls}  mean=${t.mean_ms} ms${text}`);
+      }
     } else {
       console.log('top statements: pg_stat_statements is not installed here (shared_preload_libraries + CREATE EXTENSION; provider support and enabling it are owner decisions)');
     }
