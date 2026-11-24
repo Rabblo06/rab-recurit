@@ -44,6 +44,8 @@ const wsc = (name: string, timestamp: number, extra: Partial<WorkspaceUpgradeCom
 /** The published list as the 0.6.1 release PR will set it (this PR does not register 0.6.1: CREWFLOW_PREVIOUS_VERSIONS is unchanged). */
 const PREV_061 = ['0.4.0', '0.5.0', '0.6.0'];
 const PREV_070 = ['0.4.0', '0.5.0', '0.6.0', '0.6.1'];
+/** 0.7.0's reviewed upgrade-from list as its release PR will set it (every published 0.6.x). */
+const UF_070 = { '0.7.0': ['0.6.0', '0.6.1'] };
 const REAL_06 = WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [];
 const LAST_060 = lastStepOfVersion('0.6.0');
 const names = (steps: readonly { name: string }[] | null) => steps?.map((s) => s.name) ?? null;
@@ -139,10 +141,10 @@ describe('patch releases: which versions they upgrade from', () => {
     expect(versionsToCheck('0.6.1', PREV_061)).toEqual(['0.6.0', '0.6.1']);
   });
 
-  it('the minor releases keep the existing rule (0.6.0 adoption; 0.7.0 strict: the last published version)', () => {
+  it('the minor releases read their reviewed list (0.6.0 adoption; 0.7.0 every published 0.6.x it lists)', () => {
     expect(upgradeFromVersions('0.6.0', ['0.4.0', '0.5.0'])).toEqual(['0.4.0', '0.5.0']);
-    expect(upgradeFromVersions('0.7.0', PREV_061)).toEqual(['0.6.0']);
-    expect(upgradeFromVersions('0.7.0', PREV_070)).toEqual(['0.6.1']);
+    expect(upgradeFromVersions('0.7.0', PREV_061, { '0.7.0': ['0.6.0'] })).toEqual(['0.6.0']);
+    expect(upgradeFromVersions('0.7.0', PREV_070, UF_070)).toEqual(['0.6.0', '0.6.1']);
   });
 
   it("fail closed: a patch whose minor .0 is not a published previous version refuses (config, 64), also on a fresh install", () => {
@@ -224,7 +226,7 @@ describe('0.6.1 → 0.7.0 still runs the 0.7 commands', () => {
   });
 
   it('accepted from 0.6.1; a workspace that finished 0.6.0, or was created on 0.6.1, runs exactly the 0.7.0 workspace commands', () => {
-    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete: { '0.6.1': true, '0.6.0': true } }))).toMatchObject({ kind: 'continue', from: '0.6.1' });
+    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, upgradeFrom: UF_070, complete: { '0.6.1': true, '0.6.0': true } }))).toMatchObject({ kind: 'continue', from: '0.6.0' });
     const want = ['0.7.0_Ws07Structural_1786900000100', '0.7.0_Ws07Data_1786900000200'];
     expect(names(pendingWorkspaceSteps(sequence, '0.7.0', { name: LAST_060, status: 'completed' }))).toEqual(want);
     expect(names(pendingWorkspaceSteps(sequence, '0.7.0', { name: '0.6.1_TypeOrmMigrations', status: 'completed' }))).toEqual(want);
@@ -302,12 +304,12 @@ describe('registering commands for a patch release fails (typed)', () => {
 describe('security review of #219: M-1, L-2, I-2', () => {
   it('M-1: a previous patch counts as complete only with its minor .0; 0.7.0 after a --force 0.6.1 that left 0.6.0 unfinished: 65', () => {
     // The caller reads the .0 too (its instance step and every workspace's last 0.6.0 workspace command).
-    expect(versionsToCheck('0.7.0', PREV_070)).toEqual(['0.6.1', '0.6.0', '0.7.0']);
+    expect(versionsToCheck('0.7.0', PREV_070, UF_070)).toEqual(['0.6.0', '0.6.1', '0.7.0']);
     expect(versionsToCheck('0.6.2', [...PREV_070])).toEqual(['0.6.0', '0.6.1', '0.6.2']);
-    const at070 = (complete: Record<string, boolean>, force = false) => decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete, force }));
+    const at070 = (complete: Record<string, boolean>, force = false) => decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, upgradeFrom: UF_070, complete, force }));
     expect(() => at070({ '0.6.1': true, '0.6.0': false })).toThrow(UpgradeVersionTooOldError);
     expect(() => at070({ '0.6.1': true })).toThrow(UpgradeVersionTooOldError); // the .0 not read = not complete
-    expect(at070({ '0.6.1': true, '0.6.0': true })).toMatchObject({ kind: 'continue', from: '0.6.1' });
+    expect(at070({ '0.6.1': true, '0.6.0': true })).toMatchObject({ kind: 'continue', from: '0.6.0' });
     expect(at070({ '0.6.1': true, '0.6.0': false }, true).kind).toBe('forced');
     // 0.6.2 (accepts 0.6.0 and 0.6.1): the folded 0.6.1 no longer stands in for an unfinished 0.6.0.
     expect(() => decideUpgradeStart(facts({ codeVersion: '0.6.2', previousVersions: PREV_070, complete: { '0.6.1': true, '0.6.0': false } }))).toThrow(UpgradeVersionTooOldError);
@@ -317,7 +319,7 @@ describe('security review of #219: M-1, L-2, I-2', () => {
     expect(effectiveComplete('0.6.1', { '0.6.1': true, '0.6.0': false })).toEqual({ '0.6.1': true, '0.6.0': false });
     expect(effectiveComplete('0.7.0', { '0.6.1': true, '0.6.0': false, '0.7.0': true })).toEqual({ '0.6.1': false, '0.6.0': false, '0.7.0': true });
     expect(decideUpgradeStart(facts({ complete: { '0.6.0': false, '0.6.1': true } }))).toMatchObject({ kind: 'continue', from: '0.6.1' });
-    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete: { '0.6.1': false, '0.6.0': false, '0.7.0': true } }))).toMatchObject({
+    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, upgradeFrom: UF_070, complete: { '0.6.1': false, '0.6.0': false, '0.7.0': true } }))).toMatchObject({
       kind: 'continue',
       from: '0.7.0',
     });

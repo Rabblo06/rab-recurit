@@ -3,9 +3,12 @@
  * `database/commands/run-instance-commands.command.ts:124-168`, re-implemented, not copied):
  *   - `--force` skips ONLY this check (:127-133) and the run records forced = true;
  *   - a fresh install skips it (:135-140, "no provisioned workspace");
- *   - the previous version is the last TWENTY_PREVIOUS_VERSIONS entry (:142-143); 0.6.0, the adoption release, accepts
- *     0.4.0 (R254) and 0.5.0 (R256) (upgrade-version.ts upgradeFromVersions); a patch release (0.6.1) accepts the earlier
- *     published versions of its own minor line (0.6.0) and refuses (64) when its minor .0 is not published;
+ *   - the accepted previous versions: Twenty reads the last TWENTY_PREVIOUS_VERSIONS entry here (:142-143) and supports an
+ *     upgrade from every TWENTY_CROSS_UPGRADE_SUPPORTED_VERSIONS entry in its sequence runner; Crewflow keeps an explicit,
+ *     reviewed list per MINOR release (upgrade-version.ts CREWFLOW_UPGRADE_FROM_VERSIONS, owner decision 2026-11-18: e.g.
+ *     0.7.0 from any published 0.6.x it lists; 0.6.0, the adoption release, from 0.4.0 (R254) and 0.5.0 (R256)); a patch
+ *     release (0.6.1) accepts the earlier published versions of its own minor line (0.6.0) and refuses (64) when its minor
+ *     .0 is not published;
  *   - Twenty skips the check when there is nothing recorded (:145-152); Crewflow's analogue is the ONE-TIME adoption of an
  *     R254 / R256 history (B3): one is_initial row at 0.4.0 / 0.5.0, then the upgrade in the same start; only 0.6.0 adopts;
  *   - otherwise "version X is complete" (the last step of X has a completed latest attempt) must hold for an accepted
@@ -16,6 +19,11 @@
  *     UNFORCED start already moved on to the code's version (a step row of that version, completed or failed) is past the
  *     gate: a migration or post-check failure inside the version is retried, never refused 65 (CI POST-1: a fresh 0.6.0
  *     install whose later start failed its post-check). Forced rows do not count.
+ *   - a PATCH release resumes its minor .0 (owner decision 2026-11-18; Twenty upgrade-sequence-runner.service.ts:98-247 resumes
+ *     from the failed step, "Rerun the upgrade to resume from this step"): when an unforced start already moved the instance
+ *     on to the .0 (it passed this check then) and every READY workspace has a logbook row, the patch continues and re-runs
+ *     the .0's incomplete steps under their own names (upgrade-runner.ts afterApply). A workspace with no row at all is never
+ *     resumed by a patch (only 0.6.0 adopts): still refused 65.
  * Pure: the caller reads the facts on the locked session first.
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
@@ -26,8 +34,11 @@ import {
   assertPreviousVersions,
   compareVersions,
   CREWFLOW_PREVIOUS_VERSIONS,
+  CREWFLOW_UPGRADE_FROM_VERSIONS,
+  crossUpgradeSupportedVersions,
   isPatchRelease,
   minorReleaseOf,
+  UpgradeFromVersions,
   upgradeFromVersions,
 } from './upgrade-version';
 import { migrationsStepName } from './upgrade-sequence';
@@ -61,6 +72,13 @@ export interface UpgradeStartFacts {
   /** Targets the release floor does not restrict (local / test): an unattributable history is allowed, unrecorded. */
   unrestrictedTarget: boolean;
   previousVersions?: readonly string[];
+  /** The reviewed upgrade-from lists (default CREWFLOW_UPGRADE_FROM_VERSIONS). */
+  upgradeFrom?: UpgradeFromVersions;
+  /**
+   * A PATCH code version only: an earlier UNFORCED start recorded an instance row of its minor .0 (that start passed this
+   * check), and every READY workspace has a logbook row. The patch then resumes the .0's incomplete steps.
+   */
+  minorReleaseResumable?: boolean;
 }
 
 export type UpgradeStartDecision =
@@ -76,9 +94,14 @@ export type UpgradeStartDecision =
  * also needs its minor release (`M.m.0`): the patch carries no step of the .0, so "the patch is complete" says nothing about
  * the .0's commands (security review M-1, see effectiveComplete).
  */
-export function versionsToCheck(codeVersion: string, previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS): string[] {
+export function versionsToCheck(
+  codeVersion: string,
+  previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS,
+  upgradeFrom: UpgradeFromVersions = CREWFLOW_UPGRADE_FROM_VERSIONS,
+): string[] {
   assertPreviousVersions(previous);
-  const from = upgradeFromVersions(codeVersion, previous);
+  const supported = crossUpgradeSupportedVersions(codeVersion, previous, upgradeFrom);
+  const from = supported.filter((v) => v !== codeVersion);
   return [...new Set([...from, ...from.filter((v) => isPatchRelease(v)).map((v) => minorReleaseOf(v)), codeVersion])];
 }
 
@@ -106,8 +129,9 @@ export function decideUpgradeStart(f: UpgradeStartFacts): UpgradeStartDecision {
       `the code version ${f.codeVersion} is not newer than the last published version ${last}: the release version was not bumped. Refusing.`,
     );
   }
-  // Before any outcome (fresh and rollback included): a patch release whose minor .0 is not published refuses (config, 64).
-  const from = upgradeFromVersions(f.codeVersion, previous);
+  // Before any outcome (fresh and rollback included): a patch release whose minor .0 is not published, or a minor release
+  // without a valid reviewed upgrade-from list, refuses (config, 64).
+  const from = upgradeFromVersions(f.codeVersion, previous, f.upgradeFrom ?? CREWFLOW_UPGRADE_FROM_VERSIONS);
   if (f.newerVersions.length) {
     return { kind: 'rollback', newer: [...f.newerVersions], reason: `the logbook holds newer version(s) ${f.newerVersions.join(', ')} than this image (${f.codeVersion}): rollback, nothing recorded` };
   }
@@ -118,9 +142,20 @@ export function decideUpgradeStart(f: UpgradeStartFacts): UpgradeStartDecision {
     const done = [...from, f.codeVersion].find((v) => complete[v] === true);
     if (done) return { kind: 'continue', from: done, reason: done === f.codeVersion ? `${done} is already complete` : `previous version ${done} is complete` };
     if (f.codeVersionStarted) return { kind: 'continue', from: f.codeVersion, reason: `${f.codeVersion} was already started by an unforced run (past the previous-version check); retrying it` };
+    if (isPatchRelease(f.codeVersion) && f.minorReleaseResumable === true) {
+      const minor = minorReleaseOf(f.codeVersion);
+      return {
+        kind: 'continue',
+        from: minor,
+        reason: `${minor} was already started by an unforced run (past the previous-version check) but is not complete; ${f.codeVersion} resumes its incomplete steps under their own names`,
+      };
+    }
     if (f.force) return { kind: 'forced', reason: `--force: the previous-version check is skipped (none of ${from.join(', ')} is complete)` };
+    const accepted = isPatchRelease(f.codeVersion)
+      ? `${from.join(' or ')} (a patch upgrades only from its own minor line)`
+      : `any version ${f.codeVersion} upgrades from (${from.join(', ')}: its reviewed list in CREWFLOW_UPGRADE_FROM_VERSIONS)`;
     throw new UpgradeVersionTooOldError(
-      `the database has not completed ${from.join(' or ')} (needed before ${f.codeVersion}). Upgrade through the missing release first, or run the manual command \`upgrade --force\` (not recommended). Nothing was applied.`,
+      `the database has not completed ${accepted}, which is needed before ${f.codeVersion}. Upgrade through a listed release first, or run the manual command \`upgrade --force\` (not recommended). Nothing was applied.`,
     );
   }
 
