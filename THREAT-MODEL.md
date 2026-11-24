@@ -10457,6 +10457,111 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## M4 offline clock-in, staff phone (Flutter): punches stored on the device (branch feat/m4-mobile-offline-queue, 2026-11-21; no SQL; offline stays OFF, owner HARD RULE)
+- **What is new:** `packages/rab-mobile/lib/features/offline_sync/` can hold attendance punches (check-in, clock-in,
+  break start/end, clock-out) that could not reach the server, exactly as `docs/plans/m4-offline/DESIGN.md` §3 defines
+  them, until they are sent to `POST /rest/v1/attendance/me/sync` (not built yet). Whose data: the signed-in staff
+  member's own attendance evidence (shift id, the scanned QR text, an optional location fix, boot-clock readings and the
+  server-signed offline ticket).
+- **Threats and controls:**
+  - *Lost or stolen phone reads the queue.* The queue is one JSON value per user in the app's single secure storage
+    (`appSecureStorage`: Android AES-GCM data key wrapped by an Android Keystore RSA key; iOS Keychain
+    `AfterFirstUnlockThisDeviceOnly`, never synchronised), device-only and out of backups (`android:allowBackup="false"`),
+    wiped on a reinstall by `SecureStorageBootstrap`. It holds no name, no token, no money and no server-derived field.
+    It is capped at 30 entries / 48 KB per user (a 31st capture or a larger queue is refused and nothing is written),
+    acknowledged entries are deleted, and an empty queue deletes the stored value. No new dependency (no database, no
+    file store).
+  - *Editing the queue on the phone to change a time, a shift or the QR.* Entries are immutable and carry a signature
+    over the RFC 8785 canonical JSON of every other field (`canonical_json.dart`, tested against the RFC sample); the
+    server rejects any change (`SIGNATURE_INVALID`). The phone never decides a time: it records boot-clock readings and
+    a ticket; the server bounds the time (DESIGN §4, `@rab/shared` `offline-punch-time.ts`) and the phone never computes
+    worked minutes or pay (`duration.ts` stays the only place).
+  - *Another user on the same phone sends or sees someone else's punches.* The queue and ticket are keyed by user id
+    (`rab.offline.queue.<userId>`); a different user never reads or sends them (the server would also reject the ticket
+    subject).
+  - *Replaying or reordering entries.* `clientSeq` is a per-install counter written before use and never reused; an
+    unreadable counter fails closed (no capture) rather than restarting. Each entry has a UUID v4 idempotency key; the
+    store refuses a duplicate key or sequence number. Replay order is `clientSeq`.
+  - *A corrupted queue silently losing a punch.* An unreadable queue is reported (`unreadable`), never overwritten by a
+    new capture and never silently dropped; only an explicit dismissal deletes it.
+  - *Deep-sleep clock drift inflating pay.* Elapsed time comes from a `rab/boot_clock` channel
+    (`SystemClock.elapsedRealtime()`, counts deep sleep), never Dart's `Stopwatch` (stops in deep sleep, which would make
+    a punch look earlier). No reading = no capture.
+  - *Passing a reboot off as the same boot session (security review M1).* The boot identity is the kernel's random
+    per-boot UUID (`/proc/sys/kernel/random/boot_id`), which no user, app or adb shell can write; an unreadable or
+    malformed value refuses the reading (no capture). It was `Settings.Global.BOOT_COUNT`, which `adb shell settings put
+    global boot_count N` rewrites without root, letting a rebooted phone whose uptime caught up with the ticket reading
+    anchor a late clock-in near the ticket time. The server-side backstop (reject `TIME_UNTRUSTED` when the wall-clock and
+    boot-clock deltas disagree in the pay-adding direction) is a ROLLOUT-CHECKLIST precondition.
+  - *A jammed queue.* The 30-entry / 48 KB limits are enforced on a new capture only; sync outcomes and dismissals
+    (which only remove entries or set a code) never fail on them, and server-supplied codes and reasons are capped at
+    49 / 32 characters before they are stored (security review L4).
+  - *Keystore failure wiping the queue.* The shared secure-storage configuration uses `resetOnError: true` (Android): if
+    the Keystore key cannot decrypt (for example after some OS or lock-screen changes), the plugin deletes the stored
+    values, the offline queue included. Unsent punches are then lost on the phone (never sent; the manager sees no
+    receipt). Accepted: the same setting protects tokens, and the alternative is an unreadable store that blocks the app.
+  - *A rooted phone.* Each entry carries `integrity.rootedSignal` (DESIGN §3.2, §6.4): a cheap `su`-binary check on
+    Android (`integrity_signal.dart`), client-asserted, recorded by the server as a flag and never used to block.
+- **Still off, by construction:** nothing can be queued unless (1) the build was made with
+  `--dart-define=OFFLINE_ATTENDANCE=true` (default false), (2) the server's last `GET /attendance/me/active` said
+  `offline.enabled == true`, (3) a ticket from this boot, received under 16 h ago, is held, and (4) a registered device
+  key can sign. The device key and its registration route do not exist yet, so the signer is a placeholder that is never
+  available (`UnavailableEntrySigner`): on a real phone the queue stays empty.
+- **Residual:** a rooted phone can read secure storage and see its own queued punches (its own data); it still cannot
+  forge a valid signature once the Keystore key exists, and the server bounds every time to the schedule (D3). The
+  boot-clock channel's values are client-asserted; the server treats them as bounded evidence, not as truth.
+- **Tests:** `test/offline_queue_store_test.dart` (forbidden fields never written; signed payload = canonical JSON
+  minus `sig`; per-user keys; replay order; 31st entry and 48 KB refused with nothing written; duplicate key or
+  sequence refused; unreadable queue never overwritten; update cannot add entries; sequence never reused, corrupt
+  counter fails closed; concurrent appends; ticket capture window: same boot and <= 16 h only; boot clock channel fails
+  closed), `test/offline_canonical_json_test.dart` (RFC 8785 sample, key order, numbers, escapes, refusals).
+
+## M4 offline clock-in, staff phone (Flutter): Clock In / Out fall back to the queue; fixed "not yet confirmed" card; logout guard (branch feat/m4-mobile-offline-wiring, on top of feat/m4-mobile-offline-queue, 2026-11-21; no SQL; offline stays OFF)
+- **What changes:** `AttendanceProvider.checkIn` / `clockIn` / `clockOut` may save the punch on the phone
+  (`OfflineSyncController.capture`) instead of showing "Connection lost", and the clock screen, Profile and logout
+  show what is saved. Whose data: the staff member's own attendance.
+- **Threats and controls:**
+  - *A dropped request recorded twice (once by the server, once from the queue).* Only a request that got NO response
+    is queued (socket / DNS / TLS / client error, or THIS CLIENT giving up waiting: `ApiTimeoutException`,
+    `TimeoutException`); any HTTP response, a 5xx or a server/proxy-sent 408 included, is shown as an error and never
+    queued (`isNoResponseFailure`; security review L2: a real 408 used to be indistinguishable from the client's own
+    timeout). When queueing is possible the online request carries an `Idempotency-Key` and the queued entry reuses the
+    same key (D17), so the server either reports the first attempt as applied or applies it once. With offline mode off
+    there is no key and no header: the request is byte-for-byte what it was before M4 (tested). `ApiClient.post` accepts
+    no extra header except `Idempotency-Key` (allowlist; anything else throws).
+  - *A fake or client-driven timer (CLAUDE.md "no mock production logic"; D10).* A saved punch never sets `active` or
+    any local attendance; the clock card shows a fixed "Clocked in 09:02 · Not yet confirmed" (`OfflinePendingCard`,
+    no `Timer`, tested to stay identical after 5 s) and the server timer appears only once the server confirms. The
+    09:02 is the server-anchored estimate at the tap, display only; it is never sent and never used as a time.
+  - *Punches arriving out of order.* While anything is waiting, a new punch is saved behind it instead of going online
+    first (so a clock-out never reaches the server before its clock-in). Every entry names its shift (never "the
+    current shift"); clock-out uses the open attendance's shift or the saved clock-in's.
+  - *Losing unsent punches on logout, or leaving them at rest (D18).* Logout from Profile is blocked while punches are
+    unsent: "Stay signed in" keeps them; "Discard and log out" deletes them (never sent; the manager is not told). With
+    nothing unsent, logout deletes whatever is left (refused / too-old results, the ticket) before signing out. Session
+    expiry does not delete the queue: it stays keyed to that user and is never readable by another account.
+    That decision is made on the STORED queue, re-read under the store's lock, never on memory alone: if start-up could
+    not read secure storage (memory empty) or the queue is unreadable, logout shows the guard and deletes nothing
+    unless the staff member explicitly discards (security review L3).
+    If that explicit discard itself fails (broken store), logout still runs; whatever could not be deleted stays keyed
+    to that user (re-review Low).
+  - *Server text in the UI.* Refusals are shown by code through `offline_messages.dart`; server text is never shown.
+- **Still off, by construction:** the controller is created per staff session but `mayQueue` needs the build flag,
+  `offline.enabled == true` from the server, a fresh ticket from this boot and an available device key; the shipped
+  signer is a placeholder that is never available, so every punch behaves exactly as before.
+- **Not built (later):** `break_start` / `break_end` capture exists in the model but no break UI ships in this app
+  yet; geofence-exit auto clock-out is never queued (D14); the sync client is the next PR.
+- **Tests:** `test/attendance_offline_queue_test.dart` (off: dropped connection = the old error, nothing saved, no
+  header, with and without a controller, server not enabling; on: success sends one request with a key; no response
+  and 408 save with the same key; 409/500/503 never saved; next punch saved behind the first without a request;
+  clock-out keeps the open server attendance untouched; offline check-in satisfies the Check In step without a server
+  time; a stale ticket refuses with "Connect once"), `test/offline_sync_controller_test.dart` (switches, ticket fetch
+  limit, capture contents and signature, reboot / 16 h refusal, UX dependency checks, signing failure stores nothing,
+  full queue, per-user isolation, 72 h too-old, dismiss, discard, logout clear), `test/offline_ui_test.dart` (fixed card,
+  no ticking, clock-out after a saved clock-in, saved clock-out disables the action; logout guard stay / discard / no
+  queue; banner and saved-actions rows, dismiss only for refused rows).
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

@@ -58,6 +58,8 @@ class LocationFix {
     required this.lng,
     required this.accuracyM,
     required this.capturedAt,
+    this.age = Duration.zero,
+    this.mock = false,
   });
 
   /// [trustedNow] is the server-anchored clock (`AttendanceProvider.
@@ -79,11 +81,18 @@ class LocationFix {
       lng: position.longitude,
       accuracyM: position.accuracy,
       capturedAt: (trustedNow ?? device).subtract(age),
+      age: age,
+      mock: position.isMocked,
     );
   }
 
   final double lat, lng, accuracyM;
   final DateTime capturedAt;
+
+  /// How old the fix was when it was taken for this punch, and the platform mock-provider flag. Used only by the
+  /// offline queue (M4 DESIGN §5.1: `fixBootMs`, `mock`); never sent with an online request.
+  final Duration age;
+  final bool mock;
 
   Map<String, Object> toJson() => {
     'lat': lat,
