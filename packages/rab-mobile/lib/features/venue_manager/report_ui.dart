@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../../core/motion/shift_motion.dart';
 
-import '../../core/theme/schedule_tokens.dart';
 
 /// Visual language of the Venue Manager Shift report / Review / Timesheet screens (owner reference designs
 /// 2026-10-17): light neutral page, white rounded cards, dark navy actions, amber notices, mint / pink / lavender badges.
@@ -311,44 +311,74 @@ class ReportSegments<T> extends StatelessWidget {
       color: Colors.white,
       borderRadius: BorderRadius.circular(14),
     ),
-    child: Row(
+    child: Stack(
       children: [
-        for (var i = 0; i < values.length; i++)
-          Expanded(
-            child: Semantics(
-              button: true,
-              selected: values[i] == selected,
-              child: GestureDetector(
-                key: Key('segment-${labels[i]}'),
-                onTap: onChanged == null ? null : () => onChanged!(values[i]),
-                child: AnimatedContainer(
-                  duration: ScheduleTokens.styleMotion,
-                  height: 44,
-                  alignment: Alignment.center,
+        if (values.contains(selected))
+          Positioned.fill(
+            child: AnimatedAlign(
+              duration: ShiftMotion.reduced(context)
+                  ? Duration.zero
+                  : const Duration(milliseconds: 260),
+              curve: Curves.easeOutCubic,
+              alignment: AlignmentDirectional(
+                values.length == 1
+                    ? 0
+                    : -1 + 2 * values.indexOf(selected) / (values.length - 1),
+                0,
+              ),
+              child: FractionallySizedBox(
+                widthFactor: 1 / values.length,
+                heightFactor: 1,
+                child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: values[i] == selected
-                        ? ReportTokens.navy
-                        : Colors.transparent,
+                    color: ReportTokens.navy,
                     borderRadius: BorderRadius.circular(11),
-                  ),
-                  child: Text(
-                    labels[i],
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: values[i] == selected
-                          ? FontWeight.w600
-                          : FontWeight.w400,
-                      color: values[i] == selected
-                          ? Colors.white
-                          : ReportTokens.muted,
-                    ),
                   ),
                 ),
               ),
             ),
           ),
+        Row(
+          children: [
+            for (var i = 0; i < values.length; i++)
+              Expanded(
+                child: Semantics(
+                  button: true,
+                  selected: values[i] == selected,
+                  child: TextButton(
+                    key: Key('segment-${labels[i]}'),
+                    onPressed: onChanged == null
+                        ? null
+                        : () => onChanged!(values[i]),
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 12,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(11),
+                      ),
+                    ),
+                    child: Text(
+                      labels[i],
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: values[i] == selected
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                        color: values[i] == selected
+                            ? Colors.white
+                            : ReportTokens.muted,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
       ],
     ),
   );

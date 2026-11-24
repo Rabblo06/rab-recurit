@@ -15,13 +15,16 @@ class SchedulePanel extends StatelessWidget {
   final VoidCallback? onTap;
   final EdgeInsetsGeometry padding;
   @override
-  Widget build(BuildContext context) => Material(
-    color: color,
-    borderRadius: BorderRadius.circular(ScheduleTokens.panelRadius),
-    child: InkWell(
-      onTap: onTap,
+  Widget build(BuildContext context) => PressFeedback(
+    enabled: onTap != null,
+    child: Material(
+      color: color,
       borderRadius: BorderRadius.circular(ScheduleTokens.panelRadius),
-      child: Padding(padding: padding, child: child),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(ScheduleTokens.panelRadius),
+        child: Padding(padding: padding, child: child),
+      ),
     ),
   );
 }
