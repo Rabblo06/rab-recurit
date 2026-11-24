@@ -81,6 +81,8 @@ PostgreSQL major per run (run it for 16, 17 and 18; Debian postgres images, see 
 | U6 | A foreign database (a table in `public`): FOREIGN, `DatabaseStateError` (67), nothing created, Worker never started. |
 | U7 | Two migrate children of the new image race for the advisory lock on a seeded R254 database: one applies 2, the other waits and finds CURRENT; no duplicate ledger rows. |
 
+None of these cases (nor `upgrade-ledger-tests/`) starts a PATCH release (`M.m.p`, p > 0): the images under test are minor releases. A forced patch start whose `.0` command deferred is the one exit-0 start that reports `/healthz` `upgradeFailed: true` (a forced marker row, OWNER-LOGIN-DEPLOYMENT.md 3.6 (e)), so it cannot appear in these runs. A future patch-release case must expect `upgradeFailed: true` there, not treat it as a regression. That path is covered by `cross-upgrade-resume.integration.spec.ts` case 9 and `upgrade-runner-deferral.spec.ts`.
+
 ```bash
 # local registry (127.0.0.1 only), the images by digest
 docker run -d --name deploy-order-registry -p 127.0.0.1:5055:5000 --tmpfs /var/lib/registry registry@sha256:<digest>
