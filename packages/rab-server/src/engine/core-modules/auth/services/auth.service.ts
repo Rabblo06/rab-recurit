@@ -4,7 +4,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
-import { Organisation, Role, User, UserRole } from '../../../../modules/identity/entities';
+import { Organisation, Role, User, UserRole } from '../../identity/entities';
 import { AuditAction, AuditService } from '../../audit/audit.service';
 import { EnvironmentService } from '../../environment/environment.service';
 import { EmailOutboxService } from '../../email/email-outbox.service';

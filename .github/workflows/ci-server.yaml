@@ -47,7 +47,7 @@ jobs:
       # migrator built. The application connects as crewflow_app (TEST_DATABASE_URL, restricted, NOBYPASSRLS); fixtures as
       # the disposable cluster's bootstrap superuser (TEST_DATABASE_URL_UNPOOLED). Every value is random and masked.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -130,7 +130,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       HWS_RUNTIME_ENABLED: 'false'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
@@ -182,7 +182,7 @@ jobs:
       REDIS_URL: redis://localhost:6379
       CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
