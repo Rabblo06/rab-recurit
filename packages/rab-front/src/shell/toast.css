@@ -1,0 +1,27 @@
+/* Sileo owns the surface; the existing toast controller owns timing and actions. */
+.toast-host { position: relative; z-index: 2000; }
+.toast-host [data-sileo-viewport] { z-index: 2000; --sileo-width: min(350px, calc(100vw - 32px)); }
+.toast-host [data-sileo-toast] { cursor: default; outline: none; }
+.toast-host [data-sileo-svg] { filter: drop-shadow(0 8px 16px rgb(20 24 32 / 12%)); }
+.toast-host [data-sileo-title] { font-family: inherit; font-size: 13px; font-weight: 650; color: var(--font-primary); }
+.toast-host [data-sileo-description] { font-family: inherit; color: var(--font-primary); margin: 0; }
+.toast { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 2px 0 10px; color: var(--font-primary); font-size: 13px; line-height: 1.55; text-align: left; }
+.toast-icon { display: none; }
+.toast-message { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
+.toast-progress { position: absolute; bottom: 0; left: 0; height: 2px; width: 100%; background: var(--toast-ink); opacity: .25; border-radius: 99px; animation: toast-drain linear forwards; pointer-events: none; }
+.toast.is-paused .toast-progress { animation-play-state: paused; }
+.toast.is-persistent .toast-progress { display: none; }
+.toast-sr-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.toast-close, .toast-action { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 32px; min-height: 32px; padding: 6px; border: 0; border-radius: 99px; background: var(--bg-secondary); color: var(--font-secondary); cursor: pointer; }
+.toast-close:hover, .toast-action:hover { color: var(--font-primary); background: var(--bg-tertiary, var(--bg-secondary)); }
+.toast-action { padding-inline: 12px; font: inherit; font-weight: 600; color: var(--toast-ink); }
+.toast-close:focus-visible, .toast-action:focus-visible { outline: 2px solid var(--toast-ink); outline-offset: 2px; }
+.toast-error { --toast-ink: var(--feedback-error); }
+.toast-success { --toast-ink: var(--feedback-success); }
+.toast-warning { --toast-ink: var(--feedback-warning); }
+.toast-info { --toast-ink: var(--feedback-info); }
+@keyframes toast-drain { from { width: 100%; } to { width: 0%; } }
+@keyframes toast-hold { from { opacity: .25; } to { opacity: .25; } }
+.toast-progress.toast-progress-static { animation-name: toast-hold; }
+@media (prefers-reduced-motion: reduce) { .toast-progress { animation-name: toast-hold; } }
+@media (pointer: coarse) { .toast-close, .toast-action { min-width: 44px; min-height: 44px; } }

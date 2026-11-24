@@ -1,3 +1,4 @@
+import { SearchField } from '../components/arc/search-field/search-field';
 import { useRef, useState } from 'react';
 import { IconSearch, IconDots, IconArrowUpRight, IconFilter, IconArrowsSort } from '@tabler/icons-react';
 import Popover from '../components/Popover';
@@ -7,12 +8,9 @@ import SortPopover from './SortPopover';
 import type { ActiveFilters, SortState, TableToolbarConfig } from './types';
 import { useColumnVisibility } from './useColumnVisibility';
 
-export function TableSearchInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+export function TableSearchInput({ value, onChange, placeholder = 'Search...' }: { value: string; onChange: (value: string) => void; placeholder?: string }) {
   return (
-    <div className="toolbar-search">
-      <IconSearch size={14} />
-      <input aria-label="Search records" placeholder="Search..." value={value} onChange={(e) => onChange(e.target.value)} />
-    </div>
+    <div className="arc-table-search"><SearchField type="text" label="Search records" placeholder={placeholder} value={value} onValueChange={onChange} /></div>
   );
 }
 
@@ -89,7 +87,7 @@ export default function TableViewControls({
       </button>
       <a className="btn btn-outline toolbar-open-view" href={`${window.location.pathname}${window.location.search}`} target="_blank" rel="noopener noreferrer" aria-label="Open this view in a new tab" title="Open this view in a new tab"><IconArrowUpRight size={14} /></a>
 
-      <Popover open={open === 'filter'} onClose={() => setOpen(null)} anchorRef={filterRef}>
+      <Popover open={open === 'filter'} onClose={() => setOpen(null)} anchorRef={filterRef} className="web-filter-popover" minWidth={320}>
         <FilterPopover fields={config.filters} active={filters} onChange={onFiltersChange} />
       </Popover>
       <Popover open={open === 'sort'} onClose={() => setOpen(null)} anchorRef={sortRef}>

@@ -26,8 +26,8 @@ function mount(path: string) {
     >
       <MemoryRouter initialEntries={[path]}>
         <Routes>
-          <Route path="/settings/account" element={<AccountPage />} />
-          <Route path="/settings/security" element={<Where />} />
+          <Route path="/settings/account/*" element={<AccountPage />} />
+          <Route path="/settings/profile" element={<Where />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -43,11 +43,11 @@ beforeEach(() => {
   sessionStorage.clear();
 });
 
-it('two-factor authentication moved to Security: Account links there and no longer manages it', () => {
+it('Account exposes clearly unavailable mailbox previews and does not manage MFA', () => {
   mount('/settings/account');
   expect(
-    screen.getByRole('link', { name: 'Open Security settings' }),
-  ).toHaveAttribute('href', '/settings/security');
+    screen.getByRole('link', { name: 'Connect with SMTP' }),
+  ).toHaveAttribute('href', '/settings/account/new');
   expect(
     screen.queryByRole('button', { name: /Set up|Turn on/ }),
   ).not.toBeInTheDocument();
@@ -61,7 +61,7 @@ it('a Microsoft re-auth started on Security (the server returns to /settings/acc
   );
   mount('/settings/account?reauth=ok');
   expect(screen.getByTestId('where')).toHaveTextContent(
-    '/settings/security?reauth=ok',
+    '/settings/profile?reauth=ok',
   );
 });
 
@@ -69,7 +69,7 @@ it('a ?reauth= return without the Security page’s note stays on Account (StepU
   mount('/settings/account?reauth=ok');
   expect(screen.queryByTestId('where')).not.toBeInTheDocument();
   expect(
-    screen.getByRole('link', { name: 'Open Security settings' }),
+    screen.getByRole('link', { name: 'Connect with SMTP' }),
   ).toBeInTheDocument();
 });
 
@@ -80,4 +80,16 @@ it('a stale note (older than 15 minutes) is ignored', () => {
   );
   mount('/settings/account?reauth=failed');
   expect(screen.queryByTestId('where')).not.toBeInTheDocument();
+});
+
+it('mailbox configuration previews cannot accept credentials or save', () => {
+ mount('/settings/account/new');
+ expect(screen.getByRole('button',{name:'Save'})).toBeDisabled();
+ expect(screen.getByPlaceholderText('name@example.com')).toBeDisabled();
+ expect(screen.getByRole('button',{name:'Connect with Google'})).toBeDisabled();
+});
+it('calendar preview is explicitly unavailable', () => {
+ mount('/settings/account/calendar');
+ expect(screen.getByText(/Preview only/)).toBeInTheDocument();
+ for(const radio of screen.getAllByRole('radio')) expect(radio).toBeDisabled();
 });

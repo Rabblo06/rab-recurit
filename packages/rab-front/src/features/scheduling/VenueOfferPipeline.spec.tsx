@@ -145,6 +145,15 @@ const tab = (name: RegExp) => screen.getByRole('tab', { name });
 const lane = (name: string) => screen.getByRole('region', { name });
 
 describe('tabs and lanes', () => {
+  it('shows the staffing pipeline when there is only one offer', async () => {
+    board.shift.requiredCount = 1;
+    board.summary = { required: 1, filled: 0, open: 1 };
+    mount();
+    await screen.findByRole('heading', { name: 'Example venue' });
+    expect(within(lane('Offered')).getByText('Jordan Staff')).toBeInTheDocument();
+    expect(document.querySelectorAll('.pipeline-card')).toHaveLength(1);
+    expect(screen.queryByText('Could not load staffing pipeline')).not.toBeInTheDocument();
+  });
   it('renders a proper tablist with Staffing / Attendance / Closed, each holding exactly its contract lanes', async () => {
     everyStage();
     mount();
@@ -154,7 +163,7 @@ describe('tabs and lanes', () => {
     for (const [key, labels] of Object.entries(LANES)) {
       await userEvent.click(tab(new RegExp(`^${key}`, 'i')));
       expect(tab(new RegExp(`^${key}`, 'i'))).toHaveAttribute('aria-selected', 'true');
-      const panel = screen.getByRole('tabpanel');
+      const panel = screen.getByRole('tabpanel', { name: new RegExp('^' + key, 'i') });
       expect(panel).toHaveAttribute('aria-labelledby', `pipeline-tab-${key}`);
       expect([...panel.querySelectorAll('.pipeline-column')].map((c) => c.getAttribute('aria-label'))).toEqual(labels);
       for (const label of labels) {
@@ -219,7 +228,7 @@ describe('tabs and lanes', () => {
     board.staff = [card({ stage: 'on_break', name: 'Bea Break', assignmentStatus: 'confirmed' })];
     mount(undefined, '/venue-offers/shift?tab=attendance');
     await screen.findByRole('heading', { name: 'Example venue' });
-    const columns = [...screen.getByRole('tabpanel').querySelectorAll('.pipeline-column')].map((c) => c.getAttribute('aria-label'));
+    const columns = [...screen.getByRole('tabpanel', { name: /^Attendance/ }).querySelectorAll('.pipeline-column')].map((c) => c.getAttribute('aria-label'));
     expect(columns.indexOf('On break')).toBe(columns.indexOf('Clocked in') + 1);
     expect(within(lane('On break')).getByText('Bea Break')).toBeTruthy();
     expect(within(lane('Attendance missing')).getByRole('heading')).toHaveTextContent('Attendance missing0');
@@ -269,14 +278,17 @@ describe('search, filter and sort', () => {
     await screen.findByText('Ann Able');
     const names = () => [...lane('Offered').querySelectorAll('.pipeline-card strong')].map((n) => n.textContent);
     expect(names()).toEqual(['Ann Able', 'Zed Zulu']);
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Sort staff' }), 'name-desc');
+    await userEvent.click(screen.getByRole('button', { name: 'Sort: Name' }));
+    await userEvent.click(screen.getByRole('option', { name: 'Sort: Name (Z–A)' }));
     expect(names()).toEqual(['Zed Zulu', 'Ann Able']);
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Filter staff' }), 'attention');
+    await userEvent.click(screen.getByRole('button', { name: 'Filter: All staff' }));
+    await userEvent.click(screen.getByRole('option', { name: 'Filter: Needs attention' }));
     await waitFor(() => expect(screen.queryByText('Zed Zulu')).toBeNull());
     await userEvent.click(tab(/^Attendance/));
     expect(screen.getByText('Mia Missing')).toBeTruthy();
     expect(screen.queryByText('Rob Reviewed')).toBeNull();
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Filter staff' }), 'reviewed');
+    await userEvent.click(screen.getByRole('button', { name: 'Filter: Needs attention' }));
+    await userEvent.click(screen.getByRole('option', { name: 'Filter: Reviewed' }));
     expect(screen.getByText('Rob Reviewed')).toBeTruthy();
     await waitFor(() => expect(screen.queryByText('Mia Missing')).toBeNull());
   });

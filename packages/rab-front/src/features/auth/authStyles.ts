@@ -14,7 +14,7 @@ export const s: Record<string, CSSProperties> = {
   label: { display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--font-secondary)', marginBottom: 8 },
   input: { display: 'block', width: '100%', height: 44, padding: '11px 14px', border: '1px solid var(--border-medium)', borderRadius: 6, fontSize: 13, color: 'var(--font-primary)', fontFamily: 'inherit', boxSizing: 'border-box', marginBottom: 20, background: 'var(--bg-primary)', transition: 'border-color .15s' },
   submitBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', minHeight: 40, padding: '10px 16px', background: 'var(--walnut)', color: '#fff', border: '1px solid transparent', borderRadius: 6, fontSize: 13, lineHeight: '18px', fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: 'background .15s', boxSizing: 'border-box', textDecoration: 'none', marginTop: 4 },
-  eyeBtn: { position: 'absolute', right: 12, top: 12, color: 'var(--font-tertiary)', background: 'none', border: 'none', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' },
+  eyeBtn: { position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', width: 28, height: 28, justifyContent: 'center', color: 'var(--font-tertiary)', background: 'none', border: 'none', cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' },
   errorText: { color: 'var(--feedback-error)' },
   successText: { color: 'var(--feedback-success)' },
   error: { color: 'var(--feedback-error)', fontSize: 12, lineHeight: '18px', marginBottom: 12, padding: '9px 12px', background: 'var(--feedback-error-bg)', borderRadius: 6, border: '1px solid var(--feedback-error-border)' },

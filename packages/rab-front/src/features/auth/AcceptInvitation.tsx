@@ -1,3 +1,4 @@
+import PasswordGuidance from './PasswordGuidance';
 import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
 import { postAuthSuccessCopy, safeApplicationTarget, ApplicationTarget } from './authErrors';
@@ -202,16 +203,14 @@ export default function AcceptInvitation() {
                       autoComplete="new-password"
                       required
                       aria-invalid={weak || undefined}
-                      aria-describedby={weak ? 'invite-strength' : undefined}
+                      aria-describedby="invite-strength"
                     />
                     <button type="button" aria-label={showPassword ? 'Hide password' : 'Show password'} style={s.eyeBtn} onClick={() => setShowPassword((v) => !v)}>
                       {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
                     </button>
                   </div>
                 </motion.div>
-                {password && strength && !strength.valid && (
-                  <ul id="invite-strength" aria-label="Password requirements" style={s.strengthList}>{strength.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
-                )}
+                <PasswordGuidance id="invite-strength" password={password} email={invitation?.email} disabled={loading} onSuggest={value => { setPassword(value); setConfirm(value); setShowPassword(false); }} />
                 <motion.div variants={item}>
                   <label style={s.label} htmlFor="invite-confirm">Confirm password</label>
                   <input

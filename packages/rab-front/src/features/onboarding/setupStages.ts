@@ -15,9 +15,9 @@ import type { ManagerWorkspaceSchemaStatus } from '../../shared/hooks/useMyWorks
 export const SETUP_STAGES = [
   { key: 'validating', label: 'Validating' },
   { key: 'creating', label: 'Creating workspace' },
-  { key: 'database', label: 'Preparing database' },
-  { key: 'rls', label: 'Applying FORCE RLS' },
-  { key: 'verifying', label: 'Verifying workspace' },
+  { key: 'database', label: 'Preparing your workspace' },
+  { key: 'rls', label: 'Securing your workspace' },
+  { key: 'verifying', label: 'Checking everything' },
   { key: 'ready', label: 'Ready' },
 ] as const;
 

@@ -1,12 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
-
-const WEEKDAY_HEADERS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const MONTH_NAMES = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
+import { Calendar } from './arc/calendar/calendar';
+import './date-input.css';
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
@@ -46,12 +41,6 @@ export function todayIso(): string {
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 }
 
-/** Monday-first weekday index (0=Mon .. 6=Sun) for the 1st of the given month. */
-function firstWeekdayOfMonth(year: number, month: number): number {
-  const jsDay = new Date(year, month - 1, 1).getDay(); // 0=Sun..6=Sat
-  return (jsDay + 6) % 7;
-}
-
 /**
  * Shared date input for both the Create Staff wizard and the Staff Detail
  * panel's inline date fields (Date of birth, Start date, Expiry date) — a
@@ -68,7 +57,7 @@ function firstWeekdayOfMonth(year: number, month: number): number {
  * Flips above the input when there isn't room below.
  */
 export default function DateInput({
-  value, onChange, min, max, placeholder = 'DD/MM/YYYY',
+  value, onChange, min, max, placeholder = 'DD/MM/YYYY', autoFormat = false, ariaLabel,
 }: {
   /** ISO `YYYY-MM-DD`, or `''` for empty. */
   value: string;
@@ -77,6 +66,8 @@ export default function DateInput({
   min?: string;
   max?: string;
   placeholder?: string;
+  autoFormat?: boolean;
+  ariaLabel?: string;
 }) {
   const [text, setText] = useState(value ? isoToDisplay(value) : '');
   const [open, setOpen] = useState(false);
@@ -89,6 +80,12 @@ export default function DateInput({
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const focusCalendar = useRef(false);
+  useEffect(() => {
+    if (!open || !coords || !focusCalendar.current) return;
+    const day = popoverRef.current?.querySelector<HTMLButtonElement>('[data-present] [data-date][tabindex="0"]');
+    if (day) { focusCalendar.current = false; day.focus(); }
+  }, [open, coords]);
 
   useEffect(() => {
     setText(value ? isoToDisplay(value) : '');
@@ -105,8 +102,8 @@ export default function DateInput({
     const input = inputRef.current;
     if (!input) return;
     const rect = input.getBoundingClientRect();
-    const estimatedHeight = popoverRef.current?.offsetHeight ?? 300;
-    const estimatedWidth = popoverRef.current?.offsetWidth ?? 240;
+    const estimatedHeight = popoverRef.current?.offsetHeight ?? 340;
+    const estimatedWidth = popoverRef.current?.offsetWidth ?? 328;
     const spaceBelow = window.innerHeight - rect.bottom;
     const flipUp = spaceBelow < estimatedHeight + 8 && rect.top > estimatedHeight + 8;
     // Clamp horizontally too — the Detail panel sits flush against the right
@@ -162,37 +159,39 @@ export default function DateInput({
     onChange(iso);
   };
 
-  const pick = (day: number) => {
-    const iso = `${viewYear}-${pad2(viewMonth)}-${pad2(day)}`;
-    setText(isoToDisplay(iso));
-    setError('');
-    onChange(iso);
-    setOpen(false);
+  const localDate = (iso?: string) => iso ? new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10))) : undefined;
+  const pick = (date: Date) => {
+    const iso = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+    setText(isoToDisplay(iso)); setError(''); onChange(iso);
+    inputRef.current?.focus(); setOpen(false);
   };
 
-  const changeMonth = (delta: number) => {
-    let m = viewMonth + delta;
-    let y = viewYear;
-    if (m < 1) { m = 12; y -= 1; }
-    if (m > 12) { m = 1; y += 1; }
-    setViewMonth(m);
-    setViewYear(y);
-  };
-
-  const leading = firstWeekdayOfMonth(viewYear, viewMonth);
-  const totalDays = daysInMonth(viewYear, viewMonth);
-  const cells: Array<number | null> = [...Array(leading).fill(null), ...Array.from({ length: totalDays }, (_, i) => i + 1)];
-
+  const firstYear = Math.min(viewYear, min ? Number(min.slice(0, 4)) : 1900);
+  const lastYear = Math.max(viewYear, max ? Number(max.slice(0, 4)) : Number(today.slice(0, 4)) + 100);
+  const years = Array.from({length: lastYear - firstYear + 1}, (_, i) => firstYear + i);
   return (
     <div className="date-input" ref={containerRef}>
       <input
+        aria-label={ariaLabel}
         ref={inputRef}
         type="text"
+        inputMode={autoFormat ? 'numeric' : undefined}
         value={text}
         placeholder={placeholder}
         onFocus={() => setOpen(true)}
         onClick={() => setOpen(true)}
-        onChange={(e) => { setText(e.target.value); setError(''); }}
+        onChange={(e) => {
+          const raw = e.target.value;
+          if (!autoFormat) { setText(raw); setError(''); return; }
+          const digits = raw.replace(/\D/g, '').slice(0, 8);
+          // Insert separators only when there is a following digit, so Backspace stays predictable.
+          const formatted = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)].filter(Boolean).join('/');
+          const caret = e.target.selectionStart ?? raw.length;
+          const before = raw.slice(0, caret).replace(/\D/g, '').length;
+          const position = Math.min(formatted.length, before + (before > 2 ? 1 : 0) + (before > 4 ? 1 : 0));
+          setText(formatted); setError('');
+          requestAnimationFrame(() => { if (document.activeElement === inputRef.current) inputRef.current?.setSelectionRange(position, position); });
+        }}
         onBlur={() => commit(text)}
         onKeyDown={(e) => {
           // Only swallow Escape while our own popover is open (closing it
@@ -200,49 +199,30 @@ export default function DateInput({
           // in its own editable-row (Staff Detail) can use a second Escape
           // to cancel that row's edit mode without this component eating it.
           if (e.key === 'Escape') { if (open) { e.stopPropagation(); setOpen(false); } }
+          if (e.key === 'ArrowDown') { e.preventDefault(); focusCalendar.current = true; setOpen(true); updatePosition(); }
           if (e.key === 'Enter') { commit(text); setOpen(false); }
         }}
       />
       {error && <span className="date-input-error">{error}</span>}
       {open && coords && createPortal(
         <div
-          className="date-input-popover"
+          className="date-input-popover arc-date-popover"
+          role="dialog" aria-label="Choose date"
+          onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); inputRef.current?.focus(); setOpen(false); } }}
           ref={popoverRef}
           data-rab-portal="true"
-          style={{ position: 'fixed', top: coords.top, left: coords.left, minWidth: coords.width }}
+          style={{ position: 'fixed', top: coords.top, left: coords.left, width: 328, maxWidth: 'calc(100vw - 16px)' }}
         >
           <div className="date-input-popover-header">
-            <button type="button" className="btn-icon" onClick={() => changeMonth(-1)} aria-label="Previous month">
-              <IconChevronLeft size={14} />
-            </button>
-            <span>{MONTH_NAMES[viewMonth - 1]} {viewYear}</span>
-            <button type="button" className="btn-icon" onClick={() => changeMonth(1)} aria-label="Next month">
-              <IconChevronRight size={14} />
-            </button>
+            <select aria-label="Month" value={viewMonth} onChange={event => setViewMonth(Number(event.target.value))}>{Array.from({length: 12}, (_, i) => <option key={i} value={i + 1}>{new Date(2000, i, 1).toLocaleString('en-GB', {month: 'long'})}</option>)}</select>
+            <select aria-label="Year" value={viewYear} onChange={event => setViewYear(Number(event.target.value))}>{years.map(year => <option key={year} value={year}>{year}</option>)}</select>
           </div>
-          <div className="date-input-weekdays">
-            {WEEKDAY_HEADERS.map((w) => <span key={w}>{w}</span>)}
-          </div>
-          <div className="date-input-grid">
-            {cells.map((day, i) => {
-              if (day === null) return <span key={`b${i}`} />;
-              const iso = `${viewYear}-${pad2(viewMonth)}-${pad2(day)}`;
-              const disabled = (!!min && iso < min) || (!!max && iso > max);
-              const isSelected = iso === value;
-              const isToday = iso === today;
-              return (
-                <button
-                  key={iso}
-                  type="button"
-                  disabled={disabled}
-                  className={`date-input-day${isSelected ? ' selected' : ''}${isToday && !isSelected ? ' today' : ''}`}
-                  onClick={() => pick(day)}
-                >
-                  {day}
-                </button>
-              );
-            })}
-          </div>
+          <Calendar value={localDate(value)} onChange={pick}
+            month={new Date(viewYear, viewMonth - 1, 1)}
+            onMonthChange={(date) => { setViewYear(date.getFullYear()); setViewMonth(date.getMonth() + 1); }}
+            minDate={localDate(min)} maxDate={localDate(max)} locale="en-GB" showToday />
+          <button type="button" className="date-picker-clear" onClick={() => { setText(''); setError(''); onChange(''); inputRef.current?.focus(); setOpen(false); }}>Clear</button>
+
         </div>,
         document.body,
       )}

@@ -1,4 +1,6 @@
+import { motion as arcMotion } from 'framer-motion';
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { IconChevronRight, IconDatabase, IconServer, IconTool, IconMail, IconFolder, IconSettings } from '@tabler/icons-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
@@ -11,6 +13,7 @@ const QueueMetricsChart = lazy(() => import('./QueueMetricsChart'));
 export const HEALTH_REFETCH_MS = 15_000;
 
 const CARD_LABEL: Record<HealthCard['key'], string> = { database: 'Database', redis: 'Redis', worker: 'Worker', provisioner: 'Provisioner', email: 'Email', storage: 'File storage' };
+const HEALTH_ICON = { database: IconDatabase, redis: IconServer, worker: IconTool, provisioner: IconSettings, email: IconMail, storage: IconFolder };
 const STATUS_PILL: Record<HealthStatus, [string, string]> = {
   healthy: ['ap-ok', 'Healthy'],
   warning: ['ap-warn', 'Warning'],
@@ -82,25 +85,23 @@ export default function HealthTab() {
 
   return (
     <>
-      <section className="ap-block" aria-label="System health">
+      <section className="ap-block ap-health-section" aria-label="System health">
         <div className="ap-block-head">
-          <h2 className="ap-h2">System health</h2>
+          <div><h2 className="ap-h2">Health Status</h2><p className="ap-sub">How your system is doing</p></div>
           <span className="ap-muted" style={{ font: 'var(--text-small)' }}>
             {health.data ? `Checked ${secondsAgo(health.data.checkedAt, now)}` : health.isError ? 'Health could not be checked' : 'Checking…'} ·{' '}
             <button type="button" className="ap-btn ap-sm" onClick={() => void health.refetch()} disabled={health.isFetching}>{health.isFetching ? 'Checking…' : 'Refresh'}</button>
           </span>
         </div>
-        <div className="ap-grid-3">
-          {(health.data?.cards ?? []).map((c) => (
-            <div key={c.key} className="ap-card ap-indicator">
-              <b>{CARD_LABEL[c.key]}</b>
-              <span className={`ap-pill ${STATUS_PILL[c.status][0]}`}>{STATUS_PILL[c.status][1]}</span>
-              <p>{c.detail}</p>
-            </div>
-          ))}
-          {!health.data?.cards && (
-            <div className="ap-card ap-indicator"><b>Health</b><span className="ap-pill">{health.isError ? 'Unavailable' : 'Checking'}</span><p>{health.isError ? 'The health report could not be loaded.' : 'Running checks…'}</p></div>
-          )}
+        <div className="ap-health-list">
+          {(health.data?.cards ?? []).map((c) => {
+            const Icon = HEALTH_ICON[c.key];
+            return <details key={c.key} className="ap-health-item">
+              <summary><Icon size={16} aria-hidden="true" /><span>{CARD_LABEL[c.key]}</span><span className={`ap-pill ${STATUS_PILL[c.status][0]}`}>{STATUS_PILL[c.status][1]}</span><IconChevronRight className="ap-health-chevron" size={14} aria-hidden="true" /></summary>
+              <div className="ap-health-detail"><p>{c.detail}</p><dl><dt>Status</dt><dd>{STATUS_PILL[c.status][1]}</dd><dt>Response time</dt><dd>{c.latencyMs === null ? 'Not reported' : `${c.latencyMs} ms`}</dd><dt>Checked</dt><dd>{formatDateTime(health.data!.checkedAt)}</dd></dl></div>
+            </details>;
+          })}
+          {!health.data?.cards && <p className="ap-health-empty">{health.isError ? 'The health report could not be loaded.' : 'Running checks…'}</p>}
         </div>
       </section>
 
@@ -190,7 +191,7 @@ export default function HealthTab() {
                 <tr><td colSpan={7} className="ap-empty">No {state} jobs in this queue.</td></tr>
               ) : (
                 jobItems.map((j) => (
-                  <tr key={j.id}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={j.id}>
                     <td>
                       <input
                         type="checkbox"
@@ -211,7 +212,7 @@ export default function HealthTab() {
                     <td className="ap-num">{j.attemptsMade}{j.maxAttempts ? ` / ${j.maxAttempts}` : ''}</td>
                     <td>{formatDateTime(j.finishedAt ?? j.processedAt ?? j.createdAt)}</td>
                     <td className="ap-muted ap-mono">{j.errorClass ?? '—'}</td>
-                  </tr>
+                  </arcMotion.tr>
                 ))
               )}
             </tbody>

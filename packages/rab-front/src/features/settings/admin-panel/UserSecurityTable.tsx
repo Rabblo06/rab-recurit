@@ -1,3 +1,4 @@
+import { motion as arcMotion } from 'framer-motion';
 import { IconDeviceMobile, IconInfoCircle, IconKey, IconShieldCheck } from '@tabler/icons-react';
 
 import { formatDate, fullName, initials, ROLE_FILTERS, roleLabel, type AdminUser } from './adminPanelApi';
@@ -78,7 +79,7 @@ export default function UserSecurityTable({
                 const name = fullName(u);
                 const blocked = resetBlockedReason(u, meId);
                 return (
-                  <tr key={u.id} data-selected={selectedId === u.id || undefined}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={u.id} data-selected={selectedId === u.id || undefined}>
                     <td>
                       <button type="button" className="ap-who" style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', textAlign: 'left', color: 'inherit', font: 'inherit' }} onClick={() => onSelect(u)} aria-label={`Show ${name}`}>
                         <span className="ap-avatar ap-avatar-sm" aria-hidden="true">{initials(name)}</span>
@@ -98,7 +99,7 @@ export default function UserSecurityTable({
                         Reset 2FA
                       </button>
                     </td>
-                  </tr>
+                  </arcMotion.tr>
                 );
               })
             )}

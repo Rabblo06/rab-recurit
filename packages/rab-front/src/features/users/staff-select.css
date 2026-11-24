@@ -1,0 +1,24 @@
+.staff-select-trigger { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; min-width:0; min-height:35px; padding:7px 10px; border:1px solid var(--border-medium); border-radius:7px; background:var(--bg-secondary); color:var(--font-primary); font:inherit; font-size:13px; text-align:left; cursor:pointer; }
+.staff-select-trigger span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.staff-select-trigger svg { flex-shrink:0; color:var(--font-tertiary); }
+.staff-select-trigger:focus-visible { outline:2px solid #6478ff; outline-offset:1px; }
+.staff-select-placeholder { color:var(--font-secondary); }
+.staff-select-card { width:300px; max-width:calc(100vw - 16px); padding:4px; border:1px solid var(--border-light); border-radius:9px; background:var(--bg-primary); box-shadow:0 4px 16px rgb(0 0 0 / 12%); }
+.staff-select-search { display:flex; align-items:center; gap:7px; padding:5px 8px 8px; border-bottom:1px solid var(--border-light); color:var(--font-tertiary); }
+.staff-select-search input { width:100%; min-width:0; border:0; padding:4px 0; margin:0; background:transparent; color:var(--font-primary); font:inherit; font-size:12px; }
+.staff-select-search input:focus,.staff-select-search input:focus-visible { outline:none; box-shadow:none; }
+.staff-select-options { max-height:230px; overflow-y:auto; padding-top:4px; }
+.staff-select-options [role=option] { width:100%; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px; border:0; border-radius:5px; background:transparent; color:var(--font-secondary); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
+.staff-select-options [role=option].is-active { background:var(--bg-secondary); }
+.staff-select-empty { padding:12px 8px; font-size:12px; color:var(--font-tertiary); }
+
+.staff-select-value { display:flex; align-items:center; gap:8px; min-width:0; }
+.staff-select-value > svg { flex-shrink:0; }
+.staff-country-flag { display:inline-flex; width:16px; height:12px; flex-shrink:0; }
+.staff-country-flag svg { width:16px; height:12px; }
+.staff-select-card.is-compact { width:220px; }
+.staff-select-card.is-compact .staff-select-options { max-height:245px; }
+
+.staff-select-options [role=option][aria-selected=true] { background:var(--bg-secondary); color:var(--font-primary); }
+
+.staff-select-options:focus-visible { outline:none; }

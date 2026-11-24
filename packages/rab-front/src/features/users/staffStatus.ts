@@ -59,7 +59,6 @@ export function getStaffDisplayStatus({
   accountStatus,
   employmentStatus,
   invitationStatus,
-  pendingInvite,
 }: UserStatusInput): DisplayStatus {
   // The account is genuinely activated — for staff, what's shown from here
   // is the separate employment/compliance axis; for a manager there is no
@@ -101,10 +100,9 @@ export function getStaffDisplayStatus({
     return { key: 'delivery_failed', label: 'Delivery failed', tone: 'inactive' };
   }
   if (invitationStatus === 'pending') {
-    const n = pendingInvite?.sendNumber ?? 1;
     return {
       key: 'pending_invite',
-      label: n >= 3 ? 'Final invite (3/3)' : `Pending invite (${n}/3)`,
+      label: 'Pending',
       tone: 'pending',
     };
   }

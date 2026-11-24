@@ -240,3 +240,14 @@
   .pa { overflow: visible; }
   .pa-grid { grid-template-columns: 1fr; }
 }
+/* Connected sections preserve lane/card state while scrolling between tabs. */
+.pipeline-stage-group { flex: 0 0 auto; display: flex; position: relative; border-right: 1px solid var(--border-light); }
+.pipeline-board { position: relative; }
+.pipeline-stage-group .pipeline-column { flex: 0 0 236px; width: 236px; }
+.pipeline-dropdown { min-width: 145px; }
+.pipeline-dropdown .staff-select-trigger { min-height: 32px; border-color: transparent; background: transparent; font-size: 12px; }
+.pipeline-dropdown .staff-select-trigger:hover { background: var(--bg-transparent-light); }
+@media (max-width: 640px) {
+  .pipeline-stage-group .pipeline-column { flex: 0 0 78vw; max-width: 280px; }
+  .pipeline-dropdown { flex: 1 1 130px; }
+}

@@ -1,4 +1,4 @@
-import type { Ref } from 'react';
+import { useState, type Ref } from 'react';
 
 import { LOW_RECOVERY_CODES, type MfaStatus } from '../../../auth/mfa/mfaApi';
 import { AcsIcon } from '../../../auth/mfa/ui/icons';
@@ -30,17 +30,20 @@ function lowCodesMessage(remaining: number): string {
  */
 export default function TwoFactorCard({
   status,
+  compact = false,
   onTurnOn,
   onRegenerate,
   onTurnOff,
   headingRef,
 }: {
   status: MfaStatus;
+  compact?: boolean;
   onTurnOn: () => void;
   onRegenerate: () => void;
   onTurnOff: () => void;
   headingRef: Ref<HTMLHeadingElement>;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const on = status.enabled;
   const low = on && status.recoveryCodesRemaining <= LOW_RECOVERY_CODES;
   const enabledOn = formatEnabledOn(status.enabledAt);
@@ -54,6 +57,34 @@ export default function TwoFactorCard({
       ? 'Your organisation requires a code from an authenticator app for your account. Turn it on now, or you’ll be asked to set it up at your next sign-in.'
       : 'Add a code from an authenticator app when you sign in. It’s optional, and you can turn it off at any time.';
 
+  if (compact && !expanded)
+    return (
+      <section className="settings-section profile-mfa-section">
+        <h3 ref={headingRef} tabIndex={-1}>
+          Two-factor authentication
+        </h3>
+        <p>Enhance security by requiring a code along with your password.</p>
+        <button
+          type="button"
+          className="settings-provider-row"
+          disabled={!on && !status.enrolmentAvailable}
+          onClick={() => (on ? setExpanded(true) : onTurnOn())}
+        >
+          <AcsIcon name="shield" />
+          <span>Authenticator app</span>
+          <StatusBadge on={on} />
+          <span aria-hidden="true">›</span>
+        </button>
+        {low && (
+          <Notice tone="warning">
+            {lowCodesMessage(status.recoveryCodesRemaining)}
+          </Notice>
+        )}
+        {!on && !status.enrolmentAvailable && (
+          <p>Two-factor setup is currently unavailable.</p>
+        )}
+      </section>
+    );
   return (
     <section
       className="acs-card acs-security-card acs-stack"

@@ -8,6 +8,7 @@ import ModalFrame from './ModalFrame';
  */
 export default function ConfirmDialog({
   open,
+  dialogClassName,
   title,
   description,
   confirmLabel = 'Confirm',
@@ -18,6 +19,7 @@ export default function ConfirmDialog({
   onCancel,
 }: {
   open: boolean;
+  dialogClassName?: string;
   title: string;
   description?: string;
   confirmLabel?: string;
@@ -39,6 +41,7 @@ export default function ConfirmDialog({
   return (
     <ModalFrame
       open={open}
+      dialogClassName={dialogClassName}
       onBackdropMouseDown={(e) => { if (e.target === e.currentTarget && !loading) onCancel(); }}
       dialogProps={{ role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'confirm-dialog-title' }}
     >
@@ -49,7 +52,8 @@ export default function ConfirmDialog({
             {cancelLabel}
           </button>
           <button
-            className="btn btn-dark"
+            className={`btn btn-dark${destructive ? '' : ' flow-button'}`}
+            aria-busy={loading || undefined}
             style={destructive ? { background: 'var(--color-red)', borderColor: 'var(--color-red)', color: '#fff' } : undefined}
             onClick={onConfirm}
             disabled={loading}

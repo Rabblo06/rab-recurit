@@ -93,3 +93,26 @@ it('item 1: a validation refusal shows the server’s safe text, never the hard-
   expect(toasts[0]!.message).toBe('This notification can’t be turned off for your role.');
   expect(toasts[0]!.action).toBeUndefined(); // repeating can't help
 });
+
+it('deferred mode only saves on Save and Cancel discards changes', async () => {
+ render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><NotificationsCard deferred/></QueryClientProvider>);
+ fireEvent.click(await screen.findByRole('checkbox',{name:'Email: An offer is sent to me'}));
+ expect(patch).not.toHaveBeenCalled();
+ fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+ expect(box('Email')).not.toBeChecked();
+ fireEvent.click(box('Email'));
+ patch.mockResolvedValueOnce({data:{...rows[0],emailEnabled:true}});
+ fireEvent.click(screen.getByRole('button',{name:'Save'}));
+ await waitFor(()=>expect(patch).toHaveBeenCalledTimes(1));
+ expect(patch).toHaveBeenCalledWith('/profile/notification-preferences',{notificationType:'offer_sent',emailEnabled:true});
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Save'})).toBeDisabled());
+});
+it('deferred save failure retains draft for a manual retry', async () => {
+ render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}})}><NotificationsCard deferred/></QueryClientProvider>);
+ fireEvent.click(await screen.findByRole('checkbox',{name:'Email: An offer is sent to me'}));
+ patch.mockRejectedValueOnce(httpError(500));
+ fireEvent.click(screen.getByRole('button',{name:'Save'}));
+ await waitFor(()=>expect(patch).toHaveBeenCalledTimes(1));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Save'})).toBeEnabled());
+ expect(box('Email')).toBeChecked();
+});

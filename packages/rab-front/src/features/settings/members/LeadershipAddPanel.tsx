@@ -1,3 +1,4 @@
+import StaffSelect from '../../users/StaffSelect';
 import { useState, type ReactNode } from 'react';
 import InitialManagerPage from '../workspace/InitialManagerPage';
 import CeoInvitationPanel from './CeoInvitationPanel';
@@ -21,15 +22,15 @@ export default function LeadershipAddPanel({ capabilities, modeSelect }: {
     ...(capabilities.initialManagerScope === 'own' ? [{ value: 'initial-manager', label: 'Initial Manager' }] : []),
   ];
   const [selection, setSelection] = useState('');
+  const [email, setEmail] = useState('');
   const selected = choices.find((choice) => choice.value === selection)?.value ?? choices[0]?.value;
   if (!choices.length) return null;
 
   const roleControl = choices.length > 1 ? (
     <div className="field">
       <label htmlFor="leadership-role">Leadership role</label>
-      <select id="leadership-role" value={selected} onChange={(event) => setSelection(event.target.value)}>
-        {choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-      </select>
+      <StaffSelect id="leadership-role" label="Leadership role" value={selected ?? ''} onChange={setSelection}
+        options={choices} placeholder="Select role" searchable={false} compact />
     </div>
   ) : (
     <div className="field">
@@ -40,20 +41,12 @@ export default function LeadershipAddPanel({ capabilities, modeSelect }: {
 
   if (selected === 'ceo') {
     return <section className="leadership-add" aria-label="Add organisation leadership">
-      {modeSelect && <div className="leadership-controls">{modeSelect}</div>}
-      <CeoInvitationPanel roleControl={roleControl} />
+      <CeoInvitationPanel roleControl={roleControl} modeSelect={modeSelect} draftEmail={email} onDraftEmailChange={setEmail} />
     </section>;
   }
 
-  return <section className="member-invite-card leadership-add" aria-labelledby="add-heading">
-    <div className="member-section-heading">
-      <h3 id="add-heading">Add organisation leadership</h3>
-      <p>Invite your organisation{'’'}s Initial Manager to set up their workspace.</p>
-    </div>
-    <div className="leadership-controls">
-      {modeSelect}
-      {roleControl}
-    </div>
-    <InitialManagerPage />
+  return <section className="leadership-add" aria-label="Add organisation leadership">
+    {modeSelect}
+    <InitialManagerPage roleControl={roleControl} draftEmail={email} onDraftEmailChange={setEmail} />
   </section>;
 }

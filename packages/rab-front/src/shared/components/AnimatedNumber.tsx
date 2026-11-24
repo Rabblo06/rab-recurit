@@ -1,9 +1,10 @@
+import { motionTokens } from './arc/motion-tokens';
 import { animate } from 'framer-motion';
 import { useEffect, useRef, useState } from 'react';
 import { duration, usePrefersReducedMotion } from '../motion';
 
 /** Decelerating, non-overshooting count easing (cubic ease-out) — values never pass their target. */
-export const COUNT_EASE: [number, number, number, number] = [0.33, 1, 0.68, 1];
+export const COUNT_EASE: [number, number, number, number] = [...motionTokens.ease.enter];
 /** Initial reveal of a dashboard figure: long enough to SEE it count up and slow into place. */
 export const REVEAL_S = 1.3;
 

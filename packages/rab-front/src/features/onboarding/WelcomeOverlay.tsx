@@ -94,16 +94,14 @@ export default function WelcomeOverlay({ role, firstName, avatarKey, organisatio
             width: 56,
             height: 56,
             borderRadius: 14,
-            background: 'var(--font-primary, #1a1815)',
+            background: 'transparent',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             marginBottom: 24,
           }}
         >
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
-            <path d="M12 3L21 19.5H3L12 3Z" fill="white" />
-          </svg>
+          <img src="/images/crewflow-mark.svg" width="56" height="56" alt="Crewflow" />
         </motion.div>
 
         <motion.h1

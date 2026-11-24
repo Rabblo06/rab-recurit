@@ -103,7 +103,7 @@ export function AvailabilityConflictDialog({
         </div>
         <div className="modal-actions">
           <button className="btn btn-outline" onClick={onCancel} autoFocus>Cancel</button>
-          <button className="btn btn-dark" onClick={onConfirm}>{confirmLabel}</button>
+          <button className={`btn btn-dark${confirmLabel.startsWith('Confirm') ? ' flow-button' : ''}`} onClick={onConfirm}>{confirmLabel}</button>
         </div>
       </>}
     </ModalFrame>,

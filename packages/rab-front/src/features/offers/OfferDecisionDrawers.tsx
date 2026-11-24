@@ -125,7 +125,7 @@ export default function OfferDecisionDrawers() {
         footer={
           <>
             <button className="btn btn-outline" onClick={() => setConfirmTarget(null)}>Cancel</button>
-            <button className="btn btn-dark" disabled={confirm.busy} onClick={() => confirmTarget && confirm.submit(confirmTarget.id)}>
+            <button className="btn btn-dark flow-button" aria-busy={confirm.busy || undefined} disabled={confirm.busy} onClick={() => confirmTarget && confirm.submit(confirmTarget.id)}>
               <IconCheck size={14} />{confirm.busy ? 'Confirming…' : 'Confirm shift'}
             </button>
           </>

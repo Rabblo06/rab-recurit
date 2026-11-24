@@ -1,3 +1,4 @@
+import { IconUpload } from '@tabler/icons-react';
 import { useRef } from 'react';
 import Avatar from '../../shared/components/Avatar';
 import { toast } from '../../shared/lib/toast';
@@ -32,12 +33,14 @@ export default function AvatarUploadButton({
   label,
   onFileSelected,
   disabled,
+  showUploadAction = false,
 }: {
   imageKey?: string | null;
   previewUrl?: string | null;
   label: string;
   onFileSelected: (file: File) => void;
   disabled?: boolean;
+  showUploadAction?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -58,6 +61,7 @@ export default function AvatarUploadButton({
   }
 
   return (
+    <>
     <button
       type="button"
       className="avatar-upload-button"
@@ -75,5 +79,7 @@ export default function AvatarUploadButton({
         onChange={handleChange}
       />
     </button>
+    {showUploadAction && <button type="button" className="btn btn-outline" disabled={disabled} onClick={()=>inputRef.current?.click()}><IconUpload size={14}/> Upload photo</button>}
+    </>
   );
 }

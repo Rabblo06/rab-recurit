@@ -66,7 +66,7 @@ const LABEL: Record<ActionKey, { verb: string; title: string; done: string }> = 
  * when the caller holds the matching permission (display hint; the server re-checks every request). Runs the EXISTING
  * single-record endpoints one record at a time (no generic bulk mutation, no unbounded Promise.all), shows exactly which
  * records will be skipped and why before anything runs, then reports per-record success/failure. Succeeded records leave
- * the selection; failed ones stay selected for retry. Delete keeps the routes' step-up (current password).
+ * the selection; failed ones stay selected for retry. Delete starts only after holding the action; the server retains its authorization and protected-account checks.
  */
 export default function UsersBulkActions({ kind, selected, setSelected, permissions, scopeNote }: {
   kind: SelectionKind;
@@ -77,7 +77,6 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
 }) {
   const qc = useQueryClient();
   const [action, setAction] = useState<ActionKey | null>(null);
-  const [password, setPassword] = useState('');
   const [running, setRunning] = useState(false);
   const [outcomes, setOutcomes] = useState<Outcome[] | null>(null);
 
@@ -93,7 +92,7 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     return { eligible, skipped };
   }, [action, entries, kind]);
 
-  const close = () => { if (running) return; setAction(null); setPassword(''); setOutcomes(null); };
+  const close = () => { if (running) return; setAction(null);  setOutcomes(null); };
   useEffect(() => {
     if (!action) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
@@ -101,22 +100,24 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     return () => document.removeEventListener('keydown', onKey);
   });
 
-  async function run() {
-    if (!action || running || plan.eligible.length === 0) return;
-    if (action === 'delete' && !password) return;
+  async function run(requestedAction = action) {
+    const action = requestedAction;
+    const eligible = action === "delete" ? entries.map(([id, record]) => ({id, name:record.name})) : plan.eligible;
+    if (!action || running || eligible.length === 0) return;
+    setAction(action);
     setRunning(true);
     const results: Outcome[] = [];
-    for (const target of plan.eligible) {
+    for (const target of eligible) {
       try {
-        if (action === 'delete') await api.delete(`${BASE[kind]}/${target.id}`, { data: { currentPassword: password } });
+        if (action === 'delete') await api.delete(`${BASE[kind]}/${target.id}`);
         else await api.post(`${BASE[kind]}/${target.id}/${action === 'activate' ? 'reactivate' : 'deactivate'}`);
         results.push({ ...target, ok: true });
       } catch (e) {
         results.push({ ...target, ok: false, message: serverMessage(e) });
-        // A refused step-up (wrong password) fails every remaining record the same way — stop instead of repeating it.
+        // A refused authorization check fails every remaining record the same way — stop instead of repeating it.
         const status = (e as { response?: { status?: number } })?.response?.status;
         if (action === 'delete' && (status === 401 || status === 403)) {
-          for (const rest of plan.eligible.slice(results.length)) results.push({ ...rest, ok: false, message: 'Not attempted.' });
+          for (const rest of eligible.slice(results.length)) results.push({ ...rest, ok: false, message: 'Not attempted.' });
           break;
         }
       }
@@ -124,7 +125,7 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     }
     setOutcomes(results);
     setRunning(false);
-    setPassword('');
+    
     const next = new Map(selected);
     for (const r of results) if (r.ok) next.delete(r.id);
     setSelected(next);
@@ -143,7 +144,7 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     actions.push({ key: 'deactivate', label: 'Deactivate', icon: <IconUserOff size={16} stroke={1.7} />, onClick: () => setAction('deactivate') });
   }
   if (permissions.email) actions.push({ key: 'email', label: 'Send Email', icon: <IconMail size={16} stroke={1.7} />, onClick: openEmail });
-  if (permissions.lifecycle) actions.push({ key: 'delete', label: 'Delete', icon: <IconTrash size={16} stroke={1.7} />, onClick: () => setAction('delete'), tone: 'danger' });
+  if (permissions.lifecycle) actions.push({ key: 'delete:' + entries.map(([id])=>id).join(','), label: `Hold to delete ${entries.length}`, icon: <IconTrash size={16} stroke={1.7} />, onClick: () => void run('delete'), disabled: running, holdToConfirm: true, title: 'Permanently delete selected users. This cannot be undone.', tone: 'danger' });
 
   const succeeded = outcomes?.filter((o) => o.ok).length ?? 0;
   const failed = outcomes?.filter((o) => !o.ok) ?? [];
@@ -190,18 +191,13 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
                   </>
                 )}
                 {running && outcomes && <p role="status" className="bulk-plan-sub">Working… {outcomes.length} of {plan.eligible.length}</p>}
-                {action === 'delete' && (
-                  <div className="field" style={{ marginTop: 14 }}>
-                    <label htmlFor="bulk-step-up">Your current password</label>
-                    <input id="bulk-step-up" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={running} autoFocus />
-                  </div>
-                )}
+
                 <div className="modal-actions">
                   <button className="btn btn-outline" onClick={close} disabled={running}>Cancel</button>
                   <button
                     className={`btn btn-dark${action === 'delete' ? ' btn-destructive' : ''}`}
                     onClick={() => void run()}
-                    disabled={running || plan.eligible.length === 0 || (action === 'delete' && !password)}
+                    disabled={running || plan.eligible.length === 0}
                   >
                     {running ? 'Working…' : `${label.verb} ${plan.eligible.length}`}
                   </button>

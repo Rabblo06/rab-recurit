@@ -230,12 +230,7 @@ describe('turn on (confirm password → connect authenticator → save codes)', 
       within(await card()).getByRole('button', { name: 'Turn on 2FA' }),
     );
     expect(dialog()).toHaveAccessibleName('Confirm it’s you');
-    expect(
-      within(dialog()).getByRole('list', { name: 'Setup progress' }),
-    ).toBeInTheDocument();
-    expect(
-      within(dialog()).getByText('Confirm identity').closest('li'),
-    ).toHaveAttribute('aria-current', 'step');
+    expect(within(dialog()).queryByRole('list', { name: 'Setup progress' })).toBeNull();
     const continueBtn = within(dialog()).getByRole('button', {
       name: 'Continue',
     });
@@ -285,6 +280,7 @@ describe('turn on (confirm password → connect authenticator → save codes)', 
       'src',
       MATERIAL.qrDataUrl,
     );
+    fireEvent.click(within(dialog()).getByText('Can’t scan? Show the setup key'));
     expect(
       within(dialog()).getByRole('group', { name: 'Setup key' }),
     ).toHaveTextContent(MATERIAL.manualKey);

@@ -1,3 +1,4 @@
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { useMemo, useState } from 'react';
 import { IconAlertTriangle, IconBuilding, IconChevronLeft, IconChevronRight, IconFileText, IconHash, IconMail, IconSearch, IconCurrencyPound } from '@tabler/icons-react';
 import {
@@ -39,8 +40,7 @@ export default function PayrollCalendarView(props: CalendarViewProps) {
           <span className="payroll-chip">{staff.length} staff</span>
         </header>
         <label className="payroll-search">
-          <IconSearch size={14} aria-hidden="true" />
-          <input type="search" placeholder="Search staff..." aria-label="Search staff" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <SearchField label="Search staff" type="search" placeholder="Search staff..." aria-label="Search staff" value={search} onChange={(e) => setSearch(e.target.value)} />
         </label>
         <ul className="payroll-team-list" role="listbox" aria-label="Staff">
           {filteredStaff.map((s) => {

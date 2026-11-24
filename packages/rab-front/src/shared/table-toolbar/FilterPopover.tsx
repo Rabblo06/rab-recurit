@@ -1,4 +1,8 @@
-import { useEffect, useState } from 'react';
+import DateInput from '../components/DateInput';
+import DateRangePicker from '../components/arc/date-range-picker/date-range-picker';
+import FilterToolbar, { type FilterChip } from '../components/arc/filter-toolbar/filter-toolbar';
+import { motion, useReducedMotion } from 'framer-motion';
+import { useState } from 'react';
 import { IconX } from '@tabler/icons-react';
 import type { ActiveFilters, FilterFieldConfig } from './types';
 
@@ -11,16 +15,8 @@ function FilterValueControl({
   value: string;
   onChange: (value: string) => void;
 }) {
-  if (field.type === 'select') {
-    return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} aria-label={field.label}>
-        <option value="">Any</option>
-        {field.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    );
-  }
   if (field.type === 'date') {
-    return <input type="date" value={value} onChange={(e) => onChange(e.target.value)} aria-label={field.label} />;
+    return <DateInput value={value} onChange={onChange} ariaLabel={field.label} />;
   }
   return (
     <input
@@ -39,121 +35,47 @@ function RangeValueControl({
   to,
   onChangeFrom,
   onChangeTo,
+  onRangeChange,
 }: {
   field: FilterFieldConfig;
   from: string;
   to: string;
   onChangeFrom: (v: string) => void;
   onChangeTo: (v: string) => void;
+  onRangeChange: (from: string, to: string) => void;
 }) {
   const inputType = field.type === 'dateRange' ? 'date' : 'number';
+  const parse = (value: string) => { const [y,m,d]=value.split('-').map(Number); return new Date(y,m-1,d); };
+  const iso = (date: Date) => [date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
   return (
     <>
+      {field.type === "dateRange" && <DateRangePicker className="filter-date-range" label={`${field.label} range`} months={1} weekStartsOn={1} locale="en-GB" value={from && to ? {start:parse(from),end:parse(to)} : null} onChange={range=>onRangeChange(iso(range.start),iso(range.end))} />}
+      {field.type === 'dateRange' ? <div className="filter-date-bounds"><div><span>From</span><DateInput value={from} onChange={onChangeFrom} ariaLabel={field.label + ' from'} /></div><div><span>To</span><DateInput value={to} onChange={onChangeTo} ariaLabel={field.label + ' to'} /></div></div> : <>
       <input type={inputType} value={from} onChange={(e) => onChangeFrom(e.target.value)} aria-label={`${field.label} from`} style={{ width: 90 }} />
       <span style={{ color: 'var(--font-tertiary)', fontSize: 11 }}>to</span>
       <input type={inputType} value={to} onChange={(e) => onChangeTo(e.target.value)} aria-label={`${field.label} to`} style={{ width: 90 }} />
+      </>}
     </>
   );
 }
 
-/**
- * "+ Add filter" only offers fields with no active value yet — a field
- * already showing a row is edited/removed there, not re-added. Every value
- * change calls `onChange` immediately with the full next `ActiveFilters` map
- * (the caller — `useTableQueryState` — owns debouncing/URL-sync), matching
- * how the reference Users flow ("choose Status → choose Active → table
- * updates") is expected to behave: no separate "Apply" step.
- */
-export default function FilterPopover({
-  fields,
-  active,
-  onChange,
-}: {
-  fields: FilterFieldConfig[];
-  active: ActiveFilters;
-  onChange: (next: ActiveFilters) => void;
-}) {
-  const isRangeField = (f: FilterFieldConfig) => f.type === 'dateRange' || f.type === 'numberRange';
-  const fieldHasValue = (f: FilterFieldConfig) =>
-    isRangeField(f) ? Boolean(active[`${f.key}From`] || active[`${f.key}To`]) : Boolean(active[f.key]);
 
-  const [extraRows, setExtraRows] = useState<string[]>([]);
-  // A field shows a row if it has a value OR the user just added it blank.
-  const visibleFields = fields.filter((f) => fieldHasValue(f) || extraRows.includes(f.key));
-  const availableToAdd = fields.filter((f) => !fieldHasValue(f) && !extraRows.includes(f.key));
-
-  useEffect(() => {
-    // Once a just-added blank row gets a real value, it's driven by
-    // `active` from here on — stop tracking it as an "extra" row so it
-    // doesn't linger duplicated if `active` is ever reset externally.
-    setExtraRows((prev) => prev.filter((k) => !fields.find((f) => f.key === k && fieldHasValue(f))));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
-
-  const setValue = (key: string, value: string) => onChange({ ...active, [key]: value });
-  const setRangeValue = (baseKey: string, part: 'From' | 'To', value: string) =>
-    onChange({ ...active, [`${baseKey}${part}`]: value });
-
-  const removeField = (field: FilterFieldConfig) => {
-    setExtraRows((prev) => prev.filter((k) => k !== field.key));
-    if (isRangeField(field)) {
-      const next = { ...active };
-      delete next[`${field.key}From`];
-      delete next[`${field.key}To`];
-      onChange(next);
-    } else {
-      const next = { ...active };
-      delete next[field.key];
-      onChange(next);
-    }
-  };
-
-  const hasAnyValue = fields.some(fieldHasValue);
-
-  return (
-    <div>
-      <div className="rab-popover-title">Filter</div>
-      {visibleFields.length === 0 && <div className="rab-popover-empty">No filters applied.</div>}
-      {visibleFields.map((field) => (
-        <div className="filter-row" key={field.key}>
-          <span className="filter-field-label">{field.label}</span>
-          {isRangeField(field) ? (
-            <RangeValueControl
-              field={field}
-              from={active[`${field.key}From`] ?? ''}
-              to={active[`${field.key}To`] ?? ''}
-              onChangeFrom={(v) => setRangeValue(field.key, 'From', v)}
-              onChangeTo={(v) => setRangeValue(field.key, 'To', v)}
-            />
-          ) : (
-            <FilterValueControl field={field} value={active[field.key] ?? ''} onChange={(v) => setValue(field.key, v)} />
-          )}
-          <button type="button" className="filter-row-remove" aria-label={`Remove ${field.label} filter`} onClick={() => removeField(field)}>
-            <IconX size={13} />
-          </button>
-        </div>
-      ))}
-      {availableToAdd.length > 0 && (
-        <div className="filter-add-row">
-          <select
-            value=""
-            aria-label="Add filter"
-            onChange={(e) => {
-              if (e.target.value) setExtraRows((prev) => [...prev, e.target.value]);
-            }}
-          >
-            <option value="">+ Add filter</option>
-            {availableToAdd.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-          </select>
-        </div>
-      )}
-      {hasAnyValue && (
-        <div className="filter-popover-footer">
-          <button type="button" className="filter-clear-all" onClick={() => { setExtraRows([]); onChange({}); }}>
-            Clear all
-          </button>
-        </div>
-      )}
-    </div>
-  );
+/** Arc's field/value menu keeps API keys separate from display labels. */
+export default function FilterPopover({fields,active,onChange}:{fields:FilterFieldConfig[];active:ActiveFilters;onChange:(next:ActiveFilters)=>void}) {
+ const reduced=useReducedMotion();const [extraRows,setExtraRows]=useState<string[]>([]);
+ const isRange=(field:FilterFieldConfig)=>field.type==='dateRange'||field.type==='numberRange';
+ const hasValue=(field:FilterFieldConfig)=>isRange(field)?Boolean(active[field.key+'From']||active[field.key+'To']):Boolean(active[field.key]);
+ const remove=(id:string)=>{const field=fields.find(f=>f.key===id);if(!field)return;const next={...active};delete next[id];if(isRange(field)){delete next[id+'From'];delete next[id+'To'];}setExtraRows(rows=>rows.filter(key=>key!==id));onChange(next);};
+ const chips:FilterChip[]=fields.filter(hasValue).map(field=>({id:field.key,label:field.label,value:isRange(field)?[active[field.key+'From']||'Any',active[field.key+'To']||'Any'].join(' – '):field.options?.find(option=>option.value===active[field.key])?.label??active[field.key]}));
+ const menuFields=fields.map(field=>({id:field.key,label:field.label,options:field.type==='select'?(field.options??[]):[{value:'__edit',label:'Set value…'}]}));
+ const editFields=fields.filter(field=>field.type!=='select'&&(hasValue(field)||extraRows.includes(field.key)));
+ return <section className="web-filter-toolbar" aria-label="Filters">
+  <div className="rab-popover-title">Filter</div>
+  <FilterToolbar filters={chips} onRemove={remove} onClearAll={()=>{setExtraRows([]);onChange({});}} addFilter={{fields:menuFields,align:'start',label:'Add filter',onAdd:chip=>{const field=fields.find(f=>f.key===chip.id);if(!field)return;if(field.type==='select'){onChange({...active,[field.key]:chip.rawValue??''});}else setExtraRows(rows=>rows.includes(field.key)?rows:[...rows,field.key]);}}}/>
+  {editFields.map(field=><motion.div className="filter-row filter-value-row" key={field.key} initial={reduced?false:{opacity:0,y:4}} animate={{opacity:1,y:0}} transition={{duration:reduced?0:.2}}>
+   <span className="filter-field-label">{field.label}</span>
+   {isRange(field)?<RangeValueControl field={field} from={active[field.key+'From']??''} to={active[field.key+'To']??''} onChangeFrom={value=>onChange({...active,[field.key+'From']:value})} onChangeTo={value=>onChange({...active,[field.key+'To']:value})} onRangeChange={(from,to)=>onChange({...active,[field.key+'From']:from,[field.key+'To']:to})}/>:<FilterValueControl field={field} value={active[field.key]??''} onChange={value=>onChange({...active,[field.key]:value})}/>}
+   <button type="button" className="filter-row-remove" aria-label={'Remove '+field.label+' filter'} onClick={()=>remove(field.key)}><IconX size={13}/></button>
+  </motion.div>)}
+ </section>;
 }

@@ -3,18 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@blobatar/react": "2.7.0",
     "@rab/shared": "workspace:*",
     "@rab/ui": "workspace:*",
     "@tabler/icons-react": "^3.44.0",
     "@tanstack/react-query": "^5.101.0",
     "axios": "^1.21.0",
+    "blobatar": "2.7.0",
     "framer-motion": "^11.15.0",
     "lucide-react": "^0.469.0",
+    "motion": "12.34.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "react-phone-number-input": "^3.4.18",
     "react-router-dom": "^7.1.1",
-    "recharts": "^2.15.0"
+    "recharts": "^2.15.0",
+    "sileo": "patch:sileo@npm%3A0.1.6#~/.yarn/patches/sileo-npm-0.1.6-4a517477db.patch"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.0",

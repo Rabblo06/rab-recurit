@@ -1,0 +1,68 @@
+.crewflow-date-popover { padding:0; border:1px solid var(--border-light); border-radius:8px; background:var(--bg-primary); box-shadow:0 3px 14px rgb(0 0 0 / 12%); overflow:hidden; }
+.crewflow-date-popover .date-picker-caption { padding:8px 10px; border-bottom:1px solid var(--border-light); color:var(--font-tertiary); font-size:11px; }
+.crewflow-date-popover .date-input-popover-header { display:flex; gap:4px; padding:8px; margin:0; }
+.crewflow-date-popover select { width:auto; min-width:0; height:26px; padding:2px 5px; font-size:11px; border:0; border-radius:4px; background:var(--bg-secondary); color:var(--font-secondary); }
+.crewflow-date-popover select:first-child { flex:1; }
+.crewflow-date-popover .btn-icon { width:25px; height:26px; color:var(--font-tertiary); }
+.crewflow-date-popover .date-input-weekdays,.crewflow-date-popover .date-input-grid { gap:2px; padding:0 8px; }
+.crewflow-date-popover .date-input-grid { padding-bottom:8px; }
+.crewflow-date-popover .date-input-weekdays span { font-size:10px; }
+.crewflow-date-popover .date-input-day { height:27px; border-radius:4px; font-size:11px; }
+.crewflow-date-popover .date-input-day.selected { background:#4263eb; color:#fff; border-color:#4263eb; }
+.crewflow-date-popover .date-input-day.today:not(.selected) { background:var(--bg-secondary); color:var(--font-primary); }
+.date-picker-outside { display:grid; place-items:center; color:var(--font-tertiary); opacity:.45; font-size:11px; }
+.date-picker-clear { width:100%; display:flex; align-items:center; gap:5px; padding:8px 10px; border:0; border-top:1px solid var(--border-light); color:var(--font-secondary); background:transparent; font-size:11px; cursor:pointer; }
+.date-picker-clear:hover { background:var(--bg-secondary); }
+
+/* Arc's calendar inherits Crewflow tokens, keeping the existing date input API. */
+.arc-date-popover, .arc-controls {
+  --foreground: var(--font-primary);
+  --background: var(--bg-primary);
+  --surface: var(--bg-primary);
+  --border: var(--border-light);
+  --danger: var(--feedback-error);
+  --control-height-sm: 32px;
+  --control-height-md: 38px;
+  --control-height-lg: 44px;
+  --radius-control: 12px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --shadow-resting: 0 2px 6px rgb(20 24 32 / 6%);
+  --text-secondary: var(--font-secondary);
+  --text-muted: var(--font-tertiary, var(--font-secondary));
+  --surface-muted: var(--bg-secondary);
+  --accent: var(--font-primary);
+  --accent-strong: var(--font-primary);
+  --accent-foreground: var(--bg-primary);
+  --font-body: inherit;
+  --text-base: 14px;
+  --text-sm: 13px;
+  --text-xs: 11px;
+  --leading-body: 1.5;
+  --tracking-body: -.01em;
+  --radius-pill: 999px;
+  --duration-instant: 0ms;
+  --duration-fast: 160ms;
+  --duration-spring: 280ms;
+  --ease-standard: cubic-bezier(.2, .8, .2, 1);
+  --ease-spring: cubic-bezier(.2, .8, .2, 1);
+}
+.date-input-popover.arc-date-popover {
+  width: 328px;
+  max-width: calc(100vw - 16px);
+  padding: 18px;
+  border-radius: 24px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 16px 48px rgb(20 24 32 / 12%), 0 2px 6px rgb(20 24 32 / 4%);
+}
+.arc-date-popover button:focus-visible { outline: 2px solid var(--font-primary); outline-offset: 2px; }
+.arc-date-popover [aria-hidden="true"] { pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .arc-date-popover * { transition: none !important; } }
+
+.date-input-popover.arc-date-popover { border-radius: 12px; }
+.arc-date-popover .date-input-popover-header { display:flex; gap:8px; margin-bottom:12px; }
+.arc-date-popover select { min-width:0; color:var(--font-primary); background:var(--bg-secondary); border:1px solid var(--border-light); border-radius:6px; padding:4px 6px; }
+.arc-date-popover .date-picker-clear { margin-top:12px; border:0; background:transparent; color:var(--font-secondary); cursor:pointer; }

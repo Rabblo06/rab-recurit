@@ -15,10 +15,11 @@ import {
 } from './onboardingMotion';
 import OnboardingPulsingLogo from './OnboardingPulsingLogo';
 import WelcomeOverlay from './WelcomeOverlay';
-import { SETUP_STAGES, setupStageStates, type SetupStageKey, type SetupStageState } from './setupStages';
+import { setupStageStates } from './setupStages';
+import SetupStageList from './SetupStageList';
 
 /** Owner requirement: the preparation presentation runs for at least 8s, even if READY is
- * already confirmed on mount. Presentation only — READY is still what gates the welcome. */
+ * already confirmed on mount. Presentation only — READY still gates profile setup and the final welcome. */
 export const MIN_ANIMATION_MS = 8_000;
 /** Pause on the final (real) checkmark before the welcome takes over. */
 export const READY_BEAT_MS = 600;
@@ -26,9 +27,10 @@ export const READY_BEAT_MS = 600;
 const EASE = [0.22, 1, 0.36, 1] as const;
 
 /**
- * Reached only via explicit navigation right after `CreateProfileScreen` completes onboarding.
- * Polls the REAL `schemaStatus`; never fakes progress or success. The checklist is SERVER-DERIVED (`setupStages.ts`):
- * no stage moves on a timer. The workspace is provisioned on the server path inside `POST /manager-workspaces`
+ * Reached after workspace creation, before profile setup. After profile completion this same screen
+ * immediately hands off to the existing welcome overlay, without replaying preparation.
+ * Polls the REAL `schemaStatus`; never fakes progress or success. Progress is SERVER-DERIVED (`setupStages.ts`):
+ * the timer only scrolls through already-confirmed stages. The workspace is provisioned on the server path inside `POST /manager-workspaces`
  * (`core.provision_workspace`, when that migration is approved; otherwise by the Worker provisioner), so it is usually
  * READY before this screen mounts.
  *  - CREATING here means provisioning has not finished (connection lost, a restart, a lost response, or the Worker
@@ -39,7 +41,7 @@ const EASE = [0.22, 1, 0.36, 1] as const;
  *  - A failed poll or resume shows an honest "connection lost" notice and keeps polling; it never shows progress.
  * FAILED, SUPERSEDED and a missing status never continue. The 8s floor is presentation only and never a bypass.
  */
-export default function WorkspacePreparationScreen() {
+export default function WorkspacePreparationScreen({ welcomeOnly = false }: { welcomeOnly?: boolean }) {
   const nav = useNavigate();
   const qc = useQueryClient();
   const reduceMotion = Boolean(useReducedMotion());
@@ -70,6 +72,7 @@ export default function WorkspacePreparationScreen() {
   const superseded = status === 'SUPERSEDED';
   const failed = status === 'FAILED';
   const ready = status === 'READY';
+  const needsProfile = !!workspace && !workspace.onboardingCompletedAt;
   const presentable = !isLoading && !!workspace && status !== null;
   const welcomeEligible = !!workspace && welcomeFor === workspace.id;
   const halted = superseded || failed;
@@ -118,12 +121,13 @@ export default function WorkspacePreparationScreen() {
   // A completed onboarding with no pending welcome (refresh after the welcome began, or a later
   // visit to this URL) never replays anything — straight to the dashboard, still only on READY.
   useEffect(() => {
-    if (ready && !welcomeEligible && !showWelcome) nav('/', { replace: true });
-  }, [ready, welcomeEligible, showWelcome, nav]);
+    if (ready && !needsProfile && !welcomeEligible && !showWelcome) nav('/', { replace: true });
+  }, [ready, needsProfile, welcomeEligible, showWelcome, nav]);
 
   useEffect(() => {
-    if (ready && welcomeEligible && floorReached && readyBeatDone) setShowWelcome(true);
-  }, [ready, welcomeEligible, floorReached, readyBeatDone]);
+    if (ready && !needsProfile && welcomeEligible && (welcomeOnly || (floorReached && readyBeatDone))) setShowWelcome(true);
+    if (ready && needsProfile && floorReached && readyBeatDone) nav('/onboarding/profile', { replace: true });
+  }, [ready, needsProfile, welcomeEligible, floorReached, readyBeatDone, welcomeOnly, nav]);
 
   // Consumed only after the overlay has committed to the screen, never before it begins.
   useEffect(() => {
@@ -208,7 +212,7 @@ export default function WorkspacePreparationScreen() {
         transition={{ duration: reduceMotion ? 0 : 0.45, ease: EASE }}
         style={{ position: 'relative', zIndex: 1, textAlign: 'center', maxWidth: 360, padding: '0 24px' }}
       >
-        <OnboardingPulsingLogo active={!halted && !ready} tone={halted ? 'failed' : 'default'} />
+        {halted && <OnboardingPulsingLogo active={false} tone="failed" />}
 
         {!isLoading && (!workspace || status === null) ? <>
           <h1 style={s.title}>Workspace status unavailable</h1>
@@ -236,10 +240,6 @@ export default function WorkspacePreparationScreen() {
           </>
         ) : (
           <>
-            <p style={s.title}>Preparing your workspace</p>
-            <p className="preparation-description">
-              {ready ? 'All set.' : 'The database, FORCE RLS and verification steps run in one transaction, so they finish together.'}
-            </p>
             {connectionLost && !ready ? (
               <p className="preparation-connection" style={{ ...s.subtitle, ...s.errorText }}>
                 Connection lost — still trying. Your workspace keeps its real state.
@@ -250,54 +250,5 @@ export default function WorkspacePreparationScreen() {
         )}
       </motion.div>
     </div>
-  );
-}
-
-/** The six server-derived setup stages (see setupStages.ts). Hidden from screen readers: the live region announces state. */
-function SetupStageList({ stages, reduceMotion }: { stages: Record<SetupStageKey, SetupStageState>; reduceMotion: boolean }) {
-  return (
-    <ol className="preparation-steps" aria-hidden="true">
-      {SETUP_STAGES.map(({ key, label }) => {
-        const state = stages[key];
-        return (
-          <motion.li
-            key={key}
-            className={`preparation-step is-${state}`}
-            data-state={state}
-            data-stage={key}
-            initial={false}
-            animate={{ opacity: state === 'pending' ? 0.35 : 1, y: reduceMotion ? 0 : state === 'pending' ? 4 : 0 }}
-            transition={{ duration: reduceMotion ? 0 : 0.5, ease: EASE }}
-          >
-            <span className="preparation-step-icon" style={state === 'failed' ? { color: '#b4473b', background: '#f6e6e3' } : undefined}>
-              {state === 'complete' ? (
-                <motion.svg
-                  key="check"
-                  width="10" height="10" viewBox="0 0 12 12" fill="none"
-                  initial={reduceMotion ? false : { scale: 0.4, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  transition={{ duration: reduceMotion ? 0 : 0.35, ease: EASE }}
-                >
-                  <motion.path
-                    d="M2.5 6.2 5 8.6 9.6 3.6"
-                    stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-                    initial={reduceMotion ? false : { pathLength: 0 }}
-                    animate={{ pathLength: 1 }}
-                    transition={{ duration: reduceMotion ? 0 : 0.4, ease: EASE, delay: reduceMotion ? 0 : 0.05 }}
-                  />
-                </motion.svg>
-              ) : state === 'failed' ? (
-                <svg width="9" height="9" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                  <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                </svg>
-              ) : state === 'current' ? (
-                <span className="preparation-step-dot" />
-              ) : null}
-            </span>
-            {label}
-          </motion.li>
-        );
-      })}
-    </ol>
   );
 }

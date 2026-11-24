@@ -22,17 +22,24 @@ export default function Popover({
   anchorRef,
   children,
   align = 'start',
+  placement = 'below',
   minWidth = 260,
   className = '',
   role = 'dialog',
   animated = true,
+  dismissExclusionRef,
+  onEscape,
 }: {
+  dismissExclusionRef?: RefObject<HTMLElement | null>;
+  /** Return true when a nested layer handled Escape. */
+  onEscape?: () => boolean;
   open: boolean;
   onClose: () => void;
   anchorRef: RefObject<HTMLElement | null>;
   children: ReactNode;
   /** 'start' aligns the popover's left edge with the anchor's left edge; 'end' aligns right edges. */
   align?: 'start' | 'end';
+  placement?: 'below' | 'right';
   minWidth?: number;
   className?: string;
   role?: 'dialog' | 'presentation';
@@ -47,6 +54,8 @@ export default function Popover({
   const popoverElRef = useRef<HTMLDivElement | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const reducedMotion = useReducedMotion();
+  const dismissal = useRef({ open, onClose, onEscape });
+  dismissal.current = { open, onClose, onEscape };
 
   const updatePosition = useCallback(() => {
     const anchor = anchorRef.current;
@@ -55,10 +64,10 @@ export default function Popover({
     const estimatedHeight = popoverElRef.current?.offsetHeight ?? 280;
     const estimatedWidth = popoverElRef.current?.offsetWidth ?? minWidth;
     const spaceBelow = window.innerHeight - rect.bottom;
-    const flipUp = spaceBelow < estimatedHeight + 8 && rect.top > estimatedHeight + 8;
-    const rawLeft = align === 'end' ? rect.right - estimatedWidth : rect.left;
+    const flipUp = placement !== 'right' && spaceBelow < estimatedHeight + 8 && rect.top > estimatedHeight + 8;
+    const rawLeft = placement === 'right' ? rect.right + 6 : align === 'end' ? rect.right - estimatedWidth : rect.left;
     const left = Math.round(Math.max(8, Math.min(rawLeft, window.innerWidth - estimatedWidth - 8)));
-    const rawTop = flipUp ? rect.top - estimatedHeight - 4 : rect.bottom + 4;
+    const rawTop = placement === 'right' ? rect.top : flipUp ? rect.top - estimatedHeight - 4 : rect.bottom + 4;
     const top = Math.round(animated ? Math.max(8, Math.min(rawTop, window.innerHeight - estimatedHeight - 8)) : rawTop);
     // Skip the state update entirely when nothing actually moved —
     // `setCoords({...})` always allocates a new object, which React treats
@@ -72,7 +81,7 @@ export default function Popover({
     // content, Audit Log's 58-option Action select, where sub-pixel reflow
         // made the two computed positions never quite bitwise-equal).
     setCoords((prev) => (prev && prev.top === top && prev.left === left && prev.up === flipUp ? prev : { top, left, up: flipUp }));
-  }, [anchorRef, align, minWidth, animated]);
+  }, [anchorRef, align, minWidth, animated, placement]);
 
   // Ties the ResizeObserver to the exact DOM node's mount/unmount, not to
   // "did any ancestor re-render" — a plain `useRef` + an `[open]`-keyed
@@ -101,10 +110,14 @@ export default function Popover({
       const target = e.target as Node;
       if (anchorRef.current?.contains(target)) return;
       if (popoverElRef.current?.contains(target)) return;
-      onClose();
+      if (dismissExclusionRef?.current?.contains(target)) return;
+      dismissal.current.onClose();
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        e.preventDefault(); e.stopPropagation();
+        if (!dismissal.current.onEscape?.()) dismissal.current.onClose();
+      }
     };
     // A layout shift elsewhere on the page can move the anchor without any scroll/resize event and without resizing
     // the popover, leaving it stuck at the old position (over its own trigger). Compare the anchor's rect once per frame
@@ -141,12 +154,13 @@ export default function Popover({
     ref: setPopoverRef,
     className: `rab-popover ${className}`,
     'data-rab-portal': 'true',
+    'aria-hidden': !open || undefined,
     style: { position: 'fixed' as const, top: coords.top, left: coords.left, minWidth },
     role,
   };
 
   if (animated) return createPortal(
-    <AnimatePresence onExitComplete={() => { if (!open) setCoords(null); }}>
+    <AnimatePresence onExitComplete={() => { if (!dismissal.current.open) setCoords(null); }}>
       {open && <motion.div {...panelProps}
         variants={dropdown} custom={coords.up ? 1 : 0}
         initial={reducedMotion ? false : 'hidden'} animate="visible" exit="exit">

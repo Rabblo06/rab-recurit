@@ -1,3 +1,6 @@
+import { Link } from 'react-router-dom';
+import { useWorkspaceHost, workspaceUrlFor } from '../../../shared/lib/workspace-host';
+import { IconWorld, IconChevronRight } from '@tabler/icons-react';
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
@@ -16,6 +19,7 @@ const UPLOAD_TIMEOUT_MS = 120_000;
 /** Same "Picture + Name" shape as the old `WorkspaceGeneralPage`, pointed at the private `ManagerWorkspace` (`/manager-workspaces/me`) instead of the shared Organisation (`/workspace`). */
 export default function MyWorkspaceGeneralPage() {
   const qc = useQueryClient();
+  const host = useWorkspaceHost();
   const { data: workspace, isLoading } = useMyWorkspace();
   const [name, setName] = useState('');
   // Reseed the name from the server only while the user has not started editing it: a logo upload/removal refetches
@@ -140,13 +144,17 @@ export default function MyWorkspaceGeneralPage() {
       </div>
 
       <div className="settings-section">
-        <h3>Workspace URL</h3>
-        <p>This is the URL used to access your workspace.</p>
-        <div className="settings-row">
-          <span>Subdomain</span>
-          <span style={{ color: 'var(--font-primary)' }}>{workspace.subdomain}</span>
-        </div>
+        <h3>Domain</h3>
+        <p>Edit your subdomain name or set a custom domain.</p>
+        <Link className="settings-provider-row settings-domain-link" to="/settings/my-workspace/domains">
+          <IconWorld size={20} stroke={1.5} aria-hidden="true" />
+          <span>Customize Domain</span>
+          {workspace.status === 'active' && workspaceUrlFor(host, workspace.subdomain) && <span className="settings-domain-status">• Active</span>}
+          <IconChevronRight size={15} aria-hidden="true" />
+        </Link>
       </div>
+      <section className="settings-section"><h3>Support</h3><p>Temporary support access is not available in Crewflow settings.</p></section>
+      <section className="settings-section"><h3>Danger zone</h3><p>Workspace deletion is not available here. Your workspace data will remain unchanged.</p><button type="button" className="btn btn-outline settings-danger" disabled>Delete workspace</button></section>
       <ConfirmDialog
         open={confirmRemove}
         title="Remove the workspace logo?"
