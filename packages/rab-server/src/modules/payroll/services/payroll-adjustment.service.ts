@@ -9,7 +9,7 @@ import {
   PayrollRecordStatus,
   PermissionFlag,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
@@ -20,6 +20,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { AddPayrollAdditionDto, AddPayrollCorrectionDto, ListPayrollAdjustmentsDto } from '../dto/payroll-adjustment.dto';
 import { Allocation, allocateRecords, PeriodRef, periodsById } from './payroll-allocation';
 
@@ -131,6 +132,10 @@ const ADJ_COLS = `a.id, a.kind, a.status, a.staff_profile_id, a.staff_user_id, a
  */
 @Injectable()
 export class PayrollAdjustmentService {
+  /** Layer 2 field policy (review fix): amounts follow the 'payroll_record' amount field, like every payroll read. */
+  @Inject(FieldPolicyService)
+  private readonly fieldPolicy!: FieldPolicyService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly permissions: PermissionsService,
@@ -418,7 +423,16 @@ export class PayrollAdjustmentService {
       : [];
     const runPeriod = new Map(runs.map((r) => [r.id, r.period_id]));
     const periods = await periodsById(m, ctx.organisationId!, [...new Set(runs.map((r) => r.period_id))]);
-    return rows.map((r) => {
+    // Layer 2 field policy (review fix): amounts follow the 'payroll_record' amount field for the list and every action.
+    const policy = await this.fieldPolicy.resolveTx(m, ctx, 'payroll_record');
+    return rows.map((r) => this.fieldPolicy.omitDeep(policy, this.toView(ctx, r, staffName, byId, alloc, runPeriod, periods)));
+  }
+
+  private toView(
+    ctx: AuthContext, r: AdjustmentRow, staffName: Map<string, string>, byId: Map<string, { created_by_name: string | null; decided_by_name: string | null }>,
+    alloc: Map<string, Allocation>, runPeriod: Map<string, string>, periods: Map<string, PeriodRef>,
+  ): PayrollAdjustmentView {
+    {
       const period: PeriodRef | null = r.run_id ? periods.get(runPeriod.get(r.run_id) ?? '') ?? null : alloc.get(r.id)?.period ?? null;
       return {
         id: r.id, kind: r.kind, status: r.status, staffProfileId: r.staff_profile_id, staffName: staffName.get(r.staff_profile_id) ?? '',
@@ -429,9 +443,8 @@ export class PayrollAdjustmentService {
         payrollPeriod: period ? { id: period.id, start: period.start, end: period.end } : null, payday: period?.payday ?? null,
         createdByMe: r.created_by === ctx.userId,
       };
-    });
+    }
   }
-
 }
 
 function toLine(r: Record<string, unknown>): AdjustmentLine {

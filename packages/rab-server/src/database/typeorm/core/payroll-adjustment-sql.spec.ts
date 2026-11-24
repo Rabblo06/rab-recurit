@@ -1,6 +1,8 @@
 import {
+  EXPECTED_PAYROLL_ADJUSTMENT_FUNCTIONS,
   EXPECTED_PAYROLL_ADJUSTMENT_STATE,
   PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL,
+  PAYROLL_ADJUSTMENT_INSERT_GUARD_FUNCTION_SQL,
   PAYROLL_ADJUSTMENT_MAX_PENCE,
   PAYROLL_ADJUSTMENT_OWNERSHIP_SQL,
   PAYROLL_ADJUSTMENT_PARITY_TRIGGERS,
@@ -115,29 +117,60 @@ describe('core.payroll_adjustment SQL (owner decision 3)', () => {
     expect(security).toContain('CREATE TRIGGER payroll_adjustment_guard BEFORE UPDATE ON core.payroll_adjustment FOR EACH ROW EXECUTE FUNCTION core.payroll_adjustment_guard()');
   });
 
+  it('review fix: the guard refuses a run without an `opened` fact of the SAME organisation and workspace, and a finalised run', () => {
+    const g = flat(PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL);
+    expect(g).toContain('IF NEW.run_id IS NOT NULL AND OLD.run_id IS NULL THEN');
+    expect(g).toContain("IF NOT EXISTS (SELECT 1 FROM core.payroll_run_event e WHERE e.run_id = NEW.run_id AND e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'opened') THEN");
+    expect(g).toContain("IF EXISTS (SELECT 1 FROM core.payroll_run_event e WHERE e.run_id = NEW.run_id AND e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'finalised') THEN");
+  });
+
+  it('review fix: run facts are insert-only, tenant + workspace manager, unique per (organisation, workspace, run, event); records only on finalised', () => {
+    expect(table).toContain('CONSTRAINT payroll_run_event_key UNIQUE (organisation_id, workspace_id, run_id, event)');
+    expect(table).toContain("CHECK (event IN ('opened', 'finalised'))");
+    expect(table).toContain("CHECK (event = 'finalised' OR cardinality(payroll_record_ids) = 0)");
+    expect(security).toContain('ALTER TABLE core.payroll_run_event FORCE ROW LEVEL SECURITY');
+    expect(policy('payroll_run_event_insert')).toContain('(created_by = core.current_uid())');
+    expect(policy('payroll_run_event_select')).toContain(MANAGER);
+    expect(security).toContain('GRANT SELECT, INSERT ON TABLE core.payroll_run_event TO crewflow_app');
+    expect(security.some((s) => /payroll_run_event AS PERMISSIVE FOR (UPDATE|DELETE)/.test(s) || /GRANT UPDATE .* core\.payroll_run_event/.test(s))).toBe(false);
+  });
+
+  it('review fix: the insert guard binds staff_user_id to staff_profile_id in the bound workspace (core and workspace copy), fail closed', () => {
+    const g = flat(PAYROLL_ADJUSTMENT_INSERT_GUARD_FUNCTION_SQL);
+    expect(g).toContain('SET search_path = pg_catalog, core');
+    expect(g).not.toMatch(/SECURITY DEFINER/);
+    expect(g).toContain("ws_schema text := 'workspace_' || pg_catalog.replace(NEW.workspace_id::text, '-', '')");
+    expect(g).toContain("pg_catalog.format('SELECT sp.user_id FROM %I.staff_profile sp WHERE sp.id = $1 AND sp.workspace_id = $2 AND sp.organisation_id = $3', ws_schema)");
+    expect(g).toContain('IF (core_user IS NULL AND ws_user IS NULL) OR (core_user IS NOT NULL AND core_user IS DISTINCT FROM NEW.staff_user_id) OR (ws_user IS NOT NULL AND ws_user IS DISTINCT FROM NEW.staff_user_id) THEN');
+    expect(g).toContain('NEW.created_at := pg_catalog.now();');
+    expect(security).toContain('CREATE TRIGGER payroll_adjustment_insert_guard BEFORE INSERT ON core.payroll_adjustment FOR EACH ROW EXECUTE FUNCTION core.payroll_adjustment_insert_guard()');
+  });
+
   it('grant parity with the reviewed function: UPDATE allow-list = the runtime columns, DELETE and TRUNCATE refused', () => {
-    const triggers = security.filter((s) => s.startsWith('CREATE TRIGGER _payroll_adjustment_grant_parity_'));
+    const triggers = security.filter((s) => /^CREATE TRIGGER _payroll_(adjustment|run_event)_grant_parity_/.test(s));
     expect(triggers.map((s) => /CREATE TRIGGER (\S+)/.exec(s)![1]).sort()).toEqual([...PAYROLL_ADJUSTMENT_PARITY_TRIGGERS].sort());
-    expect(triggers.find((s) => s.includes('_update'))).toContain(
+    expect(triggers.find((s) => s.includes('_payroll_adjustment_grant_parity_update'))).toContain(
       `core.owner_login_grant_parity_guard(${PAYROLL_ADJUSTMENT_UPDATABLE_COLUMNS.map((c) => `'${c}'`).join(', ')})`,
     );
     // The parity UPDATE guard sorts before the state guard (PostgreSQL fires same-kind triggers in name order).
     expect('_payroll_adjustment_grant_parity_update' < 'payroll_adjustment_guard').toBe(true);
   });
 
-  it('ownership goes to crewflow (table and guard function)', () => {
+  it('ownership goes to crewflow (tables and guard functions)', () => {
     expect(PAYROLL_ADJUSTMENT_OWNERSHIP_SQL).toEqual([
       'ALTER TABLE core.payroll_adjustment OWNER TO crewflow',
+      'ALTER TABLE core.payroll_run_event OWNER TO crewflow',
       'ALTER FUNCTION core.payroll_adjustment_guard() OWNER TO crewflow',
+      'ALTER FUNCTION core.payroll_adjustment_insert_guard() OWNER TO crewflow',
     ]);
   });
 
   it('the post-condition reports every difference and accepts the reviewed state', () => {
-    expect(payrollAdjustmentStateProblems({ ...EXPECTED_PAYROLL_ADJUSTMENT_STATE })).toEqual([]);
-    expect(payrollAdjustmentStateProblems(undefined)).toEqual(['core.payroll_adjustment: missing']);
-    expect(payrollAdjustmentStateProblems({ ...EXPECTED_PAYROLL_ADJUSTMENT_STATE, force: false })).toEqual([
-      'core.payroll_adjustment.force: expected true, found false',
-    ]);
-    expect(payrollAdjustmentStateProblems({ ...EXPECTED_PAYROLL_ADJUSTMENT_STATE, acl: 'crewflow_app:DELETE,crewflow_app:INSERT,crewflow_app:SELECT' })).toHaveLength(1);
+    const tables = Object.entries(EXPECTED_PAYROLL_ADJUSTMENT_STATE).map(([table_name, st]) => ({ table_name, ...st }));
+    const functions = Object.entries(EXPECTED_PAYROLL_ADJUSTMENT_FUNCTIONS).map(([name, state]) => ({ name, state }));
+    expect(payrollAdjustmentStateProblems(tables, functions)).toEqual([]);
+    expect(payrollAdjustmentStateProblems(tables.slice(1), functions)).toEqual(['core.payroll_adjustment: missing']);
+    expect(payrollAdjustmentStateProblems(tables.map((t) => ({ ...t, force: false })), functions)).toHaveLength(2);
+    expect(payrollAdjustmentStateProblems(tables, functions.slice(1))).toEqual(['core.payroll_adjustment_guard(): missing']);
   });
 });

@@ -46,6 +46,8 @@ function harness(opts: { held?: string[]; venue?: boolean; respond?: Responder; 
     }),
   };
   const svc = new PayrollAdjustmentService(tenantContext as never, permissions as never, resourceScope as never, audit as never, stepUp as never);
+  // Property-injected in Nest; here a policy that hides nothing (the deep omit itself is tested in field-policy.service.spec).
+  Object.assign(svc, { fieldPolicy: { resolveTx: async () => ({ object: 'payroll_record', hiddenFields: new Set(), hiddenProperties: new Set() }), omitDeep: (_p: unknown, v: unknown) => v } });
   const writes = () => queries.filter((q) => /^(INSERT|UPDATE) /.test(q));
   return { svc, manager, queries, writes, audit, stepUp };
 }

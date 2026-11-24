@@ -116,7 +116,7 @@ const RUN_CSV_COLUMNS: readonly RunCsvColumn[] = [
   { header: 'Payday', value: (_s, v) => v.period?.payday ?? '' },
   { header: 'Shifts', value: (s) => String(s.records) },
   { header: 'Hours', field: 'workedTime', value: (s) => (s.minutes / 60).toFixed(2) },
-  { header: 'Gross (GBP)', field: 'amount', value: (s) => (s.grossPence / 100).toFixed(2) },
+  { header: 'Gross (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.grossPence) },
   // Owner decision 4: rolled-up holiday pay as its own column (0.00 when the provider handles it).
   { header: 'Holiday pay (GBP)', field: 'amount', money: true, value: (s) => penceToDecimalString(s.holidayPayPence) },
   // Owner decision 3: each adjustment kind as its own column (the provider pays expenses differently from pay), then the total.
@@ -194,6 +194,8 @@ export class PayrollRunService {
         [ctx.organisationId, ctx.workspaceId, runs.map((r) => r.id)]) : [];
       const adjByRun = new Map(adj.map((a) => [a.run_id, assertSafePence(Number(a.total), 'payroll run adjustments')]));
       const extra = await periodsById(m, ctx.organisationId!, runs.filter((r) => !periods.some((p) => p.id === r.period_id)).map((r) => r.period_id));
+      // Layer 2 field policy (review fix): a hidden money field is absent at every depth, never only at the top level.
+      const policy = await this.fieldPolicy.resolveTx(m, ctx, 'payroll_record');
       return {
         periods: [...periods, ...extra.values()].sort((a, b) => a.start.localeCompare(b.start)).map((period) => {
           const r = byPeriod.get(period.id);
@@ -201,7 +203,7 @@ export class PayrollRunService {
           const grossPence = assertSafePence(Number(r.gross), 'payroll run gross');
           const adjustmentsPence = adjByRun.get(r.id) ?? 0;
           return { period, run: { id: r.id, status: r.status, records: r.records, grossPence, adjustmentsPence, totalPence: assertSafePence(grossPence + adjustmentsPence, 'payroll run total') } };
-        }),
+        }).map((p) => (p.run ? { ...p, run: this.fieldPolicy.omitDeep(policy, p.run) } : p)),
       };
     });
   }
@@ -253,6 +255,13 @@ export class PayrollRunService {
           });
         }
       }
+      // Review fix: the run's `opened` fact (core.payroll_run_event, insert-only); the adjustment guard refuses any run
+      // without one in this organisation and workspace, and any run with a `finalised` fact.
+      await m.query(
+        `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, created_by)
+         SELECT $1, $2, $3, 'opened', $4 WHERE NOT EXISTS (SELECT 1 FROM core.payroll_run_event
+           WHERE organisation_id = $1 AND workspace_id = $2 AND run_id = $3 AND event = 'opened')`,
+        [ctx.organisationId, ctx.workspaceId, run.id, ctx.userId]);
       const adjustmentsAdded = (await this.adjustments.includeInRun(m, ctx, run.id, periodId)).added;
       // Owner decision 4: every line of this (still prepared) run gets its frozen holiday pay. Records approved after holiday
       // pay shipped already have one (approval); older records get the organisation's CURRENT setting here (flagged).
@@ -261,7 +270,7 @@ export class PayrollRunService {
           WHERE l.run_id = $1 AND NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h WHERE h.payroll_record_id = l.payroll_record_id)`, [run.id]);
       await this.holidayPay.snapshotRecords(m, ctx, unfrozen.map((u) => u.payroll_record_id));
       await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_PREPARED, { entityType: 'payroll_run', entityId: run.id, metadata: { periodId, linesAdded: added, lateLines: late, adjustmentsAdded } });
-      return this.view(m, ctx, run.id);
+      return this.policyView(m, ctx, run.id);
     });
   }
 
@@ -285,6 +294,11 @@ export class PayrollRunService {
       await m.query(`UPDATE ${t.payroll_run} SET status = 'finalised', finalised_at = now(), finalised_by = $2, updated_at = now() WHERE id = $1`, [runId, ctx.userId]);
       // Owner decision 3: the run's adjustments are locked with it; core.payroll_adjustment_guard() refuses any later change.
       await this.adjustments.lockForRun(m, ctx, runId);
+      // Review fix: the run's `finalised` fact with its payroll records (insert-only). From now on the database refuses an
+      // adjustment joining this run and a holiday-pay line for any of these records.
+      await m.query(
+        `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, payroll_record_ids, created_by) VALUES ($1, $2, $3, 'finalised', $4::uuid[], $5)`,
+        [ctx.organisationId, ctx.workspaceId, runId, lines.map((l) => l.payroll_record_id), ctx.userId]);
       for (const staffId of [...new Set([...lines.map((l) => l.staff_profile_id), ...adjustmentLines.map((a) => a.staffProfileId)])]) {
         await m.query(`INSERT INTO ${t.payslip} (organisation_id, workspace_id, run_id, staff_profile_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
           [ctx.organisationId, ctx.workspaceId, runId, staffId]);
@@ -294,7 +308,7 @@ export class PayrollRunService {
       await this.realtimeEvents.recordForRecipients(m, {
         organisationId: ctx.organisationId!, eventKey: `payroll.record_changed:${runId}:finalised`, eventType: RealtimeEventType.PAYROLL_RECORD_CHANGED, entityType: 'payroll_run', entityId: runId,
       }, (tx) => payrollAudience(tx, ctx.workspaceId!));
-      return this.view(m, ctx, runId);
+      return this.policyView(m, ctx, runId);
     });
   }
 
@@ -302,10 +316,8 @@ export class PayrollRunService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_VIEW);
       await this.lockRun(m, ctx, runId, false);
-      const v = await this.view(m, ctx, runId);
-      // Layer 2 field policy (wave 5): identical for every payroll.view holder today; a hidden field is absent.
-      const policy = await this.fieldPolicy.resolveTx(m, ctx, 'payroll_record');
-      return { ...v, totals: this.fieldPolicy.omit(policy, v.totals), staff: v.staff.map((s) => this.fieldPolicy.omit(policy, s)) };
+      // Layer 2 field policy (wave 5): a hidden field is absent (review fix: at every depth).
+      return this.policyView(m, ctx, runId);
     });
   }
 
@@ -338,7 +350,7 @@ export class PayrollRunService {
       const slip = await this.lockPayslip(m, runId, staffProfileId);
       const sha = createHash('sha256').update(buffer).digest('hex');
       const [current] = await m.query(`SELECT sha256 FROM ${t.payslip_document} WHERE payslip_id = $1 AND version = $2`, [slip.id, slip.version]);
-      if (current?.sha256 === sha) return this.view(m, ctx, runId);
+      if (current?.sha256 === sha) return this.policyView(m, ctx, runId);
       const version = Number(slip.version) + 1;
       const file = await this.files.store(m, {
         kind: FileKind.PAYSLIP_PDF, organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId!, resourceType: 'payslip', resourceId: slip.id,
@@ -357,7 +369,7 @@ export class PayrollRunService {
         message: `Payslip for ${run.period_start} – ${run.period_end} (payday ${run.payday}).`,
         relatedEntityType: 'payslip_document', relatedEntityId: doc.id,
       });
-      return this.view(m, ctx, runId);
+      return this.policyView(m, ctx, runId);
     });
   }
 
@@ -374,7 +386,7 @@ export class PayrollRunService {
         `UPDATE ${t.payslip} SET net_pence = $2, net_source = $3, net_recorded_by = $4, net_recorded_at = $5, updated_at = now() WHERE id = $1`,
         netPence === null ? [slip.id, null, null, null, null] : [slip.id, netPence, 'provider_document', ctx.userId, new Date()]);
       await this.audit.record(m, ctx, AuditAction.PAYSLIP_NET_RECORDED, { entityType: 'payslip', entityId: slip.id, metadata: { runId, staffProfileId, netPence, source: netPence === null ? null : 'provider_document' } });
-      return this.view(m, ctx, runId);
+      return this.policyView(m, ctx, runId);
     });
   }
 
@@ -399,7 +411,7 @@ export class PayrollRunService {
       await this.realtimeEvents.recordForRecipients(m, {
         organisationId: ctx.organisationId!, eventKey: `payroll.record_changed:${slip.id}:paid`, eventType: RealtimeEventType.PAYROLL_RECORD_CHANGED, entityType: 'payslip', entityId: slip.id,
       }, (tx) => payrollAudience(tx, ctx.workspaceId!));
-      return this.view(m, ctx, runId);
+      return this.policyView(m, ctx, runId);
     });
   }
 
@@ -529,6 +541,16 @@ export class PayrollRunService {
         WHERE ps.run_id = $1 AND ps.staff_profile_id = $2 FOR UPDATE OF ps`, [runId, staffProfileId]);
     if (!slip) throw new NotFoundException('Payslip not found.');
     return slip;
+  }
+
+  /**
+   * The run view as THIS caller may see it (review fix): the 'payroll_record' field policy applied at every depth, for the
+   * detail read and for every action's response (prepare, finalise, payslip upload, net, mark paid), so a hidden money
+   * field never reaches a caller through a nested row or another endpoint. The CSV applies the same policy per column.
+   */
+  private async policyView(m: EntityManager, ctx: AuthContext, runId: string): Promise<RunView> {
+    const policy = await this.fieldPolicy.resolveTx(m, ctx, 'payroll_record');
+    return this.fieldPolicy.omitDeep(policy, await this.view(m, ctx, runId));
   }
 
   private async view(m: EntityManager, ctx: AuthContext, runId: string): Promise<RunView> {

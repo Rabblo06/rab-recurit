@@ -285,7 +285,8 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     };
     await expect(insert(a.userId, { created_by: c.userId })).rejects.toMatchObject({ code: '42501' }); // names another author
     await expect(insert(a.userId, { status: 'approved' })).rejects.toMatchObject({ code: '42501' }); // born approved
-    await expect(insert(staff[0]!.userId)).rejects.toMatchObject({ code: '42501' }); // staff cannot write
+    // Staff cannot write: refused by RLS (42501), or by the insert guard first (23514) if their own profile is not visible to it.
+    expect(['42501', '23514']).toContain((await insert(staff[0]!.userId).catch((e: { code: string }) => e)).code);
     await expect(insert(a.userId, { staff_user_id: a.userId })).rejects.toMatchObject({ code: '23514' }); // own pay
     await expect(insert(a.userId, { kind: 'deduction' })).rejects.toMatchObject({ code: '23514' });
     await expect(insert(a.userId, { amount_pence: -100 })).rejects.toMatchObject({ code: '23514' }); // only a correction may be negative
@@ -302,8 +303,16 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET amount_pence = 999999 WHERE id = $1`, [ids.bonus])).rejects.toMatchObject({ code: '42501' });
     // approved -> pending: the state machine refuses.
     await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET status = 'pending_approval', decided_by = NULL, decided_at = NULL WHERE id = $1`, [ids.bonus])).rejects.toMatchObject({ code: '23514' });
-    // A pending line cannot join a run.
-    await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET run_id = $2, included_at = now() WHERE id = $1`, [pendingId, randomUUID()])).rejects.toMatchObject({ code: '23514' });
+    // A line can only join an OPEN run of its own workspace (review fix: core.payroll_run_event); an invented run id is refused
+    // by the guard before any CHECK.
+    await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET run_id = $2, included_at = now() WHERE id = $1`, [ids.bonus, randomUUID()])).rejects.toMatchObject({ code: '42501' });
+    // Review fix (4a): staff_user_id must be the user of staff_profile_id in this workspace (insert guard), so the
+    // segregation CHECK cannot be dodged with a mismatched user id.
+    await expect(insert(a.userId, { staff_user_id: staff[2]!.userId })).rejects.toMatchObject({ code: '23514' });
+    await expect(insert(a.userId, { staff_profile_id: randomUUID() })).rejects.toMatchObject({ code: '23514' });
+    // Run facts are insert-only: no UPDATE / DELETE for the runtime (owner) login.
+    await expect(asUser(c.userId, `UPDATE core.payroll_run_event SET event = 'opened'`)).rejects.toMatchObject({ code: '42501' });
+    await expect(asUser(c.userId, `DELETE FROM core.payroll_run_event`)).rejects.toMatchObject({ code: '42501' });
     // No DELETE for anyone at runtime (financial record).
     await expect(asUser(a.userId, `DELETE FROM core.payroll_adjustment WHERE id = $1`, [pendingId])).rejects.toMatchObject({ code: '42501' });
     // The Venue Manager cannot update any line (RLS hides them: zero rows changed).
@@ -344,6 +353,14 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     // Locked: the database refuses ANY change, even of a column the runtime login may update.
     await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET updated_at = now() WHERE id = $1`, [ids.bonus])).rejects.toMatchObject({ code: '42501' });
     await expect(adminDataSource.query(`UPDATE core.payroll_adjustment SET updated_at = now() WHERE id = $1`, [ids.bonus])).rejects.toMatchObject({ code: '42501' });
+    // Review fix (2): the finalised run's fact exists with its records, and nothing may JOIN the locked run afterwards: a
+    // still-unincluded approved line pointed at it directly is refused by the guard (runtime owner login, 42501).
+    const facts = await adminDataSource.query(`SELECT event, cardinality(payroll_record_ids)::int AS n FROM core.payroll_run_event WHERE run_id = $1 ORDER BY event`, [runId]);
+    expect(facts).toEqual([{ event: 'finalised', n: 1 }, { event: 'opened', n: 0 }]);
+    const stray = await http().post('/rest/v1/payroll/adjustments/bonuses').set(auth(tokenA)).send({ staffProfileId: staff[2]!.profileId, amountPence: 111, reason: 'Stray line' });
+    expect((await http().post(`/rest/v1/payroll/adjustments/${stray.body.id}/approve`).set(auth(await freshToken(c)))).status).toBe(200);
+    await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET run_id = $2, included_at = now() WHERE id = $1`, [stray.body.id, runId])).rejects.toMatchObject({ code: '42501' });
+    ids.stray = stray.body.id;
     // Payslips exist for every paid person, adjustment-only staff included.
     const slips = await adminDataSource.query(`SELECT staff_profile_id FROM ${businessTable(a.workspaceId!, 'payslip')} WHERE run_id = $1`, [runId]);
     expect(slips.map((s: { staff_profile_id: string }) => s.staff_profile_id).sort()).toEqual(staff.slice(0, 3).map((s) => s.profileId).sort());
@@ -359,7 +376,8 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     expect(next.status).toBe(200);
     expect((await row(late.body.id)).run_id).toBe(next.body.id);
     const included = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_run.adjustments_included' AND entity_id = $1`, [next.body.id]);
-    expect(included[0].metadata).toMatchObject({ adjustments: 1, carriedForward: 1 });
+    expect(included[0].metadata).toMatchObject({ adjustments: 2, carriedForward: 2 });
+    expect((await row(ids.stray)).run_id).toBe(next.body.id);
     ids.late = late.body.id;
   });
 
@@ -378,11 +396,33 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     expect(JSON.stringify(other.body)).not.toContain(ids.bonus);
   });
 
+  it('field policy (review fix 1): a caller whose policy hides amounts gets no *Pence key at any depth (run detail, run list, adjustments)', async () => {
+    // C works in A's workspace with only a system role: every payroll_record field is hidden for them (FieldPolicyService).
+    const token = await freshToken(c);
+    const pence = (v: unknown, path = '$'): string[] => {
+      if (Array.isArray(v)) return v.flatMap((x, i) => pence(x, `${path}[${i}]`));
+      if (v && typeof v === 'object') return Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => [...(/Pence$/.test(k) ? [`${path}.${k}`] : []), ...pence(x, `${path}.${k}`)]);
+      return [];
+    };
+    const detail = await http().get(`/rest/v1/payroll/runs/${ids.run}`).set(auth(token));
+    expect(detail.status).toBe(200);
+    expect(pence(detail.body)).toEqual([]);
+    expect(detail.body.staff.length).toBeGreaterThan(0);
+    const runs = await http().get('/rest/v1/payroll/runs').set(auth(token));
+    expect(runs.body.periods.some((p: { run: unknown }) => p.run)).toBe(true);
+    expect(pence(runs.body)).toEqual([]);
+    const list = await http().get('/rest/v1/payroll/adjustments').set(auth(token));
+    expect(list.body.total).toBeGreaterThan(0);
+    expect(pence(list.body)).toEqual([]);
+    // The workspace owner (nothing hidden) still sees them.
+    expect(pence((await http().get(`/rest/v1/payroll/runs/${ids.run}`).set(auth(tokenA))).body).length).toBeGreaterThan(0);
+  });
+
   it('audit trail: created, approved, rejected and included are all recorded; still zero rows without tenant context', async () => {
     const actions = await adminDataSource.query(
       `SELECT action, count(*)::int AS n FROM core.audit_log WHERE organisation_id = $1 AND action LIKE 'payroll_adjustment.%' GROUP BY action ORDER BY action`, [orgId]);
     expect(Object.fromEntries(actions.map((r: { action: string; n: number }) => [r.action, r.n]))).toEqual({
-      'payroll_adjustment.approved': 4, 'payroll_adjustment.created': 5, 'payroll_adjustment.rejected': 2,
+      'payroll_adjustment.approved': 5, 'payroll_adjustment.created': 6, 'payroll_adjustment.rejected': 2,
     });
     expect((await dataSource.query(`SELECT count(*)::int AS n FROM core.payroll_adjustment`))[0].n).toBe(0);
   });

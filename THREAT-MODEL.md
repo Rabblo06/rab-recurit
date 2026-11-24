@@ -10522,6 +10522,19 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   (b) holiday pay is not added on adjustments (decision 4 PR states the rule); (c) the second approver must also pass
   P1's MFA-enrolment rule once decision 5 lands (today: a recent step-up, which includes the code when the approver has
   MFA).
+- **Independent review fixes (24 Nov):** (1) money fields of runs, payslip rows and adjustment lines follow the
+  'payroll_record' amount field at EVERY depth (`FieldPolicyService.omitDeep`, applied to run detail, run list, every run
+  action's response and the adjustment list / actions); (2) insert-only run facts `core.payroll_run_event` (`opened` at
+  prepare, `finalised` with its payroll records at finalise): the guard refuses an adjustment joining a run with no
+  `opened` fact in its own organisation and workspace (foreign or invented) or with a `finalised` fact (locked);
+  (4a) `core.payroll_adjustment_insert_guard()` requires staff_user_id to be the user of staff_profile_id in the bound
+  workspace (core copy and, when present, the workspace schema copy must agree), and sets the row clocks.
+- **Note (4c):** the adjustment REASON text is hidden from staff by the API projection only; RLS returns the staff
+  member's whole approved rows (reason included) to a direct query in their own session. Acceptable today (no staff path
+  runs raw SQL); a column-level split would be needed if staff ever get a generic query surface.
+- **Residual (run facts):** the database cannot prove that an `opened` fact names a run that really exists in the
+  workspace schema (no cross-schema key); a manager writing raw SQL could park an approved line in an invented open run
+  (it would then be paid nowhere, never paid twice). Runs finalised before this migration have no `finalised` fact.
 
 ## Rolled-up holiday pay: per-organisation setting and a frozen per-record line (Lane P2, M5, owner decision 4 / assumption A3, branch feat/payroll-holiday-pay, 2026-11-21; NEW SQL: PayrollHolidayPay1786723110000, DRAFT for owner review)
 - **Asset / actors:** the holiday pay added to every approved shift, and the rule that decides it. Attackers considered: a
