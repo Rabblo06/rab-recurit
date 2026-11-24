@@ -10538,7 +10538,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Fixed (independent review of #294):** (L) raw database errors (constraint names) could reach the per-row 409 report:
   a row's reason is now only the message of an HttpException the code threw on purpose; anything else is logged with a
   correlation id and shown as "This offer could not be sent (reference …)". (L) No throttle: the service debits the
-  EXPENSIVE class (`ExpensiveActionRateLimitService`, 10/min per user, 30/min per organisation, fail closed) and the
-  route carries a 10/min per-IP `@Throttle`. (I) The acknowledgement list now accepts up to 200 entries, matching the
+  EXPENSIVE class (`ExpensiveActionRateLimitService`, 10/min per user, 30/min per organisation, fail closed). No
+  extra per-IP cap (re-review: managers behind one office NAT would share it). (I) The acknowledgement list now accepts up to 200 entries, matching the
   200-offer batch cap (it inherited 100). New test: another organisation's shift and staff ids read exactly like
   ids that do not exist, and nothing is sent.
