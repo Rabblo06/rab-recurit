@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { IconCircleCheck, IconMail, IconTrash, IconUserOff } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import BulkActionBar, { type BulkAction } from '../../shared/components/BulkActionBar';
+import DeletePasswordPrompt from './DeletePasswordPrompt';
 import ModalFrame from '../../shared/components/ModalFrame';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
 
@@ -66,7 +67,7 @@ const LABEL: Record<ActionKey, { verb: string; title: string; done: string }> = 
  * when the caller holds the matching permission (display hint; the server re-checks every request). Runs the EXISTING
  * single-record endpoints one record at a time (no generic bulk mutation, no unbounded Promise.all), shows exactly which
  * records will be skipped and why before anything runs, then reports per-record success/failure. Succeeded records leave
- * the selection; failed ones stay selected for retry. Delete starts only after holding the action; the server retains its authorization and protected-account checks.
+ * the selection; failed ones stay selected for retry. Delete starts only after holding the action AND re-entering the current password (the routes' step-up); the server retains its authorization and protected-account checks.
  */
 export default function UsersBulkActions({ kind, selected, setSelected, permissions, scopeNote }: {
   kind: SelectionKind;
@@ -79,6 +80,8 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
   const [action, setAction] = useState<ActionKey | null>(null);
   const [running, setRunning] = useState(false);
   const [outcomes, setOutcomes] = useState<Outcome[] | null>(null);
+  // Owner decision 73 (b): the hold opens the existing current-password step-up; only the password submit deletes.
+  const [passwordPrompt, setPasswordPrompt] = useState(false);
 
   const entries = useMemo(() => [...selected.entries()].slice(0, MAX_BULK_RECORDS), [selected]);
   const plan = useMemo(() => {
@@ -100,8 +103,9 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     return () => document.removeEventListener('keydown', onKey);
   });
 
-  async function run(requestedAction = action) {
+  async function run(requestedAction = action, currentPassword?: string) {
     const action = requestedAction;
+    if (action === 'delete' && !currentPassword) return;
     const eligible = action === "delete" ? entries.map(([id, record]) => ({id, name:record.name})) : plan.eligible;
     if (!action || running || eligible.length === 0) return;
     setAction(action);
@@ -109,12 +113,12 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     const results: Outcome[] = [];
     for (const target of eligible) {
       try {
-        if (action === 'delete') await api.delete(`${BASE[kind]}/${target.id}`);
+        if (action === 'delete') await api.delete(`${BASE[kind]}/${target.id}`, { data: { currentPassword } });
         else await api.post(`${BASE[kind]}/${target.id}/${action === 'activate' ? 'reactivate' : 'deactivate'}`);
         results.push({ ...target, ok: true });
       } catch (e) {
         results.push({ ...target, ok: false, message: serverMessage(e) });
-        // A refused authorization check fails every remaining record the same way — stop instead of repeating it.
+        // A refused step-up (wrong password) or authorization check fails every remaining record the same way — stop.
         const status = (e as { response?: { status?: number } })?.response?.status;
         if (action === 'delete' && (status === 401 || status === 403)) {
           for (const rest of eligible.slice(results.length)) results.push({ ...rest, ok: false, message: 'Not attempted.' });
@@ -144,7 +148,7 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
     actions.push({ key: 'deactivate', label: 'Deactivate', icon: <IconUserOff size={16} stroke={1.7} />, onClick: () => setAction('deactivate') });
   }
   if (permissions.email) actions.push({ key: 'email', label: 'Send Email', icon: <IconMail size={16} stroke={1.7} />, onClick: openEmail });
-  if (permissions.lifecycle) actions.push({ key: 'delete:' + entries.map(([id])=>id).join(','), label: `Hold to delete ${entries.length}`, icon: <IconTrash size={16} stroke={1.7} />, onClick: () => void run('delete'), disabled: running, holdToConfirm: true, title: 'Permanently delete selected users. This cannot be undone.', tone: 'danger' });
+  if (permissions.lifecycle) actions.push({ key: 'delete:' + entries.map(([id])=>id).join(','), label: `Hold to delete ${entries.length}`, icon: <IconTrash size={16} stroke={1.7} />, onClick: () => setPasswordPrompt(true), disabled: running, holdToConfirm: true, title: 'Permanently delete selected users. This cannot be undone.', tone: 'danger' });
 
   const succeeded = outcomes?.filter((o) => o.ok).length ?? 0;
   const failed = outcomes?.filter((o) => !o.ok) ?? [];
@@ -154,6 +158,15 @@ export default function UsersBulkActions({ kind, selected, setSelected, permissi
   return (
     <>
       <BulkActionBar count={selected.size} onClear={() => setSelected(new Map())} actions={actions} scopeNote={scopeNote} />
+      {passwordPrompt && (
+        <DeletePasswordPrompt
+          title="Confirm it’s you"
+          description={`Delete ${entries.length} selected ${entries.length === 1 ? 'account' : 'accounts'}? Deleting cannot be undone; the server still refuses accounts it must keep.`}
+          busy={running}
+          onSubmit={(currentPassword) => { setPasswordPrompt(false); void run('delete', currentPassword); }}
+          onCancel={() => setPasswordPrompt(false)}
+        />
+      )}
       <ModalFrame
         open={!!action}
         onBackdropMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}

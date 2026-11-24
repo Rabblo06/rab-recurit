@@ -1,4 +1,5 @@
 import HoldToConfirm from '../../shared/components/arc/hold-to-confirm/hold-to-confirm';
+import DeletePasswordPrompt from './DeletePasswordPrompt';
 import Popover from '../../shared/components/Popover';
 import CompoundDetailField from './CompoundDetailField';
 import EmailComposerFields from './EmailComposerFields';
@@ -635,11 +636,14 @@ export default function UserDetailPanel() {
   const currentDeleteTarget = '/' + endpoint + '/' + id;
   const activeDeleteTarget = useRef(currentDeleteTarget);
   activeDeleteTarget.current = currentDeleteTarget;
+  // Owner decision 73 (b): the hold opens the existing current-password step-up; only the password submit deletes.
+  const [passwordPromptFor, setPasswordPromptFor] = useState<string | null>(null);
   const deleteUser = useMutation({
-    mutationFn: (target: string) => api.delete(target),
-    onSuccess: (_result, target) => {
+    mutationFn: ({ target, currentPassword }: { target: string; currentPassword: string }) => api.delete(target, { data: { currentPassword } }),
+    onSuccess: (_result, { target }) => {
       qc.invalidateQueries({ queryKey: [target.split('/')[1]] });
       toast.success('User deleted.');
+      setPasswordPromptFor((open) => (open === target ? null : open));
       if (activeDeleteTarget.current === target) close();
     },
     onError: (e: unknown) => {
@@ -1139,7 +1143,7 @@ export default function UserDetailPanel() {
                           </button>
                         )}
                         <div className="detail-more-menu-divider" />
-                        <HoldToConfirm key={currentDeleteTarget} label="Hold to delete user" title="Permanently delete this user. This cannot be undone." tone="danger" duration={1800} confirmed={deleteUser.variables === currentDeleteTarget && deleteUser.isSuccess} disabled={deleteUser.variables === currentDeleteTarget && deleteUser.isPending} onConfirm={() => deleteUser.mutate(currentDeleteTarget)} />
+                        <HoldToConfirm key={currentDeleteTarget} label="Hold to delete user" title="Permanently delete this user. This cannot be undone." tone="danger" duration={1800} confirmed={deleteUser.variables?.target === currentDeleteTarget && deleteUser.isSuccess} disabled={deleteUser.variables?.target === currentDeleteTarget && deleteUser.isPending} onConfirm={() => { setMenuOpen(false); setPasswordPromptFor(currentDeleteTarget); }} />
                       </>
                     ) : (
                       <>
@@ -1156,7 +1160,7 @@ export default function UserDetailPanel() {
                           </button>
                         )}
                         <div className="detail-more-menu-divider" />
-                        <HoldToConfirm key={currentDeleteTarget} label="Hold to delete user" title="Permanently delete this user. This cannot be undone." tone="danger" duration={1800} confirmed={deleteUser.variables === currentDeleteTarget && deleteUser.isSuccess} disabled={deleteUser.variables === currentDeleteTarget && deleteUser.isPending} onConfirm={() => deleteUser.mutate(currentDeleteTarget)} />
+                        <HoldToConfirm key={currentDeleteTarget} label="Hold to delete user" title="Permanently delete this user. This cannot be undone." tone="danger" duration={1800} confirmed={deleteUser.variables?.target === currentDeleteTarget && deleteUser.isSuccess} disabled={deleteUser.variables?.target === currentDeleteTarget && deleteUser.isPending} onConfirm={() => { setMenuOpen(false); setPasswordPromptFor(currentDeleteTarget); }} />
                       </>
                     )}
                   </div>
@@ -1192,6 +1196,16 @@ export default function UserDetailPanel() {
                 </button>
               </div>
             </div>
+          )}
+
+          {passwordPromptFor === currentDeleteTarget && (
+            <DeletePasswordPrompt
+              title="Confirm it’s you"
+              description={`Delete ${record.firstName} ${record.lastName}? They lose access at once and are removed from your team. Their shifts, attendance and payroll history are kept. This cannot be undone.`}
+              busy={deleteUser.variables?.target === currentDeleteTarget && deleteUser.isPending}
+              onSubmit={(currentPassword) => deleteUser.mutate({ target: currentDeleteTarget, currentPassword })}
+              onCancel={() => setPasswordPromptFor(null)}
+            />
           )}
 
           {cancelConfirm && (
