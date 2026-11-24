@@ -61,11 +61,13 @@ import { withdrawUnconfirmedOffer } from './withdraw-unconfirmed-offer';
 import { completeShiftIfSettled, lockShiftRow } from '../../scheduling/utils/complete-shift-if-settled';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
+import { assertPayRateSet } from '../../scheduling/utils/pay-rate-rules';
 import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
 import { TimerTriggerQueueService } from '../../../engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { OfferKind, OfferKindType } from '../constants/offer-kind';
 import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
+import { resolveSeatPayRate } from '../../staff/services/staff-role-rate-resolution';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
@@ -216,7 +218,7 @@ function offerSummarySelect(manager: EntityManager): string {
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
-    s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
+    s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, sa.pay_rate_snapshot_pence AS pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
     o.offer_kind, COALESCE(s.default_starts_at, s.starts_at) AS original_starts_at, COALESCE(s.default_ends_at, s.ends_at) AS original_ends_at,
     v.name AS venue_name, v.photo_file_id AS venue_photo_file_id, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name,
@@ -267,7 +269,9 @@ function toOfferSummary(r: Record<string, unknown>, audience: { kind: 'manager';
     roleName: r.role_name as string,
     staffProfileId: r.staff_profile_id as string,
     staffName: `${r.first_name} ${r.last_name}`,
-    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'shift.pay_rate_pence'),
+    // Lane C: the SEAT's rate (send-time snapshot, re-taken at confirmation), so the hourly rate shown next to
+    // estimatedPayPence is the one it was computed from (a staff role rate may differ from the shift's rate).
+    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'shift_assignment.pay_rate_snapshot_pence'),
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
     venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
@@ -588,6 +592,9 @@ export class OfferService {
     offerKind: OfferKindType = OfferKind.STANDARD,
   ): Promise<JobOffer> {
     await assertShiftActionWindowOpen(manager, shift.id, 'send');
+    // Owner decision 39: never offer a seat at £0 (a shift priced before the rule), on every send path including
+    // replacement and standby offers — refused before the seat or the offer exists.
+    assertPayRateSet(shift.payRatePence);
     const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
     const time = validateAssignmentTime(shift, proposedTime ?? defaultAssignmentTime(shift), scheduledBreak);
     await assertVenueTeamSelection(manager, ctx, [staffProfileId], shift.workspaceId);
@@ -614,6 +621,16 @@ export class OfferService {
     // second evaluation is the authoritative one and is what gets audited.
     const [acknowledgedConflict] = await assertStaffAvailabilityAcknowledged(manager, [{ staffProfileId, ...time }], availabilityAcknowledgements);
 
+    // Lane C: the same staff-aware rate confirmation will snapshot (staff role rate in force on this seat's start, else the
+    // shift's rate), so the offer's estimate matches what the staff member is confirmed at. Confirmation re-reads it and is
+    // the authority (applyOfferConfirmation).
+    const seatRate = await resolveSeatPayRate(manager, {
+      shiftId: shift.id,
+      staffProfileId,
+      jobRoleId: shift.jobRoleId,
+      startsAt: time.startsAt,
+      fallbackPence: shift.payRatePence,
+    });
     const assignment = manager.create(ShiftAssignment, {
       organisationId: ctx.organisationId!,
       // Inherited from the parent Shift — keeps ShiftAssignment.workspaceId
@@ -622,7 +639,7 @@ export class OfferService {
       shiftId: shift.id,
       staffProfileId,
       status: ShiftAssignmentStatus.OFFERED,
-      payRateSnapshotPence: shift.payRatePence,
+      payRateSnapshotPence: seatRate.payRatePence,
       assignedBy: ctx.userId,
       period: toTstzRange(time.startsAt, time.endsAt),
       breakMinutes: proposedTime?.breakMinutes ?? null,
@@ -640,7 +657,7 @@ export class OfferService {
       clockOutAt: time.endsAt,
       scheduledBreakMinutes: scheduledBreak,
     });
-    const estimatedPayPence = payForMinutes(shift.payRatePence, workedMinutes);
+    const estimatedPayPence = payForMinutes(seatRate.payRatePence, workedMinutes);
     const expiresAt = new Date(Date.now() + (expiresInHours ?? 48) * 60 * 60 * 1000);
 
     const offer = manager.create(JobOffer, {
@@ -1109,6 +1126,8 @@ export class OfferService {
       if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
         throw new NotFoundException('Shift not found.');
       }
+      // Owner decision 39: approving opens the shift (publishes it); a request priced at £0 is refused, never opened.
+      assertPayRateSet(shift.payRatePence);
 
       // The recipient list is re-derived from `shift_request_staff` here,
       // never taken from `dto.staffProfileIds` — the Venue Offers detail

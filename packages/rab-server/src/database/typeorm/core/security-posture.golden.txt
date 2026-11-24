@@ -351,6 +351,9 @@ execute|login_handoff_create(uuid,text,integer)|crewflow|false
 execute|login_handoff_peek(text,text)|PUBLIC|false
 execute|login_handoff_peek(text,text)|crewflow_app|true
 execute|login_handoff_peek(text,text)|crewflow|false
+execute|mark_shift_rate_resolved(uuid)|PUBLIC|false
+execute|mark_shift_rate_resolved(uuid)|crewflow_app|true
+execute|mark_shift_rate_resolved(uuid)|crewflow|true
 execute|mark_workspace_schema_failed(uuid,text)|PUBLIC|false
 execute|mark_workspace_schema_failed(uuid,text)|crewflow_app|false
 execute|mark_workspace_schema_failed(uuid,text)|crewflow|true
@@ -657,6 +660,7 @@ owner|function|login_handoff_cleanup(integer)|rab_secure_owner|definer=true|sear
 owner|function|login_handoff_consume(text,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|login_handoff_create(uuid,text,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|login_handoff_peek(text,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|mark_shift_rate_resolved(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_failed(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_ready(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mark_workspace_schema_superseded(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -812,9 +816,11 @@ owner|table|role|crewflow
 owner|table|shift_assignment|crewflow
 owner|table|shift_report|crewflow
 owner|table|shift_request_staff|crewflow
+owner|table|shift_resolved_rate|crewflow
 owner|table|shift_staff_review|crewflow
 owner|table|shift|crewflow
 owner|table|staff_profile|crewflow
+owner|table|staff_role_rate|crewflow
 owner|table|stored_file|crewflow
 owner|table|upgrade_migration|rab_secure_owner
 owner|table|user_auth_identity|rab_secure_owner
@@ -909,9 +915,11 @@ rls|role|enable=true|force=true
 rls|shift_assignment|enable=true|force=true
 rls|shift_report|enable=true|force=true
 rls|shift_request_staff|enable=true|force=true
+rls|shift_resolved_rate|enable=true|force=true
 rls|shift_staff_review|enable=true|force=true
 rls|shift|enable=true|force=true
 rls|staff_profile|enable=true|force=true
+rls|staff_role_rate|enable=true|force=true
 rls|stored_file|enable=true|force=true
 rls|upgrade_migration|enable=true|force=true
 rls|user_auth_identity|enable=true|force=true
@@ -1088,12 +1096,16 @@ table|shift_report|crewflow_app|S,I,U,D
 table|shift_report|crewflow|S,I,U,D,T,R,G
 table|shift_request_staff|crewflow_app|S,I,U,D
 table|shift_request_staff|crewflow|S,I,U,D,T,R,G
+table|shift_resolved_rate|crewflow_app|S
+table|shift_resolved_rate|crewflow|S,I,U,D,T,R,G
 table|shift_staff_review|crewflow_app|S,I,U
 table|shift_staff_review|crewflow|S,I,U,D,T,R,G
 table|shift|crewflow_app|S,I,U,D
 table|shift|crewflow|S,I,U,D,T,R,G
 table|staff_profile|crewflow_app|S,I,U,D
 table|staff_profile|crewflow|S,I,U,D,T,R,G
+table|staff_role_rate|crewflow_app|S,I,D
+table|staff_role_rate|crewflow|S,I,U,D,T,R,G
 table|stored_file|crewflow_app|S,I,U
 table|stored_file|crewflow|S,I,U,D,T,R,G
 table|upgrade_migration|crewflow_app|

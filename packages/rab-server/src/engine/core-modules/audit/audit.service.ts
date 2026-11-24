@@ -152,6 +152,14 @@ export const AuditAction = {
   VENUE_ROLE_RATE_CREATED: 'venue_role_rate.created',
   VENUE_ROLE_RATE_UPDATED: 'venue_role_rate.updated',
   VENUE_ROLE_RATE_DELETED: 'venue_role_rate.deleted',
+  /**
+   * A staff member's own pay rate for a job role (`core.staff_role_rate`) was created, changed or deleted
+   * (StaffRoleRateService; Lane C). `entityType` `staff_role_rate`, `targetUserId` the staff member. Metadata:
+   * staffProfileId, jobRoleId, effectiveFrom, effectiveTo (+ the changed field NAMES on update) — never a pay amount.
+   */
+  STAFF_ROLE_RATE_CREATED: 'staff_role_rate.created',
+  STAFF_ROLE_RATE_UPDATED: 'staff_role_rate.updated',
+  STAFF_ROLE_RATE_DELETED: 'staff_role_rate.deleted',
   VENUE_PHOTO_UPDATED: 'venue.photo_updated',
   FILE_UPLOADED: 'file.uploaded',
   FILE_DOWNLOAD_AUTHORIZED: 'file.download_authorized',

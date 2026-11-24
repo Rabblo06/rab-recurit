@@ -235,6 +235,25 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // Lane C staff role rates (DRAFT, owner SQL review pending; THREAT-MODEL "Staff role rates"): the four policies of
+  // core.staff_role_rate, added only (tenant + a non-venue, non-archived manager of the bound workspace; INSERT also
+  // created_by = the caller). Owner, FORCE RLS, grants and the two grant-parity triggers are pinned by the golden posture
+  // snapshot and the migration's own post-condition; no runtime login gains a privilege it did not have. Whitespace collapsed.
+  '1786722210000-StaffRoleRateSchema': [
+    "+ policy|staff_role_rate|staff_role_rate_delete|d|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))|check=",
+    "+ policy|staff_role_rate|staff_role_rate_insert|a|permissive=true|roles=public|using=|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))) AND (created_by = core.current_uid()))",
+    "+ policy|staff_role_rate|staff_role_rate_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))|check=",
+    "+ policy|staff_role_rate|staff_role_rate_update|w|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))",
+  ],
+  // Lane C, owner decisions 41 / 97 (DRAFT, owner SQL review pending): the two policies of core.shift_resolved_rate (the
+  // marker of a shift whose rate was resolved, not typed, in its own creating transaction), added only: SELECT tenant + a
+  // non-venue manager of the bound workspace; INSERT tenant + created_by = the caller (reached only through the crewflow-owned
+  // definer core.mark_shift_rate_resolved). Owner, FORCE RLS, grants, the definer and the four parity triggers are pinned by
+  // the golden posture snapshot and the migration's own post-condition. Whitespace collapsed.
+  '1786722220000-ShiftResolvedRate': [
+    "+ policy|shift_resolved_rate|shift_resolved_rate_insert|a|permissive=true|roles=public|using=|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (created_by = core.current_uid()))",
+    "+ policy|shift_resolved_rate|shift_resolved_rate_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))))|check=",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
