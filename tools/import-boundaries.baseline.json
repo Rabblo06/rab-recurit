@@ -46,6 +46,7 @@
       "packages/rab-worker/src/queues/rab-reports/payroll-period-attention.job.ts": 5,
       "packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts": 3,
       "packages/rab-worker/src/queues/rab-reports/report-email-content.ts": 1,
+      "packages/rab-worker/src/queues/rab-reports/report-export.job.ts": 1,
       "packages/rab-worker/src/queues/rab-reports/report-recipients.ts": 2,
       "packages/rab-worker/src/queues/rab-reports/report.processors.ts": 1,
       "packages/rab-worker/src/queues/rab-reports/shift-report-scheduler.job.ts": 14,

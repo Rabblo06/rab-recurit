@@ -32,6 +32,7 @@ const EXPECTED_IDS = [
   'crewflow:crewflow-scan-realtime:realtime-outbox-publish',
   'crewflow:crewflow-scan-reports:final-timesheet',
   'crewflow:crewflow-scan-reports:payroll-period-attention',
+  'crewflow:crewflow-scan-reports:report-export',
   'crewflow:crewflow-scan-reports:shift-report-scheduler',
   'crewflow:crewflow-scan-reports:shift-statement-dispatch',
   'crewflow:crewflow-scan-shifts:attendance-monitor',

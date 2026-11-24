@@ -185,6 +185,8 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
   job(SCAN_QUEUES.shifts, 'shift-scan-combined', 'shift scan (combined)', { kind: 'combined-shift-scan' }, 'lastShiftScanCombinedAt', 'shiftScanCombinedFailures', true, {
     shiftScanMode: 'combined',
   }),
+  // Owner decision 29 (reports page v1): builds pending report exports and deletes files 24 h after they were ready.
+  job(SCAN_QUEUES.reports, 'report-export', 'report export', envSeconds('WORKER_REPORT_EXPORT_INTERVAL_SECONDS'), 'lastReportExportAt', 'reportExportFailures', true),
 ]);
 
 /**

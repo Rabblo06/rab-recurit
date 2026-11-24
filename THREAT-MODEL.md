@@ -10457,6 +10457,136 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## Reports page and async export — five CSV reports built by the Worker, single-use 60-second links, files deleted after 24 h (owner decision 29, branch feat/reports-async-export, 2026-11-21; NEW SQL, DRAFT for owner review)
+- **Assets:** hours, pay, attendance exceptions and payroll-run figures for many people at once, in one downloadable file.
+- **Actors and threats:** a manager reading another manager's (or organisation's) export; a Venue Manager reaching pay or
+  another venue; a staff member reaching any report; a leaked or replayed download link; a client widening its own scope
+  or adding pay columns through the request body; a CSV that runs a formula in Excel; an export kept forever; a flood of
+  exports; a person (not the Worker) writing a "ready" file; the Worker forging a link.
+- **Controls:**
+  - Layer 1/2: `PermissionGuard(report.view)` (list) / `PermissionGuard(report.export)` (request, link, download) on each
+    handler AND `ReportExportService` re-checks the same flags in the transaction. `@ManagerApplication()`: mobile
+    sessions refused. The existing flags `report.view` / `report.export` are reused (held by CEO, managers and Venue
+    Managers today; staff hold neither) — the decision text names "reports.view"; flagged for the owner.
+  - organisationId / workspaceId / requester / scope / pay and hours columns come only from the verified session and the
+    live field policy, never the body (`forbidNonWhitelisted`: `organisationId`, `includePay`, `status`, `scopeKind` → 400).
+  - Scope: a Venue Manager's export stores their venue ids (one venue if they chose one; 404 for any other venue), never
+    pay (CHECK) and never the payroll run summary (403). Everyone else is limited to the records of their resolved owner
+    (`created_by`, as the lists). Pay columns only with `payroll.view` AND the pay field visible; hours only while worked
+    time is visible. The decision is stored on the row and RE-CHECKED when a link is issued and at download: a lost
+    venue → 404, lost pay / hours access → 403 ("run the export again").
+  - Layer 3/4: every query pins organisation, workspace and requester; `core.report_export` has ENABLE + FORCE RLS in the
+    creating migration: the requester's own rows (select; insert only as a fresh pending row; update) and the Worker's
+    (`rab.actor_type = 'worker'`, organisation + workspace) select / update. No tenant context → zero rows; another user's
+    session → zero rows; another organisation / manager → 404 on list, link and download.
+  - Guard trigger `core.report_export_guard()`: identity, parameters and scope immutable; a person may only issue / burn
+    a link (only for a ready file; the database sets the 60-second lifetime and burns once, before expiry, counting one
+    download); only the Worker builds or deletes a file, with the transitions pending → ready | failed, ready → expired
+    (not before the 24 h are up), and never touches a link. No DELETE grant, owner-login parity triggers for UPDATE /
+    DELETE. A row (who exported what, when) is kept; the audit log keeps requested / ready / failed / link issued /
+    downloaded / file deleted (requested and downloaded are shipped off-host like the payroll CSV export).
+  - Link: 32 random bytes (base64url), returned once, stored only as SHA-256 (unique), sent back in a POST body (not the
+    URL, so not in access logs), single use, 60 s; an expired or used link → 404.
+  - File: built by the Worker in the export's own binding inside a savepoint (statement timeout 120 s, at most 10 MB,
+    otherwise `too_large`); kept in the row (no object-storage copy, no URL) and removed 24 h after it was ready.
+  - CSV: every cell through the payroll CSV's `csvCell` (leading `= + - @ tab CR` neutralised, quoting); money as integer
+    pence → decimal string (bigint arithmetic); hours from the stored worked minutes.
+  - Flood: 10 exports per user per rolling hour (transaction-scoped advisory lock + count, 429); the value is an assumption.
+- **Assumptions flagged (payroll / attendance figures):** report 1's gross pay is the clock-out earnings snapshot (before
+  approval / adjustments; report 5 is the approved run); "late" reuses LATE_CLOCK_IN_GRACE_MINUTES; "out of area" = a
+  clock-in fix outside the venue's geofence radius; the 48-hour column is per calendar week (WTR is a 17-week average),
+  a warning only; fill rate counts published shifts; dates are London work dates.
+- **Residual / follow-ups:** the import-boundary ratchet needs one owner-approved Worker edge
+  (`report-export.job.ts` → `modules/reports/services/report-builders.ts`); no API wake (an export waits for the next
+  15-second Worker scan); PDF later.
+- **Tests:** `report-builders.spec.ts` (formula neutralising, bigint pence, scope predicates in every query, Venue Manager
+  venue-only SQL, pay / hours columns only when stored, exceptions, 48 h edge, fill rate, unknown key builds nothing);
+  `report-exports.integration.spec.ts` (happy path; single use; expired link; mass assignment 400s; other organisation /
+  other manager / staff 404 / 403 with the link left unburnt; Venue Manager scope, 403 on the payroll summary and 404
+  after losing the venue; payroll.view lost → 403 at download; 429; zero rows without context; guard / grant / no-DELETE
+  refusals; database-fixed 60 s); `report-export.integration.spec.ts` (Worker: built once, scoped, notified, audited;
+  not_found fails at once; deleted after 24 h, no link afterwards); scheduler / registry specs.
+
+## CSV export cells: formula neutralising reads values like a spreadsheet; every cell quoted (security review of decision 29, branch fix/csv-cell-formula-hardening, 2026-11-21; no SQL)
+- **Finding (Medium, existing):** `csvCell` (payroll run CSV export) tested only the first raw character for `= + - @ tab CR`.
+  A staff name such as ` =1+1` (leading space), ` @x` (NBSP), `＝1+1` (fullwidth, NFKC `=`) or `a;=1+1` (a new cell in a
+  semicolon-separated locale) reached Excel / Sheets unprefixed and could be evaluated when a manager opened the export.
+- **Control:** the value is NFKC-normalised and leading whitespace / NBSP / Unicode spaces / control / format characters are
+  skipped before the trigger test, and every piece a `,` `;` tab or line break could split it into is tested too; a hit is
+  prefixed with `'` (the original text kept), except a value or piece that is entirely a plain decimal number
+  (`-12.34`, re-review: a negative amount must stay a number in Excel). Every cell is now quoted (`"` doubled), so no separator inside a value starts a
+  new cell in any locale. The reports exports (decision 29) use the same function.
+- **Tests:** `field-policy.service.spec.ts` (` =1+1`, fullwidth `＝1+1`, ` @x`, NBSP + zero-width, a control character,
+  `a;=1+1`, `a,+1`, a line break, benign text quoted only); `payroll-runs.integration.spec.ts` header now quoted.
+
+## Reports export — fixes from the independent security review (branch feat/reports-async-export, 2026-11-22; CHANGED SQL, DRAFT)
+- **Medium — the one-time link was service-only:** the requester's RLS rows plus the table SELECT grant let a runtime
+  session read `csv_content` directly, and the link checks ignored `file_expires_at`. **Fix:** the CSV and its link moved
+  to `core.report_export_file`, owned by rab_secure_owner (NOLOGIN), ENABLE + FORCE RLS with only the owner-only definer
+  policy and a RESTRICTIVE deny for crewflow / crewflow_app, and no table privilege for any runtime login. Four SECURITY
+  DEFINER functions (pinned search_path, EXECUTE for crewflow_app only, each pinned to the bound organisation + workspace):
+  `report_export_file_put` and `_purge` (Worker only), `_issue_link` and `_take` (the requester only; `_take` burns the link
+  and returns the content in one UPDATE … RETURNING). Both refuse once the file has expired (`file_expires_at >
+  clock_timestamp()`), whatever the link says. None names a crewflow-owned table (R4 unchanged). `core.report_export`
+  keeps only metadata; a person can no longer UPDATE it at all (no policy; the guard refuses a non-Worker update).
+- **Medium — object flags:** besides report.view / report.export, each report needs its object flag (attendance.view for
+  hours-and-pay, exceptions and weekly hours; schedule.view for fill rate; payroll.view for the payroll run summary), checked
+  at request, at link issue and at download (403).
+- **Low — insert defaults:** a BEFORE INSERT branch of `core.report_export_guard()` sets created_at / updated_at to now(),
+  status pending, attempts 0 and clears every build column (an owner-login runtime is not bound by the INSERT column grant).
+- **Low — size budget:** enforced while building: every report query fetches at most 100,000 rows (+1 to detect more) and
+  the CSV is built line by line against the 10 MB budget, failing `too_large` before a partial file exists.
+- **Low — one export cannot block the queue (superseded by the re-review below: audit is no longer contained):** the notice and audit run in their own savepoint (a failure is logged by error
+  name and rolled back alone); an unexpected error on one export is logged and the cycle moves on (the row is retried next
+  cycle under the attempt limit).
+- **Residual (retention):** deleting the file after 24 h removes the row; the old row version stays in dead tuples until
+  vacuum, and in WAL and backups for their own retention (managed PostgreSQL: 7-day point-in-time restore). The 24-hour
+  promise is about what the application can serve, not about physical erasure.
+- **CSV cells:** the shared `csvCell` now reads values like a spreadsheet and quotes every cell (separate PR, merged in).
+- **Tests:** `report-exports.integration.spec.ts` (raw SELECT / UPDATE / DELETE of the file table refused for the runtime login
+  and the Worker; definer caller separation; link and take refused after file expiry; a backdated owner insert stored as a
+  fresh pending row; object flags 403 at request / link / download without burning the link); Worker spec (a failing notice
+  neither undoes the build nor blocks the next export; the file row gone after 24 h); `report-builders.spec.ts` (row cap,
+  byte budget while building, quoted cells).
+
+## Reports export and CSV cells — re-review follow-ups (branches feat/reports-async-export and fix/csv-cell-formula-hardening, 2026-11-22; CHANGED SQL, DRAFT)
+- **CSV cells:** a value (or split piece) that is entirely a plain decimal number (`^-?\d+(\.\d+)?$` after NFKC and the
+  leading-space strip, e.g. `-12.34`) is no longer prefixed, so a negative amount stays a number in Excel; `-1+2`, `-A1`,
+  `+12` and `-1e5` are still prefixed. Every cell stays quoted.
+- **File table tenant predicate:** the definer-only policy on `core.report_export_file` is now `CURRENT_USER =
+  rab_secure_owner AND organisation_id = core.current_org() AND workspace_id = core.current_workspace()` (USING and WITH
+  CHECK), so even a definer bound to another organisation sees nothing.
+- **File tied to its export:** a composite FK `(export_id, organisation_id, workspace_id, requested_by)` → `core.report_export
+  (id, organisation_id, workspace_id, requested_by)`; `report_export_file_put` with an unknown export or a different requester
+  fails (23503). Purging clears the content and keeps a tombstone (`purged_at`), so the PK allows one file per export, ever.
+  The "status pending" condition is not expressible as a constraint without a crewflow-owned lookup that R4/R6 forbid; it is
+  held by the Worker (row locked `FOR UPDATE SKIP LOCKED` while pending, put in the same transaction) plus put-once.
+- **Accurate claim (BC-01):** the runtime login holds no privilege on the file table, so normal code paths cannot read the
+  content or touch the link. The owner login `crewflow_owner` is a member of `rab_secure_owner` (INHERIT / SET): arbitrary
+  SQL in that session (injection) could `SET ROLE rab_secure_owner` or alter the policies. Same, owner-accepted posture as
+  every other rab_secure_owner table; it protects normal paths, not an attacker who already runs SQL.
+- **Audit is evidence (fail closed):** the `report_export.ready` / `.failed` / `.file_deleted` audit rows are written in the
+  export's own transaction; an audit failure rolls back that export's state change (it stays pending / ready) and the cycle
+  logs the error name and moves on. Only the in-app notice runs in a contained savepoint.
+- **Tests:** `field-policy.service.spec.ts` (`-12.34`, ` -12.34`, `-0.5` not prefixed; `-1+2`, `-A1`, `-12.34;=1+1`, `+12`,
+  `-1e5` prefixed); `report-exports.integration.spec.ts` (put with an unknown export or another requester → 23503, a second put
+  → 23505; take with another organisation bound → NULL and the link still usable); Worker spec (a failing audit write leaves
+  the export pending, logs `AuditDown` without the message, the next export still builds, and it builds next cycle; the
+  expired file leaves a content-less tombstone).
+
+## Reports export — expired-file sweep (final review, branch feat/reports-async-export, 2026-11-24; ADDED SQL, DRAFT)
+- **Finding (Low):** the Worker's purge was driven by the export's status (`ready` and past expiry), so a file stored for an
+  export that ended `failed` or `expired` (a Worker bug) would keep its content at rest forever.
+- **Control:** `core.report_export_file_sweep_expired(limit)` (SECURITY DEFINER, owner rab_secure_owner, pinned search_path,
+  EXECUTE for crewflow_app only, Worker only) clears the content and sets `purged_at` for every file of the bound workspace
+  whose own `file_expires_at` has passed, whatever the export's status (at most 1..1000 rows per call). The report-export
+  cycle runs it over every routable workspace at most once an hour per Worker process (a write transaction per workspace);
+  a failure is logged by error name and the cycle moves on.
+- **Tests:** Worker spec (a file stored for a failed export survives the status-based cycle, is left alone before expiry,
+  and is cleared by the sweep after 24 h, the export staying failed); `report-exports.integration.spec.ts` (a person calling
+  the sweep → 42501); adapter parity (the processor passes the hourly sweep switch).
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

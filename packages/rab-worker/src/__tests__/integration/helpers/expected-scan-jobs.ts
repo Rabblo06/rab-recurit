@@ -34,6 +34,8 @@ export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
   'crewflow:crewflow-scan-maintenance:ai-stale-turn-sweep',
   // Phase D-Q4a: the combined shift scan (registered only with WORKER_SHIFT_SCAN_MODE=combined, instead of its four members).
   'crewflow:crewflow-scan-shifts:shift-scan-combined',
+  // Owner decision 29: background report exports.
+  'crewflow:crewflow-scan-reports:report-export',
 ]);
 
 /** Phase D-Q4a: the scan registered only in WORKER_SHIFT_SCAN_MODE=combined (the default, separate, never schedules it). */
@@ -53,7 +55,7 @@ export const EXPECTED_CONSUMER_HANDLERS: readonly string[] = Object.freeze([
   'crewflow-audit-events/audit-event-ship',
 ]);
 
-/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 23 scans + 6 consumers = 29. */
+/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 24 scans + 6 consumers = 30. */
 export const EXPECTED_HANDLERS: readonly string[] = Object.freeze([
   ...EXPECTED_SCAN_SCHEDULER_IDS.map((id) => {
     const [, queue, jobName] = id.split(':');

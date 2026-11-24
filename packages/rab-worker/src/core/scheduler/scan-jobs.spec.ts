@@ -38,7 +38,7 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
   const env = { get: (k: string) => (validated as unknown as Record<string, number>)[k]! };
 
   it('has exactly the 19 jobs-process loops, in main.ts order, plus the AI retention scan, with the same names, intervals and stats keys', () => {
-    expect(SCAN_JOBS).toHaveLength(23); // Phase D-Q2 appends ai-stale-turn-sweep, Phase D-Q4a shift-scan-combined (below)
+    expect(SCAN_JOBS).toHaveLength(24); // Phase D-Q2 appends ai-stale-turn-sweep, Phase D-Q4a shift-scan-combined, decision 29 report-export (below)
     SCAN_JOBS.slice(0, PRE_MIGRATION_MAIN_TS.length).forEach((def, i) => {
       const [name, interval, lastRunAt, failures] = PRE_MIGRATION_MAIN_TS[i]!;
       expect(def.name).toBe(name);
@@ -72,8 +72,15 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
     expect(resolveIntervalMs(SCAN_JOBS[21]!, env)).toBe(5 * MIN);
   });
 
+  it('owner decision 29: the report export scan is appended — reports queue, seconds setting (default 15), always registered', () => {
+    expect(SCAN_JOBS.slice(23).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy])).toEqual([
+      ['report-export', 'crewflow-scan-reports', { kind: 'env-seconds', key: 'WORKER_REPORT_EXPORT_INTERVAL_SECONDS' }, 'lastReportExportAt', 'reportExportFailures', true, undefined],
+    ]);
+    expect(resolveIntervalMs(SCAN_JOBS[23]!, env)).toBe(15_000);
+  });
+
   it('Phase D-Q4a: the combined shift scan is appended last — shifts queue, tick = gcd of its members (default 300 s), only with WORKER_SHIFT_SCAN_MODE=combined', () => {
-    expect(SCAN_JOBS.slice(22).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy, d.shiftScanMode])).toEqual([
+    expect(SCAN_JOBS.slice(22, 23).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy, d.shiftScanMode])).toEqual([
       ['shift-scan-combined', 'crewflow-scan-shifts', { kind: 'combined-shift-scan' }, 'lastShiftScanCombinedAt', 'shiftScanCombinedFailures', true, undefined, 'combined'],
     ]);
     expect(resolveIntervalMs(SCAN_JOBS[22]!, env)).toBe(5 * MIN);
@@ -83,19 +90,19 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
   it('the eight `return false` cycles are flagged (dispatchers, login-handoff and storage cleanup, outbox and AI retention)', () => {
     expect(SCAN_JOBS.filter((d) => d.mayReturnFalse).map((d) => d.jobName)).toEqual([
       'email-dispatch', 'push-dispatch', 'login-handoff-cleanup', 'storage-cleanup', 'shift-statement-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention',
-      'ai-stale-turn-sweep', 'shift-scan-combined',
+      'ai-stale-turn-sweep', 'shift-scan-combined', 'report-export',
     ]);
   });
 
   it('scheduler ids are unique and `crewflow:<queue>:<jobName>`; job names unique per queue', () => {
     const ids = SCAN_JOBS.map(schedulerIdOf);
-    expect(new Set(ids).size).toBe(23);
+    expect(new Set(ids).size).toBe(24);
     for (const def of SCAN_JOBS) expect(schedulerIdOf(def)).toBe(`crewflow:${def.queue}:${def.jobName}`);
     expect(schedulerIdOf(SCAN_JOBS[1]!)).toBe('crewflow:crewflow-scan-email:email-dispatch');
     // Each queue's Worker concurrency = its number of distinct scans.
     expect(SCAN_QUEUE_NAMES.map((q) => [q, scanJobsOn(q).length])).toEqual([
       ['crewflow-scan-email', 1], ['crewflow-scan-push', 1], ['crewflow-scan-shifts', 5], ['crewflow-scan-offers', 3],
-      ['crewflow-scan-reports', 4], ['crewflow-scan-maintenance', 8], ['crewflow-scan-realtime', 1],
+      ['crewflow-scan-reports', 5], ['crewflow-scan-maintenance', 8], ['crewflow-scan-realtime', 1],
     ]);
   });
 

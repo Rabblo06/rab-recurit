@@ -6,6 +6,11 @@ import { CONSUMER_QUEUES, SCAN_QUEUES } from '../../core/scheduler/queue-registr
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runFinalTimesheetCycle } from './final-timesheet.job';
 import { runPayrollPeriodAttentionCycle } from './payroll-period-attention.job';
+import { runReportExportCycle } from './report-export.job';
+
+/** The expired-file sweep (a write transaction per workspace) runs at most this often per Worker process. */
+const REPORT_FILE_SWEEP_EVERY_MS = 60 * 60 * 1000;
+let lastReportFileSweepAt = 0;
 import { runShiftReportSchedulerCycle } from './shift-report-scheduler.job';
 import { enqueueShiftStatement } from './shift-statement-enqueue';
 import { processShiftStatementJob, runShiftStatementDispatchCycle } from './shift-statement.job';
@@ -65,6 +70,27 @@ export class ReportScanProcessor {
     const { runtimeDataSource, tenantContext, notificationService, logger } = this.deps.get();
     const result = await runPayrollPeriodAttentionCycle(runtimeDataSource, tenantContext, notificationService);
     if (result.notified) logger.log(`payroll period attention: notified=${result.notified}`);
+  }
+
+  // Owner decision 29: build pending report exports and delete files 24 h after they were ready.
+  @Process('report-export')
+  async reportExport(): Promise<boolean> {
+    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger } = this.deps.get();
+    const now = Date.now();
+    const sweep = now - lastReportFileSweepAt >= REPORT_FILE_SWEEP_EVERY_MS;
+    if (sweep) lastReportFileSweepAt = now;
+    const result = await runReportExportCycle(runtimeDataSource, tenantContext, notificationService, auditService, {
+      lateGraceMinutes: environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'),
+      log: (line) => logger.warn(line),
+      sweepExpiredFiles: sweep,
+    });
+    const handled = result.built + result.failed + result.retried + result.deleted + result.errors + result.swept;
+    if (handled) {
+      logger.log(
+        `report export: built=${result.built} failed=${result.failed} retried=${result.retried} deleted=${result.deleted} swept=${result.swept} errors=${result.errors}`,
+      );
+    }
+    return handled > 0;
   }
 }
 

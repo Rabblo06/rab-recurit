@@ -14,6 +14,7 @@ jest.mock('../../queues/rab-reports/shift-report-scheduler.job', () => ({ runShi
 jest.mock('../../queues/rab-reports/final-timesheet.job', () => ({ runFinalTimesheetCycle: jest.fn() }));
 jest.mock('../../queues/rab-reports/shift-statement.job', () => ({ runShiftStatementDispatchCycle: jest.fn(), processShiftStatementJob: jest.fn() }));
 jest.mock('../../queues/rab-reports/payroll-period-attention.job', () => ({ runPayrollPeriodAttentionCycle: jest.fn() }));
+jest.mock('../../queues/rab-reports/report-export.job', () => ({ runReportExportCycle: jest.fn() }));
 jest.mock('../../queues/rab-realtime/publish-outbox.job', () => ({ runRealtimeOutboxPublishCycle: jest.fn() }));
 jest.mock('../../queues/rab-maintenance/account-invite-cleanup.job', () => ({
   runAccountInviteCleanupCycle: jest.fn(),
@@ -40,6 +41,7 @@ import * as report from '../../queues/rab-reports/shift-report-scheduler.job';
 import * as finalTs from '../../queues/rab-reports/final-timesheet.job';
 import * as statement from '../../queues/rab-reports/shift-statement.job';
 import * as payroll from '../../queues/rab-reports/payroll-period-attention.job';
+import * as reportExport from '../../queues/rab-reports/report-export.job';
 import * as realtime from '../../queues/rab-realtime/publish-outbox.job';
 import * as invite from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import * as token from '../../queues/rab-maintenance/token-cleanup.job';
@@ -161,6 +163,14 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     expect((report.runShiftReportSchedulerCycle as jest.Mock).mock.calls[0][0]).toBe(d.directDataSource);
     expect((finalTs.runFinalTimesheetCycle as jest.Mock).mock.calls[0]).toEqual([d.directDataSource, d.tenantContext, d.emailOutboxService, d.fileService, { audit: d.auditService }]);
     expect((payroll.runPayrollPeriodAttentionCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.tenantContext, d.notificationService]);
+    // Owner decision 29: the report export scan runs on the pooled runtime DataSource, with the live late-clock-in grace.
+    (reportExport.runReportExportCycle as jest.Mock).mockResolvedValue({ built: 0, failed: 0, retried: 0, deleted: 0, errors: 0, swept: 0 });
+    await expect(p.reportExport()).resolves.toBe(false);
+    expect((reportExport.runReportExportCycle as jest.Mock).mock.calls[0]).toEqual([
+      d.runtimeDataSource, d.tenantContext, d.notificationService, d.auditService, { lateGraceMinutes: ENV.LATE_CLOCK_IN_GRACE_MINUTES, log: expect.any(Function), sweepExpiredFiles: expect.any(Boolean) },
+    ]);
+    (reportExport.runReportExportCycle as jest.Mock).mockResolvedValue({ built: 1, failed: 0, retried: 0, deleted: 0, errors: 0, swept: 0 });
+    await expect(p.reportExport()).resolves.toBe(true);
     const publish = (statement.runShiftStatementDispatchCycle as jest.Mock).mock.calls[0][2];
     // D-Q1: organisation ids are UUIDs (the declared tenant scope is validated); the add() itself is unchanged.
     const [r1, o, w] = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-0000000000a1'];
