@@ -144,12 +144,12 @@ export function workspaceAttendanceScopeSql(schema: string): string {
 /**
  * Expected `core.workspace_schema_fingerprint_v2` of a level-25 workspace per PostgreSQL major. Measured, never derived
  * (ws-attendance-staff-scope.integration.spec.ts `[l25-fp]`; the per-major fingerprints ci run prints `MISMATCH (measured …)`).
- * PLACEHOLDERS until CI measures them: an undeclared or wrong value makes provisioning refuse (fail closed).
+ * Measured by the fingerprints ci run on 998afa5b (`v20 -> structure level 25`, 2026-11-24); a wrong value makes provisioning refuse.
  */
 export const ATTENDANCE_STAFF_SCOPE_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
-  16: '0000000000000000000000000000000000000000000000000000000000000016',
-  17: '0000000000000000000000000000000000000000000000000000000000000017',
-  18: '0000000000000000000000000000000000000000000000000000000000000018',
+  16: 'cb0ee4fa9c39ba5638079483ef21c265a3d774c705701d77a64944d32ed372c8',
+  17: 'eea87580e22e1845801fea68542c1677436d0982aea8bcba044e435a0017a7db',
+  18: 'e60275242131425f33c60762c160e5274512809ba55e6c002f5d92e53d6283bb',
 });
 
 export const ATTENDANCE_STAFF_SCOPE_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceAttendanceStaffScope1786722120000';
