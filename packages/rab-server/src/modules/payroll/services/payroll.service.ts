@@ -267,6 +267,10 @@ interface LockedRecord {
   finalised_by: string | null;
   /** Who reviewed this record's attendance seat (`shift_assignment.attendance_reviewed_by`); a preparer too (review of #335). */
   reviewed_by: string | null;
+  /** Everyone the insert-only audit history names as having finalised this report or reviewed this seat (never edited). */
+  history_preparers: string[] | null;
+  /** Both the report's finalisation and the seat's review are in the audit history (fail closed when not). */
+  has_history: boolean;
 }
 
 const NOT_READY_MESSAGE = 'This payroll record is not ready for approval.';
@@ -279,12 +283,16 @@ const NOT_FOUND_MESSAGE = 'Payroll can\'t be approved until verified hours and p
  * Owner decision 5 (2026-11-21), maker-checker, no override: the approver is never the person who prepared the pay. A record
  * is prepared by finalising its shift report (ShiftReportService.finalise creates it in the same transaction), so its preparer
  * is `shift_report.finalised_by`; whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) prepared it
- * too. An unknown finaliser = refused (fail closed), never "not the caller". The same rule is enforced by the database
+ * too, and so does anyone the insert-only audit history names as finaliser or reviewer (the live columns are writable). An
+ * unknown finaliser or reviewer, or missing history, = refused (fail closed), never "not the caller". The same rule is enforced by the database
  * (`core.payroll_record_guard()`, PayrollMakerCheckerBackstop1786723020000).
  */
 function preparerBlock(record: LockedRecord, ctx: AuthContext): { reason: 'prepared_by_you' | 'not_ready'; message: string } | null {
-  if (!record.finalised_by) return { reason: 'not_ready', message: PREPARER_UNKNOWN_MESSAGE };
-  if (record.finalised_by === ctx.userId || record.reviewed_by === ctx.userId) return { reason: 'prepared_by_you', message: PREPARED_BY_YOU_MESSAGE };
+  const historical = record.history_preparers ?? [];
+  if (record.finalised_by === ctx.userId || record.reviewed_by === ctx.userId || historical.includes(ctx.userId)) {
+    return { reason: 'prepared_by_you', message: PREPARED_BY_YOU_MESSAGE };
+  }
+  if (!record.finalised_by || !record.reviewed_by || !record.has_history) return { reason: 'not_ready', message: PREPARER_UNKNOWN_MESSAGE };
   return null;
 }
 
@@ -725,8 +733,20 @@ export class PayrollService {
     return manager.query(
       `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.amount_pence, sp.user_id AS staff_user_id,
               (SELECT sr.finalised_by FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised') AS finalised_by,
-              (SELECT sa.attendance_reviewed_by FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id WHERE a.id = pr.attendance_id) AS reviewed_by
+              (SELECT sa.attendance_reviewed_by FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id WHERE a.id = pr.attendance_id) AS reviewed_by,
+              h.history_preparers, COALESCE(h.has_report_history AND h.has_seat_history, false) AS has_history
          FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
+         LEFT JOIN LATERAL (
+           SELECT array_agg(DISTINCT al.actor_user_id) FILTER (WHERE al.actor_user_id IS NOT NULL) AS history_preparers,
+                  bool_or(al.action = 'attendance.report_finalised') AS has_report_history,
+                  bool_or(al.action = 'attendance.reviewed') AS has_seat_history
+             FROM core.audit_log al
+            WHERE al.organisation_id = pr.organisation_id
+              AND ((al.action = 'attendance.report_finalised' AND al.entity_type = 'shift_report'
+                    AND al.entity_id::text IN (SELECT sr.id::text FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised'))
+                OR (al.action = 'attendance.reviewed' AND al.entity_type = 'shift_assignment'
+                    AND al.entity_id::text IN (SELECT a.shift_assignment_id::text FROM ${t.attendance} a WHERE a.id = pr.attendance_id)))
+         ) h ON true
         WHERE pr.id = ANY($1::uuid[]) AND pr.organisation_id = $2 AND pr.workspace_id = $3
         ORDER BY pr.id
         FOR UPDATE OF pr`,

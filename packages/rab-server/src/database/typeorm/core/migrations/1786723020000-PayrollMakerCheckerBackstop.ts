@@ -8,25 +8,15 @@ import {
   PAYROLL_RECORD_GUARD_BODY_AFTER,
   PAYROLL_RECORD_GUARD_BODY_BEFORE,
   payrollRecordGuardSql,
-  payrollRunUpdatePolicySql,
 } from '../../workspace-schema/payroll-maker-checker-sql';
 
-interface State {
-  guard_body_hash: string | null;
-  run_using_hash: string | null;
-  run_check_hash: string | null;
-}
-
 /**
- * DRAFT — NEW SQL, owner SQL review FIRST (owner decision 5; independent review of #335, MEDIUM). The database layer under
- * PayrollService / PayrollRunService's maker-checker refusals:
- *  1. CREATE OR REPLACE core.payroll_record_guard(): when `approved_by` is set or changed, refuse (42501) an approver who
- *     finalised the record's shift report or reviewed its attendance. One function serves core AND every workspace schema's
- *     payroll_record trigger, so both copies are covered now. Owner, ACL and triggers are unchanged (CREATE OR REPLACE).
- *  2. ALTER POLICY payroll_run_update ON core.payroll_run WITH CHECK (<old> AND (status <> 'finalised' OR finalised_by <>
- *     prepared_by)). The workspace copies need a 0.7.0 structure level.
- * In ONE transaction, only from a known state (semantic-golden hashes; the after-state on a re-run), re-checked after; then
- * the secure-owner invariants. down(): the 1786719200000 body and expression back.
+ * DRAFT — NEW SQL, owner SQL review FIRST (owner decision 5; independent reviews of #335). The database layer under the
+ * services' maker-checker refusals: CREATE OR REPLACE core.payroll_record_guard() with the maker-checker block (see
+ * payroll-maker-checker-sql.ts). One function serves the payroll_record trigger of core AND of every workspace schema, so
+ * both copies are covered; owner, ACL and triggers are unchanged (CREATE OR REPLACE). No table, policy, grant or data change.
+ * In ONE transaction, only from a known body (semantic-golden hash; the after-body on a re-run), re-checked after; then the
+ * secure-owner invariants. down(): the 1786719200000 body back.
  */
 export class PayrollMakerCheckerBackstop1786723020000 implements MigrationInterface {
   name = 'PayrollMakerCheckerBackstop1786723020000';
@@ -44,24 +34,20 @@ export class PayrollMakerCheckerBackstop1786723020000 implements MigrationInterf
   }
 
   private async apply(queryRunner: QueryRunner, direction: 'up' | 'down'): Promise<void> {
-    const before = await this.state(queryRunner);
-    const known = (v: string | null, a: string, b: string) => v === a || v === b;
-    if (!known(before.guard_body_hash, H.guardBodyBefore, H.guardBodyAfter) || before.run_using_hash !== H.runUsing || !known(before.run_check_hash, H.runCheckBefore, H.runCheckAfter)) {
-      throw new Error(`${this.name}: refusing to run ${direction}: unknown state ${JSON.stringify(before)}. Nothing was changed.`);
+    const before = await this.bodyHash(queryRunner);
+    if (before !== H.guardBodyBefore && before !== H.guardBodyAfter) {
+      throw new Error(`${this.name}: refusing to run ${direction}: core.payroll_record_guard() has an unknown body (hash ${before ?? 'none'}). Nothing was changed.`);
     }
     const up = direction === 'up';
     await queryRunner.query(payrollRecordGuardSql(up ? PAYROLL_RECORD_GUARD_BODY_AFTER : PAYROLL_RECORD_GUARD_BODY_BEFORE));
-    await queryRunner.query(payrollRunUpdatePolicySql(up));
-    const after = await this.state(queryRunner);
-    const want = { guard_body_hash: up ? H.guardBodyAfter : H.guardBodyBefore, run_using_hash: H.runUsing, run_check_hash: up ? H.runCheckAfter : H.runCheckBefore };
-    if (JSON.stringify(after) !== JSON.stringify(want)) {
-      throw new Error(`${this.name}: after ${direction}: ${JSON.stringify(after)}, expected ${JSON.stringify(want)} (rolled back).`);
-    }
+    const after = await this.bodyHash(queryRunner);
+    const want = up ? H.guardBodyAfter : H.guardBodyBefore;
+    if (after !== want) throw new Error(`${this.name}: after ${direction}: body hash ${after ?? 'none'}, expected ${want} (rolled back).`);
   }
 
-  private async state(queryRunner: QueryRunner): Promise<State> {
-    const [row] = (await queryRunner.query(PAYROLL_MAKER_CHECKER_STATE_SQL)) as State[];
-    return { guard_body_hash: row?.guard_body_hash ?? null, run_using_hash: row?.run_using_hash ?? null, run_check_hash: row?.run_check_hash ?? null };
+  private async bodyHash(queryRunner: QueryRunner): Promise<string | null> {
+    const [row] = (await queryRunner.query(PAYROLL_MAKER_CHECKER_STATE_SQL)) as Array<{ guard_body_hash: string | null }>;
+    return row?.guard_body_hash ?? null;
   }
 
   private async inTransaction(queryRunner: QueryRunner, body: () => Promise<void>): Promise<void> {

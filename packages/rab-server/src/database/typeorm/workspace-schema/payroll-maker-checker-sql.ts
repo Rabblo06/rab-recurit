@@ -1,17 +1,20 @@
-// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (function, policy and column names, md5 constants); no request or row data reaches these templates.
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (function, table, action and column names, md5 constants); no request or row data reaches these templates.
 /**
- * DRAFT — NEW SQL, owner SQL review FIRST (owner decision 5, review of #335). The database layer of "the approver is never the
- * person who prepared the pay", used by migration PayrollMakerCheckerBackstop1786723020000:
- *  1. `core.payroll_record_guard()` (ONE function, the BEFORE UPDATE trigger of core.payroll_record AND of every
- *     workspace_*.payroll_record) gains a check: when `approved_by` is set or changed, it must not be the person who finalised
- *     the record's shift report (`shift_report.finalised_by`) nor the one who reviewed its attendance
- *     (`shift_assignment.attendance_reviewed_by`), read in the trigger's own schema (TG_TABLE_SCHEMA). 42501 otherwise. Only
- *     the moment of approval is checked, so rows approved before this rule are never blocked by later updates.
- *  2. `payroll_run_update` on core.payroll_run: WITH CHECK also requires a finalised run's `finalised_by` to be the caller
- *     and not `prepared_by`. (`prepared_by` itself is never updatable by the runtime role: no column grant, and the
- *     owner-login grant-parity trigger enforces the same for crewflow_owner.)
- *     (The `workspace_*` copies of this policy need a 0.7.0 structure level and follow with the 0.7.0 chain.)
- * The rest of the guard body is byte-for-byte the 1786719200000 body.
+ * DRAFT — NEW SQL, owner SQL review FIRST (owner decision 5; independent reviews of #335). The database layer of "the approver
+ * is never the person who prepared the pay", used by migration PayrollMakerCheckerBackstop1786723020000.
+ *
+ * `core.payroll_record_guard()` is ONE function: the BEFORE UPDATE trigger of core.payroll_record AND of every
+ * workspace_*.payroll_record, so this covers both copies without a workspace structure level. It gains:
+ *  - on the move to `approved` (NEW.status = 'approved', OLD.status <> 'approved'): `approved_by` must be the signed-in caller
+ *    (core.current_uid(); no worker exemption — the worker never writes approved_by, and the worker marker is a plain GUC);
+ *    the record's finalised shift report and its attendance seat must be readable in the trigger's schema with a non-null
+ *    finaliser and reviewer (fail closed); the approver is neither of them; AND, because those live columns are writable by
+ *    managers, the insert-only `core.audit_log` must hold the report's finalisation and the seat's review, and no such
+ *    history row may name the approver as actor (so re-pointing `finalised_by` / clearing `attendance_reviewed_by` after the
+ *    fact does not help);
+ *  - outside that move, `approved_by` never changes (42501).
+ * Rows approved before this rule are never re-checked (only the move to approved is). The rest of the body is byte-for-byte
+ * the 1786719200000 body. The payroll_run finaliser rule (core + workspace copies) ships with the 0.7.0 chain.
  */
 
 /** The 1786719200000 body of core.payroll_record_guard() (prosrc, exact). */
@@ -41,36 +44,36 @@ END
 `;
 
 /** Variables the maker-checker block adds to DECLARE. */
-export const PAYROLL_RECORD_GUARD_DECLARE_ADDED = `  finaliser uuid;
+export const PAYROLL_RECORD_GUARD_DECLARE_ADDED = `  report_id uuid;
+  finaliser uuid;
+  seat_id uuid;
   reviewer uuid;
-  has_report boolean;
-  has_seat boolean;
 `;
 
-/**
- * The maker-checker block (inserted before RETURN NEW), run whenever `approved_by` changes:
- *  - a human session may only record ITSELF (core.current_uid()) as approver, and only once (an existing approver is never
- *    replaced or cleared);
- *  - the record's finalised shift report and its attendance seat must both be readable in the trigger's schema (fail closed:
- *    a row hidden by RLS or missing refuses), and the approver is neither the report's finaliser nor the seat's reviewer.
- */
-export const PAYROLL_RECORD_GUARD_BLOCK = `  -- Owner decision 5 (maker-checker): the caller approves as themselves, once, and never prepared these hours.
-  IF NEW.approved_by IS DISTINCT FROM OLD.approved_by THEN
-    IF NOT is_worker AND (OLD.approved_by IS NOT NULL OR NEW.approved_by IS DISTINCT FROM core.current_uid()) THEN
-      RAISE EXCEPTION 'payroll_record approver must be the signed-in caller, recorded once' USING ERRCODE = '42501';
+/** The maker-checker block (inserted before RETURN NEW). */
+export const PAYROLL_RECORD_GUARD_BLOCK = `  -- Owner decision 5 (maker-checker): checked on the move to approved; approved_by changes nowhere else.
+  IF NEW.status = 'approved' AND OLD.status IS DISTINCT FROM 'approved' THEN
+    IF NEW.approved_by IS NULL OR NEW.approved_by IS DISTINCT FROM core.current_uid() THEN
+      RAISE EXCEPTION 'payroll_record approver must be the signed-in caller' USING ERRCODE = '42501';
     END IF;
-    IF NEW.approved_by IS NOT NULL THEN
-      EXECUTE format('SELECT sr.finalised_by, sa.attendance_reviewed_by, sr.shift_id IS NOT NULL, sa.id IS NOT NULL'
-                     ' FROM (SELECT 1) one'
-                     ' LEFT JOIN %1$I.shift_report sr ON sr.shift_id = $1 AND sr.status = ''finalised'''
-                     ' LEFT JOIN %1$I.attendance a ON a.id = $2'
-                     ' LEFT JOIN %1$I.shift_assignment sa ON sa.id = a.shift_assignment_id', TG_TABLE_SCHEMA)
-        INTO finaliser, reviewer, has_report, has_seat USING NEW.shift_id, NEW.attendance_id;
-      IF NOT coalesce(has_report, false) OR NOT coalesce(has_seat, false) OR finaliser IS NULL
-         OR finaliser = NEW.approved_by OR reviewer IS NOT DISTINCT FROM NEW.approved_by THEN
-        RAISE EXCEPTION 'payroll_record approver prepared these hours, or their preparation cannot be verified' USING ERRCODE = '42501';
-      END IF;
+    EXECUTE format('SELECT sr.id, sr.finalised_by, sa.id, sa.attendance_reviewed_by FROM (SELECT 1) one'
+                   ' LEFT JOIN %1$I.shift_report sr ON sr.shift_id = $1 AND sr.status = ''finalised'''
+                   ' LEFT JOIN %1$I.attendance a ON a.id = $2'
+                   ' LEFT JOIN %1$I.shift_assignment sa ON sa.id = a.shift_assignment_id', TG_TABLE_SCHEMA)
+      INTO report_id, finaliser, seat_id, reviewer USING NEW.shift_id, NEW.attendance_id;
+    IF report_id IS NULL OR seat_id IS NULL OR finaliser IS NULL OR reviewer IS NULL
+       OR finaliser = NEW.approved_by OR reviewer = NEW.approved_by
+       OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id
+                        AND al.action = 'attendance.report_finalised' AND al.entity_type = 'shift_report' AND al.entity_id::text = report_id::text)
+       OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id
+                        AND al.action = 'attendance.reviewed' AND al.entity_type = 'shift_assignment' AND al.entity_id::text = seat_id::text)
+       OR EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id AND al.actor_user_id = NEW.approved_by
+                    AND ((al.action = 'attendance.report_finalised' AND al.entity_type = 'shift_report' AND al.entity_id::text = report_id::text)
+                      OR (al.action = 'attendance.reviewed' AND al.entity_type = 'shift_assignment' AND al.entity_id::text = seat_id::text))) THEN
+      RAISE EXCEPTION 'payroll_record approver prepared these hours, or their preparation cannot be verified' USING ERRCODE = '42501';
     END IF;
+  ELSIF NEW.approved_by IS DISTINCT FROM OLD.approved_by THEN
+    RAISE EXCEPTION 'payroll_record approver changes only when the record is approved' USING ERRCODE = '42501';
   END IF;
 `;
 
@@ -85,35 +88,11 @@ export function payrollRecordGuardSql(body: string): string {
   return `CREATE OR REPLACE FUNCTION core.payroll_record_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, core AS $fn$${body}$fn$`;
 }
 
-const RUN_UPDATE_BASE = `(organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM core.manager_profile mp WHERE ((mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text))))`;
-
-/** core.payroll_run's payroll_run_update WITH CHECK before (1786719200000; equal to its USING) and after. */
-export const CORE_PAYROLL_RUN_UPDATE_CHECK_BEFORE_DEPARSED = `(${RUN_UPDATE_BASE})`;
-export const CORE_PAYROLL_RUN_UPDATE_CHECK_AFTER_DEPARSED = `(${RUN_UPDATE_BASE} AND ((status <> 'finalised'::text) OR ((finalised_by = core.current_uid()) AND (finalised_by <> prepared_by))))`;
-
-export function payrollRunUpdatePolicySql(after: boolean): string {
-  return `ALTER POLICY payroll_run_update ON core.payroll_run WITH CHECK ${after ? CORE_PAYROLL_RUN_UPDATE_CHECK_AFTER_DEPARSED : CORE_PAYROLL_RUN_UPDATE_CHECK_BEFORE_DEPARSED}`;
-}
-
-/** Catalog state: the guard's body hash (the semantic goldens' `body=`) and the run policy's hashes. */
-export const PAYROLL_MAKER_CHECKER_STATE_SQL = `SELECT
-  (SELECT pg_catalog.md5(coalesce(p.prosrc, '') || '|' || coalesce(pg_catalog.pg_get_function_sqlbody(p.oid), ''))
-     FROM pg_catalog.pg_proc p WHERE p.oid = 'core.payroll_record_guard()'::pg_catalog.regprocedure) AS guard_body_hash,
-  (SELECT pg_catalog.md5(pg_catalog.regexp_replace(pg_catalog.pg_get_expr(p.polqual, p.polrelid), '\\s+', ' ', 'g'))
-     FROM pg_catalog.pg_policy p WHERE p.polrelid = 'core.payroll_run'::pg_catalog.regclass AND p.polname = 'payroll_run_update') AS run_using_hash,
-  (SELECT pg_catalog.md5(pg_catalog.regexp_replace(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), '\\s+', ' ', 'g'))
-     FROM pg_catalog.pg_policy p WHERE p.polrelid = 'core.payroll_run'::pg_catalog.regclass AND p.polname = 'payroll_run_update') AS run_check_hash`;
+/** Catalog state: the guard's body hash (the semantic goldens' `body=`). */
+export const PAYROLL_MAKER_CHECKER_STATE_SQL = `SELECT pg_catalog.md5(coalesce(p.prosrc, '') || '|' || coalesce(pg_catalog.pg_get_function_sqlbody(p.oid), '')) AS guard_body_hash
+  FROM pg_catalog.pg_proc p WHERE p.oid = 'core.payroll_record_guard()'::pg_catalog.regprocedure`;
 
 export const PAYROLL_MAKER_CHECKER_HASHES = Object.freeze({
   guardBodyBefore: '6493c13974ec4c47975a703bade22f0a',
-  guardBodyAfter: 'dca8a5d7724b656457143b07cde2d417',
-  runUsing: 'de27c66e727763f94d047d16e9656077',
-  runCheckBefore: 'de27c66e727763f94d047d16e9656077',
-  runCheckAfter: '4a23581aa5b4bf7e6802bdfadcfa24f8',
+  guardBodyAfter: 'a5117bbbccae1919729e6f86e03d6d07',
 });
-
-/** The restricted-migrator's reviewed privilege drift for PayrollMakerCheckerBackstop1786723020000 (the policy line). */
-export const CORE_PAYROLL_MAKER_CHECKER_REVIEWED_DRIFT: readonly string[] = Object.freeze([
-  `- policy|payroll_run|payroll_run_update|w|permissive=true|roles=public|using=${CORE_PAYROLL_RUN_UPDATE_CHECK_BEFORE_DEPARSED}|check=${CORE_PAYROLL_RUN_UPDATE_CHECK_BEFORE_DEPARSED}`,
-  `+ policy|payroll_run|payroll_run_update|w|permissive=true|roles=public|using=${CORE_PAYROLL_RUN_UPDATE_CHECK_BEFORE_DEPARSED}|check=${CORE_PAYROLL_RUN_UPDATE_CHECK_AFTER_DEPARSED}`,
-]);
