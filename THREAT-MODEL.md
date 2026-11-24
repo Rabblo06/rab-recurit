@@ -10526,3 +10526,13 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` (concurrent resize, stale guard, rollback, foreign 404,
   shrink 400, replacement 400, missing schedule.create 403, direct-shift pipeline owner-only).
 
+
+## 2026-11-24 — New web UI: hold-to-delete keeps the current-password step-up (owner decision 73 b)
+
+- **Change (web only):** deleting a Staff / Manager / Venue Manager (single or bulk) is now an uninterrupted 1.8 s hold
+  followed by the existing "Your current password" prompt; the request is sent only from the password submit, with
+  `currentPassword` in the body exactly as before. The hold is intent only, never a control.
+- **Server unchanged:** the DELETE routes still verify the actor's password first (P2.8 `assertCurrentPassword`), then
+  permissions, tenant scope and deletion invariants. A refused step-up stops a bulk run (no repeated wrong-password calls).
+- **Tests:** `UserDetailPanel.spec.tsx` and `UsersBulkActions.spec.tsx` (the hold alone sends nothing; the password is
+  sent; a refusal is shown; cancel deletes nothing).
