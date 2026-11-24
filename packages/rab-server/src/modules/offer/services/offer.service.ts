@@ -592,6 +592,9 @@ export class OfferService {
     offerKind: OfferKindType = OfferKind.STANDARD,
   ): Promise<JobOffer> {
     await assertShiftActionWindowOpen(manager, shift.id, 'send');
+    // Owner decision 39: never offer a seat at £0 (a shift priced before the rule), on every send path including
+    // replacement and standby offers — refused before the seat or the offer exists.
+    assertPayRateSet(shift.payRatePence);
     const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
     const time = validateAssignmentTime(shift, proposedTime ?? defaultAssignmentTime(shift), scheduledBreak);
     await assertVenueTeamSelection(manager, ctx, [staffProfileId], shift.workspaceId);

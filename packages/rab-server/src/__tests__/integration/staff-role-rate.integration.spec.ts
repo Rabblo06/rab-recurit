@@ -865,31 +865,38 @@ describeIfDb(
       expect(await rowCount(leaver.profileId!)).toBe(1);
     });
 
-    // ------------------------------------------------------------------------------------------------ decision 41 (explicit shift rate wins)
+    // ------------------------------------------------------------------------------------------------ decisions 41 / 97 (which shifts take a staff rate)
 
-    it('decision 41: a rate typed on the shift wins over the staff role rate at send and at confirmation; without it the staff rate wins', async () => {
+    const shiftWith = async (
+      jobRoleId: string,
+      extra: Record<string, unknown> = {},
+    ) => {
+      const start = new Date(Date.now() + shiftDay++ * 86_400_000);
+      return scheduling.create(ctxA, {
+        venueId,
+        jobRoleId,
+        startsAt: start.toISOString(),
+        endsAt: new Date(start.getTime() + 6 * 3_600_000).toISOString(),
+        requiredCount: 1,
+        breakMinutes: 0,
+        ...extra,
+      } as never);
+    };
+    const markerOf = async (shiftId: string) =>
+      admin.query(
+        `SELECT created_by FROM core.shift_resolved_rate WHERE shift_id = $1`,
+        [shiftId],
+      );
+
+    it('decision 41: a rate typed on the shift wins over the staff role rate at send and at confirmation; a resolved rate takes the staff rate', async () => {
       const role = await newRole(1400);
       await rates.create(ctxA, worker.profileId!, {
         jobRoleId: role,
         payRatePence: 2300,
         effectiveFrom: day(-10),
       });
-      const start = new Date(Date.now() + shiftDay++ * 86_400_000);
-      const typed = await scheduling.create(ctxA, {
-        venueId,
-        jobRoleId: role,
-        startsAt: start.toISOString(),
-        endsAt: new Date(start.getTime() + 6 * 3_600_000).toISOString(),
-        requiredCount: 1,
-        breakMinutes: 0,
-        payRatePence: 1777,
-      } as never);
-      expect(
-        await admin.query(
-          `SELECT created_by FROM core.shift_explicit_rate WHERE shift_id = $1`,
-          [typed.id],
-        ),
-      ).toEqual([{ created_by: a.userId }]);
+      const typed = await shiftWith(role, { payRatePence: 1777 });
+      expect(await markerOf(typed.id)).toEqual([]); // a typed rate is never marked resolved
       await scheduling.publish(ctxA, typed.id);
       const offer = await offers.send(ctxA, typed.id, {
         staffProfileId: worker.profileId!,
@@ -907,9 +914,9 @@ describeIfDb(
         pay_rate_snapshot_pence: '1777',
       });
       // A staff rate edit afterwards changes nothing (the snapshot is never recalculated).
-      const [existing] = await rates
-        .list(ctxA, worker.profileId!)
-        .then((r) => r.filter((x) => x.jobRoleId === role));
+      const [existing] = (await rates.list(ctxA, worker.profileId!)).filter(
+        (x) => x.jobRoleId === role,
+      );
       await rates.update(ctxA, worker.profileId!, existing!.id, {
         payRatePence: 2900,
       });
@@ -917,14 +924,8 @@ describeIfDb(
         (await seatOf(typed.id, worker.profileId!)).pay_rate_snapshot_pence,
       ).toBe('1777');
 
-      // The same role and staff member on a shift whose rate was NOT typed: the staff rate (now 2900) wins.
-      const resolved = await newShift(role);
-      expect(
-        await admin.query(
-          `SELECT 1 FROM core.shift_explicit_rate WHERE shift_id = $1`,
-          [resolved.id],
-        ),
-      ).toHaveLength(0);
+      const resolved = await shiftWith(role);
+      expect(await markerOf(resolved.id)).toEqual([{ created_by: a.userId }]);
       await scheduling.publish(ctxA, resolved.id);
       await sendAcceptConfirm(resolved.id, worker);
       expect(
@@ -932,29 +933,42 @@ describeIfDb(
       ).toBe('2900');
     });
 
-    it('decision 41 marker: zero rows without tenant context; only a non-venue manager of the workspace reads it; insert-only; WITH CHECK names the author', async () => {
-      const shift = await scheduling.create(ctxA, {
-        venueId,
-        jobRoleId: await newRole(1400),
-        startsAt: new Date(Date.now() + shiftDay++ * 86_400_000).toISOString(),
-        endsAt: new Date(
-          Date.now() + (shiftDay - 1) * 86_400_000 + 3_600_000,
-        ).toISOString(),
-        requiredCount: 1,
-        payRatePence: 1600,
-      } as never);
+    it('decision 97: a shift created before staff rates existed (no resolved-rate marker) keeps its own rate at confirmation', async () => {
+      const role = await newRole(1400);
+      await rates.create(ctxA, worker.profileId!, {
+        jobRoleId: role,
+        payRatePence: 2600,
+        effectiveFrom: day(-10),
+      });
+      const legacy = await shiftWith(role);
+      // What a pre-migration shift looks like: no marker (the migration never back-fills one). Removed with the superuser
+      // admin connection, which the parity guard lets through; no application role can do this.
+      await admin.query(
+        `DELETE FROM core.shift_resolved_rate WHERE shift_id = $1`,
+        [legacy.id],
+      );
+      await scheduling.publish(ctxA, legacy.id);
+      await sendAcceptConfirm(legacy.id, worker);
+      expect(
+        (await seatOf(legacy.id, worker.profileId!)).pay_rate_snapshot_pence,
+      ).toBe('1400');
+    });
+
+    it('marker: zero rows without tenant context; only a non-venue manager of the workspace reads it; no direct writes for the runtime login', async () => {
+      const shift = await shiftWith(await newRole(1400));
       expect(
         await dataSource.manager.query(
-          `SELECT shift_id FROM core.shift_explicit_rate`,
+          `SELECT shift_id FROM core.shift_resolved_rate`,
         ),
       ).toHaveLength(0);
+      expect((await markerOf(shift.id)).length).toBe(1);
       const visible = (who: TestIdentity) =>
         as(
           who,
           async (m) =>
             (
               await m.query(
-                `SELECT 1 FROM core.shift_explicit_rate WHERE shift_id = $1`,
+                `SELECT 1 FROM core.shift_resolved_rate WHERE shift_id = $1`,
                 [shift.id],
               )
             ).length,
@@ -966,7 +980,7 @@ describeIfDb(
         await sqlState(
           as(a, (m) =>
             m.query(
-              `UPDATE core.shift_explicit_rate SET created_by = $2 WHERE shift_id = $1`,
+              `UPDATE core.shift_resolved_rate SET created_by = $2 WHERE shift_id = $1`,
               [shift.id, b.userId],
             ),
           ),
@@ -976,27 +990,43 @@ describeIfDb(
         await sqlState(
           as(a, (m) =>
             m.query(
-              `DELETE FROM core.shift_explicit_rate WHERE shift_id = $1`,
+              `DELETE FROM core.shift_resolved_rate WHERE shift_id = $1`,
               [shift.id],
             ),
           ),
         ),
       ).toBe('42501');
-      const forged = (who: TestIdentity, createdBy: string) =>
-        as(who, (m) =>
-          m.query(
-            `INSERT INTO core.shift_explicit_rate (shift_id, organisation_id, workspace_id, created_by) VALUES ($1, $2, $3, $4)`,
-            [randomUUID(), who.organisationId, who.workspaceId, createdBy],
+      expect(
+        await sqlState(
+          as(a, (m) =>
+            m.query(
+              `INSERT INTO core.shift_resolved_rate (shift_id, organisation_id, workspace_id, created_by) VALUES ($1, $2, $3, $4)`,
+              [randomUUID(), a.organisationId, a.workspaceId, a.userId],
+            ),
           ),
+        ),
+      ).toBe('42501');
+    });
+
+    it('marker definer: refuses a non-existent shift, a shift of another manager, a shift created in an earlier transaction, and a Venue Manager or staff caller (42501); nothing is written', async () => {
+      const mark = (who: TestIdentity, shiftId: string) =>
+        as(who, (m) =>
+          m.query(`SELECT core.mark_shift_rate_resolved($1)`, [shiftId]),
         );
-      expect(await sqlState(forged(a, b.userId))).toBe('42501');
-      expect(await sqlState(forged(vm, vm.userId))).toBe('42501');
-      expect(await sqlState(forged(worker, worker.userId))).toBe('42501');
+      const typed = await shiftWith(await newRole(1400), {
+        payRatePence: 1500,
+      }); // the shift of a, no marker
+      expect(await sqlState(mark(a, randomUUID()))).toBe('42501'); // non-existent
+      expect(await sqlState(mark(b, typed.id))).toBe('42501'); // another manager (another workspace)
+      expect(await sqlState(mark(a, typed.id))).toBe('42501'); // own shift, but created in an earlier transaction
+      expect(await sqlState(mark(vm, typed.id))).toBe('42501');
+      expect(await sqlState(mark(worker, typed.id))).toBe('42501');
+      expect(await markerOf(typed.id)).toEqual([]);
     });
 
     // ------------------------------------------------------------------------------------------------ decision 40 (org-local date)
 
-    it('decision 40: the staff rate period is judged on the organisation-local date — 23:30 UTC on D is D+1 in a UTC+1 organisation', async () => {
+    it('decision 40: the staff rate period is judged on the organisation-local date (23:30 UTC on D is D+1 in a UTC+1 organisation)', async () => {
       const role = await newRole(1400);
       const at = new Date(Date.now() + 70 * 86_400_000);
       at.setUTCHours(23, 30, 0, 0);
@@ -1015,11 +1045,11 @@ describeIfDb(
         payRatePence: 2900,
         effectiveFrom: next,
       });
-      const shiftId = randomUUID(); // no marker: not an explicit rate
+      const shift = await shiftWith(role); // a resolved rate: staff rates may apply
       const seat = () =>
         as(a, (m) =>
           resolveSeatPayRate(m, {
-            shiftId,
+            shiftId: shift.id,
             staffProfileId: plain.profileId!,
             jobRoleId: role,
             startsAt: at,

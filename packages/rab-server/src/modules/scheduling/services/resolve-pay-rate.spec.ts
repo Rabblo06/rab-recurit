@@ -68,7 +68,8 @@ describe('SchedulingService.resolvePayRate', () => {
     expect(fake.findOne).not.toHaveBeenCalled(); // the default is never read once a venue rate applies
     // The organisation-local date is computed by PostgreSQL from the start instant (bound, never interpolated).
     const [sql, bound] = fake.query.mock.calls[0]!;
-    expect(sql).toContain('AT TIME ZONE coalesce((SELECT o.timezone FROM core.organisation o WHERE o.id = core.current_org())');
+    expect(sql).toContain('AT TIME ZONE o.timezone');
+    expect(sql).toContain('FROM core.organisation o WHERE o.id = core.current_org()');
     expect(bound).toEqual([params.startsAt]);
     const [q] = fake.queries;
     expect(q!.entity).toBe(VenueRoleRate);
@@ -120,10 +121,13 @@ describe('pay rate rules (decisions 39 and 40)', () => {
     expect(PAY_RATE_REQUIRED_MESSAGE).toBe('Set a pay rate for this role first.');
   });
 
-  it('organisationLocalDate binds the instant as UTC ISO and refuses an invalid one', async () => {
+  it('organisationLocalDate binds the instant as UTC ISO, refuses an invalid one and throws without a visible organisation', async () => {
     const query = jest.fn(async (..._args: unknown[]) => [{ day: '2026-12-06' }]);
     await expect(organisationLocalDate({ query } as unknown as EntityManager, new Date('2026-12-05T23:30:00.000Z'))).resolves.toBe('2026-12-06');
     expect(query.mock.calls[0]![1]).toEqual(['2026-12-05T23:30:00.000Z']);
     await expect(organisationLocalDate({ query } as unknown as EntityManager, 'nope')).rejects.toThrow('invalid instant');
+    // Fail closed: no visible organisation row (no tenant context) never falls back to a guessed time zone.
+    const none = jest.fn(async (..._args: unknown[]) => []);
+    await expect(organisationLocalDate({ query: none } as unknown as EntityManager, new Date())).rejects.toThrow('missing tenant context');
   });
 });

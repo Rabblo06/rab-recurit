@@ -10541,18 +10541,32 @@ workspace-table shape (structure level 27) is the reviewed alternative.
     is gone is never used; deactivated/archived staff cannot be offered; an archived job role takes no new rate (409).
   - *Audit*: `staff_role_rate.created|updated|deleted` in the same transaction, with staff member, job role and dates —
     never an amount; not shipped to the security sink (same class as `venue_role_rate.*`).
-- **Owner decisions applied (decided 2026-11-22; DECISIONS-PENDING.md 39, 40, 41, 48):** 48 — core tables, not workspace
-  tables; 39 — never a £0 rate (shifts refused by fix/pay-rate-decisions-39-40; a staff role rate must be > 0, CHECK and
-  DTO); 40 — rate periods are judged on the seat start's organisation-local date (`core.organisation.timezone`), both
-  ends inclusive, for the staff rate exactly as for the venue rate; 41 — a rate typed on the shift wins over a staff role
-  rate: `SchedulingService.insertNewShiftTx` writes a marker row in `core.shift_explicit_rate` (migration
-  `ShiftExplicitRate1786722220000`) in the same transaction when `payRatePence` was given, and `resolveSeatPayRate` uses the
-  shift's own rate when the marker exists. The marker table: organisation + workspace, ENABLE + FORCE RLS, tenant +
-  non-venue manager on SELECT and INSERT (INSERT also `created_by = core.current_uid()`), INSERT-only (no UPDATE / DELETE
-  grant; the owner login refused UPDATE, DELETE and TRUNCATE by the reviewed parity guard), no amount stored.
+- **Owner decisions applied (DECISIONS-PENDING.md 39, 40, 41, 48, 97):** 48: core tables, not workspace tables; 39: never
+  a £0 rate (shifts refused by fix/pay-rate-decisions-39-40; a staff role rate must be > 0, CHECK and DTO; the seat rate is
+  checked again by `resolveSeatPayRate`, so no seat is ever confirmed at £0); 40: rate periods are judged on the seat
+  start's organisation-local date (`core.organisation.timezone`), both ends inclusive, failing closed without a visible
+  organisation; 41 and 97: a staff role rate may apply only to a shift whose rate was RESOLVED (not typed) in its own
+  creating transaction. `SchedulingService.insertNewShiftTx` marks such a shift in `core.shift_resolved_rate` (migration
+  `ShiftResolvedRate1786722220000`) through the only writer, the crewflow-owned SECURITY DEFINER
+  `core.mark_shift_rate_resolved(uuid)` (pinned search_path, EXECUTE for crewflow_app only). The definer refuses (42501)
+  unless the shift exists in the bound workspace (its workspace-schema copy or `core.shift`) with `created_by` = the
+  caller and `created_at = now()`, i.e. only the transaction that inserted the shift can mark it: a non-existent shift,
+  another manager's shift or an older shift can never be marked. A typed rate (41) and every shift created before the
+  migration (97, the owner default) carry no marker and keep the shift's own rate; the cut-over is derived from the
+  database, never from a client value. The marker table: organisation + workspace, ENABLE + FORCE RLS, SELECT for a
+  non-venue manager of the workspace, INSERT bound to the tenant and the caller as author; crewflow_app holds SELECT only,
+  the owner login is refused INSERT / UPDATE / DELETE / TRUNCATE by the reviewed parity guard; no amount stored.
   Remaining assumptions: permission flags reused (read `payroll.view`, write `staff.edit` + `payroll.view`); the offer
-  summary's `payRatePence` shows the seat's rate; the £1,000,000/h CHECK ceiling is a sanity bound; retention of rate rows
-  follows the staff member's (no automatic purge).
+  summary's `payRatePence` shows the seat's rate; Venue Manager request shifts (`submitRequest`) carry no marker, so they
+  keep their resolved shift rate; the £1,000,000/h CHECK ceiling is a sanity bound; retention of rate rows follows the
+  staff member's (no automatic purge).
+- **SECURITY TRADE-OFF (review item 7):** the RLS predicates of `staff_role_rate` and `shift_resolved_rate` admit ANY
+  non-venue, non-archived manager of the bound workspace, wider than the services' creator scope (`assertOwned`). A core
+  policy cannot name the workspace-schema `staff_profile` / `shift` rows that hold the creator, and a seat can legitimately
+  be priced by a manager who did not create the staff member or the shift (replacement-request approval). Layers 2-3 (the
+  service flags and the creator scope, 404) stay the authority for the API; RLS stays the tenant + manager-type boundary.
+- **INFO (review item 8):** the rate shown at acceptance is an estimate; confirmation re-reads the seat rate, so a staff
+  role rate edited between acceptance and confirmation changes the confirmed figure (never after confirmation).
 - **Residual:** no foreign key from `staff_role_rate` to `staff_profile` / `job_role`: integrity of those ids rests on the
   service scope checks (layer 3) and RLS cannot verify them; a rate row of a hard-deleted profile stays until a manager
   deletes it (never read). A confirming session that is not a non-venue manager would see no staff rate and snapshot the
@@ -10577,15 +10591,19 @@ workspace-table shape (structure level 27) is the reviewed alternative.
     (`insertNewShiftTx`: create, the AI draft proposal, create-and-send, the batch builders; and the Venue Manager request
     `submitRequest`) refuses a resolved rate of £0 — an explicit 0, a 0 venue rate and a 0 / missing default included — with
     409 `PAY_RATE_REQUIRED` ("Set a pay rate for this role first."), inside the same transaction (nothing is inserted).
-    `publish` and `approveShiftRequest` refuse a stored £0 rate (drafts and requests created before the rule).
+    `publish` and `approveShiftRequest` refuse a stored £0 rate (drafts and requests created before the rule), and so do
+    `OfferService.sendOne` (every send path, replacement and standby included) and `applyOfferConfirmation` (the refusal
+    rolls the seat / offer claims back), so a shift priced at £0 before the rule is never offered or confirmed at £0.
   - *A rate applied on the wrong day* (decision 40): the period comparison now uses the shift start's calendar date in
     the organisation's time zone (`core.organisation.timezone`, computed by PostgreSQL), both ends inclusive, instead of
     an implicit cast of the UTC instant. A rate ending on day D applies to a shift starting any time on D (organisation-
     local); 23:30 UTC is the next day in a UTC+1 organisation.
   - Inputs: the start instant is bound as a parameter; the time zone comes from the bound organisation's row
     (`core.current_org()`), never from the client.
-- **Residual:** an invalid stored time zone makes the lookup error (fail closed; validation of the column is #251). Existing
-  £0 seats or confirmed snapshots are not changed (never recalculated).
+- **Residual:** an invalid stored time zone makes the lookup error, and so does a missing organisation row (no tenant
+  context): fail closed, never a guessed zone (column validation is #251). Existing £0 confirmed snapshots are not changed
+  (never recalculated). Follow-up (not in this PR): `shift_pay_rate_pence_check` (`>= 0`) becomes `> 0 NOT VALID` with the
+  workspace structure work.
 - **Tests:** `resolve-pay-rate.spec.ts` (every precedence level, the £0 refusal at each level, the organisation-local date
   query), `resolve-pay-rate.integration.spec.ts` (create service + HTTP 409, create-and-send, publish of a £0 draft,
   inclusive end date, UTC+1 organisation, snapshot never recalculated).
