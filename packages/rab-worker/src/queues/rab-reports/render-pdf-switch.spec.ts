@@ -12,38 +12,53 @@ import {
   NATIVE_KINDS,
   PDF_RENDER_STEP_TIMEOUT_MS,
   PdfRenderTimeoutError,
-  pdfRendererMode,
   renderReportPdf,
   ReportDocument,
+  retiredPdfRendererWarning,
 } from './render-pdf.util';
 
 /**
- * PDF renderer P5 — native only, at the data-in seam `renderReportPdf(doc)` (owner decisions D1, T3, D10).
- * PDF_RENDERER: unset / empty / "native" → native; "chromium" is refused (retired: no browser in the Worker); anything
- * else is refused before the renderer runs. No browser package is ever loaded.
+ * PDF renderer P5 — native only, at the data-in seam `renderReportPdf(doc)` (owner decisions D1, T3, D10). PDF_RENDERER is
+ * retired (Phase X X5.4): there is no renderer to select, a leftover value only logs a warning at Worker boot, and no value
+ * changes what renders. No browser package is ever loaded.
  */
 jest.setTimeout(60_000);
 
 const data = FINAL_TIMESHEET_CASES['one-page']!;
 const doc: ReportDocument = { kind: 'final-timesheet', data };
 
-describe('pdfRendererMode (native only, strict)', () => {
-  it.each([[{}], [{ PDF_RENDERER: '' }], [{ PDF_RENDERER: 'native' }]])('native for %p', (env) => {
-    expect(pdfRendererMode(env)).toBe('native');
-  });
-
-  it('refuses chromium and names the rollback', () => {
-    expect(() => pdfRendererMode({ PDF_RENDERER: 'chromium' })).toThrow(/retired .*redeploying the previous Worker image/);
-  });
-
-  it.each([' ', 'Native', 'NATIVE', ' native', 'native ', 'chrome', 'pdfkit', 'true', '1', 'chromium,native'])('refuses %p', (value) => {
-    expect(() => pdfRendererMode({ PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly "native"/);
-  });
-
+describe('native only; PDF_RENDERER retired', () => {
   it('every report kind is native, and the boot line says so', () => {
     expect([...NATIVE_KINDS].sort()).toEqual(['approved-shift-statement', 'final-timesheet', 'pre-shift']);
-    expect(describePdfRendering({})).toBe('PDF rendering: native for pre-shift, final-timesheet, approved-shift-statement; no browser');
-    expect(() => describePdfRendering({ PDF_RENDERER: 'chromium' })).toThrow(/retired/);
+    expect(describePdfRendering()).toBe('PDF rendering: native for pre-shift, final-timesheet, approved-shift-statement; no browser');
+  });
+
+  it('no warning when PDF_RENDERER is unset or empty', () => {
+    expect(retiredPdfRendererWarning({})).toBeNull();
+    expect(retiredPdfRendererWarning({ PDF_RENDERER: '' })).toBeNull();
+  });
+
+  // An exact, fixed string: the variable's name only, never its value.
+  it.each(['native', 'chromium', ' ', 'secret-looking-value'])('a leftover PDF_RENDERER=%p gets the one fixed warning', (value) => {
+    expect(retiredPdfRendererWarning({ PDF_RENDERER: value })).toBe(
+      'PDF_RENDERER is retired and ignored (every report renders natively): remove it from the environment',
+    );
+  });
+
+  it('a leftover PDF_RENDERER in the process environment changes nothing: the render is native', async () => {
+    const before = process.env.PDF_RENDERER;
+    process.env.PDF_RENDERER = 'chromium';
+    const native = jest.spyOn(nativeModule, 'renderNativePdf');
+    try {
+      const pdf = await renderReportPdf(doc);
+      expect(native).toHaveBeenCalledWith(doc);
+      expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+    } finally {
+      native.mockRestore();
+      if (before === undefined) delete process.env.PDF_RENDERER;
+      else process.env.PDF_RENDERER = before;
+      shutdownRenderPool();
+    }
   });
 });
 
@@ -67,7 +82,7 @@ describe('native renders go through the render pool (I-1)', () => {
   it('renderReportPdf(native) submits the view-model to the pool; the thread applies D7 and the F1 glyph guard', async () => {
     const pooled = jest.spyOn(renderPool, 'renderInPool');
     try {
-      const pdf = await renderReportPdf({ kind: 'final-timesheet', data: { ...data, notes: 'Arabic محمد end' } }, { PDF_RENDERER: 'native' });
+      const pdf = await renderReportPdf({ kind: 'final-timesheet', data: { ...data, notes: 'Arabic محمد end' } });
       expect(pooled).toHaveBeenCalledTimes(1);
       expect(pooled.mock.calls[0]![0]).toMatchObject({ kind: 'final-timesheet', generatedAt: data.generatedAt });
       const raw = pdf.toString('latin1');
@@ -91,7 +106,7 @@ describe('renderReportPdf', () => {
   afterAll(() => shutdownRenderPool());
 
   it('renders a PDF from the data, and no browser package is ever loaded', async () => {
-    const pdf = await renderReportPdf(doc, {});
+    const pdf = await renderReportPdf(doc);
     expect(native).toHaveBeenCalledWith(doc);
     expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
     const loaded = Object.keys(require.cache).filter((k) => /[\\/]node_modules[\\/](playwright|playwright-core|chromium-bidi)[\\/]/.test(k));
@@ -99,24 +114,19 @@ describe('renderReportPdf', () => {
   });
 
   it('an unknown kind is refused before the renderer runs (fail closed)', async () => {
-    await expect(renderReportPdf({ kind: 'no-such-document', data: {} } as unknown as ReportDocument, {})).rejects.toThrow(/no native layout/);
-    expect(native).not.toHaveBeenCalled();
-  });
-
-  it.each(['chromium', ' ', 'Native'])('PDF_RENDERER=%p: rejects before the renderer runs', async (value) => {
-    await expect(renderReportPdf(doc, { PDF_RENDERER: value })).rejects.toThrow(/PDF_RENDERER/);
+    await expect(renderReportPdf({ kind: 'no-such-document', data: {} } as unknown as ReportDocument)).rejects.toThrow(/no native layout/);
     expect(native).not.toHaveBeenCalled();
   });
 
   it('the render pool deadline error (PdfRenderTimeoutError, step "native-render") reaches the job unchanged', async () => {
     // The 30 s deadline itself is enforced by the render pool terminating the thread (runtime/render-pool.spec.ts).
     native.mockRejectedValue(new PdfRenderTimeoutError('native-render', PDF_RENDER_STEP_TIMEOUT_MS));
-    await expect(renderReportPdf(doc, {})).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native-render', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
+    await expect(renderReportPdf(doc)).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native-render', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
   });
 
   it('a renderer failure propagates unchanged (T3: no fallback)', async () => {
     native.mockRejectedValue(new Error('native boom'));
-    await expect(renderReportPdf(doc, {})).rejects.toThrow('native boom');
+    await expect(renderReportPdf(doc)).rejects.toThrow('native boom');
   });
 
   // Visible and auditable: a failure inside the render pool reaches the job as the pool's own error, with its stable
@@ -128,7 +138,7 @@ describe('renderReportPdf', () => {
   ])('%s inside the render pool rejects with its code', async (_label, make, code) => {
     native.mockRestore();
     const pooled = jest.spyOn(renderPool, 'renderInPool').mockRejectedValue(make());
-    const err = await renderReportPdf(doc, {}).then(
+    const err = await renderReportPdf(doc).then(
       () => { throw new Error('expected a rejection'); },
       (e: unknown) => e,
     );
@@ -138,8 +148,8 @@ describe('renderReportPdf', () => {
   });
 
   it('deterministic output (D7) — the same data renders to the same bytes', async () => {
-    const a = await renderReportPdf(doc, {});
-    const b = await renderReportPdf(doc, {});
+    const a = await renderReportPdf(doc);
+    const b = await renderReportPdf(doc);
     expect(a.equals(b)).toBe(true);
     // The creation date is the document's generatedAt (2026-10-20T15:00:00Z), built inside the render thread.
     expect(a.toString('latin1')).toContain('D:20261020150000');

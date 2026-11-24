@@ -92,7 +92,9 @@ public enum APIError: Error, Equatable, Sendable {
     case http(status: Int, ServerErrorPayload)
     /// No connectivity, DNS, TLS or socket failure.
     case offline
-    /// Request exceeded its deadline. Never ends the session.
+    /// The CLIENT gave up waiting (URLError timeout or the hard deadline): no
+    /// answer was seen. Never ends the session. A 408 sent by a server or
+    /// proxy is an answer and maps to `.http(status: 408, ...)` instead.
     case timeout(message: String)
     /// The response could not be decoded into the expected type.
     case decoding(String)
@@ -158,6 +160,7 @@ public enum APIError: Error, Equatable, Sendable {
         switch self {
         case .offline, .timeout: return true
         case .server(let status): return status == 502 || status == 503 || status == 504
+        case .http(let status, _): return status == 408
         default: return false
         }
     }
@@ -169,6 +172,18 @@ public enum APIError: Error, Equatable, Sendable {
     public var isUncertainOutcome: Bool {
         switch self {
         case .offline, .timeout, .server: return true
+        case .http(let status, _): return status == 408
+        default: return false
+        }
+    }
+
+    /// No HTTP answer at all: the connection failed (offline, DNS, TLS,
+    /// connection lost) or the client gave up waiting. The ONLY failures an
+    /// attendance action may be saved offline after (DESIGN M4 §3.1). Any
+    /// HTTP status, a server or proxy 408 included, is an answer and is not.
+    public var isNoResponse: Bool {
+        switch self {
+        case .offline, .timeout: return true
         default: return false
         }
     }
@@ -212,6 +227,8 @@ public enum APIError: Error, Equatable, Sendable {
             return UserFacingText.isUserFacing(message) ? message : APIMessages.tooManyRequests
         case .server:
             return APIMessages.serverError
+        case .http(let status, let payload) where status == 408:
+            return payload.userFacingMessage ?? APIMessages.timeout
         case .validation(_, let payload), .http(_, let payload):
             return payload.userFacingMessage ?? APIMessages.serverError
         case .decoding, .cancelled, .invalidRequest:
@@ -229,7 +246,7 @@ public enum APIError: Error, Equatable, Sendable {
             return .unauthorized(message: payload.message)
         case 403: return .forbidden(payload)
         case 404: return .notFound(payload)
-        case 408: return .timeout(message: payload.message)
+        case 408: return .http(status: 408, payload)
         case 409: return .conflict(payload)
         case 400, 422: return .validation(status: status, payload)
         case 429:

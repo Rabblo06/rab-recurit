@@ -6,7 +6,7 @@ import { renderInPool } from './runtime/render-pool';
 import type { NativeRenderRequest } from './runtime/render-protocol';
 
 /**
- * Native PDF rendering (PDF_RENDERER=native, PDF renderer P1). Only `renderReportPdf` (render-pdf.util.ts) calls this,
+ * Native PDF rendering (PDF renderer P1). Only `renderReportPdf` (render-pdf.util.ts) calls this,
  * and only for the kinds in NATIVE_KINDS.
  *
  * Here, in the jobs process, each document's rab-server view-model builder turns the job's data into display strings;
