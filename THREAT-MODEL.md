@@ -10481,6 +10481,56 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Payroll approval: maker-checker and a fresh step-up, no override (decision 5, branch feat/payroll-approval-maker-checker, 2026-11-21; no SQL)
+
+- **Who can call this:** a workspace manager holding `payroll.approve` (approve / bulk-approve a payroll record; finalise a
+  run). Venue Managers are refused categorically (unchanged).
+- **Threat:** one person prepares pay and approves it (fraud or an unchecked mistake), or a hijacked-but-live session
+  (stolen cookie / token, unattended machine) approves pay.
+- **Controls (layer 2, in the services, so jobs and direct calls are covered too):**
+  - `PayrollService.approve` / `bulkApprove`: refused when the caller finalised the shift report that created the record
+    (`shift_report.finalised_by`, read under the same row lock; the report finalisation is what prepares a record). 403
+    single; per-id `prepared_by_you` in bulk. An unreadable preparer is refused (409 / `not_ready`), never treated as
+    "someone else". The own-hours refusal is unchanged.
+  - `PayrollRunService.finalise`: refused (403) when the caller created the run (`prepared_by`) or added lines to it through
+    `prepare` (the insert-only `payroll_run.prepared` audit row each prepare writes in the same transaction as its lines,
+    `linesAdded > 0`). A run the check cannot read counts as prepared by the caller (fail closed).
+  - All three need a fresh step-up of THIS session (`StepUpReauthService.assertRecentStepUp`, actions
+    `payroll.record.approve` / `payroll.run.finalise`): password within AUTH_STEP_UP_WINDOW_SECONDS (default 5 min) plus the
+    authenticator code when the approver has 2FA. Checked before the transaction opens (the step-up uses its own short
+    transactions; holding two pool connections is the deadlock class fixed in #323) and before the record is looked up,
+    so an unknown id discloses nothing. Refusals are audited (`auth.step_up_failed` with the action). Admin Inspect is refused.
+  - No override exists; an organisation with one payroll person cannot approve until it adds a second (decision 5's stated
+    consequence).
+- **Not changed:** reject, statement retry, prepare, upload, net and mark-paid need no step-up (decision 5 names approval).
+- **Database layer:** none added. The maker-checker facts live in other tables (shift_report, audit_log), and decision 5
+  says "no SQL unless b is chosen". RLS still refuses own-hours approval (`payroll_record_update` WITH CHECK).
+- **Tests:** payroll-approval (decision-5 case: preparer refused single + bulk with a fresh step-up, stale session refused
+  and audited, another organisation 404 after step-up, second manager approves), payroll-runs (preparer refused, stale
+  session refused, second manager finalises), lane-d step-up adoption (three new routes), and every suite that approves
+  pay now uses a second manager of the workspace (server: realtime-c1b, w5-timeline; worker: shift-statement,
+  shift-statement-wake, phase-d cutover, phase-d two-worker).
+
+**Update after the independent review of #335 (HIGH / MEDIUM / LOW fixed; the trade-off above is withdrawn):**
+- **Fresh 2FA, bound to the action, single use:** approve / bulk-approve / finalise now call
+  `StepUpReauthService.assertFreshSecondFactorForAction(ctx, action)`. An approver with no authenticator factor is refused
+  (403 `STEP_UP_MFA_ENROLMENT_REQUIRED`, audited). The session must hold a grant written by `POST /auth/step-up` with
+  `action` set and a verified TOTP code (key `step-up:<session hash>:action:<action>`); a sign-in grant, the ordinary
+  session grant, or a grant for another action never counts; the grant is read with GETDEL, so one proof serves exactly one
+  approval call. The web dialog receives `action` in the 403 and sends it back with the proof. Lane P2's approval actions
+  use the same helper (add them to ACTION_BOUND_STEP_UP_ACTIONS).
+- **Preparers:** whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) is a preparer too.
+- **Database layer (DRAFT, new SQL, PayrollMakerCheckerBackstop1786723020000):** `core.payroll_record_guard()` (the one trigger
+  function of core AND every workspace payroll_record) refuses, at the moment `approved_by` is set, an approver who
+  finalised the report or reviewed the seat (42501; rows approved earlier are never blocked by later updates).
+  `payroll_run_update` on core.payroll_run requires `finalised_by <> prepared_by` for a finalised run (workspace copies with
+  the 0.7.0 chain). Top-up preparers of a run are still checked in the service only, from the insert-only audit row; a
+  real per-line `prepared_by` column needs a workspace structure level and is proposed for the 0.7.0 PR.
+- **Tests:** payroll-approval (11) / (11b): no proof, a sign-in or ordinary grant, a sign-in grant planted under the action
+  key, a proof for another action, an un-enrolled approver: all 403; the real step-up with code then exactly one approval,
+  a second approval on the same proof 403; a reviewer who did not finalise: service 403 and DB 42501.
+  payroll-maker-checker-rls (core, runtime login): finaliser / reviewer approving 42501, run preparer finalising 42501, a
+  third manager allowed.
 ## Payroll adjustments: corrections, bonuses and expenses as separate approved lines (Lane P2, M5, owner decision 3, branch feat/payroll-adjustments, 2026-11-21; NEW SQL: PayrollAdjustmentSchema1786723100000, DRAFT for owner review)
 - **Asset / actors:** money added to a person's pay after their hours were approved. Attackers considered: a payroll
   manager paying themselves or a friend (insider), a manager approving their own entry, a Venue Manager or a staff member
@@ -10519,9 +10569,9 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   `lane-d-step-up-adoption.integration.spec.ts` (the new step-up action), `constraint-regression` (transition table ==
   DB CHECK), `owner-login-guards` (parity trigger count).
 - **Residual / flagged for the owner:** (a) a reduction is capped at the original shift's pay (assumption, see the PR);
-  (b) holiday pay is not added on adjustments (decision 4 PR states the rule); (c) the second approver must also pass
-  P1's MFA-enrolment rule once decision 5 lands (today: a recent step-up, which includes the code when the approver has
-  MFA).
+  (b) holiday pay is not added on adjustments (decision 4 PR states the rule); (c) RESOLVED with #335 merged in: approving
+  an adjustment uses Lane P1's `assertFreshSecondFactorForAction(ctx, 'payroll.adjustment.approve')` (an enrolled
+  authenticator is required; a single-use proof made for this action on this session, burnt on use).
 - **Independent review fixes (24 Nov):** (1) money fields of runs, payslip rows and adjustment lines follow the
   'payroll_record' amount field at EVERY depth (`FieldPolicyService.omitDeep`, applied to run detail, run list, every run
   action's response and the adjustment list / actions); (2) insert-only run facts `core.payroll_run_event` (`opened` at

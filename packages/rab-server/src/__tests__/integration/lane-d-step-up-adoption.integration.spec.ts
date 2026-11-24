@@ -8,7 +8,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { STEP_UP_ACTIONS, StepUpReauthService } from '../../engine/core-modules/auth/services/step-up-reauth.service';
+import { ACTION_BOUND_STEP_UP_ACTIONS, STEP_UP_ACTIONS, StepUpReauthService } from '../../engine/core-modules/auth/services/step-up-reauth.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { EnvironmentVariables } from '../../engine/core-modules/environment/environment-variables';
 import { WORKER_SCHEDULER_STATUS_KEY } from '../../engine/worker-shared/heartbeat.constants';
@@ -152,8 +152,6 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
       { token: ceoToken, actor: ceo, method: 'delete', path: '/rest/v1/ai/settings/instructions', body: { reason: 'stale probe' }, action: 'organisation.ai.instructions.update' },
       // AI Phase 6a (agents, storage only until EX-3): every agent, trigger and agent-role write needs this session's step-up.
       { token: ceoToken, actor: ceo, method: 'post', path: '/rest/v1/ai/agents', body: { name: 'stale-probe', label: 'Stale probe', prompt: 'Stale probe.', model: { tier: 'fast', modelId: null }, reason: 'stale probe' }, action: 'organisation.ai.agent.update' },
-      // M5 payroll adjustments (owner decisions 3 + 5): approving a correction / bonus / expense. Step-up before any read.
-      { token: mgrToken, actor: manager, method: 'post', path: `/rest/v1/payroll/adjustments/${someone}/approve`, action: 'payroll.adjustment.approve' },
     ];
     // The settings routes exist only while AI is on for the platform and the organisation (else the uniform 404 comes
     // before the step-up); the switch row is a fixture write as the bootstrap identity.
@@ -179,7 +177,9 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
     }
     await redis.client.multi().hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: `crewflow:test-ldsu-${randomUUID().slice(0, 8)}:bull`, reconciledAt: Date.now(), schedulers: 0 }).expire(WORKER_SCHEDULER_STATUS_KEY, 120).exec();
     const covered = new Set(routes.map((r) => r.action));
-    for (const action of STEP_UP_ACTIONS) expect(covered.has(action)).toBe(true);
+    // Owner decision 5: the action-bound approval proofs (2FA required, single use) have their own denial suite
+    // (payroll-approval / payroll-runs integration specs), not this password-step-up matrix.
+    for (const action of STEP_UP_ACTIONS) if (!(ACTION_BOUND_STEP_UP_ACTIONS as readonly string[]).includes(action)) expect(covered.has(action)).toBe(true);
 
     const before = {
       user: await owner.query(`SELECT status, email, security_version FROM core."user" WHERE id = ANY($1) ORDER BY id`, [[staff.userId, vm.userId, manager.userId]]),

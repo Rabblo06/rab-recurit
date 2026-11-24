@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
@@ -71,6 +72,9 @@ export interface StaffPayslipEntry {
 
 const iso = (v: unknown): string | null => (v ? new Date(v as string).toISOString() : null);
 const lineOf = (a: AdjustmentLine): RunAdjustmentLine => ({ id: a.id, kind: a.kind, amountPence: a.amountPence, correctsPayrollRecordId: a.correctsPayrollRecordId });
+
+/** Owner decision 5 (maker-checker, no override): whoever prepared a run never finalises it. */
+const RUN_PREPARED_BY_YOU_MESSAGE = 'You prepared this payroll run, so another payroll approver must finalise it.';
 
 /**
  * One CSV cell: quoted when needed, and spreadsheet formula injection neutralised (a staff name such as
@@ -149,6 +153,9 @@ export class PayrollRunService {
   /** Owner decision 3: approved adjustments join the run at prepare and are locked at finalise (same transaction). */
   @Inject(PayrollAdjustmentService)
   private readonly adjustments!: PayrollAdjustmentService;
+  /** Owner decision 5: finalising (locking pay, an approval decision) needs a fresh step-up. Not optional. */
+  @Inject(StepUpReauthService)
+  private readonly stepUp!: StepUpReauthService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -256,13 +263,20 @@ export class PayrollRunService {
     });
   }
 
-  /** Locks the run: its records move approved → processing (state machine) and one payslip row per staff member is created. */
+  /**
+   * Locks the run: its records move approved → processing (state machine) and one payslip row per staff member is created.
+   * Owner decision 5: a fresh step-up first (before the transaction: it opens its own), and the caller must not be anyone who
+   * prepared the run — its creator (`prepared_by`) or anyone whose prepare added lines to it (the insert-only audit row each
+   * prepare writes in the same transaction as its lines). 403, no override.
+   */
   async finalise(ctx: AuthContext, runId: string): Promise<RunView> {
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, 'payroll.run.finalise');
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_APPROVE);
       const t = businessTables(m);
       const run = await this.lockRun(m, ctx, runId);
       if (run.status === 'finalised') throw new ConflictException('This payroll run is already finalised.');
+      if (await this.preparedByCaller(m, ctx, runId)) throw new ForbiddenException(RUN_PREPARED_BY_YOU_MESSAGE);
       const lines: Array<{ payroll_record_id: string; staff_profile_id: string; status: string }> = await m.query(
         `SELECT l.payroll_record_id, l.staff_profile_id, pr.status FROM ${t.payroll_run_line} l JOIN ${t.payroll_record} pr ON pr.id = l.payroll_record_id
           WHERE l.run_id = $1 ORDER BY pr.id FOR UPDATE OF pr`, [runId]);
@@ -504,6 +518,20 @@ export class PayrollRunService {
       [runId, ctx.organisationId, ctx.workspaceId]);
     if (!run) throw new NotFoundException('Payroll run not found.');
     return run;
+  }
+
+  /** Decision 5: did the caller create this run, or add lines to it through prepare? */
+  private async preparedByCaller(m: EntityManager, ctx: AuthContext, runId: string): Promise<boolean> {
+    const t = businessTables(m);
+    const [row] = await m.query(
+      `SELECT (r.prepared_by = $2) OR EXISTS (
+                SELECT 1 FROM core.audit_log al
+                 WHERE al.organisation_id = $3 AND al.action = $4 AND al.entity_type = 'payroll_run' AND al.entity_id::text = r.id::text
+                   AND al.actor_user_id = $2 AND COALESCE((al.metadata->>'linesAdded')::int, 0) > 0) AS prepared
+         FROM ${t.payroll_run} r WHERE r.id = $1`,
+      [runId, ctx.userId, ctx.organisationId, AuditAction.PAYROLL_RUN_PREPARED]);
+    // Fail closed: a run that cannot be read here counts as prepared by the caller.
+    return row?.prepared !== false;
   }
 
   private async lockPayslip(m: EntityManager, runId: string, staffProfileId: string): Promise<{ id: string; version: number; paid_at: Date | null; staff_user_id: string }> {

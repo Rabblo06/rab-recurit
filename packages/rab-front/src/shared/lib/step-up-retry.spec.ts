@@ -93,3 +93,29 @@ it('other 403s (a plain permission refusal) and the step-up call itself never pr
   await expect(api.post('/auth/step-up', { currentPassword: 'x' })).rejects.toMatchObject({ response: { status: 403 } });
   expect(handler).not.toHaveBeenCalled();
 });
+
+it('owner decision 5: an action-bound refusal hands the action to the handler; a malformed action is dropped', async () => {
+  let granted = false;
+  const { adapter } = adapterFrom((config) =>
+    config.url === '/payroll/records/r1/approve' && !granted
+      ? { status: 403, data: { code: 'STEP_UP_REQUIRED', mfa: true, action: 'payroll.record.approve' } }
+      : { status: 200, data: { ok: true } },
+  );
+  api.defaults.adapter = adapter;
+  const seenChallenges: unknown[] = [];
+  unregister = registerStepUpHandler(async (challenge) => {
+    seenChallenges.push(challenge);
+    granted = true;
+    return true;
+  });
+  await api.post('/payroll/records/r1/approve', {});
+  expect(seenChallenges).toEqual([{ mfa: true, action: 'payroll.record.approve' }]);
+
+  granted = false;
+  const { adapter: bad } = adapterFrom((config) =>
+    !granted ? { status: 403, data: { code: 'STEP_UP_REQUIRED', mfa: true, action: '<script>' } } : { status: 200, data: { ok: true } },
+  );
+  api.defaults.adapter = bad;
+  await api.post('/payroll/records/r2/approve', {});
+  expect(seenChallenges[1]).toEqual({ mfa: true });
+});

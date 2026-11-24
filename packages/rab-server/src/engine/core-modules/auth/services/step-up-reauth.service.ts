@@ -25,6 +25,11 @@ export interface StepUpProof {
 export interface OptionalPasswordProof {
   currentPassword?: string;
   code?: string;
+  /**
+   * Owner decision 5: the one action this proof is for (an ACTION_BOUND_STEP_UP_ACTIONS member). When present and the factor
+   * was verified, a single-use grant bound to this session AND this action is recorded beside the ordinary grant.
+   */
+  action?: ActionBoundStepUpAction;
 }
 
 /**
@@ -90,12 +95,27 @@ export const STEP_UP_ACTIONS = [
   'organisation.ai.instructions.update',
   // AI Phase 6a (storage only until EX-3): the CEO creating, editing or deleting an agent, its triggers or its role flags.
   'organisation.ai.agent.update',
+  // Owner decision 5 (2026-11-21): approving pay needs a fresh proof (password + the authenticator code when enrolled) at the
+  // moment of approval, on top of the maker-checker rule. Approve / bulk-approve of payroll records, and finalising a run.
+  'payroll.record.approve',
+  'payroll.run.finalise',
   // M5 payroll adjustments (owner decisions 3 + 5): approving a correction, bonus or expense needs a fresh proof.
   'payroll.adjustment.approve',
 ] as const;
 export type StepUpAction = (typeof STEP_UP_ACTIONS)[number];
 
-type FailureReason = 'password' | 'mfa_code' | 'mfa_code_missing' | 'step_up_required' | 'sso_reauth_required';
+/**
+ * Owner decision 5 (2026-11-21, "a fresh 2FA check at approval, no override"): actions that need a proof made FOR THEM.
+ * `assertFreshSecondFactorForAction` refuses an approver with no authenticator factor, never accepts a sign-in grant or a
+ * grant earned for another action, and burns the grant on use (one proof = one approval call). Lane P2 adds
+ * `payroll.adjustment.approve` and `payroll.holiday_pay.update` here (each must also be in STEP_UP_ACTIONS).
+ */
+export const ACTION_BOUND_STEP_UP_ACTIONS = ['payroll.record.approve', 'payroll.run.finalise', 'payroll.adjustment.approve'] as const satisfies readonly StepUpAction[];
+export type ActionBoundStepUpAction = (typeof ACTION_BOUND_STEP_UP_ACTIONS)[number];
+
+type FailureReason = 'password' | 'mfa_code' | 'mfa_code_missing' | 'step_up_required' | 'sso_reauth_required' | 'mfa_enrolment_required';
+
+const ENROLMENT_MESSAGE = 'Set up two-step sign-in (an authenticator app) in your account settings before you approve pay.';
 
 /**
  * P2.8 — "sudo mode" for destructive actions. The caller's EXISTING session already proves who they are; this proves
@@ -191,12 +211,14 @@ export class StepUpReauthService {
    */
   async stepUp(ctx: StepUpCtx, proof: OptionalPasswordProof): Promise<{ validUntil: string; mfa: boolean }> {
     if (!ctx.sessionId) throw new ForbiddenException(PASSWORD_MESSAGE);
-    if (proof.currentPassword === undefined || proof.currentPassword === '') return this.completeSsoStepUp(ctx, proof.code);
+    if (proof.currentPassword === undefined || proof.currentPassword === '') return this.completeSsoStepUp(ctx, proof.code, proof.action);
+    if (proof.action !== undefined && !(await this.hasMfa(ctx))) await this.refuseUnenrolled(ctx, proof.action);
     const { method } = await this.assertPasswordAndSecondFactor(ctx, { currentPassword: proof.currentPassword, code: proof.code }, { allowRecoveryCode: false });
     const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
     const grant = JSON.stringify({ u: ctx.userId, mfa: method !== null, at: Date.now(), via: 'password' } satisfies StepUpGrant);
     try {
       await this.redis.client.set(this.grantKey(ctx.sessionId), grant, 'PX', windowMs);
+      if (proof.action !== undefined && method === 'totp') await this.writeActionGrant(ctx.sessionId, ctx.userId, proof.action, 'password', windowMs);
     } catch (error) {
       throw this.unavailable(error);
     }
@@ -217,6 +239,55 @@ export class StepUpReauthService {
     await this.recordFailure(ctx, 'step_up_required', action);
     // `mfa` tells the client which proof the dialog must collect (never anything about another account).
     throw new ForbiddenException({ code: 'STEP_UP_REQUIRED', mfa, message: 'Confirm it’s you to continue.' });
+  }
+
+  /**
+   * Owner decision 5: the proof an approval action needs, checked in the SERVICE before any write.
+   *  - the actor must have an enabled authenticator factor (403 STEP_UP_MFA_ENROLMENT_REQUIRED otherwise; no password-only path);
+   *  - THIS session must hold a grant recorded by `POST /auth/step-up` with `action` = this action and a verified TOTP code
+   *    (never a sign-in grant, never the ordinary session grant, never a grant for another action), within the window;
+   *  - the grant is read and deleted in one Redis GETDEL, so it serves exactly one call (a second approval needs a new code).
+   * Refusals are audited with the action and answered 403 STEP_UP_REQUIRED with `action`, so the web dialog asks for a
+   * proof for this action. Redis unavailable ⇒ 503 (fail closed). Admin Inspect is refused.
+   */
+  async assertFreshSecondFactorForAction(ctx: StepUpCtx, action: ActionBoundStepUpAction): Promise<void> {
+    this.refuseInspection(ctx);
+    if (!(await this.hasMfa(ctx))) await this.refuseUnenrolled(ctx, action);
+    let raw: string | null = null;
+    if (ctx.sessionId) {
+      try {
+        raw = await this.redis.client.getdel(this.actionGrantKey(ctx.sessionId, action));
+      } catch (error) {
+        throw this.unavailable(error);
+      }
+    }
+    if (raw && this.validActionGrant(raw, ctx.userId)) return;
+    await this.recordFailure(ctx, 'step_up_required', action);
+    throw new ForbiddenException({ code: 'STEP_UP_REQUIRED', mfa: true, action, message: 'Confirm it’s you with your authenticator code to continue.' });
+  }
+
+  private validActionGrant(raw: string, userId: string): boolean {
+    try {
+      const g = JSON.parse(raw) as { u?: string; mfa?: boolean; at?: number; via?: string };
+      if (g.u !== userId || g.mfa !== true || typeof g.at !== 'number') return false;
+      if (g.via !== 'password' && g.via !== 'sso_reauth') return false; // never a sign-in grant
+      return Date.now() - g.at <= this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
+    } catch {
+      return false;
+    }
+  }
+
+  private async refuseUnenrolled(ctx: StepUpCtx, action: StepUpAction): Promise<never> {
+    await this.recordFailure(ctx, 'mfa_enrolment_required', action);
+    throw new ForbiddenException({ code: 'STEP_UP_MFA_ENROLMENT_REQUIRED', message: ENROLMENT_MESSAGE });
+  }
+
+  private async writeActionGrant(sessionId: string, userId: string, action: ActionBoundStepUpAction, via: 'password' | 'sso_reauth', ttlMs: number): Promise<void> {
+    await this.redis.client.set(this.actionGrantKey(sessionId, action), JSON.stringify({ u: userId, mfa: true, at: Date.now(), via } satisfies StepUpGrant), 'PX', ttlMs);
+  }
+
+  private actionGrantKey(sessionId: string, action: ActionBoundStepUpAction): string {
+    return `${this.grantKey(sessionId)}:action:${action}`;
   }
 
   /**
@@ -355,7 +426,7 @@ export class StepUpReauthService {
   }
 
   /** P6: the second half of an SSO step-up (see `stepUp`). */
-  private async completeSsoStepUp(ctx: StepUpCtx, code: string | undefined): Promise<{ validUntil: string; mfa: boolean }> {
+  private async completeSsoStepUp(ctx: StepUpCtx, code: string | undefined, action?: ActionBoundStepUpAction): Promise<{ validUntil: string; mfa: boolean }> {
     this.refuseInspection(ctx);
     const grant = await this.readGrant(ctx);
     if (!grant || grant.via !== 'sso_reauth') {
@@ -364,8 +435,12 @@ export class StepUpReauthService {
     }
     const windowMs = this.env.get('AUTH_STEP_UP_WINDOW_SECONDS') * 1000;
     const validUntil = new Date(grant.at + windowMs).toISOString();
-    if (!(await this.hasMfa(ctx))) return { validUntil, mfa: false };
-    if (grant.mfa) return { validUntil, mfa: true };
+    if (!(await this.hasMfa(ctx))) {
+      if (action !== undefined) await this.refuseUnenrolled(ctx, action);
+      return { validUntil, mfa: false };
+    }
+    // Decision 5: an action-bound proof always needs a code verified NOW, even when the SSO grant already carries the factor.
+    if (grant.mfa && action === undefined) return { validUntil, mfa: true };
     const method = await this.verifySecondFactor(ctx, code, false);
     const remaining = grant.at + windowMs - Date.now();
     if (remaining <= 0) {
@@ -374,6 +449,7 @@ export class StepUpReauthService {
     }
     try {
       await this.redis.client.set(this.grantKey(ctx.sessionId!), JSON.stringify({ ...grant, mfa: true } satisfies StepUpGrant), 'PX', remaining);
+      if (action !== undefined && method === 'totp') await this.writeActionGrant(ctx.sessionId!, ctx.userId, action, 'sso_reauth', remaining);
     } catch (error) {
       throw this.unavailable(error);
     }

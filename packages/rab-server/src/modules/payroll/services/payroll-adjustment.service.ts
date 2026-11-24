@@ -254,14 +254,15 @@ export class PayrollAdjustmentService {
   }
 
   /**
-   * Approve: a DIFFERENT person than the creator, never the staff member it pays, holding payroll.approve, with a recent
-   * step-up of THIS session. The step-up is checked first, before any read (like every STEP_UP_ACTIONS operation: a stale,
+   * Approve: a DIFFERENT person than the creator, never the staff member it pays, holding payroll.approve, with a fresh
+   * single-use second-factor proof made for THIS action on THIS session (owner decision 5, Lane P1's
+   * assertFreshSecondFactorForAction: an enrolled authenticator is required; one proof = one approval). The step-up is checked first, before any read (like every STEP_UP_ACTIONS operation: a stale,
    * possibly stolen session learns nothing, not even whether the id exists), and outside our transaction (its refusal is
    * audited in a short transaction of its own: never a second pool connection held under ours). Then flag, 404, 403
    * (same person / own pay), 409 (state machine), all under the row lock, then the write.
    */
   async approve(ctx: AuthContext, id: string): Promise<PayrollAdjustmentView> {
-    await this.stepUp.assertRecentStepUp(ctx, PAYROLL_ADJUSTMENT_APPROVE_STEP_UP);
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, PAYROLL_ADJUSTMENT_APPROVE_STEP_UP);
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.PAYROLL_APPROVE);
       const row = await this.load(m, ctx, id, true);
