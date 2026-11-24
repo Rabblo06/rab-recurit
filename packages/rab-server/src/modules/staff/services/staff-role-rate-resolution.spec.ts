@@ -168,7 +168,7 @@ describe('resolveSeatPayRate', () => {
       'utf8',
     );
     expect(scheduling).toMatch(
-      /if \(input\.payRatePence === undefined\) await markShiftRateResolved\(manager, saved\.id\);/,
+      /if \(input\.payRatePence === undefined\) \{[\s\S]*?await markShiftRateResolved\(manager, saved\.id\);/,
     );
   });
 });

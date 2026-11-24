@@ -787,7 +787,14 @@ export class SchedulingService {
     // Owner decisions 41 / 97: only a shift whose rate was RESOLVED here (no typed payRatePence) may later take a staff role
     // rate. The shift row stores only the number, so a resolved rate is marked in core.shift_resolved_rate, in this same
     // transaction, by the guarded definer; a typed rate (and every shift created before the marker existed) has no marker.
-    if (input.payRatePence === undefined) await markShiftRateResolved(manager, saved.id);
+    if (input.payRatePence === undefined) {
+      // The marker is bound to the session's workspace; a venue of another workspace is refused with a clear error rather
+      // than the definer's 42501 (in practice resolveDraftTargetsTx already answers 404 for a venue outside the caller's scope).
+      if (saved.workspaceId !== ctx.workspaceId) {
+        throw new ConflictException({ code: 'SHIFT_WORKSPACE_MISMATCH', message: 'This venue belongs to another workspace. Switch to that workspace to create the shift.' });
+      }
+      await markShiftRateResolved(manager, saved.id);
+    }
     // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
     await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
       entityType: 'shift',

@@ -27,7 +27,12 @@ import { resolveSeatPayRate } from '../../modules/staff/services/staff-role-rate
 import { StaffRoleRateService } from '../../modules/staff/services/staff-role-rate.service';
 import { VenueService } from '../../modules/venue/services/venue.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
+import {
+  businessTable,
+  businessTableOf,
+  hwsRuntimeOn,
+  siblingTable,
+} from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -1023,6 +1028,129 @@ describeIfDb(
       expect(await sqlState(mark(worker, typed.id))).toBe('42501');
       expect(await markerOf(typed.id)).toEqual([]);
     });
+
+    it('marker through the AI executor path: createDraftTx in the caller transaction marks the shift with created_by = ctx.userId = current_uid()', async () => {
+      const role = await newRole(1400);
+      const start = new Date(Date.now() + shiftDay++ * 86_400_000);
+      const shift = await tenantContext.runInWorkspaceContext(ctxA, (m) =>
+        scheduling.createDraftTx(m, ctxA, {
+          venueId,
+          jobRoleId: role,
+          startsAt: start.toISOString(),
+          endsAt: new Date(start.getTime() + 3_600_000).toISOString(),
+          requiredCount: 1,
+        } as never),
+      );
+      expect(await markerOf(shift.id)).toEqual([{ created_by: a.userId }]);
+      const uid = await as(
+        a,
+        async (m) =>
+          (await m.query(`SELECT core.current_uid()::text AS uid`))[0].uid,
+      );
+      expect(uid).toBe(ctxA.userId);
+    });
+
+    it('a venue of another workspace than the bound one is refused cleanly (404 before any insert), never a half-created shift', async () => {
+      const bVenue = (
+        await venues.create(ctxOf(b), {
+          name: `SRR B Venue ${randomUUID().slice(0, 6)}`,
+          type: 'hotel',
+        } as never)
+      ).id;
+      const role = await newRole(1400);
+      const start = new Date(Date.now() + shiftDay++ * 86_400_000);
+      await expect(
+        scheduling.create(ctxA, {
+          venueId: bVenue,
+          jobRoleId: role,
+          startsAt: start.toISOString(),
+          endsAt: new Date(start.getTime() + 3_600_000).toISOString(),
+          requiredCount: 1,
+        } as never),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(
+        await admin.query(
+          `SELECT 1 FROM ${businessTable(b.workspaceId!, 'shift')} WHERE venue_id = $1`,
+          [bVenue],
+        ),
+      ).toEqual([]);
+    });
+
+    /**
+     * L1: the definer reads exactly ONE authoritative copy from core.hws_cutover_state. Each case runs in ONE admin
+     * transaction that is rolled back (nothing persists): the tenant GUCs bound, the cutover state set, a shift planted in
+     * that transaction (session_replication_role = replica skips the foreign keys of the planted row), then the definer.
+     */
+    const inCutoverState = async (
+      state: 'verified' | 'started',
+      plantIn: 'core' | 'workspace',
+    ) => {
+      const qr = admin.createQueryRunner();
+      await qr.connect();
+      await qr.startTransaction();
+      try {
+        await qr.query(
+          `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`,
+          [a.organisationId, a.workspaceId, a.userId],
+        );
+        await qr.query(
+          `INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at) VALUES ($1, $2, $3, CASE WHEN $3 = 'verified' THEN now() END)
+           ON CONFLICT (workspace_id) DO UPDATE SET state = EXCLUDED.state, verified_at = EXCLUDED.verified_at`,
+          [a.workspaceId, a.organisationId, state],
+        );
+        await qr.query(`SET LOCAL session_replication_role = replica`);
+        const table =
+          plantIn === 'core'
+            ? 'core.shift'
+            : businessTable(a.workspaceId!, 'shift');
+        const [{ id }] = await qr.query(
+          `INSERT INTO ${table} (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, status)
+           VALUES ($1, $2, $3, $4, now() + interval '30 days', now() + interval '30 days 2 hours', 1, 1500, $5, 'draft') RETURNING id`,
+          [a.organisationId, a.workspaceId, venueId, randomUUID(), a.userId],
+        );
+        try {
+          await qr.query(`SELECT core.mark_shift_rate_resolved($1)`, [id]);
+          return {
+            code: undefined as string | undefined,
+            marked: (
+              await qr.query(
+                `SELECT 1 FROM core.shift_resolved_rate WHERE shift_id = $1`,
+                [id],
+              )
+            ).length,
+          };
+        } catch (error) {
+          return { code: pgCode(error), marked: 0 };
+        }
+      } finally {
+        await qr.rollbackTransaction();
+        await qr.release();
+      }
+    };
+
+    (hwsRuntimeOn() ? it : it.skip)(
+      'L1 cut over (verified): a shift planted in the CORE copy is refused; only the workspace copy counts',
+      async () => {
+        expect(await inCutoverState('verified', 'core')).toEqual({
+          code: '42501',
+          marked: 0,
+        });
+        expect(await inCutoverState('verified', 'workspace')).toEqual({
+          code: undefined,
+          marked: 1,
+        });
+      },
+    );
+
+    (hwsRuntimeOn() ? it : it.skip)(
+      'L1 mid-upgrade (started): refused (42501) even for a shift in the workspace copy',
+      async () => {
+        expect(await inCutoverState('started', 'workspace')).toEqual({
+          code: '42501',
+          marked: 0,
+        });
+      },
+    );
 
     // ------------------------------------------------------------------------------------------------ decision 40 (org-local date)
 

@@ -87,8 +87,20 @@ describe('core.shift_resolved_rate SQL (decisions 41 / 97)', () => {
       'IF v_org IS NULL OR v_ws IS NULL OR v_uid IS NULL OR p_shift_id IS NULL THEN RAISE EXCEPTION',
     );
     // Both copies (workspace schema with HWS on, core with it off) are checked with the same predicate.
-    expect(fn.match(/s\.created_by = \$4 AND s\.created_at = pg_catalog\.now\(\)/g)).toHaveLength(1);
-    expect(fn).toContain("FOREACH v_schema IN ARRAY ARRAY['workspace_' || pg_catalog.replace(v_ws::text, '-', ''), 'core'] LOOP");
+    expect(
+      fn.match(/s\.created_by = \$4 AND s\.created_at = pg_catalog\.now\(\)/g),
+    ).toHaveLength(1);
+    // The ONE authoritative copy (P2's AUTHORITATIVE_COPIES pattern): mid-upgrade refused, cut over = workspace schema only.
+    expect(fn).toContain(
+      'SELECT s.state INTO cut_state FROM core.hws_cutover_state s WHERE s.workspace_id = v_ws;',
+    );
+    expect(fn).toContain(
+      "IF cut_state = 'started' OR (cut_state IS DISTINCT FROM 'verified' AND EXISTS (SELECT 1 FROM core.hws_cutover_activation)) THEN",
+    );
+    expect(fn).toContain(
+      "copies := CASE WHEN cut_state = 'verified' THEN ARRAY[ws_schema] ELSE ARRAY[ws_schema, 'core'] END;",
+    );
+    expect(fn).toContain('FOREACH v_schema IN ARRAY copies LOOP');
     expect(fn).toContain(
       "pg_catalog.format( 'SELECT EXISTS (SELECT 1 FROM %I.shift s WHERE s.id = $1",
     );

@@ -10548,10 +10548,15 @@ workspace-table shape (structure level 27) is the reviewed alternative.
   organisation; 41 and 97: a staff role rate may apply only to a shift whose rate was RESOLVED (not typed) in its own
   creating transaction. `SchedulingService.insertNewShiftTx` marks such a shift in `core.shift_resolved_rate` (migration
   `ShiftResolvedRate1786722220000`) through the only writer, the crewflow-owned SECURITY DEFINER
-  `core.mark_shift_rate_resolved(uuid)` (pinned search_path, EXECUTE for crewflow_app only). The definer refuses (42501)
-  unless the shift exists in the bound workspace (its workspace-schema copy or `core.shift`) with `created_by` = the
-  caller and `created_at = now()`, i.e. only the transaction that inserted the shift can mark it: a non-existent shift,
-  another manager's shift or an older shift can never be marked. A typed rate (41) and every shift created before the
+  `core.mark_shift_rate_resolved(uuid)` (pinned search_path, EXECUTE for crewflow_app only). The definer reads ONE
+  authoritative copy of the shift, chosen from `core.hws_cutover_state` / `core.hws_cutover_activation` exactly like P2's
+  AUTHORITATIVE_COPIES pattern (#337): a workspace mid-upgrade is refused (42501); a cut-over ('verified') workspace is read
+  only in its own schema (a row planted in its fenced core copy never counts); before the cutover the workspace schema is
+  read when it holds the row, otherwise `core.shift` (residual: the database cannot see HWS_RUNTIME_ENABLED; closed when
+  0.7.0 activates the cutover). That copy must hold the shift with `created_by` = the caller and `created_at = now()`, i.e.
+  only the transaction that inserted the shift can mark it: a non-existent shift, another manager's shift or an older shift
+  can never be marked. A venue of another workspace is refused before any insert (404), and the service refuses a marker
+  for a shift outside the bound workspace with 409 `SHIFT_WORKSPACE_MISMATCH`. A typed rate (41) and every shift created before the
   migration (97, the owner default) carry no marker and keep the shift's own rate; the cut-over is derived from the
   database, never from a client value. The marker table: organisation + workspace, ENABLE + FORCE RLS, SELECT for a
   non-venue manager of the workspace, INSERT bound to the tenant and the caller as author; crewflow_app holds SELECT only,

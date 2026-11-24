@@ -15,11 +15,16 @@
  * core.mark_shift_rate_resolved(uuid) — the ONLY writer (crewflow_app has no INSERT; the owner login is refused INSERT /
  * UPDATE / DELETE / TRUNCATE by the reviewed grant-parity guard, which lets the crewflow-owned definer through):
  *   - SECURITY DEFINER, owner crewflow, pinned search_path, EXECUTE for crewflow_app only (never PUBLIC);
- *   - refuses (42501) unless a tenant (organisation, workspace, user) is bound, and the shift EXISTS in the bound
- *     workspace — in its workspace-schema copy `workspace_<32 hex>.shift` (HWS on) or `core.shift` (HWS off): whichever copy
- *     the caller's transaction writes is the one holding a row created in THIS transaction — with created_by = the caller
- *     and created_at = now() (the transaction start: only the transaction that inserted the shift can mark it, so an
- *     existing shift — another manager's, an old one, or a non-existent id — can never be marked);
+ *   - refuses (42501) unless a tenant (organisation, workspace, user) is bound;
+ *   - reads the ONE authoritative copy of the shift, chosen from core.hws_cutover_state / core.hws_cutover_activation the
+ *     same way as P2's AUTHORITATIVE_COPIES_SQL (#337) and the binder's cutover routing: a workspace mid-upgrade ('started',
+ *     or not 'verified' once the cutover is active) is refused (42501); a cut-over ('verified') workspace is read ONLY in
+ *     its own schema `workspace_<32 hex>.shift` (its core copy is fenced and never consulted); before the cutover the
+ *     database cannot see the runtime switch (HWS_RUNTIME_ENABLED is an environment setting), so the workspace schema is
+ *     read when it holds the row, otherwise `core.shift` (documented residual, closed when 0.7.0 activates the cutover);
+ *   - requires that copy to hold the shift with created_by = the caller and created_at = now() (the transaction start:
+ *     only the transaction that inserted the shift can mark it, so an existing shift — another manager's, an old one, or
+ *     a non-existent id — can never be marked);
  *   - the insert itself is bound again by RLS (tenant + created_by = current_uid()).
  * core.shift_resolved_rate:
  *   - layer 4 (tenant): organisation_id = core.current_org() AND workspace_id = core.current_workspace(), on both policies;
@@ -61,17 +66,28 @@ CREATE TABLE core.shift_resolved_rate (
 /** The body of core.mark_shift_rate_resolved (prosrc: exactly the text between the $fn$ quotes; hashed by the semantic posture). */
 export const MARK_SHIFT_RATE_RESOLVED_BODY = `
 DECLARE
-  v_org    uuid := core.current_org();
-  v_ws     uuid := core.current_workspace();
-  v_uid    uuid := core.current_uid();
-  v_schema text;
-  v_found  boolean := false;
+  v_org     uuid := core.current_org();
+  v_ws      uuid := core.current_workspace();
+  v_uid     uuid := core.current_uid();
+  ws_schema text;
+  cut_state text;
+  copies    text[];
+  v_schema  text;
+  v_found   boolean := false;
 BEGIN
   IF v_org IS NULL OR v_ws IS NULL OR v_uid IS NULL OR p_shift_id IS NULL THEN
     RAISE EXCEPTION 'mark_shift_rate_resolved: no tenant context' USING ERRCODE = '42501';
   END IF;
-  -- The bound workspace's own schema copy (HWS on), then the core copy (HWS off): the copy this transaction wrote holds it.
-  FOREACH v_schema IN ARRAY ARRAY['workspace_' || pg_catalog.replace(v_ws::text, '-', ''), 'core'] LOOP
+  ws_schema := 'workspace_' || pg_catalog.replace(v_ws::text, '-', '');
+  -- The authoritative copy, chosen from the cutover state exactly like P2's AUTHORITATIVE_COPIES_SQL: mid-upgrade refused,
+  -- a cut-over workspace in its own schema ONLY, before the cutover the copy the transaction wrote (the runtime switch is an
+  -- environment setting the database cannot see; THREAT-MODEL residual, closed when 0.7.0 activates the cutover).
+  SELECT s.state INTO cut_state FROM core.hws_cutover_state s WHERE s.workspace_id = v_ws;
+  IF cut_state = 'started' OR (cut_state IS DISTINCT FROM 'verified' AND EXISTS (SELECT 1 FROM core.hws_cutover_activation)) THEN
+    RAISE EXCEPTION 'mark_shift_rate_resolved: this workspace is being upgraded' USING ERRCODE = '42501';
+  END IF;
+  copies := CASE WHEN cut_state = 'verified' THEN ARRAY[ws_schema] ELSE ARRAY[ws_schema, 'core'] END;
+  FOREACH v_schema IN ARRAY copies LOOP
     IF NOT v_found AND pg_catalog.to_regclass(pg_catalog.format('%I.shift', v_schema)) IS NOT NULL THEN
       EXECUTE pg_catalog.format(
         'SELECT EXISTS (SELECT 1 FROM %I.shift s WHERE s.id = $1 AND s.organisation_id = $2 AND s.workspace_id = $3 AND s.created_by = $4 AND s.created_at = pg_catalog.now())',
