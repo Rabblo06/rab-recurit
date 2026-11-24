@@ -9,8 +9,8 @@ import { addDays, zonedMidnight } from '../../ai/tools/ai-date-range';
  * client). No I/O here: the service supplies the existing-shift keys, the target checks and `now`.
  */
 
-/** The most rows one preview or one confirm may plan (bounded work per request; a bigger rota is split by venue). */
-export const DRAFT_BATCH_MAX_ROWS = 500;
+/** The most rows one preview or one confirm may plan (§5.5 caps bulk scheduling at 200 shifts per call; a bigger rota is split by venue). */
+export const DRAFT_BATCH_MAX_ROWS = 200;
 
 /** Statuses of an existing shift that make an identical new one a duplicate (a cancelled/declined shift does not). */
 export const DUPLICATE_BLOCKING_STATUSES: readonly string[] = [

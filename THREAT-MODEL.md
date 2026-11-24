@@ -10506,3 +10506,18 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   nothing written; another manager copies nothing of mine and gets 404 for my venue; another organisation's venue
   404; Venue Manager 403; organisationId/status/pay/createdBy → 400; bad dates → 400; new rows are DRAFT with no
   offer, seat, publication or recurrence, pay re-resolved, audited; second confirm creates nothing).
+
+## Copy previous week — security review fixes (branch feat/scheduling-copy-previous-week, 2026-11-24; no SQL)
+- **Findings fixed (independent review of #281):** (M) the routes and the service checked only SCHEDULE_CREATE; bulk and
+  recurring scheduling is its own capability (§5, `schedule.bulk`). Both routes now need PermissionGuard(SCHEDULE_CREATE)
+  AND PermissionGuard(SCHEDULE_BULK), and `DraftShiftBatchService` re-checks both first (403). (M) No throttle on an
+  EXPENSIVE action: new `ExpensiveActionRateLimitService` (engine/core-modules/rate-limit) debits a per-user (10/min) and
+  a per-organisation (30/min) Redis token bucket atomically, from the service (layer 2), on preview and confirm; 429 when
+  short, 503 when Redis is unavailable (fail closed); skipped only through `isRateLimitBypassEnabled` (never in
+  production). The per-call cap is now 200 shifts (§5.5). (L) Two concurrent confirms could both plan before either
+  committed and create every draft twice; confirm now takes `pg_advisory_xact_lock` per organisation + workspace before
+  planning, and duplicates are detected against every live shift at the candidates' venues in the workspace (not only
+  the caller's read scope), so a delegated member's earlier drafts count too. Only slot keys are read for that check.
+- **Tests:** schedule.bulk revoked → 403 at both routes and in the service, nothing written; two parallel confirms → N
+  drafts, not 2N; the 11th call in a minute → 429; limiter unit spec (both buckets and capacities, hashed keys, 429 retry
+  hint, 503 on a Redis error or bad reply, bypass switch).

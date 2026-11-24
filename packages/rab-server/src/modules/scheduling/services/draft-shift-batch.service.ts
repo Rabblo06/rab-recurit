@@ -24,6 +24,7 @@ import {
   weekCopyWindows,
 } from '../utils/draft-batch-plan';
 import { SchedulingService } from './scheduling.service';
+import { ExpensiveActionRateLimitService } from '../../../engine/core-modules/rate-limit/expensive-action-rate-limit.service';
 
 /** One row of a batch preview / result. Ids, times and counts only: never a pay amount. */
 export interface DraftBatchRow {
@@ -72,6 +73,7 @@ export class DraftShiftBatchService {
     private readonly memberAccess: MemberAccessPolicyService,
     private readonly venueService: VenueService,
     private readonly scheduling: SchedulingService,
+    private readonly expensiveLimit: ExpensiveActionRateLimitService,
   ) {}
 
   /** Named action `previewCopyPreviousWeek`: what `copyPreviousWeek` would create. Writes nothing. */
@@ -85,7 +87,7 @@ export class DraftShiftBatchService {
   /** Named action `copyPreviousWeek`: copies week N−1 into week N as new DRAFT shifts. One transaction. */
   copyPreviousWeek(ctx: AuthContext, dto: CopyPreviousWeekDto): Promise<DraftBatchResult> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      const { plan, timezone, window } = await this.planWeekCopyTx(manager, ctx, dto, dto.sourceShiftIds ? new Set(dto.sourceShiftIds) : undefined);
+      const { plan, timezone, window } = await this.planWeekCopyTx(manager, ctx, dto, dto.sourceShiftIds ? new Set(dto.sourceShiftIds) : undefined, true);
       const created = await this.insertPlanTx(manager, ctx, plan);
       return { ...summarise(plan, timezone, window), created };
     });
@@ -96,8 +98,9 @@ export class DraftShiftBatchService {
     ctx: AuthContext,
     dto: CopyPreviousWeekDto,
     selectedKeys?: ReadonlySet<string>,
+    forWrite = false,
   ): Promise<{ plan: PlannedDraft[]; timezone: string; window: { from: Date; to: Date } }> {
-    await this.assertCreateTx(manager, ctx);
+    await this.admitTx(manager, ctx, forWrite);
     const weekStart = assertIsoDay(dto?.weekStart);
     if (dto.venueId !== undefined) await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
     const timezone = await this.organisationTimezoneTx(manager, ctx);
@@ -119,9 +122,8 @@ export class DraftShiftBatchService {
       notes: shift.notes ?? null,
       address: shift.address ?? null,
     }));
-    const existing = await this.scopedShiftsTx(manager, ctx, target, DUPLICATE_BLOCKING_STATUSES, dto.venueId);
     const plan = planDrafts(candidates, {
-      existingSlots: new Set(existing.map((s) => slotKey(s.venueId, s.jobRoleId, s.startsAt, s.endsAt))),
+      existingSlots: await this.liveSlotsTx(manager, target, candidates),
       targetChecks: await this.checkTargetsTx(manager, ctx, candidates),
       now: new Date(),
       selectedKeys,
@@ -129,11 +131,46 @@ export class DraftShiftBatchService {
     return { plan, timezone, window: target };
   }
 
-  /** Layer 2: SCHEDULE_CREATE, re-checked in the service (403 — a categorical lack, before any row is read). */
-  private async assertCreateTx(manager: EntityManager, ctx: AuthContext): Promise<void> {
-    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE))) {
-      throw new ForbiddenException('Creating shifts is not permitted.');
+  /**
+   * Every batch call, first, in this order:
+   *  1. layer 2: SCHEDULE_CREATE AND SCHEDULE_BULK (bulk & recurring scheduling is its own capability, §5), re-checked in
+   *     the service — 403, a categorical lack, before any row is read;
+   *  2. the EXPENSIVE request class (§5.5: 10/min per user, 30/min per organisation; preview and confirm both count) —
+   *     429, or 503 when the limiter is unavailable (fail closed);
+   *  3. for a write (confirm), a transaction-scoped advisory lock per organisation + workspace, so two confirms of the
+   *     same batch (two tabs, a retry) run one after the other and the second sees the first's drafts as
+   *     `already_exists` instead of creating them twice (READ COMMITTED alone lets both plan before either commits).
+   */
+  private async admitTx(manager: EntityManager, ctx: AuthContext, forWrite: boolean): Promise<void> {
+    for (const flag of [PermissionFlag.SCHEDULE_CREATE, PermissionFlag.SCHEDULE_BULK]) {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, flag))) {
+        throw new ForbiddenException('Bulk scheduling is not permitted.');
+      }
     }
+    await this.expensiveLimit.admit('bulk-scheduling', { userId: ctx.userId, organisationId: ctx.organisationId! });
+    if (forWrite) {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`draft-batch:${ctx.organisationId}:${ctx.workspaceId ?? ''}`]);
+    }
+  }
+
+  /**
+   * The (venue, job role, start, end) of every live shift already in [from, to) at the candidates' venues, in THIS
+   * workspace (RLS). Not limited to the caller's own read scope on purpose: a delegated member's earlier drafts are
+   * created by the member while their read scope is the workspace owner's, and a duplicate must be recognised whoever
+   * created it. Only the slot keys leave this method; no row of another manager is returned to the caller.
+   */
+  private async liveSlotsTx(manager: EntityManager, window: { from: Date; to: Date }, candidates: DraftCandidate[]): Promise<Set<string>> {
+    const venueIds = [...new Set(candidates.map((c) => c.venueId))];
+    if (venueIds.length === 0) return new Set();
+    const rows = await manager
+      .createQueryBuilder(Shift, 'shift')
+      .where('shift.venueId IN (:...venueIds)', { venueIds })
+      .andWhere('shift.startsAt >= :from AND shift.startsAt < :to', { from: window.from, to: window.to })
+      .andWhere('shift.status IN (:...statuses)', { statuses: [...DUPLICATE_BLOCKING_STATUSES] })
+      .andWhere('shift.archivedAt IS NULL')
+      .select(['shift.venueId', 'shift.jobRoleId', 'shift.startsAt', 'shift.endsAt'])
+      .getMany();
+    return new Set(rows.map((s) => slotKey(s.venueId, s.jobRoleId, s.startsAt, s.endsAt)));
   }
 
   private async organisationTimezoneTx(manager: EntityManager, ctx: AuthContext): Promise<string> {

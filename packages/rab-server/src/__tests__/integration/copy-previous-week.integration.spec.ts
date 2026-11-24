@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { PermissionFlag, PermissionFlagType, ShiftStatus } from '@rab/shared';
-import { BadRequestException, ForbiddenException, INestApplication, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, HttpException, INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -159,6 +159,44 @@ describeIfDb('Copy previous week (integration)', () => {
     const result = await batch.copyPreviousWeek(ctxA, { weekStart, sourceShiftIds: [keep.id] });
     expect(result.created.map((c) => c.key)).toEqual([keep.id]);
     expect(result.rows.find((r) => r.key === drop.id)).toMatchObject({ outcome: 'skip', reason: 'not_selected' });
+  });
+
+  it('abuse: SCHEDULE_BULK revoked (SCHEDULE_CREATE kept) → 403 at the route and in the service; nothing written', async () => {
+    const weekStart = nextWeek();
+    await scheduling.create(ctxA, { venueId, jobRoleId, ...sourceWindow(weekStart, 1), requiredCount: 1 } as never);
+    await withRevoked(a, PermissionFlag.SCHEDULE_BULK, async () => {
+      await expect(batch.previewCopyPreviousWeek(ctxA, { weekStart })).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(batch.copyPreviousWeek(ctxA, { weekStart })).rejects.toBeInstanceOf(ForbiddenException);
+      const token = await factory.login(a);
+      expect((await http().post('/rest/v1/shifts/copy-previous-week').set('Authorization', `Bearer ${token}`).send({ weekStart })).status).toBe(403);
+      expect((await http().post('/rest/v1/shifts/copy-previous-week/preview').set('Authorization', `Bearer ${token}`).send({ weekStart })).status).toBe(403);
+    });
+    expect(await shiftCount(ctxA, weekStart, addDays(weekStart, 7))).toBe(0);
+  });
+
+  it('two confirms of the same week at once (two tabs, a retry) create each draft once, not twice', async () => {
+    const weekStart = nextWeek();
+    for (const day of [0, 2, 4]) await scheduling.create(ctxA, { venueId, jobRoleId, ...sourceWindow(weekStart, day), requiredCount: 1 } as never);
+    const [first, second] = await Promise.all([batch.copyPreviousWeek(ctxA, { weekStart }), batch.copyPreviousWeek(ctxA, { weekStart })]);
+    expect(first.created.length + second.created.length).toBe(3);
+    expect(await shiftCount(ctxA, weekStart, addDays(weekStart, 7))).toBe(3);
+  });
+
+  it('EXPENSIVE class: the 11th bulk-scheduling call in a minute is refused with 429 (per user)', async () => {
+    const fresh = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'copywk-rate' });
+    const ctx = ctxOf(fresh.managers[0]!);
+    const previous = process.env.RAB_DISABLE_RATE_LIMIT;
+    process.env.RAB_DISABLE_RATE_LIMIT = 'false';
+    try {
+      const weekStart = nextWeek();
+      for (let i = 0; i < 10; i++) await batch.previewCopyPreviousWeek(ctx, { weekStart });
+      const refused = await batch.previewCopyPreviousWeek(ctx, { weekStart }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(HttpException);
+      expect((refused as HttpException).getStatus()).toBe(429);
+    } finally {
+      if (previous === undefined) delete process.env.RAB_DISABLE_RATE_LIMIT;
+      else process.env.RAB_DISABLE_RATE_LIMIT = previous;
+    }
   });
 
   it('abuse: SCHEDULE_CREATE revoked → the SERVICE refuses preview and confirm with 403 and writes nothing', async () => {
