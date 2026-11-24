@@ -1,7 +1,7 @@
 // sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 import { Client } from 'pg';
 
-import { WORKSPACE_TABLES } from './workspace-tables';
+import { WORKSPACE_TABLES, WORKSPACE_TEMPLATE_TABLES } from './workspace-tables';
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './workspace-schema-modules';
 import { expectedWorkspaceIndexCount, KNOWN_WORKSPACE_INDEX_COUNTS } from './v1/server-path-template-archive-search';
 import { expectedWorkspacePolicyCount, KNOWN_WORKSPACE_POLICY_COUNTS } from './v1/server-path-template-venue-team-admin';
@@ -57,8 +57,8 @@ export const V1_EXPECTED = {
   policies: 39,
 } as const;
 
-/** The 21 business tables (defined in the dependency-free ./workspace-tables leaf; re-exported here for existing callers). */
-export { WORKSPACE_TABLES };
+/** The 23 business tables and the 21 frozen template tables (the dependency-free ./workspace-tables leaf; re-exported for existing callers). */
+export { WORKSPACE_TABLES, WORKSPACE_TEMPLATE_TABLES };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -232,7 +232,8 @@ async function applyTemplate(client: Client, schemaName: string): Promise<void> 
  * allow NULL workspace_id (legacy shared-core nullability). RLS rejects NULL today, but the schema binding must not depend on RLS alone.
  */
 async function bindWorkspace(client: Client, schemaName: string, workspaceId: string): Promise<void> {
-  for (const table of WORKSPACE_TABLES) {
+  // The frozen template's 21 tables: a table a later structure level adds (level 27+) is bound by that level's own SQL.
+  for (const table of WORKSPACE_TEMPLATE_TABLES) {
     await client.query(
       `ALTER TABLE ${schemaName}.${table} ADD CONSTRAINT ${table}_workspace_bound CHECK (workspace_id IS NOT NULL AND workspace_id = '${workspaceId}'::uuid)`,
     );
@@ -271,7 +272,7 @@ async function verifyStructure(client: Client, schemaName: string, workspaceId: 
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
                     WHERE ns.nspname = $1 AND k.contype = 'f'`) !== V1_EXPECTED.foreignKeys) fail('foreign key count');
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
-                    WHERE ns.nspname = $1 AND k.contype = 'c' AND k.conname LIKE '%\\_workspace\\_bound'`) !== WORKSPACE_TABLES.length) fail('workspace CHECK count');
+                    WHERE ns.nspname = $1 AND k.contype = 'c' AND k.conname LIKE '%\\_workspace\\_bound'`) !== WORKSPACE_TEMPLATE_TABLES.length) fail('workspace CHECK count');
   const bound = await client.query<{ def: string }>(
     `SELECT pg_get_constraintdef(k.oid) AS def FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
       WHERE ns.nspname = $1 AND k.contype = 'c' AND k.conname LIKE '%\\_workspace\\_bound'`,

@@ -36,13 +36,17 @@ describeIfB1('LV-3 the previous-version check (pure decideUpgradeStart)', () => 
     newerVersions: [],
     attribution: null,
     unrestrictedTarget: false,
+    // The 0.6.0 (adoption release) rules, with the previous-versions list 0.6.0 shipped with: release 0.7.0 appended 0.6.0
+    // to CREWFLOW_PREVIOUS_VERSIONS and upgrades strictly from it (upgrade-version-check.spec.ts covers 0.7.0).
+    previousVersions: [ADOPTION.R254, ADOPTION.R256],
   });
   const decide = (over: Partial<UpgradeStartFactsLike>) => B1!.decide({ ...base, ...over });
   const r254 = { kind: 'release' as const, release: 'R254', beyond: [], remaining: 3 };
   const r256 = { kind: 'release' as const, release: 'R256', beyond: [], remaining: 1 };
 
-  it('the code under test is the first ledger release (the adoption rules below are 0.6.0 rules)', () => {
-    expect(B1!.currentVersion).toBe(V);
+  it('the code under test is the first ledger release or later (the adoption rules below are 0.6.0 rules, pinned above)', () => {
+    const n = (v: string) => v.split('.').map(Number).reduce((a, x) => a * 10_000 + x, 0);
+    expect(n(B1!.currentVersion)).toBeGreaterThanOrEqual(n(V));
   });
 
   it('a previous version complete (0.4.0 or 0.5.0) -> continue from it', () => {

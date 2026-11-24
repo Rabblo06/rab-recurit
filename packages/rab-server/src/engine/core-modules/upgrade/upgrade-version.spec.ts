@@ -8,17 +8,28 @@ describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
     for (const bad of ['0.06.0', '1.2', 'v1.2.3', '1.2.3-rc1', '']) expect(() => compareVersions(bad, '0.1.0')).toThrow(AppVersionError);
   });
 
-  it('records R254 = 0.4.0 and R256 = 0.5.0 as the previous versions', () => {
-    expect(CREWFLOW_PREVIOUS_VERSIONS).toEqual(['0.4.0', '0.5.0']);
+  it('records R254 = 0.4.0, R256 = 0.5.0 and the adoption release 0.6.0 as the previous versions (0.7.0: C3 switched on)', () => {
+    expect(CREWFLOW_PREVIOUS_VERSIONS).toEqual(['0.4.0', '0.5.0', '0.6.0']);
+    expect(readAppVersion({})).toBe('0.7.0');
+    // From 0.7.0 on, strict: only a database that completed 0.6.0.
+    expect(upgradeFromVersions(readAppVersion({}))).toEqual(['0.6.0']);
     expect(ADOPTION_VERSION_BY_RELEASE).toEqual({ R254: '0.4.0', R256: '0.5.0' });
   });
 
   it('0.6.0 (adoption) upgrades from 0.4.0 or 0.5.0; a later minor release only from the versions on its reviewed list', () => {
     expect(upgradeFromVersions('0.6.0')).toEqual(['0.4.0', '0.5.0']);
-    expect(CREWFLOW_UPGRADE_FROM_VERSIONS).toEqual({ '0.6.0': ['0.4.0', '0.5.0'] });
+    expect(CREWFLOW_UPGRADE_FROM_VERSIONS).toEqual({ '0.6.0': ['0.4.0', '0.5.0'], '0.7.0': ['0.6.0'] });
     expect(upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'], { '0.7.0': ['0.6.0'] })).toEqual(['0.6.0']);
     // No reviewed list for the release: refused (config, 64), never a guessed default.
-    expect(() => upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'])).toThrow(/CREWFLOW_UPGRADE_FROM_VERSIONS\['0\.7\.0'\] is missing/);
+    expect(() => upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'], { '0.6.0': ['0.4.0', '0.5.0'] })).toThrow(/CREWFLOW_UPGRADE_FROM_VERSIONS\['0\.7\.0'\] is missing/);
+  });
+
+  it('release 0.7.0: the shipped list accepts an upgrade from 0.6.0 (every published 0.6.x) and nothing older', () => {
+    expect(CREWFLOW_UPGRADE_FROM_VERSIONS['0.7.0']).toEqual(['0.6.0']);
+    // The shipped defaults (CREWFLOW_PREVIOUS_VERSIONS + CREWFLOW_UPGRADE_FROM_VERSIONS): no AppVersionError (exit 64).
+    expect(upgradeFromVersions('0.7.0')).toEqual(['0.6.0']);
+    expect(upgradeFromVersions('0.7.0')).not.toContain('0.5.0');
+    expect(upgradeFromVersions('0.7.0')).not.toContain('0.4.0');
   });
 
   it('a patch release (0.6.1) upgrades from the earlier published versions of its own minor line only; its .0 must be published', () => {

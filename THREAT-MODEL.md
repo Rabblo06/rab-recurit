@@ -10457,6 +10457,303 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## engine/ stops importing modules/ — identity entities, venue resource scope, entity cache (branches refactor/engine-owns-identity-entities, refactor/engine-modules-scope-and-cache, refactor/engine-modules-venue-summary, 2026-11-21; no migration)
+- **Finding:** CLAUDE.md's "engine/ never imports from modules/" had 24 production violations (ratchet baseline
+  `engine-to-modules`), 20 of them auth, permissions, audit, email, platform-admin and user-deletion services importing
+  identity entities from `modules/identity`. A dependency in that direction lets a domain-module change silently alter
+  platform security code (and a domain module could add an entity relation the auth path then loads).
+- **Control:** the 18 identity/access entities move to `engine/core-modules/identity/entities` (pure file move, re-exported
+  from `modules/identity/entities`); `ManagerVenue` moves to `engine/core-modules/resource-scope/entities`; the by-owner
+  workspace and venue display-cache reads move to `modules/manager-workspace` and `modules/venue` (same cache kinds, keys and
+  projections, through `CoreEntityCacheService.getOrFetch`). The baseline loses the rule entirely, so any new engine ->
+  modules import fails ci-security (`tools/check-import-boundaries.cjs`; owner-dated approvals are the only exception).
+- **Changed read (authorisation input):** `ResourceScopeService.resolveTx`'s venue-manager scope no longer joins the
+  `ManagerProfile` entity; it filters `mv.manager_profile_id IN (SELECT mp.id FROM core.manager_profile mp WHERE mp.user_id
+  = $1)`. Same rows (mp.id is the primary key, so each manager_venue row joined at most one profile), same RLS on both
+  tables, `manager_venue` still schema-qualified by the bound manager, user id still a bound parameter. A venue manager with
+  no assignment still gets `{ kind: 'venue', venueIds: [] }` (sees nothing), never an owner scope.
+- **Tests:** `resource-scope.service.spec.ts` (exact SQL under core routing and a bound workspace schema, parameter binding,
+  empty-assignment fail-closed, non-venue-manager never queries manager_venue); `manager-workspace-display-cache.spec.ts`
+  and `venue-summary-cache.spec.ts` (same cache kind/key, no extra enabled/TTL argument, same projection, null never
+  cached, hit skips the database); `core-entity-cache.integration.spec.ts` follows the moved reads; the live venue scope
+  stays covered by `venue-manager-scoping.integration.spec.ts` (assign -> visible, unassign -> gone, another manager's venue
+  invisible).
+- **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
+  `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## Release 0.7.0 — the C3 cutover registered; HWS switched on in the deploy change (DRAFT release PR #175; needs the owner's deploy approval)
+
+The copy path itself is threat-modelled in the C3 entry added by **PR #178**. That entry covers:
+- the cross-tenant copy;
+- the RLS bypass window (A′);
+- serving a partial copy and the one-way sentinel;
+- the backup marker rules;
+- the core write fence and the HWS-off refusal;
+- rows left behind;
+- forged state;
+- duplicate pay statements;
+- disclosure;
+- the 5-minute budget per start;
+- #150's tests.
+
+This entry covers only what release 0.7.0 adds to switch it on.
+
+- **Activation.**
+  - The release registers the step: `'0-7'` in the upgrade registry, so `0.7.0_HwsCutover_1786721540100` runs.
+  - The version goes to 0.7.0, with `CREWFLOW_PREVIOUS_VERSIONS` + 0.6.0 and the reviewed upgrade-from list `CREWFLOW_UPGRADE_FROM_VERSIONS['0.7.0'] = ['0.6.0']` (every published 0.6.x; #240's rule: a missing entry refuses every start, 64). The upgrade is strict from 0.6.0: an R254/R256 database is refused with 65 and must take 0.6.0 first.
+  - `HWS_RUNTIME_ENABLED` stays `"false"` in both production compose files in this release PR (security review M1). It flips to `"true"` only in the deploy change that also bumps the production digest to the published 0.7.0 image. An image older than 0.7.0 never runs with HWS on, because it never ran the cutover and would serve un-copied workspace schemas.
+  - `staging/verify-image-compose.cjs` enforces this in the deployed model. It refuses `HWS_RUNTIME_ENABLED=true` unless the resolved rab-api / rab-worker image's baked `CREWFLOW_APP_VERSION` (from `docker image inspect`) is at least 0.7.0. An unknown version is refused (fail closed).
+- **The backup mount (proposed H6 exception; needs independent security review).** rab-api gets exactly one host mount: `${CREWFLOW_HWS_CUTOVER_BACKUP_DIR:-/dev/null}:/run/crewflow/hws-cutover-backup:ro`.
+  - It is read-only and rab-api only. The H6 test (`deployment-worker.test.cjs`) pins the exact string in both production files, and `verify-image-compose` refuses a writable mount.
+  - In the deployed model (`verify-image-compose`, security review L2), its source must be exactly `/dev/null`, or an existing directory that:
+    - is not the project directory, `CREWFLOW_SECRETS_DIR` or an env file's directory, nor an ancestor of one;
+    - is not under `/etc`, `/root`, `/home`, `/proc` or `/sys`.
+  - When the variable is unset it falls back to an empty file. No marker can be read there, so the copy is refused: fail closed.
+  - Exposure: read-only access to the pre-cutover dump of the same database rab-api already reaches. The operator encrypts the dump at rest and removes it after acceptance (MIGRATION-AND-ROLLBACK-PLAN.md §4.7, §5.1).
+  - `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` is committed on rab-api, and nothing can redirect it:
+    - an env file cannot set it (`compose-owner-login.cjs` `COMMITTED_KEYS`);
+    - a compose override cannot change it (`verify-image-compose` `PINNED_ENV`);
+    - the committed `environment:` value wins over `env_file` anyway.
+  - **Residual: erased data persists in the dump.** While the dump stays mounted, it keeps data that is erased after it was taken (GDPR erasure, user deletion). Unset `CREWFLOW_HWS_CUTOVER_BACKUP_DIR` and move the dump to the encrypted backup store as soon as the release is accepted. That store's retention (§5.1) then governs it.
+- **Timing.**
+  - The cutover runs in the migrate child before the API listens.
+  - The Worker starts only after the API is healthy, so no Worker writes during the copy.
+  - The migrations must be applied first. The 0.7.0 API refuses (503) every workspace against an unmigrated database: fail closed.
+- **Rollback after the cutover** (§4.7):
+  - the 0.7.0 image refuses to boot with HWS off;
+  - a previous image, where it starts at all, sees the core copies of cut-over workspaces as read-only (the fence);
+  - undoing the release means restoring the pre-cutover dump, and every write after the cutover is lost.
+- **Never silently skipped: the HWS-off / zero-workspace fix, a Part B runner change.**
+  - **Problem.** With HWS off and nothing pending, the step used to be recorded completed. It then never ran when HWS was switched on, so the sentinel was never written and fail-closed routing never turned on.
+  - **Runner change.** An upgrade command may now return `{ deferred }`. The runner then:
+    - records no logbook row and logs a WARNING;
+    - reports the step in `UpgradeRunReport.deferred`;
+    - **stops the release** (security review L1): no later instance command and no workspace pass of the version run;
+    - so no later step can be recorded and the version stays incomplete; the next start runs the step again;
+    - lets the next release's strict check refuse (65), without --force, unconditionally until the step has completed;
+    - and `PUBLISHED_VERSION_STEPS` pins each published version's steps (append-only), with a spec that fails if a registered step disappears, e.g. `UPGRADE_COMMANDS['0-7']` while 0.7.0 is the code or a previous version.
+  - **Where the cutover uses it.** The cutover defers only when HWS is off and nothing is pending. HWS off with something pending still refuses.
+  - **Host environment.** Upgrade commands now read host facts (HWS flag, marker path) from the start's own environment (`createUpgradeCommandHost({ env })`), not from `process.env` in an in-process run.
+- **Tests.**
+  - `hws-c3-cutover.integration.spec.ts` "release 0.7.0 no-op fix":
+    - (a) HWS off with zero workspaces is deferred: no row, no sentinel;
+    - (b) HWS off with every workspace verified is deferred;
+    - (c) the next HWS-on start completes and writes the sentinel;
+    - (d) a later HWS-off start leaves the completed step alone.
+  - `verify-image-compose.test.cjs` refuses HWS switched off in one file, and a writable backup mount.
+  - `deployment-worker.test.cjs` (H6) allows only the exact read-only mount on rab-api, and none on rab-worker.
+  - The B2 ledger, runner and release-floor suites start from a 0.6.0-complete database with a backup marker that passes the real checks. No seam skips the cutover.
+
+## Staff same-shift Teams read: role membership instead of equality on the comma-joined role (branch fix/shift-team-multi-role, 2026-11-17; needs owner approval)
+- **Bug (failed closed):** `ShiftTeamService.list` refused anyone whose `ctx.role !== 'staff'`. `AuthContext.role` is
+  `security.roles.join(',')` (`jwt-auth.guard.ts`), so a staff user who also holds another role (for example
+  `manager,staff`) got 403 on `GET /rest/v1/attendance/me/shift/:shiftId/team` even with a confirmed assignment.
+- **Change (widens access, owner approval needed):** the service now tests role MEMBERSHIP on the request's
+  server-resolved `ctx.security.roles` (the list `applicationAllowed` and the MFA checks read), still together with the
+  `staff_app` target and `attendance.clock`. A caller with no security snapshot (one that never passed `JwtAuthGuard`)
+  has no roles and is refused (fail closed). Everything else is unchanged: self is resolved first, the caller's own
+  confirmed assignment is locked, the transaction-local capability GUCs, the minimal fields (first name, interval, You)
+  and 404 for an unrelated, unconfirmed or foreign shift.
+- **Not changed (flagged):** layer 4 still compares by equality. The additive RLS policy `staff_profile_shift_team_select`
+  (workspace-schema module `v1.002-shift-team-policy`, migration `1786718100000`) requires
+  `current_setting('rab.role') = 'staff'`, and `rab.role` is the same comma-joined value. So a multi-role staff user now
+  passes the service gate but the database still hides every teammate's profile: the roster lists only "You". Fixing that
+  is a new workspace-schema policy version (`'staff' = ANY(string_to_array(current_setting('rab.role', true), ','))`) plus
+  its migration and posture goldens, which needs owner review of the SQL. Until then the gap fails closed (fewer names,
+  never more).
+- **Tests:** `shift-team.integration.spec.ts`: a single-role staff caller gets the roster at the service layer; a caller
+  with `manager` or `manager,venue_manager` and no `staff` is refused at the service layer on the staff app; a caller with
+  no snapshot is refused; a manager signed in to the staff app gets 403; a `manager` + `staff` user gets 200 with their
+  own row (was 403); an `it.failing` case pins the RLS gap above (full team expected) so it turns red once the policy is
+  fixed.
+
+## Staff same-shift Teams read, layer 4: the RLS policy tests staff role membership (branch db/shift-team-multi-role-level-24, 2026-11-18; release 0.7.0, structure level 24; DRAFT: new SQL, owner review first; depends on #175 and #177)
+- **Finding closed (security finding format, §5.8).** Severity: Low (availability of a roster, fail closed). Actor: a staff
+  user who also holds another role (for example `manager,staff`) and is confirmed on a live shift. Action: opens the
+  shift's team list on the staff app. Consequence before: the service gate (#205) let them in, but the policy
+  `staff_profile_shift_team_select` compared `current_setting('rab.role', true) = 'staff'`; `rab.role` is the roles joined
+  with commas, so the database hid every teammate and the roster showed only "You". Root cause: `v1/shift-team-policy.ts`
+  (frozen, ShiftTeamReadScope1786718100000) tests equality on a list value.
+- **Change (widens layer 4 to exactly the intended case).** `ALTER POLICY staff_profile_shift_team_select ... USING (...)`
+  with ONLY the role test replaced by `'staff' = ANY (pg_catalog.string_to_array(current_setting('rab.role', true), ','))`:
+  per workspace by the 0.7.0 workspace command `ShiftTeamSelectMultiRole` (structure level 24), on `core.staff_profile`
+  (the HWS-off copy) and in `core.provision_workspace` (new workspaces) by migration StaffShiftTeamMultiRole1786721600000.
+  Every other line of the predicate (tenant binding, the transaction-local capability GUCs `rab.team_shift_id` /
+  `rab.team_staff_id`, both assignments confirmed, the shift not cancelled or completed) and FOR SELECT / PERMISSIVE /
+  TO PUBLIC / no WITH CHECK are unchanged; no grant, no new policy, no data change.
+- **Why it cannot over-match.** `= ANY` compares whole elements, so `custom_staff`, `staffing`, ` staff` or `STAFF` never
+  match; role keys cannot contain a comma (system keys are fixed, custom keys are `custom_` + a `[a-z0-9_]` slug), so no
+  key can split into a fake `staff` element; an unset `rab.role` gives `string_to_array(NULL) = NULL` (no row) and an
+  empty one `'{}'` (no row). `rab.role` is bound only by TenantContextService from the server-resolved session, never
+  from a request.
+  **Stated premise (DB review of #243):** "no role key contains a comma" is enforced today ONLY in application code:
+  custom keys are `custom_` + `slugify(name, '_', 'role')` (`modules/identity/services/role.service.ts:193`,
+  `engine/utils/slug.util.ts`, which maps every run outside `[a-z0-9]` to `_`), and system keys are fixed. No database
+  CHECK forbids a comma in `core.role.key`; a key written by another path (SQL by hand, a future service) containing
+  `,staff` would make this predicate match. The coordinator is proposing that CHECK to the owner as a separate migration. The policy still admits a profile only when the caller's own confirmed assignment on that live shift is
+  the bound capability, so the widening is "multi-role staff see what single-role staff already see", nothing more.
+- **Fail closed in the migration and the runner.** The core ALTER replaces only a known expression (the 1786718100000 one
+  or its own, by semantic-golden USING hash) and re-checks PERMISSIVE / FOR SELECT / TO PUBLIC / no WITH CHECK before and
+  after; before any change, core.provision_workspace must be the expected predecessor body (#177's level-23 literal for
+  up(), this level-24 literal for down()); the workspace step is checked against the declared level-24 v2 fingerprint (a
+  workspace that does not reach it is blocked, 503); down() is refused while any workspace's shift-team policy is NOT the
+  level-23 equality form (canonicalised USING hash, so a different deparse on a future major also refuses: fail closed).
+- **Tests.** `ws-shift-team-multi-role.integration.spec.ts`: level-23 → 24 fingerprint measured and declared per major;
+  runner upgrade idempotent; both provisioners build the same level-24 structure; DB-level abuse cases as the runtime login
+  (single-role and multi-role staff see the confirmed team; `manager`, `custom_staff`, `staffing`, ` staff`, `STAFF`, `''`,
+  `manager;staff` and an unset role see nothing; a multi-role caller not confirmed on the shift, naming another shift, or
+  bound to another workspace / organisation sees nothing; zero rows with no tenant context); the core copy has the new
+  predicate; up() refuses a non-level-23 provision body; a cancelled or completed shift shows nobody; down() refused while a
+  level-24 workspace exists, and with none left (rolled back) down() restores the core equality predicate and #177's exact
+  level-23 body, refuses a second run, and up() then refuses an unknown core expression and restores level 24. `shift-team.integration.spec.ts`: the former
+  `it.failing` full-team case for a `manager` + `staff` user is now a normal `it`. `structure-level-24.spec.ts`: the
+  statement is the frozen predicate with only the role test changed, the level-24 template is level 23 + that statement,
+  and the goldens pin the new policy hash.
+
+## Attendance, layer 5: a staff-own-or-manager RLS predicate (branch fix/attendance-staff-scope-rls, 2026-11-21; release 0.7.0, structure level 25; DRAFT: new SQL, owner review first; stacked on #243, which depends on #175 and #177)
+- **Finding closed (security finding format, §5.8; M4 design §11 LOW).** Severity: Low. Actor: a staff user (`attendance.clock`)
+  reached through a code path that forgets `ownStaffProfile` / `attendanceReadScopeCondition`. Action: reads or writes another
+  staff member's attendance in the same workspace. Consequence before: the database allowed it: `attendance_tenant`
+  (template `workspace-schema-v1.sql:500`, and the core copy) bound only organisation + workspace, so the service layer was
+  the only staff-to-staff isolation (the fifth enforcement layer was missing). Root cause: attendance never got the second,
+  tighter predicate that `payroll_record_select` has.
+- **Change (narrows only).** `ALTER POLICY attendance_tenant ... USING (P) WITH CHECK (P)` where P = the unchanged tenant
+  binding AND one of: the worker marker (`rab.actor_type = 'worker'`, bound only by TenantContextService for Worker
+  contexts); the caller's own staff profile (`staff_profile.user_id = core.current_uid()`); a non-venue manager profile of
+  this workspace (Manager, CEO: `payroll_record_select`'s payrollManager); a Venue Manager linked (manager_venue) to the
+  shift's venue. Per workspace by the 0.7.0 workspace command `AttendanceStaffScope` (structure level 25), on
+  `core.attendance` (HWS off) and in `core.provision_workspace` (new workspaces) by migration
+  AttendanceStaffScopeRls1786722100000. FOR ALL / PERMISSIVE / TO PUBLIC unchanged; no grant, no new policy, no data change.
+  Every clause is a subset of the tenant-only policy it replaces, so no caller gains a row.
+- **Who loses rows (intended).** Staff see only their own attendance; a Venue Manager only attendance of shifts at their own
+  venues (as `attendanceReadScopeCondition` already scoped them); a manager profile bound to another workspace, a custom
+  workspace member (never granted `attendance.view`), and any session with no `rab.user_id` and no worker marker see none.
+  An unset user makes `core.current_uid()` NULL, so no staff / manager clause can match (fail closed).
+- **Residual risk.** The worker marker and `rab.user_id` are transaction-local GUCs set by TenantContextService; a
+  compromised runtime connection (injection) can set them (same trust level as `staff_profile_worker_scan`, BC-01). The
+  Venue Manager clause trusts `manager_venue` rows, which only workspace managers write. Internal Managers are scoped at
+  the database to the whole workspace (as payroll); the narrower "Staff they created" rule stays in the service.
+- **Fail closed in the migration and the runner.** The core ALTER replaces only a known pair of expressions (tenant-only,
+  or its own, by semantic-golden hash on USING and WITH CHECK) and re-checks PERMISSIVE / FOR ALL / TO PUBLIC before and
+  after; core.provision_workspace must be the expected predecessor body (#243's level-24 literal for up(), this level-25
+  literal for down()); each workspace step is checked against the declared level-25 v2 fingerprint (a workspace that does
+  not reach it is blocked, 503); down() is refused while any workspace's attendance policy is not the tenant-only form.
+- **Tests.** `ws-attendance-staff-scope.integration.spec.ts`, as the runtime login, on a workspace schema AND on core:
+  Staff A sees only their own row, gets 0 rows for Staff B's id, updates 0 rows of Staff B's attendance and is refused
+  (42501, WITH CHECK) inserting attendance for Staff B; a workspace Manager sees every row; a manager of another workspace
+  sees none; Venue Manager X sees only venue X's rows and Venue Manager Y only venue Y's; the worker marker sees every row,
+  and no user without the marker sees none; an unrelated user, an unknown user id, another organisation and another
+  workspace see none; zero rows with no tenant context. Plus: level-24 → 25 fingerprint measured and declared per major,
+  runner upgrade idempotent, both provisioners build the same level-25 structure, the core policy hash, up() refusing a
+  non-level-24 body, down() refused while a level-25 workspace exists, and (rolled back) down() / up() round trip with an
+  unknown core expression refused. `structure-level-25.spec.ts`: statement shape, template = level 24 + the statement,
+  goldens pin the predicate.
+## Attendance, layer 5: a staff-own-or-manager RLS predicate on core.attendance (branch fix/attendance-staff-scope-core, 2026-11-21; DRAFT: new SQL, owner review first)
+- **Finding closed (security finding format, §5.8; M4 design §11 LOW).** Severity: Low. Actor: a staff user
+  (`attendance.clock`) reached through a code path that forgets `ownStaffProfile` / `attendanceReadScopeCondition`.
+  Action: reads or writes another staff member's attendance in the same workspace. Consequence before: the database allowed
+  it, because `attendance_tenant` bound only organisation + workspace (the fifth enforcement layer was missing). Root cause:
+  attendance never got the second, tighter predicate that `payroll_record_select` has.
+- **Change (narrows only).** Migration AttendanceStaffScopeRls1786722100000: `ALTER POLICY attendance_tenant ON
+  core.attendance USING (P) WITH CHECK (P)`, P = the unchanged tenant binding AND one of: the worker marker
+  (`rab.actor_type = 'worker'`, bound only by TenantContextService for Worker contexts); the caller's own staff profile;
+  a non-venue manager profile of this workspace (Manager, CEO: `payroll_record_select`'s payrollManager); a Venue Manager
+  linked (manager_venue) to the shift's venue. FOR ALL / PERMISSIVE / TO PUBLIC unchanged; no grant, no new policy, no data
+  change. Every clause is a subset of the tenant-only policy, so no caller gains a row. The predicate lives in one place
+  (`upgrade-commands/0-7/attendance-staff-scope.ts`) so the workspace-schema copies get the identical text.
+- **Scope today.** `core.attendance` is the copy every request uses while HWS is off (production). The workspace-schema
+  copies (HWS on, dev/test) get the same predicate from a 0.7.0 workspace command once the 0.7.0 release chain (#175 / #177 /
+  #243) is on main (it needs a structure level); until then, staff isolation on workspace-schema attendance stays the
+  service layer alone, exactly as before.
+- **Who loses rows (intended).** Staff see only their own attendance; a Venue Manager only attendance of shifts at their own
+  venues (as `attendanceReadScopeCondition` already scoped them); a manager profile bound to another workspace, a custom
+  workspace member (never granted `attendance.view`) and any session with no `rab.user_id` and no worker marker see none.
+- **Residual risk.** The worker marker and `rab.user_id` are transaction-local GUCs set by TenantContextService; a
+  compromised runtime connection (injection) can set them (same trust level as `staff_profile_worker_scan`, BC-01). Internal
+  Managers are scoped at the database to the whole workspace (as payroll); the narrower "Staff they created" rule stays in
+  the service.
+- **Fail closed in the migration.** Only a known pair of expressions is replaced (tenant-only, or its own on a re-run, by
+  semantic-golden hash on USING and WITH CHECK); PERMISSIVE / FOR ALL / TO PUBLIC are re-checked before and after; then the
+  secure-owner invariants.
+- **Tests.** `attendance-staff-scope-rls.integration.spec.ts`, as the runtime login (asserted: crewflow_owner, not
+  superuser / BYPASSRLS): Staff A sees only their own row, gets 0 rows for Staff B's id, updates 0 rows of Staff B's
+  attendance and is refused (42501, WITH CHECK) inserting attendance for Staff B; a workspace Manager sees every row; a
+  manager of another workspace sees none; Venue Manager X sees only venue X's rows and Venue Manager Y only venue Y's; the
+  worker marker sees every row and no user without it sees none; an unrelated user, an unknown user id, another organisation
+  and another workspace see none; zero rows with no tenant context; the deparsed policy equals the reviewed text; down() /
+  up() round trip with an unknown expression refused (rolled back). `attendance-staff-scope-sql.spec.ts`: statement shape,
+  hashes, goldens, harness lines.
+- **Security review fixes (2026-11-21).** (1) `attendance_correction_tenant` on core now also requires the parent attendance to
+  be visible (`EXISTS (SELECT 1 FROM core.attendance a WHERE a.id = attendance_correction.attendance_id)`, USING and WITH
+  CHECK), so a correction has exactly its attendance's readers; before, staff could read each other's corrections. (2) The
+  attendance predicate's OR branches are ordered worker, manager (both uncorrelated), staff own, Venue Manager. (3)
+  UserDeletionService.findProtectedHistory is unchanged in behaviour: its hard-delete path runs only for a never-activated
+  invite (never signed in), which cannot be clock_in_by / clock_out_by, and its own history is caught through the
+  tenant-wide shift_assignment rows; a comment records why. (4) Positive
+  tests as the runtime login: own clock-in INSERT, own clock-out UPDATE, Manager and venue Venue Manager on-behalf updates (the
+  other venue's Venue Manager updates 0 rows), and a finalise-path payroll_record INSERT whose mirrorsApprovedAttendance check
+  reads attendance under the new RLS. Merge order: after #241 (the worker marker is bound only through the tenant-context
+  binder).
+- **Rebased onto #305 and the refreshed #175 (2026-11-22).** The core copies are now changed only by #305
+  (AttendanceStaffScopeRls1786722100000: attendance AND attendance_correction). This branch's level-25 migration is renamed
+  WorkspaceAttendanceStaffScope1786722120000: it changes no core policy (it refuses unless both core policies already carry
+  #305's predicates) and only re-creates core.provision_workspace over level 25. The 0.7.0 workspace command
+  `AttendanceStaffScope` (timestamp 1786722120000) applies the same two ALTER POLICY statements (attendance_tenant and
+  attendance_correction_tenant) to every workspace schema. down() is refused while a level-25 workspace exists and restores
+  the level-24 body only. Level-25 fingerprints are placeholders until CI measures them.
+## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
+- **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
+  Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager
+  context). Action: `UPDATE` or `DELETE` (or `TRUNCATE`) on `attendance_correction`. Consequence before: allowed. The
+  runtime login crewflow_owner inherits the table owner (owner-login BC-01 / BC-13), so the original `REVOKE UPDATE, DELETE`
+  never bound it; the schema role crewflow_app still held both (copied-grant drift); the tenant policy is FOR ALL; TRUNCATE is
+  never filtered by RLS. A correction row is the audit record of a pay change ("original values are never overwritten in
+  place"), so rewriting or removing it hides who changed someone's hours. Root cause: insert-only was only a grant.
+- **Change.** Migration AttendanceCorrectionInsertOnly1786722110000: three statement-level BEFORE UPDATE / DELETE / TRUNCATE
+  triggers on `core.attendance_correction` calling the existing, unchanged `core.owner_login_grant_parity_guard()` (the PAY-1
+  guard). The runtime login gets 42501 per statement, even when RLS leaves no row; INSERT and SELECT are unchanged. Definers,
+  the workspace migrator and foreign-key actions (they run as the table owner) and superusers pass.
+- **Retention unchanged (flagged for the owner).** Because FK actions pass, deleting the parent attendance (or the
+  organisation) still CASCADEs its corrections exactly as before. No code path deletes attendance today, and a
+  `payroll_record` already RESTRICTs deleting approved attendance. Making `attendance_correction.attendance_id` RESTRICT (as
+  the owner chose for breaks and receipts) would also block that path; it is a retention decision, so it is proposed, not done.
+- **Not in this PR.** `REVOKE UPDATE, DELETE ... FROM crewflow_app`: tools/check-rls-coverage.ts requires workspace grants to
+  equal core's, so that cosmetic schema-role grant moves with the workspace-schema copies (0.7.0 workspace command, after
+  #175 / #177 / #243). The workspace copies (HWS on) get the same three triggers then; until then they keep today's state.
+- **Residual risk.** An injected statement can `SET ROLE crewflow` or disable the trigger (BC-01); the semantic posture
+  monitor pins the three trigger lines (detection, not prevention).
+- **Tests.** `attendance-correction-insert-only.integration.spec.ts`, as the runtime login (asserted crewflow_owner, a
+  member of crewflow, not superuser / BYPASSRLS): a Manager who can read the correction gets 42501 for UPDATE and DELETE of
+  it, for an UPDATE / DELETE matching no row, and for TRUNCATE (with and without tenant context); the stored row is
+  unchanged; INSERT still works; `SET ROLE crewflow` (definer / FK-action path) can still delete (rolled back); zero rows
+  with no tenant context; down() / up() round trip (rolled back) and a re-run of up() is a no-op.
+  `attendance-correction-insert-only-sql.spec.ts`: statement shape, end-state check, goldens.
+- **Security review fix (2026-11-21, Medium; owner decision 46).** The reviewer showed corrections still vanished through
+  `attendance_correction.attendance_id ON DELETE CASCADE` when the runtime deleted the parent attendance (core.attendance has
+  a FOR ALL policy and no delete guard; the FK action runs as the owner and passes the guard). New migration
+  AttendanceCorrectionEvidenceRestrict1786722115000 makes that key ON DELETE RESTRICT (the pay-evidence principle the owner
+  approved for breaks and receipts). Such a delete now fails (23503, or 23001 on PostgreSQL 18) and the correction stays;
+  a hard user delete that would reach it already falls back to a soft delete on a foreign-key refusal. The organisation
+  CASCADE (tenant offboarding, LC-2) is unchanged. Tests: the runtime's delete of an attendance with a correction is refused
+  and both rows remain; a real FK cascade started by the runtime login passes the guard (probe table, rolled back) while
+  its direct DELETE gets 42501. The workspace copies get the same key change with the level-26 command (#310).
+
+## attendance_correction insert-only + RESTRICT in workspace schemas (branch fix/attendance-correction-insert-only-ws, 2026-11-24; release 0.7.0, structure level 26; DRAFT: new SQL, owner review first; stacked on #300 and #306)
+- **What.** The workspace-schema half of S11 and owner decision 46. Workspace command `AttendanceCorrectionInsertOnly`
+  (timestamp 1786722130000) per workspace: `REVOKE UPDATE, DELETE ... FROM crewflow_app`; the same three statement-level
+  BEFORE UPDATE / DELETE / TRUNCATE guard triggers as core (#306); `attendance_correction_attendance_id_fkey` CASCADE ->
+  RESTRICT (guarded, `mayDrop` declared). Migration WorkspaceAttendanceCorrectionInsertOnly1786722130000 checks (read-only)
+  that core already has #306's triggers and RESTRICT key, revokes the same two privileges on core (check-rls-coverage requires
+  workspace grants = core grants, so both move in one release) and re-creates core.provision_workspace over level 26.
+- **Effect.** In every workspace schema the runtime login gets 42501 for UPDATE / DELETE / TRUNCATE of a correction (even a
+  statement RLS leaves with no row); INSERT works; deleting an attendance that has a correction fails (23503 / 23001) and both
+  rows stay. Definers and the workspace migrator still pass the guard.
+- **Fail closed.** The workspace step is checked against the declared level-26 v2 fingerprint (placeholders until CI measures
+  them); core.provision_workspace must be the level-25 body before up() (the level-26 body before down()); down() is refused
+  while any workspace carries the level-26 triggers.
+- **Tests.** `ws-attendance-correction-insert-only.integration.spec.ts` (fingerprint measurement, runner, both provisioners,
+  runtime refusals, RESTRICT, crewflow_app privileges on core and workspace, zero rows without context, migration guards and a
+  rolled-back down/up); `structure-level-26.spec.ts`.
 ## CF-23 — notes on the user profile page no longer persist to browser storage (branch fix/cf23-staff-notes-no-browser-storage, 2026-11-21; no SQL, no server change)
 - **Finding (CF-23, LOW):** `packages/rab-front/src/features/users/UserProfile.tsx` (`/users/:id`) kept notes about a
   person in `localStorage` under `user-notes-<userId>`. Browser storage outlives logout and is shared by every account
@@ -10506,3 +10803,65 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## Attendance breaks, sync receipts and device keys: the database objects (branch feat/m4-breaks-receipts-db, 2026-11-24; core migration AttendanceBreaksReceipts1786722140000 + structure level 27 WorkspaceAttendanceBreaksReceipts1786722150000; DRAFT: new SQL, owner review first; "[after 0.7.0 cutover]", owner decision 44; stacked on #310)
+- **What:** M4 design §13 PR 2 (Appendix A with the owner's A.7 changes). Schema only: no route, service or job writes these
+  tables yet (PRs 3-6), and offline clock-in stays off until M5 adjustments and the /me/sync pen test (D12, HARD RULE).
+  `core` and every workspace schema get `attendance_break` and `attendance_sync_receipt`, plus attendance (+5 columns),
+  shift_assignment (+1) and venue (+1, default off); `core` alone gets `attendance_device_key`. WORKSPACE_TABLES 21 -> 23;
+  the C3 cutover copy list stays at the 21 template tables (decision 44).
+- **Threats and controls (runtime login crewflow_owner inherits the table owner, so grants never bind it; A.7):**
+  - Staff A reads or writes Staff B's breaks / receipts in the same workspace -> FORCE RLS, staff-own branch on every policy
+    (layer 5); SELECT also admits the workspace Manager, the shift's Venue Manager and the worker marker (read only).
+  - A break added to a closed / reviewed / approved attendance (payroll tampering) -> INSERT policy requires the staff
+    member's OWN attendance in `clocked_in` / `on_break`; UPDATE requires it open or `missing_clock_out`.
+  - A break moved or re-sized after the fact -> row-level allow-list guard (only `ended_at`, `end_source`, `updated_at`
+    may change: 42501 otherwise); a CLOSED break never changes again (`core.attendance_break_write_guard()`, 42501;
+    corrections go through attendance_correction); DELETE / TRUNCATE refused per statement (42501).
+  - A staff member back-dating or future-dating a break online -> the write guard: a `staff` start or end more than 120 s
+    from `now()` is 23514 with constraint `attendance_break_staff_window` (a CHECK cannot read now()).
+  - The same staff member dodging the window by naming another source (review of #353, item 2) -> each source names its
+    writer: `staff` / `offline_sync` only the break's own staff member, `offline_sync` only while the venue's offline flag is
+    on, `manager` only a workspace Manager or the shift's Venue Manager, `clock_out` only at the attendance's own
+    `clock_out_at` (23514, `attendance_break_clock_out_end`; the service writes clock_out_at, closes the break, then moves
+    the status). 42501 otherwise. A `clock_out` end not written by a manager is also held to the ±120 s window (re-review:
+    staff could otherwise move their own clock_out_at inside the transaction). A break starts only on an open attendance,
+    before its clock_out_at, with the attendance row read FOR SHARE (no interleaved clock-out). Pre-existing, logged by the
+    lead as a separate follow-up: staff can write their own attendance clock times at the database layer (tenant-wide
+    policy, no column guard).
+  - Offline attendance switched on before M5 (D12) -> `CHECK venue_offline_attendance_disabled (NOT
+    offline_attendance_enabled)` on every venue copy; only the owner-approved M5 migration may drop it (review item 5).
+  - Receipts (idempotency + offline evidence) edited or deleted -> no UPDATE / DELETE policy and statement-level guards
+    (42501 even on zero rows); INSERT only by the staff member's own session (`user_id = current_uid()` AND own profile),
+    and every reference (attendance, break, shift via an assignment) must belong to that staff member (review item 6).
+    Receipts are never pay input: pay reads attendance and breaks only; a receipt is evidence and an idempotency record.
+  - Pay evidence lost through a cascade -> every evidence key ON DELETE RESTRICT (attendance, staff profile, shift, break).
+  - A device key swapped to sign forged offline punches -> own-row policy; row allow-list guard (only last_used_at /
+    revoked_at / revoked_reason change); a revoked key never changes again (no un-revoke, review item 4); DELETE and
+    TRUNCATE refused for the runtime (the D15 purge goes through a crewflow definer, PR 10).
+  - A rollback that drops evidence (review item 1) -> AttendanceBreaksReceipts.down() counts with `row_security = off`:
+    an RLS-bound migrator gets an error and down() refuses; it never reads 0 under FORCE RLS and drops the tables.
+  - No tenant context -> zero rows on every new table (tested on each copy).
+- **SECURITY TRADE-OFFS / assumptions (flagged for veto):**
+  - The SELECT policies admit the worker marker (`rab.actor_type = 'worker'`, as attendance since #305) so post-shift and
+    payroll jobs can read breaks; it can never write them. Not in Appendix A.
+  - `request_sha256` is `text` (64 lower-case hex, CHECK) instead of `bytea` (the metadata catalogue has no bytea type).
+  - Organisation hard delete: core.organisation -> attendance CASCADE meets attendance <- break / receipt RESTRICT, so
+    deleting an organisation that has breaks or receipts is refused (same as corrections since #306). Tenant offboarding
+    (LC-2) must delete or anonymise evidence explicitly. Workspace schemas have no organisation key (level 22).
+  - Workspace copies have no key to core."user" for `attendance_sync_receipt.user_id` (level 22 rule); the frozen orphan
+    check does not list it yet.
+  - The metadata catalogue lists the two tables as ordinary locked standard objects without custom fields (decision 45;
+    `NO_CUSTOM_FIELD_TABLES`, decision 91 pending). Their inverse relation fields are not flagged sensitive (that rule keys
+    on system objects in engine/metadata, unchanged).
+- **UserDeletionService:** breaks and receipts count as history that blocks the never-activated-invite hard delete (soft
+  delete instead; A11 anonymise, retain); a READY workspace still below level 27 is treated as unverifiable (soft delete),
+  never a 500.
+- **Tests:** `attendance-breaks-receipts.integration.spec.ts` (core) and `ws-attendance-breaks-receipts.integration.spec.ts`
+  (level 27: fingerprint `[l27-fp]`, runner + both provisioners, verify counts, bound CHECKs, no core key, migration
+  guards) share `helpers/attendance-break-abuse.ts`: staff isolation both ways, the open-attendance insert rule, one open
+  break / no overlap, the allow-list, ±2 min, insert-only receipts, CHECKs, RESTRICT, exact crewflow_app grants, zero rows
+  without context, the runtime login is crewflow_owner. `structure-level-27.spec.ts` (static).
+- **Core copies after the cutover:** `core.attendance_break` / `core.attendance_sync_receipt` carry the C3 fence
+  (`core.hws_cutover_core_fence()`, as the 21 template copies): a cut-over workspace's core rows are read-only.
+- **Residual:** fingerprints for PostgreSQL 16/17/18 and the posture / semantic goldens are measured by CI on this DRAFT.

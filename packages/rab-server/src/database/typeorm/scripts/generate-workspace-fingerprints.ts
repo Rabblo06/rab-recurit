@@ -41,7 +41,7 @@ import {
   selectWorkspaceFingerprintMajor,
 } from '../workspace-schema/v1/expected-fingerprints';
 import { appendToTableSource, buildPlaceholders, missingVersions, planAppend } from '../workspace-schema/v1/fingerprint-append';
-import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../workspace-schema/provision-workspace-schema';
+import { provisionWorkspaceSchema, WORKSPACE_TEMPLATE_TABLES } from '../workspace-schema/provision-workspace-schema';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, modulesThrough } from '../workspace-schema/workspace-schema-modules';
 import { runMigrateOnStart } from './migrate/owner-login/migrate-on-start';
@@ -165,8 +165,8 @@ async function legacyV14(c: Client, ws: Ws): Promise<void> {
     await c.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ws.org]);
     for (const m of modulesThrough(14)) await c.query(m.sql(ws.schema));
     if (!/^workspace_[0-9a-f]{32}$/.test(ws.schema) || ws.schema !== `workspace_${ws.id.replace(/-/g, '')}`) throw new Error('unexpected workspace schema name');
-    for (const t of WORKSPACE_TABLES) {
-      // sql-injection-reviewed: ws.schema is validated just above (workspace_<32 hex> of this uuid); t is the frozen WORKSPACE_TABLES constant
+    for (const t of WORKSPACE_TEMPLATE_TABLES) {
+      // sql-injection-reviewed: ws.schema is validated just above (workspace_<32 hex> of this uuid); t is the frozen WORKSPACE_TEMPLATE_TABLES constant
       await c.query(`ALTER TABLE ${ws.schema}.${t} ADD CONSTRAINT ${t}_workspace_bound CHECK (workspace_id IS NOT NULL AND workspace_id = '${ws.id}'::uuid)`);
     }
     await c.query('SELECT core.mark_workspace_schema_ready($1, 1)', [ws.id]);
@@ -316,13 +316,24 @@ async function verify(major: number): Promise<void> {
     const level = codeWorkspaceStructureLevel();
     const want = level > L ? declaredFingerprint(level, major as 16 | 17 | 18) : t[L];
     const atLevel = async (id: string) => (level > L ? fingerprintV2(c, id) : fingerprint(c, id));
-    if (level > L) results.push(`v${L} -> structure level ${level} ${want && (await upgradeToCodeLevel(c, legacy)) === want ? 'OK' : 'MISMATCH'}`);
+    // On a mismatch the MEASURED value is printed (a fingerprint is a catalog hash, not a secret): a new structure level's
+    // declared value is reviewed from this line, like FINGERPRINTS_APPEND_JSON for a module.
+    const verdict = (got: string | null) => (want && got === want ? 'OK' : `MISMATCH (measured ${got ?? 'none'}, declared ${want ?? 'none'})`);
+    if (level > L) {
+      results.push(`v${L} -> structure level ${level} ${verdict(await upgradeToCodeLevel(c, legacy))}`);
+      log(`  ${results[results.length - 1]}`);
+    }
 
     const ts = await seedWorkspace(c, `fpv-ts-${RUN}`);
     await c.query('SET ROLE crewflow');
-    const tsRes = await provisionWorkspaceSchema(c, ts.id);
+    // A refused provision (e.g. the declared value of a new level is not yet known) is a result line, never an early exit,
+    // so the upgrade-path measurement above is still printed.
+    const tsOutcome = await provisionWorkspaceSchema(c, ts.id).then(
+      (r) => r.outcome as string,
+      (e: Error) => `REFUSED (${e.message.replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 120)})`,
+    );
     await c.query('RESET ROLE');
-    results.push(`typescript ${tsRes.outcome} ${want && (await atLevel(ts.id)) === want ? 'OK' : 'MISMATCH'}`);
+    results.push(`typescript ${tsOutcome} ${verdict(await atLevel(ts.id))}`);
 
     // The server path as the RUNTIME login, which is the owner login (owner-login architecture); no other role is unlocked.
     const srv = await seedWorkspace(c, `fpv-srv-${RUN}`);
@@ -333,8 +344,17 @@ async function verify(major: number): Promise<void> {
       await owner.query('COMMIT');
       return rows[0].o as string;
     });
-    results.push(`server path ${outcome} ${want && (await atLevel(srv.id)) === want ? 'OK' : 'MISMATCH'}`);
+    results.push(`server path ${outcome} ${verdict(await atLevel(srv.id))}`);
     for (const r of results) log(`  ${r}`);
+    // When the upgraded and the provisioned workspace disagree, print the v2 lines that differ (catalog descriptions with the
+    // schema name and workspace id normalised; no data): what a reviewer needs to see which object the paths build differently.
+    if (level > L) {
+      const v2lines = async (id: string) => new Set((await c.query('SELECT l FROM core.workspace_schema_fingerprint_v2_lines($1) AS f(l)', [id])).rows.map((r) => String(r.l)));
+      const [up, pr] = [await v2lines(legacy.id), await v2lines(srv.id)];
+      const onlyUp = [...up].filter((l) => !pr.has(l));
+      const onlyPr = [...pr].filter((l) => !up.has(l));
+      if (onlyUp.length || onlyPr.length) log(`  v2 line diff, upgraded vs server path: only-upgraded=${JSON.stringify(onlyUp)} only-provisioned=${JSON.stringify(onlyPr)}`);
+    }
     if (results.some((r) => !/ OK$/.test(r) || /FAILED|REFUSED/.test(r))) throw new Error('verification FAILED');
     log(`PostgreSQL ${major}: every provisioning path produces the committed fingerprints (v14, v${L}${level > L ? ` and structure level ${level} (v2)` : ''})`);
   });

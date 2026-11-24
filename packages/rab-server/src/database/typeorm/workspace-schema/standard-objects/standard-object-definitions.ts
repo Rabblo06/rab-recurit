@@ -1,5 +1,5 @@
 /**
- * Metadata engine M1 / E2: Crewflow's 21 workspace tables as Twenty-style STANDARD objects, plus the four read-only core
+ * Metadata engine M1 / E2: Crewflow's 23 workspace tables (21 template + 2 of structure level 27) as Twenty-style STANDARD objects, plus the four read-only core
  * reference objects their relations point at (OWNER-METADATA-ENGINE.md §0.3 and §1 E2; mapping, locks and surprises S1–S13 in
  * docs/plans/phase-x4/M0-STANDARD-OBJECTS.md; owner decisions D1–D6 approved as recommended on 2026-11-13).
  *
@@ -58,7 +58,7 @@ export const CORE_REFERENCE_OBJECTS: readonly StandardObjectDefinition[] = [
   },
 ];
 
-/** The 21 workspace tables, in WORKSPACE_TABLES order; fields in column order. */
+/** The 23 workspace tables, in WORKSPACE_TABLES order; fields in column order. */
 export const CREWFLOW_STANDARD_OBJECTS: readonly StandardObjectDefinition[] = [
   {
     table: 'staff_profile',
@@ -166,6 +166,9 @@ export const CREWFLOW_STANDARD_OBJECTS: readonly StandardObjectDefinition[] = [
       { column: 'archived_at', pgType: 'timestamp with time zone', nullable: true, name: 'archivedAt', label: 'Archived at', type: 'DATE_TIME', isSystem: true, isUIReadOnly: true },
       { column: 'archived_by', pgType: 'uuid', nullable: true, name: 'archivedBy', label: 'Archived by', type: 'UUID', isSystem: true, isUIReadOnly: true },
       { column: 'search_vector', pgType: 'tsvector', nullable: true, name: 'searchVector', label: 'Search vector', type: 'TS_VECTOR', isSystem: true, isUIReadOnly: true },
+      // Structure level 27 (design A.2, D1 default off; owner decision 91). Read-only: only the attendance settings service may
+      // enable it, and never before M5 adjustments and the /me/sync pen test (D12, HARD RULE).
+      { column: 'offline_attendance_enabled', pgType: 'boolean', nullable: false, name: 'offlineAttendanceEnabled', label: 'Offline attendance enabled', type: 'BOOLEAN', isUIReadOnly: true },
     ],
   },
   {
@@ -353,6 +356,8 @@ export const CREWFLOW_STANDARD_OBJECTS: readonly StandardObjectDefinition[] = [
       { column: 'check_in_distance_m', pgType: 'integer', nullable: true, name: 'checkInDistanceM', label: 'Check-in distance', type: 'NUMBER', isUIReadOnly: true, settings: { dataType: 'int', unit: 'metres' } },
       { column: 'check_in_accuracy_m', pgType: 'integer', nullable: true, name: 'checkInAccuracyM', label: 'Check-in accuracy', type: 'NUMBER', isUIReadOnly: true, settings: { dataType: 'int', unit: 'metres' } },
       { column: 'check_in_captured_at', pgType: 'timestamp with time zone', nullable: true, name: 'checkInCapturedAt', label: 'Check-in device time', type: 'DATE_TIME', isUIReadOnly: true },
+      // Structure level 27 (design A.2; owner decision 91).
+      { column: 'check_in_offline', pgType: 'boolean', nullable: false, name: 'checkInOffline', label: 'Checked in offline', type: 'BOOLEAN', isUIReadOnly: true },
     ],
   },
   {
@@ -460,6 +465,12 @@ export const CREWFLOW_STANDARD_OBJECTS: readonly StandardObjectDefinition[] = [
       { column: 'clock_out_by', pgType: 'uuid', nullable: true, name: 'clockOutBy', label: 'Clocked out by', type: 'RELATION', isUIReadOnly: true, relation: { target: 'workspaceMember', enforcedBy: 'service:CoreReferenceService' } },
       { column: 'clock_out_reason', pgType: 'text', nullable: true, name: 'clockOutReason', label: 'Clock-out reason', type: 'TEXT', isUIReadOnly: true },
       { column: 'clock_in_captured_at', pgType: 'timestamp with time zone', nullable: true, name: 'clockInCapturedAt', label: 'Clock-in device time', type: 'DATE_TIME', isUIReadOnly: true },
+      // Structure level 27 (M4 offline attendance, design A.2; owner decision 91: minimal M1 catalogue change).
+      { column: 'offline_recorded', pgType: 'boolean', nullable: false, name: 'offlineRecorded', label: 'Recorded offline', type: 'BOOLEAN', isUIReadOnly: true },
+      { column: 'clock_in_time_source', pgType: 'text', nullable: true, name: 'clockInTimeSource', label: 'Clock-in time source', type: 'SELECT', isUIReadOnly: true, options: ['server', 'offline_anchored', 'offline_untrusted', 'manager'] },
+      { column: 'clock_out_time_source', pgType: 'text', nullable: true, name: 'clockOutTimeSource', label: 'Clock-out time source', type: 'SELECT', isUIReadOnly: true, options: ['server', 'offline_anchored', 'offline_untrusted', 'manager'] },
+      { column: 'clock_in_claimed_at', pgType: 'timestamp with time zone', nullable: true, name: 'clockInClaimedAt', label: 'Clock-in claimed time', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'clock_out_claimed_at', pgType: 'timestamp with time zone', nullable: true, name: 'clockOutClaimedAt', label: 'Clock-out claimed time', type: 'DATE_TIME', isUIReadOnly: true },
     ],
   },
   {
@@ -681,9 +692,78 @@ export const CREWFLOW_STANDARD_OBJECTS: readonly StandardObjectDefinition[] = [
       { column: 'uploaded_at', pgType: 'timestamp with time zone', nullable: false, name: 'uploadedAt', label: 'Uploaded at', type: 'DATE_TIME', isUIReadOnly: true },
     ],
   },
+  {
+    // Structure level 27 (M4 design A.3 + A.7; owner decisions 45 and 91): an ordinary locked standard object, read-only in every
+    // field, no custom fields (pay evidence; the database triggers make it tamper-proof).
+    table: 'attendance_break',
+    kind: 'standard',
+    nameSingular: 'attendanceBreak',
+    namePlural: 'attendanceBreaks',
+    labelSingular: 'Attendance break',
+    labelPlural: 'Attendance breaks',
+    description: 'Breaks with a real start and end. Written only by the attendance services.',
+    icon: 'IconCoffee',
+    allowsCustomFields: false,
+    isSearchable: false,
+    labelIdentifierColumn: null,
+    fields: [
+      { column: 'id', pgType: 'uuid', nullable: false, name: 'id', label: 'ID', type: 'UUID', isSystem: true, isUIReadOnly: true },
+      { column: 'attendance_id', pgType: 'uuid', nullable: false, name: 'attendance', label: 'Attendance', type: 'RELATION', isUIReadOnly: true, relation: { target: 'attendance', onDelete: 'RESTRICT', inverse: { name: 'breaks', label: 'Breaks' } } },
+      { column: 'staff_profile_id', pgType: 'uuid', nullable: false, name: 'staffProfile', label: 'Staff profile', type: 'RELATION', isUIReadOnly: true, relation: { target: 'staff_profile', onDelete: 'NO_ACTION', enforcedBy: 'attendance_break_staff_workspace_fkey', inverse: { name: 'attendanceBreaks', label: 'Attendance breaks' } } },
+      { column: 'started_at', pgType: 'timestamp with time zone', nullable: false, name: 'startedAt', label: 'Started at', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'ended_at', pgType: 'timestamp with time zone', nullable: true, name: 'endedAt', label: 'Ended at', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'start_source', pgType: 'text', nullable: false, name: 'startSource', label: 'Start source', type: 'SELECT', isUIReadOnly: true, options: ['staff', 'offline_sync'] },
+      { column: 'end_source', pgType: 'text', nullable: true, name: 'endSource', label: 'End source', type: 'SELECT', isUIReadOnly: true, options: ['staff', 'offline_sync', 'clock_out', 'manager'] },
+      { column: 'is_paid', pgType: 'boolean', nullable: false, name: 'isPaid', label: 'Paid break', type: 'BOOLEAN', isUIReadOnly: true },
+      { column: 'created_at', pgType: 'timestamp with time zone', nullable: false, name: 'createdAt', label: 'Created at', type: 'DATE_TIME', isSystem: true, isUIReadOnly: true },
+      { column: 'updated_at', pgType: 'timestamp with time zone', nullable: false, name: 'updatedAt', label: 'Updated at', type: 'DATE_TIME', isSystem: true, isUIReadOnly: true },
+    ],
+  },
+  {
+    // Structure level 27 (M4 design A.4 + A.7; owner decisions 45 and 91): idempotency and offline evidence, insert-only.
+    table: 'attendance_sync_receipt',
+    kind: 'standard',
+    nameSingular: 'attendanceSyncReceipt',
+    namePlural: 'attendanceSyncReceipts',
+    labelSingular: 'Attendance sync receipt',
+    labelPlural: 'Attendance sync receipts',
+    description: 'Insert-only receipts of attendance actions (idempotency keys and offline evidence).',
+    icon: 'IconReceipt',
+    allowsCustomFields: false,
+    isSearchable: false,
+    labelIdentifierColumn: null,
+    fields: [
+      { column: 'id', pgType: 'uuid', nullable: false, name: 'id', label: 'ID', type: 'UUID', isSystem: true, isUIReadOnly: true },
+      { column: 'staff_profile_id', pgType: 'uuid', nullable: false, name: 'staffProfile', label: 'Staff profile', type: 'RELATION', isUIReadOnly: true, relation: { target: 'staff_profile', onDelete: 'RESTRICT', enforcedBy: 'attendance_sync_receipt_staff_workspace_fkey', inverse: { name: 'attendanceSyncReceipts', label: 'Attendance sync receipts' } } },
+      { column: 'user_id', pgType: 'uuid', nullable: false, name: 'user', label: 'User', type: 'RELATION', isUIReadOnly: true, relation: { target: 'workspaceMember', enforcedBy: 'service:CoreReferenceService' } },
+      { column: 'idempotency_key', pgType: 'uuid', nullable: false, name: 'idempotencyKey', label: 'Idempotency key', type: 'UUID', isSystem: true, isUIReadOnly: true },
+      { column: 'request_sha256', pgType: 'text', nullable: false, name: 'requestSha256', label: 'Request SHA-256', type: 'TEXT', isSystem: true, isUIReadOnly: true },
+      { column: 'channel', pgType: 'text', nullable: false, name: 'channel', label: 'Channel', type: 'SELECT', isUIReadOnly: true, options: ['online', 'offline_sync'] },
+      { column: 'event_type', pgType: 'text', nullable: false, name: 'eventType', label: 'Event type', type: 'SELECT', isUIReadOnly: true, options: ['check_in', 'clock_in', 'break_start', 'break_end', 'clock_out'] },
+      { column: 'shift_id', pgType: 'uuid', nullable: true, name: 'shift', label: 'Shift', type: 'RELATION', isUIReadOnly: true, relation: { target: 'shift', onDelete: 'RESTRICT', enforcedBy: 'attendance_sync_receipt_shift_workspace_fkey', inverse: { name: 'attendanceSyncReceipts', label: 'Attendance sync receipts' } } },
+      { column: 'attendance_id', pgType: 'uuid', nullable: true, name: 'attendance', label: 'Attendance', type: 'RELATION', isUIReadOnly: true, relation: { target: 'attendance', onDelete: 'RESTRICT', inverse: { name: 'syncReceipts', label: 'Sync receipts' } } },
+      { column: 'break_id', pgType: 'uuid', nullable: true, name: 'attendanceBreak', label: 'Break', type: 'RELATION', isUIReadOnly: true, relation: { target: 'attendance_break', onDelete: 'RESTRICT', inverse: { name: 'syncReceipts', label: 'Sync receipts' } } },
+      { column: 'outcome', pgType: 'text', nullable: false, name: 'outcome', label: 'Outcome', type: 'SELECT', isUIReadOnly: true, options: ['applied', 'duplicate', 'rejected'] },
+      { column: 'reason_code', pgType: 'text', nullable: true, name: 'reasonCode', label: 'Reason code', type: 'TEXT', isUIReadOnly: true },
+      { column: 'time_trust', pgType: 'text', nullable: false, name: 'timeTrust', label: 'Time trust', type: 'SELECT', isUIReadOnly: true, options: ['server', 'anchored', 'untrusted'] },
+      { column: 'claimed_at', pgType: 'timestamp with time zone', nullable: true, name: 'claimedAt', label: 'Claimed time', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'applied_at', pgType: 'timestamp with time zone', nullable: true, name: 'appliedAt', label: 'Applied time', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'received_at', pgType: 'timestamp with time zone', nullable: false, name: 'receivedAt', label: 'Received at', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'ticket_issued_at', pgType: 'timestamp with time zone', nullable: true, name: 'ticketIssuedAt', label: 'Offline ticket issued at', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'device_wall_clock_at', pgType: 'timestamp with time zone', nullable: true, name: 'deviceWallClockAt', label: 'Device clock time', type: 'DATE_TIME', isUIReadOnly: true },
+      { column: 'device_key_thumbprint', pgType: 'text', nullable: true, name: 'deviceKeyThumbprint', label: 'Device key thumbprint', type: 'TEXT', isSystem: true, isUIReadOnly: true },
+      { column: 'client_seq', pgType: 'bigint', nullable: true, name: 'clientSeq', label: 'Client sequence', type: 'NUMBER', isSystem: true, isUIReadOnly: true, settings: { dataType: 'bigint' } },
+      { column: 'location_verified', pgType: 'boolean', nullable: true, name: 'locationVerified', label: 'Location verified', type: 'BOOLEAN', isUIReadOnly: true },
+      { column: 'distance_m', pgType: 'integer', nullable: true, name: 'distanceM', label: 'Distance', type: 'NUMBER', isUIReadOnly: true, settings: { dataType: 'int', unit: 'metres' } },
+      { column: 'accuracy_m', pgType: 'integer', nullable: true, name: 'accuracyM', label: 'Accuracy', type: 'NUMBER', isUIReadOnly: true, settings: { dataType: 'int', unit: 'metres' } },
+      { column: 'qr_result', pgType: 'text', nullable: true, name: 'qrResult', label: 'QR result', type: 'SELECT', isUIReadOnly: true, options: ['ok', 'invalid', 'expired', 'shift_mismatch', 'venue_mismatch', 'revoked', 'issued_after_punch'] },
+      { column: 'flags', pgType: 'text[]', nullable: false, name: 'flags', label: 'Flags', type: 'ARRAY', isUIReadOnly: true },
+      { column: 'created_at', pgType: 'timestamp with time zone', nullable: false, name: 'createdAt', label: 'Created at', type: 'DATE_TIME', isSystem: true, isUIReadOnly: true },
+    ],
+  },
 ];
 
-/** What the sync takes: the 21 standard objects, the core references and the authoritative workspace table list. */
+/** What the sync takes: the 23 standard objects, the core references and the authoritative workspace table list. */
 export const CREWFLOW_STANDARD_OBJECT_DEFINITIONS: StandardObjectDefinitions = Object.freeze({
   standard: CREWFLOW_STANDARD_OBJECTS,
   coreReferences: CORE_REFERENCE_OBJECTS,

@@ -5,7 +5,8 @@
  * read by `upgrade-command-registry.service.ts:166-205`). Re-implemented, not copied.
  *
  * The version is `MAJOR.MINOR.PATCH`, one per release, from the root `package.json` and baked into the image as
- * `CREWFLOW_APP_VERSION` (Dockerfile ARG → ENV). R254 = 0.4.0, R256 = 0.5.0, the first release with the logbook = 0.6.0.
+ * `CREWFLOW_APP_VERSION` (Dockerfile ARG → ENV). R254 = 0.4.0, R256 = 0.5.0, the first release with the logbook = 0.6.0,
+ * the release that switches the HWS cutover (Part C3) on = 0.7.0.
  *
  * Patch releases (owner decision 2026-11-18): a patch carries no command and resumes its minor .0's incomplete instance
  * commands under the .0's own step names. ORDER INVARIANT (review R1 of #240): those commands run BEFORE any migration of
@@ -28,8 +29,9 @@ export const VERSION_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1
  * Every published version before the current code's, oldest first (Twenty TWENTY_PREVIOUS_VERSIONS). Append only, strictly
  * ascending, no duplicate (assertPreviousVersions; checked by every start decision). A backport patch on an OLDER line (say
  * 0.6.2 after 0.7.0) is never appended on main: it is built from that line's own branch, whose list ends at its own line.
+ * 0.6.0 appended by the 0.7.0 release (C3 switched on): from 0.7.0 on the code upgrades strictly from 0.6.0 only.
  */
-export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0']);
+export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0', '0.6.0']);
 
 /**
  * The versions each MINOR release (`M.m.0`) upgrades FROM: an explicit list, reviewed with that release (owner decision
@@ -47,6 +49,9 @@ export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4
  */
 export const CREWFLOW_UPGRADE_FROM_VERSIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   '0.6.0': Object.freeze(['0.4.0', '0.5.0']),
+  // Release 0.7.0 (C3 switched on): every published 0.6.x (owner decision 2026-11-18). Only 0.6.0 was ever published (the
+  // 0.6.0 rebuilds kept the version; there is no 0.6.1), so a 0.7.0 start accepts exactly a database that completed 0.6.0.
+  '0.7.0': Object.freeze(['0.6.0']),
 });
 
 export type UpgradeFromVersions = Readonly<Record<string, readonly string[]>>;

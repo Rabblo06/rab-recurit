@@ -17,7 +17,9 @@ import { createHwsCutoverCommand, HWS_CUTOVER_VERIFIED_ACTION, HwsCutoverOptions
 import type { UpgradeCommandHost } from '../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
 import { upgradeSessionOf } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UpgradeRun } from '../../engine/core-modules/upgrade/upgrade-runner';
+import { UpgradeVersionTooOldError } from '../../engine/core-modules/upgrade/upgrade-version-check';
 import { dropWorkspaceSchema, provisionTypeScript, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+import { assertCutoverFixtureDatabase } from './helpers/hws-fixtures';
 
 /**
  * OWNER-DB-ULTIMATE Part C3 (option A′, PENDING OWNER CHOICE AND SQL REVIEW): the HWS cutover copy path on a real, disposable
@@ -229,7 +231,14 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
    * other spec of the in-band run, so the cluster superuser removes it after each run (it would turn fail-closed routing on
    * for every later fixture workspace).
    */
-  const deactivate = () => admin.query('DELETE FROM core.hws_cutover_activation');
+  // Through the same guard as withCutoverInactive: only the marked disposable TEST database (name, cluster, marker).
+  const deactivate = async () => {
+    await assertCutoverFixtureDatabase({ query: async (sql: string, params?: unknown[]) => (await admin.query(sql, params as unknown[])).rows });
+    return admin.query('DELETE FROM core.hws_cutover_activation');
+  };
+  let sentinelAtStart = false;
+  /** Release 0.7.0's real step is already completed on this CI database; the logbook case runs the command under its own step. */
+  const LEDGER_CASE_TIMESTAMP = 1786721549999;
   const activeNow = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')).rows[0].n) === 1;
   const startedAny = async () => (await app.query('SELECT core.hws_cutover_started_any() AS s')).rows[0].s as boolean;
   const cutover = async (q: Client, ids: string[], h: UpgradeCommandHost, extra: HwsCutoverOptions = {}, ctx: { flushBlockCache?: () => Promise<void>; markBlockChanged?: () => void } = {}) => {
@@ -250,6 +259,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     // The command reads it as the runtime login; null when this login may not call pg_control_system() (same rule).
     clusterId = await app.query('SELECT system_identifier::text AS s FROM pg_control_system()').then((r) => r.rows[0].s as string, () => null);
     backupDir = mkdtempSync(join(tmpdir(), 'c3-backup-'));
+    // Release 0.7.0 registers the cutover: this CI database was built by a 0.7.0 start with HWS on, which already wrote the
+    // sentinel (fail-closed routing on, new workspaces verified at insertion). These cases start from "not activated" and the
+    // production state is put back afterwards (the next spec of the in-band run sees what the build left).
+    sentinelAtStart = await activeNow();
+    await deactivate();
   });
 
   afterAll(async () => {
@@ -260,8 +274,9 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await admin.query(`DELETE FROM core.worker_dispatch_pointer WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
       await admin.query(`DELETE FROM core.hws_cutover_state WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
     }
-    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0'`).catch(() => undefined);
+    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [`0.7.0_HwsCutover_${LEDGER_CASE_TIMESTAMP}`]).catch(() => undefined);
     await admin.query('DELETE FROM core.hws_cutover_activation').catch(() => undefined);
+    if (sentinelAtStart) await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING').catch(() => undefined);
     if (backupDir) rmSync(backupDir, { recursive: true, force: true });
     await app?.end();
     await admin?.end();
@@ -339,7 +354,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   it('re-check N-1: crewflow_app and crewflow_worker cannot forge a verified state (no app-callable marker; the trigger is INSERT-only)', async () => {
     const victim = await seedBusiness(await make('n1-victim'));
-    expect(await startedAny()).toBe(false);
+    // Release 0.7.0: on the shared CI database (built by a 0.7.0 start, sentinel written) other specs' workspaces were
+    // verified at insertion, so started_any() can already be true here. What matters: the forgery never changes it, and
+    // the victim never gets a state row (asserted below).
+    const startedBefore = await startedAny();
+    expect(await stateOf(victim)).toBeNull();
     // The 3-step forgery's first step (fake a new workspace's columns); errors swallowed so the attempt goes on either way.
     const forge = [
       `DO $f$ BEGIN UPDATE core.manager_workspace SET created_at = now(), schema_status = 'CREATING' WHERE id = '${victim.id}'; EXCEPTION WHEN OTHERS THEN NULL; END $f$`,
@@ -374,7 +393,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await deactivate();
     }
     expect(await stateOf(victim)).toBeNull();
-    expect(await startedAny()).toBe(false);
+    expect(await startedAny()).toBe(startedBefore);
   });
 
   let w1: Seeded;
@@ -563,8 +582,8 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   it('through the Part B logbook (UpgradeRun): failed attempt 1 (no backup, blocks reported) → completed attempt 2', async () => {
     const w3 = await seedBusiness(await make('ledger'));
-    const command = createHwsCutoverCommand({ workspaceIds: [w3.id] });
-    const step = '0.7.0_HwsCutover_1786721540100';
+    const command = { ...createHwsCutoverCommand({ workspaceIds: [w3.id] }), timestamp: LEDGER_CASE_TIMESTAMP };
+    const step = `0.7.0_HwsCutover_${LEDGER_CASE_TIMESTAMP}`;
     const session = upgradeSessionOf(app);
     const runOnce = async (h: UpgradeCommandHost) => {
       const run = new UpgradeRun({
@@ -602,6 +621,96 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     ]);
     expect(await migrationError(w3)).toBeNull();
     expect(await verifiedRows(w3)).toBe(1);
+  });
+
+  it('release 0.7.0 no-op fix: HWS off with nothing pending is DEFERRED (no logbook row, no sentinel), never completed; the first start with HWS on completes and writes the sentinel', async () => {
+    const NOOP_TIMESTAMP = 1786721549998;
+    const step = `0.7.0_HwsCutover_${NOOP_TIMESTAMP}`;
+    const session = upgradeSessionOf(app);
+    const ledgerRows = async () => (await admin.query(`SELECT status, attempt FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1 ORDER BY attempt`, [step])).rows;
+    /** One locked start's afterApply with only this command (its own step), returning the report and whether the sentinel was written. */
+    const start = async (ids: string[], h: UpgradeCommandHost) => {
+      const run = new UpgradeRun({
+        codeVersion: '0.7.0',
+        previousVersions: ['0.4.0', '0.5.0', '0.6.0'],
+        force: true,
+        log,
+        registry: { '0-7': [{ ...createHwsCutoverCommand({ workspaceIds: ids }), timestamp: NOOP_TIMESTAMP }] },
+        workspaceRegistry: {},
+        workspaceRunner: { workspaceIds: [] },
+        host: h,
+      });
+      await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
+      try {
+        await run.afterApply(session);
+        return { report: run.report, activated: await activeNow() };
+      } finally {
+        await deactivate();
+      }
+    };
+    try {
+      // (a) HWS off, zero workspaces in scope: deferred, nothing recorded, no sentinel.
+      const a = await start([], host({ hws: false }));
+      expect(a.report.deferred).toEqual([step]);
+      expect(a.report.commandFailure).toBeNull();
+      expect(a.activated).toBe(false);
+      expect(await ledgerRows()).toEqual([]);
+      // (b) HWS off, every workspace in scope already verified (created while the cutover was active): deferred the same way.
+      await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+      const v = await make('noop-verified');
+      await deactivate();
+      expect(await stateOf(v)).toBe('verified');
+      const b = await start([v.id], host({ hws: false }));
+      expect(b.report.deferred).toEqual([step]);
+      expect(b.activated).toBe(false);
+      expect(await ledgerRows()).toEqual([]);
+      // (c) The next start with HWS ON, still nothing pending: completed (attempt 1) AND the one-way sentinel written.
+      const c = await start([v.id], host({ hws: true, backup: false }));
+      expect(c.report.deferred).toEqual([]);
+      expect(c.report.commandFailure).toBeNull();
+      expect(c.activated).toBe(true);
+      expect(await ledgerRows()).toEqual([{ status: 'completed', attempt: 1 }]);
+      // Completed now: a later HWS-off start does not run it again (and an HWS-off API refuses to boot once activated).
+      const d = await start([v.id], host({ hws: false }));
+      expect(d.report.deferred).toEqual([]);
+      expect(await ledgerRows()).toEqual([{ status: 'completed', attempt: 1 }]);
+    } finally {
+      await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [step]);
+    }
+  });
+
+  it('security review L1: a deferral STOPS the release (no later step runs), so the next release refuses (65) without --force; also with the real HwsCutover deferred', async () => {
+    const session = upgradeSessionOf(app);
+    const T_DEFER = 1786721549990;
+    const T_LATER = 1786721549991;
+    const deferring = { name: 'L1Deferring', timestamp: T_DEFER, run: async () => ({ deferred: 'test: not applicable in this configuration' }) };
+    let laterRan = false;
+    const laterNoop = { name: 'L1LaterNoop', timestamp: T_LATER, run: async () => void (laterRan = true) };
+    const realDeferred = { ...createHwsCutoverCommand({ workspaceIds: [] }), timestamp: T_DEFER - 5 }; // before laterNoop (steps run by timestamp)
+    const names = [`0.7.0_L1Deferring_${T_DEFER}`, `0.7.0_L1LaterNoop_${T_LATER}`, `0.7.0_HwsCutover_${T_DEFER - 5}`];
+    const rowsOf = async (name: string) => (await admin.query(`SELECT status FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [name])).rows;
+    try {
+      for (const [label, registry] of [
+        ['a deferring test command before a no-op one', { '0-7': [deferring, laterNoop] }],
+        ['the real HwsCutover deferred (HWS off, nothing pending)', { '0-7': [realDeferred, laterNoop] }],
+      ] as const) {
+        laterRan = false;
+        const run = new UpgradeRun({ codeVersion: '0.7.0', previousVersions: ['0.4.0', '0.5.0', '0.6.0'], force: true, log, registry, workspaceRegistry: {}, workspaceRunner: { workspaceIds: [] }, host: host({ hws: false }) });
+        await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
+        try {
+          await run.afterApply(session);
+        } finally {
+          await deactivate();
+        }
+        expect([label, run.report.deferred.length, laterRan, run.report.workspaces]).toEqual([label, 1, false, null]);
+        expect([label, await rowsOf(names[1]!)]).toEqual([label, []]);
+        // The next release, without --force: 0.7.0 is not complete, so its previous-version check refuses (65).
+        const next = new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.4.0', '0.5.0', '0.6.0', '0.7.0'], force: false, log, registry, workspaceRegistry: {}, workspaceRunner: { workspaceIds: [] }, host: host({ hws: true }) });
+        await expect(next.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true })).rejects.toBeInstanceOf(UpgradeVersionTooOldError);
+      }
+    } finally {
+      await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = ANY($1::text[])`, [names]);
+    }
   });
 
   /** SQLSTATE + message of a statement inside a throwaway transaction (always rolled back). */

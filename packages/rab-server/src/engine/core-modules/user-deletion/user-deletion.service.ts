@@ -424,14 +424,30 @@ export class UserDeletionService {
    */
   private async findProtectedHistory(manager: EntityManager, userId: string): Promise<string | null> {
     const t = businessTables(manager); // C2: the scope inEveryScope bound for this visit
+    // Structure level 27 (M4 §13 PR 2): breaks and sync receipts are pay evidence (A11: anonymise, retain) and RESTRICT the
+    // delete of their staff profile, attendance and shift. A READY workspace schema still below level 27 has neither table:
+    // it cannot be checked, so the hard delete is not safe there (soft delete instead), never a 42P01.
+    const [present] = await manager.query<Array<{ ok: boolean }>>(`SELECT to_regclass($1) IS NOT NULL AND to_regclass($2) IS NOT NULL AS ok`, [
+      t.attendance_break,
+      t.attendance_sync_receipt,
+    ]);
+    if (present?.ok !== true) throw new UnverifiableWorkspace();
     const checks: Array<[string, string]> = [
       ['shift_created_by', `SELECT 1 FROM ${t.shift} WHERE created_by = $1 LIMIT 1`],
       ['job_role_created_by', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
       ['venue_created_by', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
       ['payroll_decision_actor', `SELECT 1 FROM ${t.payroll_record} WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
+      // M4 §11 (security review of #305): attendance is visible only to its staff member, the workspace's managers, the
+      // shift's Venue Managers and the Worker, so a caller who is not a manager of this scope may not see every on-behalf
+      // punch here. That cannot hide one: this path runs only for a NEVER-ACTIVATED invite (status invited / invite_expired,
+      // last_login_at IS NULL, see deleteUser), and punching someone in or out on their behalf needs a signed-in session, so
+      // such a target can never be clock_in_by / clock_out_by. Its own staff history is caught through shift_assignment
+      // (tenant-wide visible; every attendance has one) by staffWithHistory / historyLost.
       ['attendance_on_behalf_actor', `SELECT 1 FROM ${t.attendance} WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
       ['job_offer_actor', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
       ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],
+      // A receipt records the session user who wrote it (staff own session only, by its INSERT policy).
+      ['attendance_sync_receipt_user', `SELECT 1 FROM ${t.attendance_sync_receipt} WHERE user_id = $1 LIMIT 1`],
       [
         'staff_operational_history',
         `SELECT 1 FROM ${t.staff_profile} sp
@@ -443,6 +459,8 @@ export class UserDeletionService {
                OR EXISTS (SELECT 1 FROM ${t.shift_request_staff} rs WHERE rs.staff_profile_id = sp.id)
                OR EXISTS (SELECT 1 FROM ${t.venue_manager_staff} vs WHERE vs.staff_profile_id = sp.id)
                OR EXISTS (SELECT 1 FROM ${t.replacement_request} rr WHERE rr.selected_staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.attendance_break} ab WHERE ab.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.attendance_sync_receipt} ar WHERE ar.staff_profile_id = sp.id)
              )
            LIMIT 1`,
       ],
@@ -462,6 +480,7 @@ export class UserDeletionService {
          SELECT staff_profile_id FROM ${t.shift_assignment} UNION SELECT staff_profile_id FROM ${t.job_offer} UNION SELECT staff_profile_id FROM ${t.attendance}
          UNION SELECT staff_profile_id FROM ${t.shift_request_staff} UNION SELECT staff_profile_id FROM ${t.venue_manager_staff}
          UNION SELECT selected_staff_profile_id FROM ${t.replacement_request} WHERE selected_staff_profile_id IS NOT NULL
+         UNION SELECT staff_profile_id FROM ${t.attendance_sync_receipt}
        ) h
        WHERE NOT EXISTS (SELECT 1 FROM ${t.staff_profile} sp WHERE sp.id = h.staff_profile_id)`,
     );
@@ -480,6 +499,7 @@ export class UserDeletionService {
           AND NOT EXISTS (SELECT 1 FROM ${t.shift_request_staff} WHERE staff_profile_id = p.id)
           AND NOT EXISTS (SELECT 1 FROM ${t.venue_manager_staff} WHERE staff_profile_id = p.id)
           AND NOT EXISTS (SELECT 1 FROM ${t.replacement_request} WHERE selected_staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.attendance_sync_receipt} WHERE staff_profile_id = p.id)
         LIMIT 1`,
       [before],
     );

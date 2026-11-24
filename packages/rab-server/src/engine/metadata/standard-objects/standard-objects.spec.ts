@@ -38,7 +38,7 @@ function storedAfter(plan: { insertObjects: ObjectRow[]; insertFields: FieldRow[
 }
 
 describe('M1 / E2: the standard-object definitions', () => {
-  it('are valid: exactly the 21 workspace tables, unique names, locks per §0.3 and owner decisions D1–D4', () => {
+  it('are valid: exactly the 23 workspace tables, unique names, locks per §0.3 and owner decisions D1–D4', () => {
     expect(() => validateStandardDefinitions(D.standard, D.coreReferences, WORKSPACE_TABLES)).not.toThrow();
     expect(CREWFLOW_STANDARD_OBJECTS.map((o) => o.table)).toEqual([...WORKSPACE_TABLES]);
     expect(CORE_REFERENCE_OBJECTS.map((o) => o.nameSingular)).toEqual(['workspaceMember', 'managerProfile', 'storedFile', 'payrollCalendarPeriod']);
@@ -83,7 +83,7 @@ describe('M1 / E2: the standard-object definitions', () => {
     const byUid = new Map(desired.fields.map((f) => [f.universal_identifier, f]));
     const manyToOne = desired.fields.filter((f) => f.type === 'RELATION' && f.settings.relationType === 'MANY_TO_ONE');
     const withInverse = manyToOne.filter((f) => f.relation_target_field_uid);
-    expect(withInverse).toHaveLength(34);
+    expect(withInverse).toHaveLength(40);
     for (const f of withInverse) {
       const inv = byUid.get(f.relation_target_field_uid!)!;
       expect(inv.settings.relationType).toBe('ONE_TO_MANY');
@@ -106,18 +106,18 @@ describe('M1 / E2: the standard-object definitions', () => {
     expect(standardUniversalIdentifier('object:staff_profile')).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     const all = [...desired.objects.map((o) => `o ${o.physical_table} ${o.universal_identifier}`), ...desired.fields.map((f) => `f ${f.name} ${f.universal_identifier}`)].sort();
     expect(new Set(all.map((l) => l.split(' ')[2])).size).toBe(all.length);
-    expect({ objects: desired.objects.length, fields: desired.fields.length }).toEqual({ objects: 25, fields: 310 + 34 });
+    expect({ objects: desired.objects.length, fields: desired.fields.length }).toEqual({ objects: 27, fields: 353 + 40 });
     expect(createHash('sha256').update(all.join('\n')).digest('hex')).toBe(UID_DIGEST);
   });
 });
 
 /** sha256 of the sorted (kind, name, universal identifier) lines; regenerate ONLY for a reviewed, deliberate change. */
-const UID_DIGEST = 'f64afef63580a88fe41c4f0b2469daa9934388369661143a23e34318190ab0db';
+const UID_DIGEST = '129178e894f8f488e723a91ebb11fdcc4cdcf4578d6f14420505b91fc7b7e336';
 
 describe('M1 / E2: the sync planner', () => {
   it('empty workspace → inserts every object, field and option; ids are fresh and each row is written once', () => {
     const plan = planStandardObjectSync(desired, empty, ids);
-    expect(plan.insertObjects).toHaveLength(25);
+    expect(plan.insertObjects).toHaveLength(27);
     expect(plan.insertFields).toHaveLength(desired.fields.length);
     expect(plan.insertOptions.length).toBe(desired.fields.reduce((k, f) => k + f.options.length, 0));
     expect(plan.updateObjects.length + plan.updateFields.length + plan.updateOptions.length).toBe(0);
@@ -198,7 +198,7 @@ describe('M1 / E2: the sync planner', () => {
     expect(v(tweak('venue_role_rate', (o) => ({ ...o, allowsCustomFields: true })))).toThrow(/custom fields/);
     expect(v(tweak('shift', (o) => ({ ...o, fields: o.fields.map((f) => (f.column === 'status' ? { ...f, isUIReadOnly: false } : f)) })))).toThrow(/S13/);
     expect(v(tweak('job_role', (o) => ({ ...o, fields: o.fields.map((f) => (f.column === 'default_rate_pence' ? { ...f, settings: { dataType: 'bigint' as const } } : f)) })))).toThrow(/money/);
-    expect(v(D.standard.slice(1))).toThrow(/exactly the 21/);
+    expect(v(D.standard.slice(1))).toThrow(/exactly the 23/);
     // Level 22: a workspaceMember relation is enforced by exactly service:CoreReferenceService (not any service:*), no onDelete.
     const member = (change: (r: NonNullable<StandardObjectDefinition['fields'][number]['relation']>) => object) =>
       tweak('venue', (o) => ({ ...o, fields: o.fields.map((f) => (f.column === 'created_by' ? { ...f, relation: { ...f.relation!, ...change(f.relation!) } } : f)) }));
@@ -208,7 +208,7 @@ describe('M1 / E2: the sync planner', () => {
   });
 });
 
-describe('M1 / E2: catalog comparison (metadata matches the 21 tables exactly)', () => {
+describe('M1 / E2: catalog comparison (metadata matches the 23 tables exactly)', () => {
   const catalog = (): CatalogColumn[] =>
     D.standard.flatMap((o) => [
       { t: o.table, c: 'organisation_id', ty: 'uuid', nn: true },
