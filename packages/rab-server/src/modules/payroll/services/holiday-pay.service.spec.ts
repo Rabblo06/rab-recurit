@@ -36,7 +36,7 @@ function harness(opts: { held?: string[]; venue?: boolean; initial?: boolean; se
   const permissions = { userHasPermissionTx: jest.fn(async (_m: unknown, _c: unknown, flag: string) => held.has(flag)) };
   const resourceScope = { resolveTx: jest.fn(async () => (opts.venue ? { kind: 'venue', venueIds: [] } : { kind: 'owner', ownerUserId: ME, delegated: false })) };
   const audit = { record: jest.fn() };
-  const stepUp = { assertRecentStepUp: jest.fn(async () => { if (opts.stepUpRefused) throw new ForbiddenException({ code: 'STEP_UP_REQUIRED' }); }) };
+  const stepUp = { assertFreshSecondFactorForAction: jest.fn(async () => { if (opts.stepUpRefused) throw new ForbiddenException({ code: 'STEP_UP_REQUIRED' }); }) };
   const svc = new HolidayPayService(tenantContext as never, permissions as never, resourceScope as never, audit as never, stepUp as never);
   const writes = () => calls.filter((c) => /^INSERT /.test(c.sql));
   return { svc, manager, calls, writes, audit, stepUp };
@@ -56,7 +56,7 @@ describe('HolidayPayService: the organisation setting', () => {
   it('changing it needs a recent step-up FIRST (before any read), then payroll.calculate and the CURRENT Initial Manager', async () => {
     const stale = harness({ initial: true, stepUpRefused: true });
     await expect(stale.svc.useProvider(ctx)).rejects.toMatchObject({ response: { code: 'STEP_UP_REQUIRED' } });
-    expect(stale.stepUp.assertRecentStepUp).toHaveBeenCalledWith(ctx, HOLIDAY_PAY_UPDATE_STEP_UP);
+    expect(stale.stepUp.assertFreshSecondFactorForAction).toHaveBeenCalledWith(ctx, HOLIDAY_PAY_UPDATE_STEP_UP);
     expect(stale.calls).toEqual([]);
     const notInitial = harness({ initial: false });
     await expect(notInitial.svc.useRolledUpRate(ctx, 1207)).rejects.toBeInstanceOf(ForbiddenException);

@@ -34,6 +34,8 @@ import { Attendance } from '../../modules/attendance/entities/attendance.entity'
 import { NotificationService } from '../../modules/notification/services/notification.service';
 import { PayrollService } from '../../modules/payroll/services/payroll.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { enrolTotp, serviceApprovalSession } from './helpers/step-up-kit';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
@@ -61,6 +63,8 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
 
   // One world, reused by every test (each test makes its own shifts/offers).
   let org: { id: string };
+  let authRedis: AuthCacheRedisClientProvider;
+  const moduleRefRedis = () => authRedis;
   let owner: TestIdentity; // internal manager who owns the workspace, the venue and the shifts
   let approver2: TestIdentity; // another internal manager of the same organisation (own workspace)
   let vm: TestIdentity; // venue manager of `venueId`
@@ -126,6 +130,7 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
     notifications = moduleRef.get(NotificationService);
     payroll = moduleRef.get(PayrollService);
     realtime = moduleRef.get(RealtimeEventService);
+    authRedis = moduleRef.get(AuthCacheRedisClientProvider);
     admin = createAdminDataSource();
     await admin.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource: admin, tenantContext, passwordHashing: moduleRef.get(PasswordHashingService) });
@@ -364,11 +369,19 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
          VALUES ($1, $2, $3, $4, $5, 'pending_approval', 120, 1500, 3000) RETURNING id`,
         [org.id, owner.workspaceId, att.id, shiftId, who.profileId],
       );
+      // Decision 5 (maker-checker): the timesheet that prepared the record was finalised by someone other than the approver.
+      await admin.query(
+        `INSERT INTO ${businessTable(owner.workspaceId!, 'shift_report')} (organisation_id, workspace_id, shift_id, status, finalised_at, finalised_by) VALUES ($1, $2, $3, 'finalised', now(), $4)`,
+        [org.id, owner.workspaceId, shiftId, vm.userId],
+      );
       recordIds.push(record.id);
     }
     const audienceSpy = jest.spyOn(recipientsModule, 'payrollAudience');
     try {
-      const result = await payroll.bulkApprove(ctxOf(owner), recordIds);
+      // Decision 5: the approver has 2FA and a single-use proof bound to the approval action (service-direct: a session id).
+      await enrolTotp(app, await factory.login(owner), owner.password);
+      const sessionId = await serviceApprovalSession(moduleRefRedis(), owner.userId);
+      const result = await payroll.bulkApprove({ ...ctxOf(owner), sessionId }, recordIds);
       expect(result.approved).toHaveLength(3);
       expect(audienceSpy).toHaveBeenCalledTimes(1);
     } finally {

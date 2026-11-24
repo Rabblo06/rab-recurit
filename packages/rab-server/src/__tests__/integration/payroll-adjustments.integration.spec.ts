@@ -20,7 +20,8 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { businessTable } from './helpers/hws-fixtures';
-import { insertMembership, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { approvalGrant, ApprovalAction, dropApprovalGrant, enrolTotp } from './helpers/step-up-kit';
+import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Payroll adjustments (owner decision 3, PayrollAdjustmentSchema1786723100000). Real HTTP + PostgreSQL with RLS as the
@@ -74,12 +75,20 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
   const asUser = <T>(userId: string, sql: string, params: unknown[] = []) => tenantContext.runInTenantContext(ctxOf(userId), (m) => m.query(sql, params) as Promise<T>);
   const row = async (id: string) => (await adminDataSource.query(`SELECT * FROM core.payroll_adjustment WHERE id = $1`, [id]))[0];
   /** A fresh sign-in records a step-up grant for its session (OIDC max_age semantics). */
-  const freshToken = (who: TestIdentity) => factory.login(who);
-  const staleToken = async (who: TestIdentity) => {
-    const token = await factory.login(who);
-    await authRedis.client.del(`crewflow:test:step-up:${sha256(sidOf(token))}`);
-    return token;
+  /**
+   * Owner decision 5 (Lane P1, #335): approving needs an enrolled authenticator and a single-use proof bound to the action.
+   * Each approver is enrolled once on its suite session; each approval call gets its own fixture grant (step-up-kit).
+   */
+  let tokenC: string;
+  const enrolled = new Set<string>();
+  const stepped = async (token: string, who: TestIdentity, action: ApprovalAction): Promise<string> => {
+    if (!enrolled.has(who.userId)) {
+      await enrolTotp(app, token, who.password);
+      enrolled.add(who.userId);
+    }
+    return approvalGrant(authRedis, token, who.userId, action);
   };
+  const asC = (action: ApprovalAction) => stepped(tokenC, c, action);
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -96,11 +105,9 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     orgId = seeded.organisation.id;
     a = seeded.managers[0]!;
     await adminDataSource.query(`UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`, [a.userId]);
-    // C: a second non-venue manager working in A's workspace (the approver; never the person who added the line).
-    const colleague = await factory.createInternalManager(seeded.organisation, { workspace: false, permissions: 'production', label: 'adj-approver' });
-    await adminDataSource.query(`UPDATE core.manager_profile SET workspace_id = $2 WHERE user_id = $1`, [colleague.userId, a.workspaceId]);
-    await adminDataSource.transaction((m) => insertMembership(m, orgId, colleague.userId, a.workspaceId!));
-    c = { ...colleague, workspaceId: a.workspaceId };
+    // C: a second Internal Manager working in A's workspace (the approver; never the person who added the line).
+    c = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'adj-approver' });
+    tokenC = await factory.login(c);
     staff = [];
     for (let i = 0; i < 4; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `adj-s${i}` }));
     await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
@@ -155,7 +162,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
     const [rec] = await adminDataSource.query(`SELECT id, amount_pence FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
-    if (approve) expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(await freshToken(c)))).status).toBe(200);
+    if (approve) expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(await asC('payroll.record.approve')))).status).toBe(200);
     return { id: rec.id as string, amountPence: Number(rec.amount_pence) };
   }
 
@@ -200,41 +207,53 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
   });
 
   it('approval: never the creator; needs a recent step-up; a second person approves once; a decision never changes', async () => {
-    // Fresh sessions where the step-up is not what is being tested (approve checks the step-up first).
-    const own = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await freshToken(a)));
+    // An approver with no authenticator is refused before anything else (decision 5, no password-only path).
+    const unenrolled = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(tokenA));
+    expect({ status: unenrolled.status, code: unenrolled.body.code }).toEqual({ status: 403, code: 'STEP_UP_MFA_ENROLMENT_REQUIRED' });
+    // With a valid proof, the creator is still refused (maker-checker).
+    const own = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await stepped(tokenA, a, 'payroll.adjustment.approve')));
     expect(own.status).toBe(403);
     expect(own.body.code).toBe('PAYROLL_ADJUSTMENT_SAME_PERSON');
     expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(tokenVm))).status).toBe(403);
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await freshToken(otherManager)))).status).toBe(404);
-    expect((await http().post(`/rest/v1/payroll/adjustments/${randomUUID()}/approve`).set(auth(await freshToken(c)))).status).toBe(404);
+    // Another organisation: the proof check comes first (unenrolled: 403, nothing learnt about the id); with a proof, 404.
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(tokenOther))).body.code).toBe('STEP_UP_MFA_ENROLMENT_REQUIRED');
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await stepped(tokenOther, otherManager, 'payroll.adjustment.approve')))).status).toBe(404);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${randomUUID()}/approve`).set(auth(await asC('payroll.adjustment.approve')))).status).toBe(404);
 
-    const stale = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await staleToken(c)));
+    // Enrolled but no proof for THIS action on this session (or a proof for another action): STEP_UP_REQUIRED.
+    await stepped(tokenC, c, 'payroll.adjustment.approve');
+    await dropApprovalGrant(authRedis, tokenC, 'payroll.adjustment.approve');
+    await approvalGrant(authRedis, tokenC, c.userId, 'payroll.record.approve');
+    const stale = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(tokenC));
+    await dropApprovalGrant(authRedis, tokenC, 'payroll.record.approve');
     expect(stale.status).toBe(403);
     expect(stale.body.code).toBe('STEP_UP_REQUIRED');
     expect((await row(ids.bonus)).status).toBe('pending_approval');
     const refusals = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE actor_user_id = $1 AND action = 'auth.step_up_failed' AND metadata->>'action' = 'payroll.adjustment.approve'`, [c.userId]);
     expect(refusals[0].n).toBeGreaterThanOrEqual(1);
 
-    const ok = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await freshToken(c)));
+    const ok = await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await asC('payroll.adjustment.approve')));
+    // One proof = one approval: the grant was burnt.
+    expect(await authRedis.client.exists(`crewflow:${process.env.NODE_ENV}:step-up:${sha256(sidOf(tokenC))}:action:payroll.adjustment.approve`)).toBe(0);
     expect(ok.status).toBe(200);
     expect(ok.body).toMatchObject({ status: 'approved', createdByMe: false });
     expect(ok.body.payrollPeriod).toMatchObject({ start: periods[1]!.start, end: periods[1]!.end });
     const r = await row(ids.bonus);
     expect({ status: r.status, decided_by: r.decided_by }).toEqual({ status: 'approved', decided_by: c.userId });
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await freshToken(c)))).status).toBe(409);
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/reject`).set(auth(await freshToken(c))).send({ reason: 'Too late' })).status).toBe(409);
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.expense}/approve`).set(auth(await freshToken(c)))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/approve`).set(auth(await asC('payroll.adjustment.approve')))).status).toBe(409);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.bonus}/reject`).set(auth(tokenC)).send({ reason: 'Too late' })).status).toBe(409);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.expense}/approve`).set(auth(await asC('payroll.adjustment.approve')))).status).toBe(200);
   });
 
   it('rejection: a reason is required, never by the creator, then terminal', async () => {
     const dup = await http().post('/rest/v1/payroll/adjustments/bonuses').set(auth(tokenA)).send({ staffProfileId: staff[0]!.profileId, amountPence: 2500, reason: 'Duplicate entry' });
     ids.rejected = dup.body.id;
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/reject`).set(auth(await freshToken(c))).send({})).status).toBe(400);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/reject`).set(auth(tokenC)).send({})).status).toBe(400);
     expect((await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/reject`).set(auth(tokenA)).send({ reason: 'Mine' })).status).toBe(403);
-    const rej = await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/reject`).set(auth(await freshToken(c))).send({ reason: 'Duplicate of the earlier bonus' });
+    const rej = await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/reject`).set(auth(tokenC)).send({ reason: 'Duplicate of the earlier bonus' });
     expect(rej.status).toBe(200);
     expect(rej.body).toMatchObject({ status: 'rejected', rejectionReason: 'Duplicate of the earlier bonus' });
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/approve`).set(auth(await freshToken(c)))).status).toBe(409);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.rejected}/approve`).set(auth(await asC('payroll.adjustment.approve')))).status).toBe(409);
   });
 
   it('corrections: linked to the original APPROVED record; plus or minus; a reduction never exceeds what the shift paid', async () => {
@@ -251,7 +270,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     expect(minus.status).toBe(201);
     expect(minus.body).toMatchObject({ kind: 'correction', amountPence: -150, correctsPayrollRecordId: s1Record.id, staffProfileId: staff[1]!.profileId });
     ids.minus = minus.body.id;
-    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.minus}/approve`).set(auth(await freshToken(c)))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${ids.minus}/approve`).set(auth(await asC('payroll.adjustment.approve')))).status).toBe(200);
     // The approved original is never edited.
     const [orig] = await adminDataSource.query(`SELECT status, amount_pence FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = $1`, [s1Record.id]);
     expect({ status: orig.status, amount: Number(orig.amount_pence) }).toEqual({ status: 'approved', amount: s1Record.amountPence });
@@ -322,7 +341,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
       expect(res[1]).toBe(0);
     });
     // Reject the guard-test line so it stays out of the run (decided by C, a different person).
-    expect((await http().post(`/rest/v1/payroll/adjustments/${pendingId}/reject`).set(auth(await freshToken(c))).send({ reason: 'Guard test line' })).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${pendingId}/reject`).set(auth(tokenC)).send({ reason: 'Guard test line' })).status).toBe(200);
   });
 
   it('runs: approved lines join the run of their period, appear in totals and the CSV, and are locked at finalise', async () => {
@@ -347,7 +366,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     expect(lines[0]).toContain('Gross (GBP),Corrections (GBP),Bonuses (GBP),Expenses (GBP),Total (GBP)');
     expect(csv.text).toContain(',-1.50,0.00,0.00,'); // a negative correction stays a number
 
-    const fin = await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await freshToken(c)));
+    const fin = await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await asC('payroll.run.finalise')));
     expect(fin.status).toBe(200);
     for (const id of [ids.bonus, ids.expense, ids.minus]) expect((await row(id)).locked_at).not.toBeNull();
     // Locked: the database refuses ANY change, even of a column the runtime login may update.
@@ -358,7 +377,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     const facts = await adminDataSource.query(`SELECT event, cardinality(payroll_record_ids)::int AS n FROM core.payroll_run_event WHERE run_id = $1 ORDER BY event`, [runId]);
     expect(facts).toEqual([{ event: 'finalised', n: 1 }, { event: 'opened', n: 0 }]);
     const stray = await http().post('/rest/v1/payroll/adjustments/bonuses').set(auth(tokenA)).send({ staffProfileId: staff[2]!.profileId, amountPence: 111, reason: 'Stray line' });
-    expect((await http().post(`/rest/v1/payroll/adjustments/${stray.body.id}/approve`).set(auth(await freshToken(c)))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/adjustments/${stray.body.id}/approve`).set(auth(await asC('payroll.adjustment.approve')))).status).toBe(200);
     await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET run_id = $2, included_at = now() WHERE id = $1`, [stray.body.id, runId])).rejects.toMatchObject({ code: '42501' });
     ids.stray = stray.body.id;
     // Payslips exist for every paid person, adjustment-only staff included.
@@ -368,7 +387,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
 
   it('a line approved after the run is finalised sits on the next period (carried forward), never in the finalised run', async () => {
     const late = await http().post('/rest/v1/payroll/adjustments/bonuses').set(auth(tokenA)).send({ staffProfileId: staff[0]!.profileId, amountPence: 500, reason: 'Late bonus' });
-    const approved = await http().post(`/rest/v1/payroll/adjustments/${late.body.id}/approve`).set(auth(await freshToken(c)));
+    const approved = await http().post(`/rest/v1/payroll/adjustments/${late.body.id}/approve`).set(auth(await asC('payroll.adjustment.approve')));
     expect(approved.body.payrollPeriod).toMatchObject({ start: periods[2]!.start });
     expect((await http().post('/rest/v1/payroll/runs/prepare').set(auth(tokenA)).send({ periodId: (await http().get('/rest/v1/payroll/runs').set(auth(tokenA))).body.periods.find((p: { period: { start: string } }) => p.period.start === periods[1]!.start).period.id })).status).toBe(409);
     const p2 = (await http().get('/rest/v1/payroll/runs').set(auth(tokenA))).body.periods.find((p: { period: { start: string } }) => p.period.start === periods[2]!.start);
@@ -398,7 +417,7 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
 
   it('field policy (review fix 1): a caller whose policy hides amounts gets no *Pence key at any depth (run detail, run list, adjustments)', async () => {
     // C works in A's workspace with only a system role: every payroll_record field is hidden for them (FieldPolicyService).
-    const token = await freshToken(c);
+    const token = tokenC;
     const pence = (v: unknown, path = '$'): string[] => {
       if (Array.isArray(v)) return v.flatMap((x, i) => pence(x, `${path}[${i}]`));
       if (v && typeof v === 'object') return Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => [...(/Pence$/.test(k) ? [`${path}.${k}`] : []), ...pence(x, `${path}.${k}`)]);

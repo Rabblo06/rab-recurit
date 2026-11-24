@@ -304,6 +304,45 @@ export class TestIdentityFactory {
     };
   }
 
+  /**
+   * Owner decision 5 (payroll maker-checker): a SECOND Internal Manager (canonical `manager` role, `internal` profile) inside an
+   * EXISTING workspace — the other payroll person who approves what `owner` prepared. Same role, profile and membership rows
+   * as createInternalManager, but no workspace of its own.
+   */
+  async createWorkspaceCoManager(org: OrgRef, owner: Pick<TestIdentity, 'workspaceId'>, opts: { permissions?: PermissionSpec; label?: string } = {}): Promise<TestIdentity> {
+    const def = ROLE_DEFS[ManagerType.INTERNAL]!;
+    const workspaceId = owner.workspaceId;
+    if (!workspaceId) throw new TestSetupError('createWorkspaceCoManager needs an owner with a workspace.');
+    const email = `${opts.label ?? 'comgr'}-${randomUUID()}@example.test`;
+    let userId!: string;
+    let profileId!: string;
+    await this.infra.tenantContext.runInTenantContext(bootstrapContext(org.id), async (m) => {
+      const role = await this.provisionRole(m, org.id, def.key, def.name, this.resolvePermissions(opts.permissions, def.permissions));
+      userId = await this.insertUser(m, org.id, email, 'Second', 'Approver', UserStatus.ACTIVE);
+      await m.insert(UserRole, { userId, roleId: role.id, organisationId: org.id });
+      await m.query(`SELECT set_config('rab.user_id', $1, true), set_config('rab.workspace_id', $2, true)`, [userId, workspaceId]);
+      const profile = await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [
+        org.id,
+        userId,
+        ManagerType.INTERNAL,
+        workspaceId,
+      ]);
+      profileId = profile[0].id as string;
+      await insertMembership(m, org.id, userId, workspaceId);
+    });
+    return {
+      kind: 'internal_manager',
+      organisationId: org.id,
+      userId,
+      email,
+      password: this.password,
+      roleKey: def.key,
+      workspaceId,
+      profileId,
+      defaultApplication: 'manager_web',
+    };
+  }
+
   /** N Internal Managers in ONE organisation sharing the canonical `manager` role; the first optionally a platform admin (what most abuse suites need for admin-only endpoints). */
   async createOrganisationWithManagers(
     count: number,

@@ -46,6 +46,8 @@ import type { ReportDocument } from '../../queues/rab-reports/render-pdf.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { approvalGrant, enrolTotp } from './helpers/step-up-kit';
+import { AuthCacheRedisClientProvider } from '@rab/server/engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
@@ -692,7 +694,13 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenM))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenM))).status).toBe(200);
     const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM ${siblingTable(await businessTableOf(admin, 'attendance', out.body.id), 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
-    expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(tokenM))).status).toBe(200);
+    // Owner decision 5 (maker-checker): the manager finalised the timesheet, so a second manager of the workspace approves,
+    // after a fresh step-up of their session.
+    const approver = await factory.createWorkspaceCoManager(org, manager, { label: 'w4-approver' });
+    const approverToken = await factory.login(approver);
+    await enrolTotp(app, approverToken, approver.password);
+    await approvalGrant(app.get(AuthCacheRedisClientProvider), approverToken, approver.userId);
+    expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(approverToken))).status).toBe(200);
     return rec.id;
   }
 

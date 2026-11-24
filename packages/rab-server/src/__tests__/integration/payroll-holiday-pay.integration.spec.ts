@@ -4,7 +4,7 @@ import './helpers/use-local-storage-env'; // MUST be imported before AppModule â
 import { rolledUpHolidayPayPence } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -21,7 +21,8 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { businessTable } from './helpers/hws-fixtures';
-import { insertMembership, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { approvalGrant, ApprovalAction, dropApprovalGrant, enrolTotp } from './helpers/step-up-kit';
+import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Rolled-up holiday pay (owner decision 4, assumption A3; PayrollHolidayPay1786723110000). Real HTTP + PostgreSQL with RLS
@@ -39,8 +40,6 @@ const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(300_000);
 
-const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
-const sidOf = (token: string) => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
 const addDays = (date: string, n: number) => new Date(Date.parse(`${date}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
 describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
@@ -68,12 +67,21 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
 
   const ctxOf = (userId: string): AuthContext => ({ organisationId: orgId, workspaceId: a.workspaceId, userId, role: '' }) as AuthContext;
   const asUser = <T>(userId: string, sql: string, params: unknown[] = []) => tenantContext.runInTenantContext(ctxOf(userId), (m) => m.query(sql, params) as Promise<T>);
-  const fresh = (who: TestIdentity) => factory.login(who);
-  const stale = async (who: TestIdentity) => {
-    const token = await factory.login(who);
-    await authRedis.client.del(`crewflow:test:step-up:${sha256(sidOf(token))}`);
-    return token;
+  /**
+   * Owner decision 5 (Lane P1, #335): approving pay and changing the holiday setting need an enrolled authenticator and a
+   * single-use proof bound to the action. Each actor is enrolled once on its suite session; each call gets its own grant.
+   */
+  let tokenC: string;
+  const enrolled = new Set<string>();
+  const stepped = async (token: string, who: TestIdentity, action: ApprovalAction): Promise<string> => {
+    if (!enrolled.has(who.userId)) {
+      await enrolTotp(app, token, who.password);
+      enrolled.add(who.userId);
+    }
+    return approvalGrant(authRedis, token, who.userId, action);
   };
+  const asA = () => stepped(tokenA, a, 'payroll.holiday_pay.update');
+  const asC = (action: ApprovalAction) => stepped(tokenC, c, action);
   const snapshot = async (recordId: string) => (await adminDataSource.query(`SELECT * FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recordId]))[0];
 
   beforeAll(async () => {
@@ -91,10 +99,8 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     orgId = seeded.organisation.id;
     a = seeded.managers[0]!;
     await adminDataSource.query(`UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`, [a.userId]);
-    const colleague = await factory.createInternalManager(seeded.organisation, { workspace: false, permissions: 'production', label: 'hol-approver' });
-    await adminDataSource.query(`UPDATE core.manager_profile SET workspace_id = $2 WHERE user_id = $1`, [colleague.userId, a.workspaceId]);
-    await adminDataSource.transaction((m) => insertMembership(m, orgId, colleague.userId, a.workspaceId!));
-    c = { ...colleague, workspaceId: a.workspaceId };
+    c = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'hol-approver' });
+    tokenC = await factory.login(c);
     staff = [];
     for (let i = 0; i < 3; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `hol-s${i}` }));
     await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
@@ -142,7 +148,7 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
     const [rec] = await adminDataSource.query(`SELECT id, amount_pence FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
-    expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(await fresh(c)))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(await asC('payroll.record.approve')))).status).toBe(200);
     return { id: rec.id as string, amountPence: Number(rec.amount_pence) };
   }
 
@@ -159,22 +165,28 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     expect(def.status).toBe(200);
     // Review fix 3 (fail-safe): no settings row = the payroll provider handles holiday pay; rolled-up is an explicit opt-in.
     expect(def.body).toMatchObject({ mode: 'provider', rateBps: null, isDefault: true, canManage: true });
-    expect((await http().get('/rest/v1/payroll/settings/holiday-pay').set(auth(await fresh(c)))).body.canManage).toBe(false);
+    expect((await http().get('/rest/v1/payroll/settings/holiday-pay').set(auth(tokenC))).body.canManage).toBe(false);
     expect((await http().get('/rest/v1/payroll/settings/holiday-pay').set(auth(tokenVm))).status).toBe(403);
 
     // Not the Initial Manager (fresh session, holds payroll.calculate): 403. Venue Manager: 403 at the route.
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(c)))).status).toBe(403);
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await asC('payroll.holiday_pay.update')))).status).toBe(403);
     expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(tokenVm))).status).toBe(403);
     // Stale session of the Initial Manager: STEP_UP_REQUIRED, nothing written, refusal audited.
-    const staleRes = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await stale(a)));
+    // The Initial Manager with no authenticator: refused (decision 5, no password-only path).
+    const unenrolled = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(tokenA));
+    expect({ status: unenrolled.status, code: unenrolled.body.code }).toEqual({ status: 403, code: 'STEP_UP_MFA_ENROLMENT_REQUIRED' });
+    // Enrolled, but no proof made for THIS action on this session: STEP_UP_REQUIRED.
+    await asA();
+    await dropApprovalGrant(authRedis, tokenA, 'payroll.holiday_pay.update');
+    const staleRes = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(tokenA));
     expect({ status: staleRes.status, code: staleRes.body.code }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED' });
     expect(await adminDataSource.query(`SELECT 1 FROM core.organisation_payroll_setting WHERE organisation_id = $1`, [orgId])).toEqual([]);
     // Mass assignment and bad rates: 400.
     for (const body of [{ rateBps: 1207, organisationId: randomUUID() }, { rateBps: 1207, mode: 'provider' }, { rateBps: 0 }, { rateBps: 10001 }, { rateBps: 12.07 }, {}]) {
-      expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send(body)).status).toBe(400);
+      expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(tokenA)).send(body)).status).toBe(400);
     }
     // A manager of another organisation who is not its Initial Manager: refused (and it is never this organisation's setting).
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(otherManager)))).status).toBe(403);
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await factory.login(otherManager)))).status).toBe(403);
     // RLS backstop: a non-Initial manager writing the row directly is refused.
     await expect(asUser(c.userId, `INSERT INTO core.organisation_payroll_setting (organisation_id, holiday_pay_mode, updated_by) VALUES ($1, 'provider', $2)`, [orgId, c.userId]))
       .rejects.toMatchObject({ code: '42501' });
@@ -208,7 +220,7 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
   });
 
   it('an explicit "provider" setting chosen after ship: still no back-fill, no line; the change is audited', async () => {
-    const set = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(a)));
+    const set = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await asA()));
     expect(set.status).toBe(200);
     expect(set.body).toMatchObject({ mode: 'provider', rateBps: null, isDefault: false });
     const [audit] = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_setting.holiday_pay_changed' AND organisation_id = $1`, [orgId]);
@@ -219,7 +231,7 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
   });
 
   it('explicit rolled-up: approval freezes the shared rounding rule; prepare back-fills the pre-ship record (audited count); insert-only; RLS per role', async () => {
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 1207 })).status).toBe(200);
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await asA())).send({ rateBps: 1207 })).status).toBe(200);
     recs.push(await approvedRecordFor(1));
     const s1 = await snapshot(recs[1]!.id);
     expect({ mode: s1.mode, rate: s1.rate_bps, base: Number(s1.base_pence), pay: Number(s1.holiday_pay_pence), by: s1.created_by, user: s1.staff_user_id }).toEqual({
@@ -254,7 +266,7 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
   });
 
   it('runs: view and CSV show each frozen line; a finalised run never changes (late lines refused by the database, setting changes ignored)', async () => {
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(a)))).status).toBe(200);
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await asA()))).status).toBe(200);
     recs.push(await approvedRecordFor(2));
     expect(Number((await snapshot(recs[2]!.id)).holiday_pay_pence)).toBe(0);
     // Earlier frozen figures never move when the setting changes.
@@ -270,14 +282,14 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     const csv = await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenA));
     expect((csv.text as string).split('\n')[0]).toContain('Gross (GBP),Holiday pay (GBP)');
 
-    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await fresh(c)))).status).toBe(200);
+    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await asC('payroll.run.finalise')))).status).toBe(200);
     const before = (await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenA))).body;
     // Review fix 2: a holiday line for a record of the finalised run is refused by the database (runtime owner login, 42501).
     await unfreeze(recs[2]!.id);
     await expect(asUser(c.userId,
       `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, rate_bps, base_pence, holiday_pay_pence, created_by)
        VALUES ($1, $2, $3, $4, $5, 'rolled_up', 10000, $6, $6, $7)`, [orgId, a.workspaceId, recs[2]!.id, staff[2]!.profileId, staff[2]!.userId, recs[2]!.amountPence, c.userId])).rejects.toMatchObject({ code: '42501' });
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 10000 })).status).toBe(200);
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await asA())).send({ rateBps: 10000 })).status).toBe(200);
     const after = (await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenA))).body;
     expect(after.totals).toEqual(before.totals);
     expect(after.staff.map((s: { holidayPayPence: number }) => s.holidayPayPence)).toEqual(before.staff.map((s: { holidayPayPence: number }) => s.holidayPayPence));

@@ -95,9 +95,10 @@ export class HolidayPayService {
   }
 
   private async change(ctx: AuthContext, mode: HolidayPayMode, rateBps: number | null): Promise<HolidayPaySettingView> {
-    // Step-up first, before any read and outside our transaction (as every STEP_UP_ACTIONS operation; its refusal is
-    // audited in a short transaction of its own), then the flag / Venue Manager / Initial Manager checks under the write.
-    await this.stepUp.assertRecentStepUp(ctx, HOLIDAY_PAY_UPDATE_STEP_UP);
+    // Decision 5's action-bound proof first (enrolled authenticator + a single-use proof made for this action, Lane P1),
+    // before any read and outside our transaction (its refusal is audited in a short transaction of its own), then the
+    // flag / Venue Manager / Initial Manager checks under the write.
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, HOLIDAY_PAY_UPDATE_STEP_UP);
     return this.tenantContext.runInTenantContext(ctx, async (m) => {
       await this.assertCanManage(m, ctx);
       const before = await this.view(m, ctx);

@@ -41,7 +41,7 @@ function harness(opts: { held?: string[]; venue?: boolean; respond?: Responder; 
   const resourceScope = { assertHasWorkspace: jest.fn(), resolveTx: jest.fn(async () => (opts.venue ? { kind: 'venue', venueIds: [] } : { kind: 'owner', ownerUserId: ME, delegated: false })) };
   const audit = { record: jest.fn() };
   const stepUp = {
-    assertRecentStepUp: jest.fn(async () => {
+    assertFreshSecondFactorForAction: jest.fn(async () => {
       if (opts.stepUpRefused) throw new ForbiddenException({ code: 'STEP_UP_REQUIRED' });
     }),
   };
@@ -201,7 +201,7 @@ describe('PayrollAdjustmentService: approve and reject (decision 5 rule)', () =>
   it('approve needs a recent step-up of this session, checked before any read: refused => nothing read or written', async () => {
     const h = harness({ stepUpRefused: true, respond: withAdjustment(adjustmentRow()) });
     await expect(h.svc.approve(ctx, ADJ)).rejects.toMatchObject({ response: { code: 'STEP_UP_REQUIRED' } });
-    expect(h.stepUp.assertRecentStepUp).toHaveBeenCalledWith(ctx, PAYROLL_ADJUSTMENT_APPROVE_STEP_UP);
+    expect(h.stepUp.assertFreshSecondFactorForAction).toHaveBeenCalledWith(ctx, PAYROLL_ADJUSTMENT_APPROVE_STEP_UP);
     expect(h.queries).toEqual([]);
   });
 
@@ -218,7 +218,7 @@ describe('PayrollAdjustmentService: approve and reject (decision 5 rule)', () =>
   it('reject records the reason; no step-up (no money moves)', async () => {
     const h = harness({ respond: (sql) => (/a\.id = \$1|a\.id = ANY/.test(sql) ? [adjustmentRow()] : []) });
     await h.svc.reject(ctx, ADJ, 'Duplicate of last week');
-    expect(h.stepUp.assertRecentStepUp).not.toHaveBeenCalled();
+    expect(h.stepUp.assertFreshSecondFactorForAction).not.toHaveBeenCalled();
     const update = (h.manager.query as jest.Mock).mock.calls.find(([sql]) => /^\s*UPDATE core\.payroll_adjustment/.test(sql));
     expect(update![1]).toEqual([ADJ, ME, 'Duplicate of last week']);
   });
