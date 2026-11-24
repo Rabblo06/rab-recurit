@@ -10535,3 +10535,55 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   schedule clamp D3, untrusted clock-out never applied D4, manager review before payroll). An encrypted backup restored
   to the same device can bring back an old queue; the server refuses it after 72 h. The Secure Enclave signer and its
   registration are not built (server route missing).
+
+## Staff time off: requested by staff, approved by a manager, a hard block on new offers (branch feat/staff-time-off, 2026-11-24; owner decisions 42 and 48; DRAFT SQL StaffTimeOffSchema1786722230000)
+- **Surface:** a new core table `core.staff_time_off` (date ranges per staff member, organisation_id + workspace_id, FORCE
+  RLS) and nine routes: staff `GET/POST /rest/v1/me/time-off`, `POST /rest/v1/me/time-off/:id/cancel` (staff app only,
+  `offer.respond`); managers `GET /rest/v1/time-off?status=`, `GET/POST /rest/v1/staff/:staffProfileId/time-off`,
+  `POST /rest/v1/time-off/:id/approve|decline|cancel` (`staff.view` to read, `staff.edit` to decide or enter). It touches
+  another person's data (a staff member's absences) and which offers, and therefore which paid work, a person can get.
+- **Threats:** a staff member reading or cancelling a colleague's time off, or approving their own; a manager of another
+  workspace / organisation reading or deciding it; a Venue Manager seeing absences; a client naming `organisationId`,
+  `status`, `staffUserId` or `decidedBy`; a direct insert naming someone else; deleting the history; an offer slipping
+  through on a blocked day (time zone, overnight shift, daylight saving, time off approved after the offer was sent, or a
+  caller whose RLS view of the table is empty).
+- **Controls:** five layers. (1) PermissionGuard on every handler; (2) the same flag re-checked first in
+  `StaffTimeOffService` (403 before any read); (3) scope: a manager reaches only staff they created
+  (`StaffService.findOwnedProfileTx`) in the bound organisation and workspace, a staff member only rows with their own
+  profile AND user id — 404 otherwise; (4) RLS tenant predicate on every policy; (5) per-actor policies: managers =
+  non-venue, non-archived `core.manager_profile` of the bound workspace, never on their own row (no self-approval), INSERT
+  only approved rows they requested and decided, UPDATE only requested/approved rows into a decision or a cancellation;
+  staff = `staff_user_id = core.current_uid()`, INSERT only `requested` rows for themselves, UPDATE only their own
+  still-requested row to `cancelled`. Column UPDATE grants (decision / cancellation columns only), no DELETE grant (time off
+  is declined or cancelled, never deleted), grant-parity triggers hold the owner login to the same (UPDATE allow-list,
+  DELETE, TRUNCATE). Mutations are named actions checked by `assertTransition(STAFF_TIME_OFF_TRANSITIONS)` and written as a
+  compare-and-set on the previous status. Audit rows (`staff_time_off.*`, not shipped off-host) carry ids and dates only,
+  never the note or the decline reason. The offer block (`assertNoApprovedTimeOff`) runs in `assertStaffEligibleForOffer`
+  (every send path) and again in `applyOfferConfirmation`; it computes the organisation-local first day (start) and last
+  day (end − 1 µs) with `AT TIME ZONE core.organisation.timezone` in one statement and FAILS CLOSED (409
+  `STAFF_TIME_OFF_UNVERIFIABLE`) when no organisation is visible or the session is not one whose RLS shows that staff
+  member's time off — never a silent pass. Overlapping approved ranges are refused by an exclusion constraint (409).
+- **SECURITY TRADE-OFF (owner may veto):** RLS sees the old row (USING) and the new row (WITH CHECK) separately and
+  permissive policies are OR-ed, so the manager UPDATE policy cannot pair a specific old status with a specific new one: at
+  the database layer a manager of the workspace could re-decide approved time off (approved → approved / declined) or mark a
+  request cancelled while stamping a decision. The service refuses both (transition table, 409) before any write; no guard
+  trigger function was added to keep the SQL surface small. Likewise `staff_profile_id ↔ staff_user_id` consistency is
+  enforced by the service (it copies the user id from the profile it scoped), not by a constraint: a core table cannot name
+  the workspace-schema staff_profile; the offer block matches BOTH ids, so an inconsistent row can never block someone
+  else.
+- **Flagged assumptions:** requested (unapproved) time off does not block (reading of decision 42); a staff member cannot
+  withdraw APPROVED time off (they ask a manager); a manager cancels only approved time off and declines requests; time off
+  that already ended is refused (it blocks nothing); a manager never decides their own time off; the existing flags are
+  reused (staff.view / staff.edit / offer.respond), no permission migration; custom workspace members see no time off (the
+  RLS second predicate); no notifications yet (a new notification type needs a CHECK change = more owner SQL).
+- **Tests:** `staff-time-off.integration.spec.ts` (zero rows without tenant context; request → approve → send refused
+  409 and cancel lifts it; requested does not block; approval after send stops confirmation with the claim rolled back;
+  23:30 UTC in a UTC+1 organisation; overnight, end-at-midnight and daylight-saving day computation on real PostgreSQL;
+  fail-closed without tenant context and for a Venue Manager session; staff cannot read / cancel a colleague's row (404),
+  insert approved rows or decide (42501, routes 401/403); raw inserts with someone else's staff_user_id 42501; Venue
+  Manager sees nothing; other workspace / organisation 404; revoked flag 403 with nothing written; forbidden body fields
+  400; no DELETE privilege and immutable columns 42501; re-decision 409; overlapping approval 409; audit without the note),
+  `staff-time-off.service.spec.ts`, `staff-time-off-check.spec.ts`, `staff-time-off-sql.spec.ts`,
+  `staff-time-off-transitions.spec.ts`.
+- **Residual:** the front end is not built yet (no console or mobile screens); the block is checked at send and at
+  confirmation only, not at staff accept (the confirmation re-check covers it).

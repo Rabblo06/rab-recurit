@@ -344,6 +344,18 @@ export class StaffService {
   }
 
   /**
+   * Lane C (StaffRoleRateService): the staff profile `id` inside the caller's transaction, under this service's strict
+   * write-path scope (`assertOwned`, the caller's own created_by; no delegated read scope). 404 for a missing profile, a
+   * profile RLS hides (another workspace / organisation) or one outside the caller's scope — never 403.
+   */
+  async findOwnedProfileTx(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
+    const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
+    if (!profile?.user) throw new NotFoundException('Staff member not found.');
+    this.assertOwned(ctx, profile);
+    return profile;
+  }
+
+  /**
    * A `jobRoleId` on a create/update request was previously only checked
    * for organisation membership — a real gap: any manager could assign
    * another manager's *private* job role by guessing its UUID, even though

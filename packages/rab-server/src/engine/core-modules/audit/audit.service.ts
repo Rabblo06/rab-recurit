@@ -152,6 +152,17 @@ export const AuditAction = {
   VENUE_ROLE_RATE_CREATED: 'venue_role_rate.created',
   VENUE_ROLE_RATE_UPDATED: 'venue_role_rate.updated',
   VENUE_ROLE_RATE_DELETED: 'venue_role_rate.deleted',
+  /**
+   * Date-specific staff time off (`core.staff_time_off`, StaffTimeOffService; owner decisions 42, 48): a staff member
+   * requested or cancelled their own request; a manager approved, declined, cancelled approved time off or entered approved
+   * time off directly. `entityType` `staff_time_off`, `targetUserId` the staff member. Metadata: staffProfileId, startsOn,
+   * endsOn (+ the previous status on a decision / cancellation) — never the staff note or the decline reason.
+   */
+  STAFF_TIME_OFF_REQUESTED: 'staff_time_off.requested',
+  STAFF_TIME_OFF_ENTERED: 'staff_time_off.entered',
+  STAFF_TIME_OFF_APPROVED: 'staff_time_off.approved',
+  STAFF_TIME_OFF_DECLINED: 'staff_time_off.declined',
+  STAFF_TIME_OFF_CANCELLED: 'staff_time_off.cancelled',
   VENUE_PHOTO_UPDATED: 'venue.photo_updated',
   FILE_UPLOADED: 'file.uploaded',
   FILE_DOWNLOAD_AUTHORIZED: 'file.download_authorized',

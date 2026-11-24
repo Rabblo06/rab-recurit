@@ -8,6 +8,7 @@ import { ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
+import { assertNoApprovedTimeOff } from '../../staff/services/staff-time-off-check';
 
 /**
  * DOM-01 — the single canonical "can this staff member receive/hold an offer
@@ -76,6 +77,10 @@ export async function assertStaffEligibleForOffer(
   if (conflicting.length > 0) {
     throw new ConflictException('This staff member already has a confirmed shift that overlaps this time.');
   }
+
+  // Owner decision 42 (hard block): APPROVED time off on any organisation-local day this window touches refuses the offer
+  // (409 STAFF_TIME_OFF). Its own function and file (modules/staff/services/staff-time-off-check.ts); never acknowledgeable.
+  await assertNoApprovedTimeOff(manager, { staffProfileId, staffUserId: staffProfile.userId }, window);
 
   return staffProfile;
 }
