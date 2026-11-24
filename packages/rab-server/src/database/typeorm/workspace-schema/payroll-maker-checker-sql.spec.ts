@@ -8,7 +8,9 @@ import {
   CORE_PAYROLL_RUN_UPDATE_CHECK_BEFORE_DEPARSED,
   PAYROLL_MAKER_CHECKER_HASHES as H,
   PAYROLL_RECORD_GUARD_BODY_AFTER,
+  PAYROLL_RECORD_GUARD_BLOCK,
   PAYROLL_RECORD_GUARD_BODY_BEFORE,
+  PAYROLL_RECORD_GUARD_DECLARE_ADDED,
   payrollRecordGuardSql,
 } from './payroll-maker-checker-sql';
 import { SEMANTIC_GOLDEN_PG16 } from '../../posture-drift/semantic-golden.pg16';
@@ -24,10 +26,11 @@ describe('payroll maker-checker backstop SQL (decision 5)', () => {
     expect(PAYROLL_RECORD_GUARD_BODY_BEFORE).toBe(original);
     expect(md5(`${PAYROLL_RECORD_GUARD_BODY_BEFORE}|`)).toBe(H.guardBodyBefore);
     expect(md5(`${PAYROLL_RECORD_GUARD_BODY_AFTER}|`)).toBe(H.guardBodyAfter);
-    const removed = PAYROLL_RECORD_GUARD_BODY_AFTER.replace('  prepared boolean;\n', '').replace(/  -- Owner decision 5[\s\S]*?  END IF;\n  END IF;\n/, '');
+    const removed = PAYROLL_RECORD_GUARD_BODY_AFTER.replace(PAYROLL_RECORD_GUARD_DECLARE_ADDED, '').replace(PAYROLL_RECORD_GUARD_BLOCK, '');
     expect(removed).toBe(PAYROLL_RECORD_GUARD_BODY_BEFORE);
-    expect(PAYROLL_RECORD_GUARD_BODY_AFTER).toContain('NEW.approved_by IS DISTINCT FROM OLD.approved_by');
-    expect(PAYROLL_RECORD_GUARD_BODY_AFTER).toContain("format('SELECT EXISTS (SELECT 1 FROM %1$I.shift_report sr");
+    expect(PAYROLL_RECORD_GUARD_BLOCK).toContain('NEW.approved_by IS DISTINCT FROM core.current_uid()');
+    expect(PAYROLL_RECORD_GUARD_BLOCK).toContain('OLD.approved_by IS NOT NULL');
+    expect(PAYROLL_RECORD_GUARD_BLOCK).toContain('NOT coalesce(has_report, false) OR NOT coalesce(has_seat, false) OR finaliser IS NULL');
     expect(PAYROLL_RECORD_GUARD_BODY_AFTER).toContain("USING ERRCODE = '42501'");
     expect(payrollRecordGuardSql(PAYROLL_RECORD_GUARD_BODY_AFTER)).not.toMatch(/SECURITY DEFINER|OWNER TO|GRANT|REVOKE/);
   });
