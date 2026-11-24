@@ -58,9 +58,7 @@ describeIfDb('staff document expiry alerts (integration)', () => {
   const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
   const pdf = () => Buffer.from('%PDF-1.4\n%%EOF\n');
 
-  async function org(
-    label: string,
-  ): Promise<{
+  async function org(label: string): Promise<{
     orgId: string;
     a: TestIdentity;
     s1: TestIdentity;
@@ -207,5 +205,37 @@ describeIfDb('staff document expiry alerts (integration)', () => {
     const after = await alertsFor(w.s1.userId);
     expect(after).toHaveLength(4);
     expect(after[3]!.related_entity_id).toBe(in30);
+  });
+
+  it('review L1: documents of one staff member reaching the same threshold together are ONE notice each to the staff member and the owner', async () => {
+    const w = await org('docexp-coalesce');
+    const docs = [
+      await upload(w.token, w.s1, '2030-01-04'),
+      await upload(w.token, w.s1, '2030-01-05'),
+      await upload(w.token, w.s1, '2030-01-06'),
+    ];
+    const run = await runStaffDocumentExpiryCycle(
+      adminDataSource,
+      tenantContext,
+      notifications,
+      { organisationId: w.orgId, today: '2030-01-01' },
+    );
+    expect(run.notified).toBe(3); // three documents covered ...
+    const owner = await alertsFor(w.a.userId);
+    expect(owner).toHaveLength(1); // ... by one owner notice
+    expect(owner[0]!.title).toMatch(/expiring soon/);
+    expect(await alertsFor(w.s1.userId)).toHaveLength(1);
+    // Every document was claimed: a second run sends nothing.
+    expect(
+      (
+        await runStaffDocumentExpiryCycle(
+          adminDataSource,
+          tenantContext,
+          notifications,
+          { organisationId: w.orgId, today: '2030-01-01' },
+        )
+      ).notified,
+    ).toBe(0);
+    expect(docs).toHaveLength(3);
   });
 });

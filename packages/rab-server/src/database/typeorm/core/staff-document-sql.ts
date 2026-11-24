@@ -27,6 +27,15 @@
  *   SELECT for anyone in the organisation (staff see what is required; the offer check reads it); INSERT / UPDATE / DELETE
  *   only by a non-venue manager of the organisation, recorded as updated_by = current uid.
  *
+ * Independent security review (2026-11-24) fixes, all in this same migration (never merged before):
+ *   H1/H2 core.staff_document_offer_block(): the offer block reads through a crewflow-owned SECURITY DEFINER pinned to the
+ *         bound tenant (not the caller's RLS), and only a VERIFIED valid document lifts a block on an expired type;
+ *   M1    the guard also runs BEFORE INSERT (pending, not scanned, uploaded_by = current uid, created_at = now()); verify
+ *         needs scan_status 'clean'; verified_by / rejected_by / revoked_by must be the current uid; scan columns change
+ *         only through core.staff_document_record_scan() (crewflow-owned definer, the uploading transaction only);
+ *   M2    requirement writes: the organisation's CEO or current Initial Manager only;
+ *   M3    maker-checker: the uploader never verifies the same document.
+ *
  * ACCESS: both tables and the guard function are owned by crewflow (handed over inside withCrewflowCoreCreate); crewflow_app
  * holds SELECT + INSERT + column UPDATE (decision and scan columns) on staff_document and SELECT / INSERT / DELETE + column
  * UPDATE (required, updated_by, updated_at) on the requirement table; nothing for PUBLIC. The owner login is bound by FORCE
@@ -110,9 +119,12 @@ const TENANT = `(organisation_id = core.current_org()) AND (workspace_id = core.
 const WORKSPACE_MANAGER = `(EXISTS (SELECT 1 FROM core.manager_profile mp
       WHERE (mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org())
         AND (mp.workspace_id = core.current_workspace()) AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))`;
-const ORGANISATION_MANAGER = `(EXISTS (SELECT 1 FROM core.manager_profile mp
-      WHERE (mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org())
-        AND (mp.type <> 'venue'::text) AND (mp.archived_at IS NULL)))`;
+/** Review M2 (owner decision 90): only the organisation's CEO or its current Initial Manager changes required types. */
+const REQUIREMENT_WRITER = `(EXISTS (SELECT 1 FROM core.manager_profile mp
+      WHERE (mp.user_id = core.current_uid()) AND (mp.organisation_id = core.current_org()) AND (mp.archived_at IS NULL)
+        AND ((mp.type = 'ceo'::text) OR ((mp.type = 'internal'::text) AND mp.is_initial_manager AND (mp.superseded_at IS NULL)))))`;
+/** Inside the two crewflow-owned SECURITY DEFINER functions only (review H1 / M1). */
+const DEFINER = `(CURRENT_USER = 'crewflow'::name)`;
 const OWN = `(staff_user_id = core.current_uid())`;
 const WORKER = `(current_setting('rab.actor_type'::text, true) = 'worker'::text)`;
 
@@ -128,9 +140,6 @@ export const STAFF_DOCUMENT_UPDATABLE_COLUMNS: readonly string[] =
     'revoked_by',
     'revoked_at',
     'revocation_reason',
-    'scan_status',
-    'scan_engine',
-    'scanned_at',
   ]);
 
 export const STAFF_DOCUMENT_TABLES_SQL = `
@@ -208,13 +217,27 @@ AS $fn$
 DECLARE
   v_privileged boolean := current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
     OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false);
+  v_uid uuid := core.current_uid();
 BEGIN
   IF TG_OP = 'TRUNCATE' THEN
     IF v_privileged THEN RETURN NULL; END IF;
     RAISE EXCEPTION 'staff document tables cannot be truncated' USING ERRCODE = '42501';
   END IF;
-  IF TG_OP <> 'UPDATE' OR TG_TABLE_NAME IS DISTINCT FROM 'staff_document' THEN
+  IF TG_OP NOT IN ('INSERT', 'UPDATE') OR TG_TABLE_NAME IS DISTINCT FROM 'staff_document' THEN
     RAISE EXCEPTION 'core.staff_document_guard: unexpected % on %', TG_OP, TG_TABLE_NAME USING ERRCODE = '42501';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    -- A new document is always pending and unscanned, written by its uploader; created_at is the transaction's own now()
+    -- (core.staff_document_record_scan relies on it to accept a verdict only in the uploading transaction).
+    IF NEW.status IS DISTINCT FROM 'pending' OR NEW.scan_status IS DISTINCT FROM 'not_scanned' OR NEW.scan_engine IS NOT NULL OR NEW.scanned_at IS NOT NULL THEN
+      RAISE EXCEPTION 'a staff document starts pending and not scanned; a verdict is recorded only by core.staff_document_record_scan()' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.uploaded_by IS DISTINCT FROM v_uid AND NOT v_privileged THEN
+      RAISE EXCEPTION 'uploaded_by must be the current user' USING ERRCODE = '42501';
+    END IF;
+    NEW.created_at := pg_catalog.now();
+    NEW.updated_at := pg_catalog.now();
+    RETURN NEW;
   END IF;
   IF (NEW.id, NEW.organisation_id, NEW.workspace_id, NEW.staff_user_id, NEW.document_type, NEW.file_id, NEW.issued_on, NEW.expires_on,
       NEW.uploaded_by, NEW.created_at)
@@ -223,14 +246,31 @@ BEGIN
       OLD.uploaded_by, OLD.created_at) THEN
     RAISE EXCEPTION 'a staff document''s owner, type, file and dates never change; upload a new document instead' USING ERRCODE = '42501';
   END IF;
-  IF (NEW.scan_status, NEW.scan_engine, NEW.scanned_at) IS DISTINCT FROM (OLD.scan_status, OLD.scan_engine, OLD.scanned_at)
-     AND OLD.scan_status <> 'not_scanned' THEN
-    RAISE EXCEPTION 'a recorded scan verdict never changes' USING ERRCODE = '42501';
+  IF (NEW.scan_status, NEW.scan_engine, NEW.scanned_at) IS DISTINCT FROM (OLD.scan_status, OLD.scan_engine, OLD.scanned_at) THEN
+    -- Only the scanner path (the crewflow-owned definer core.staff_document_record_scan), once, from not_scanned.
+    IF current_user IS DISTINCT FROM 'crewflow'::name OR OLD.scan_status <> 'not_scanned' OR NEW.status IS DISTINCT FROM OLD.status THEN
+      RAISE EXCEPTION 'a scan verdict is recorded only once, by core.staff_document_record_scan()' USING ERRCODE = '42501';
+    END IF;
   END IF;
   IF NEW.status IS DISTINCT FROM OLD.status THEN
     IF NOT ((OLD.status = 'pending' AND NEW.status IN ('verified', 'rejected', 'revoked'))
             OR (OLD.status = 'verified' AND NEW.status = 'revoked')) THEN
       RAISE EXCEPTION 'invalid staff document transition % -> %', OLD.status, NEW.status USING ERRCODE = '23514';
+    END IF;
+    IF NEW.status = 'verified' THEN
+      IF NEW.scan_status IS DISTINCT FROM 'clean' THEN
+        RAISE EXCEPTION 'a staff document is verified only after a clean virus scan' USING ERRCODE = '23514';
+      END IF;
+      IF NEW.verified_by IS DISTINCT FROM v_uid THEN
+        RAISE EXCEPTION 'verified_by must be the current user' USING ERRCODE = '42501';
+      END IF;
+      IF NEW.verified_by = NEW.uploaded_by THEN
+        RAISE EXCEPTION 'the uploader cannot verify the same document (maker-checker)' USING ERRCODE = '23514';
+      END IF;
+    ELSIF NEW.status = 'rejected' AND NEW.rejected_by IS DISTINCT FROM v_uid THEN
+      RAISE EXCEPTION 'rejected_by must be the current user' USING ERRCODE = '42501';
+    ELSIF NEW.status = 'revoked' AND NEW.revoked_by IS DISTINCT FROM v_uid THEN
+      RAISE EXCEPTION 'revoked_by must be the current user' USING ERRCODE = '42501';
     END IF;
     IF OLD.status = 'verified' AND (NEW.verified_by, NEW.verified_at) IS DISTINCT FROM (OLD.verified_by, OLD.verified_at) THEN
       RAISE EXCEPTION 'an earlier verification is kept when a document is revoked' USING ERRCODE = '23514';
@@ -245,9 +285,77 @@ BEGIN
 END
 $fn$`;
 
+/**
+ * Review H1 / H2: the offer block must not depend on what the CALLER can read (a CEO, or a custom-role Venue Manager whose
+ * manager_profile is not bound to this workspace, sees no document rows under RLS, so the block failed open). A
+ * crewflow-owned SECURITY DEFINER reads the bound workspace's documents for ONE staff user and returns only the blocked
+ * types and the latest expiry date — no document data. Pinned to core.current_org() / core.current_workspace(); no tenant
+ * bound = an error (fail closed), never "no rows".
+ * Rule (owner decision 83 as updated by the review): a requested type is blocked when the staff member holds a pending or
+ * verified document of it that expired before p_on_date AND has no VERIFIED document of it valid on p_on_date — once a
+ * required document has expired, a pending upload never lifts the block. Never held at all = not blocked (owner decision).
+ * Owner crewflow (not rab_secure_owner): a rab_secure_owner definer naming a crewflow table would grow the frozen Phase 0b R4
+ * list; the runtime login already inherits crewflow, so ownership by rab_secure_owner would add no protection against it.
+ */
+export const STAFF_DOCUMENT_OFFER_BLOCK_FUNCTION_SQL = `CREATE FUNCTION core.staff_document_offer_block(p_staff_user_id uuid, p_required_types text[], p_on_date date)
+RETURNS TABLE (document_type text, expired_on date)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  v_org uuid := core.current_org();
+  v_ws uuid := core.current_workspace();
+BEGIN
+  IF v_org IS NULL OR v_ws IS NULL OR p_staff_user_id IS NULL OR p_on_date IS NULL THEN
+    RAISE EXCEPTION 'core.staff_document_offer_block needs a bound organisation and workspace' USING ERRCODE = '42501';
+  END IF;
+  RETURN QUERY
+    SELECT d.document_type, max(d.expires_on)
+      FROM core.staff_document d
+     WHERE d.organisation_id = v_org AND d.workspace_id = v_ws AND d.staff_user_id = p_staff_user_id
+       AND d.document_type = ANY (coalesce(p_required_types, ARRAY[]::text[]))
+       AND d.status IN ('pending', 'verified') AND d.expires_on IS NOT NULL AND d.expires_on < p_on_date
+       AND NOT EXISTS (
+         SELECT 1 FROM core.staff_document v
+          WHERE v.organisation_id = v_org AND v.workspace_id = v_ws AND v.staff_user_id = p_staff_user_id
+            AND v.document_type = d.document_type AND v.status = 'verified' AND (v.expires_on IS NULL OR v.expires_on >= p_on_date))
+     GROUP BY d.document_type
+     ORDER BY d.document_type;
+END
+$fn$`;
+
+/**
+ * Review M1: the ONLY way a scan verdict is recorded. Accepts `clean` for a document of the bound organisation + workspace
+ * that the CURRENT user uploaded IN THIS TRANSACTION (created_at = now(), which the guard forces on INSERT), still pending and
+ * not scanned. The scanner runs in the application; this narrows who can claim a verdict to the uploading request itself.
+ */
+export const STAFF_DOCUMENT_RECORD_SCAN_FUNCTION_SQL = `CREATE FUNCTION core.staff_document_record_scan(p_document_id uuid, p_engine text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF p_engine IS NULL OR p_engine !~ '^[A-Za-z0-9._-]{1,100}$' THEN
+    RAISE EXCEPTION 'core.staff_document_record_scan: invalid scanner engine name' USING ERRCODE = '22023';
+  END IF;
+  UPDATE core.staff_document
+     SET scan_status = 'clean', scan_engine = p_engine, scanned_at = pg_catalog.clock_timestamp()
+   WHERE id = p_document_id AND organisation_id = core.current_org() AND workspace_id = core.current_workspace()
+     AND uploaded_by = core.current_uid() AND status = 'pending' AND scan_status = 'not_scanned' AND created_at = pg_catalog.now();
+  RETURN FOUND;
+END
+$fn$`;
+
 export const STAFF_DOCUMENT_SECURITY_SQL: readonly string[] = [
   'REVOKE ALL ON FUNCTION core.staff_document_guard() FROM PUBLIC',
-  'CREATE TRIGGER staff_document_guard BEFORE UPDATE ON core.staff_document FOR EACH ROW EXECUTE FUNCTION core.staff_document_guard()',
+  'REVOKE ALL ON FUNCTION core.staff_document_offer_block(uuid, text[], date) FROM PUBLIC',
+  'GRANT EXECUTE ON FUNCTION core.staff_document_offer_block(uuid, text[], date) TO crewflow_app',
+  'REVOKE ALL ON FUNCTION core.staff_document_record_scan(uuid, text) FROM PUBLIC',
+  'GRANT EXECUTE ON FUNCTION core.staff_document_record_scan(uuid, text) TO crewflow_app',
+  'CREATE TRIGGER staff_document_guard BEFORE INSERT OR UPDATE ON core.staff_document FOR EACH ROW EXECUTE FUNCTION core.staff_document_guard()',
   ...STAFF_DOCUMENT_TABLES.map(
     (t) =>
       `CREATE TRIGGER ${t}_truncate_guard BEFORE TRUNCATE ON core.${t} FOR EACH STATEMENT EXECUTE FUNCTION core.staff_document_guard()`,
@@ -261,19 +369,24 @@ export const STAFF_DOCUMENT_SECURITY_SQL: readonly string[] = [
   USING (${TENANT} AND (${OWN} OR ${WORKSPACE_MANAGER} OR ${WORKER}))`,
   `CREATE POLICY staff_document_insert ON core.staff_document AS PERMISSIVE FOR INSERT TO PUBLIC
   WITH CHECK (${TENANT} AND (uploaded_by = core.current_uid()) AND (status = 'pending'::text)
-    AND (scan_status = ANY (ARRAY['not_scanned'::text, 'clean'::text])) AND (${OWN} OR ${WORKSPACE_MANAGER}))`,
+    AND (scan_status = 'not_scanned'::text) AND (${OWN} OR ${WORKSPACE_MANAGER}))`,
   `CREATE POLICY staff_document_update ON core.staff_document AS PERMISSIVE FOR UPDATE TO PUBLIC
   USING (${TENANT} AND ${WORKSPACE_MANAGER})
   WITH CHECK (${TENANT} AND ${WORKSPACE_MANAGER} AND (staff_user_id <> core.current_uid()))`,
+  `CREATE POLICY staff_document_definer_select ON core.staff_document AS PERMISSIVE FOR SELECT TO crewflow
+  USING (${DEFINER} AND ${TENANT})`,
+  `CREATE POLICY staff_document_definer_scan ON core.staff_document AS PERMISSIVE FOR UPDATE TO crewflow
+  USING (${DEFINER} AND ${TENANT})
+  WITH CHECK (${DEFINER} AND ${TENANT})`,
   `CREATE POLICY staff_document_requirement_select ON core.staff_document_requirement AS PERMISSIVE FOR SELECT TO PUBLIC
   USING (organisation_id = core.current_org())`,
   `CREATE POLICY staff_document_requirement_insert ON core.staff_document_requirement AS PERMISSIVE FOR INSERT TO PUBLIC
-  WITH CHECK ((organisation_id = core.current_org()) AND (updated_by = core.current_uid()) AND ${ORGANISATION_MANAGER})`,
+  WITH CHECK ((organisation_id = core.current_org()) AND (updated_by = core.current_uid()) AND ${REQUIREMENT_WRITER})`,
   `CREATE POLICY staff_document_requirement_update ON core.staff_document_requirement AS PERMISSIVE FOR UPDATE TO PUBLIC
-  USING ((organisation_id = core.current_org()) AND ${ORGANISATION_MANAGER})
-  WITH CHECK ((organisation_id = core.current_org()) AND (updated_by = core.current_uid()) AND ${ORGANISATION_MANAGER})`,
+  USING ((organisation_id = core.current_org()) AND ${REQUIREMENT_WRITER})
+  WITH CHECK ((organisation_id = core.current_org()) AND (updated_by = core.current_uid()) AND ${REQUIREMENT_WRITER})`,
   `CREATE POLICY staff_document_requirement_delete ON core.staff_document_requirement AS PERMISSIVE FOR DELETE TO PUBLIC
-  USING ((organisation_id = core.current_org()) AND ${ORGANISATION_MANAGER})`,
+  USING ((organisation_id = core.current_org()) AND ${REQUIREMENT_WRITER})`,
   'GRANT SELECT, INSERT ON TABLE core.staff_document TO crewflow_app',
   `GRANT UPDATE (${STAFF_DOCUMENT_UPDATABLE_COLUMNS.join(', ')}) ON TABLE core.staff_document TO crewflow_app`,
   'GRANT SELECT, INSERT, DELETE ON TABLE core.staff_document_requirement TO crewflow_app',
@@ -289,6 +402,8 @@ export const STAFF_DOCUMENT_OWNERSHIP_SQL: readonly string[] = [
     (t) => `ALTER TABLE core.${t} OWNER TO crewflow`,
   ),
   'ALTER FUNCTION core.staff_document_guard() OWNER TO crewflow',
+  'ALTER FUNCTION core.staff_document_offer_block(uuid, text[], date) OWNER TO crewflow',
+  'ALTER FUNCTION core.staff_document_record_scan(uuid, text) OWNER TO crewflow',
 ];
 
 /** down(): retention — refuses while any document row exists (counted after NO FORCE in down()'s own transaction). */
@@ -302,6 +417,8 @@ export const STAFF_DOCUMENT_ROWS_SQL = `SELECT (SELECT pg_catalog.count(*) FROM 
 export const STAFF_DOCUMENT_DOWN_SQL: readonly string[] = [
   'DROP TABLE core.staff_document_requirement',
   'DROP TABLE core.staff_document',
+  'DROP FUNCTION core.staff_document_record_scan(uuid, text)',
+  'DROP FUNCTION core.staff_document_offer_block(uuid, text[], date)',
   'DROP FUNCTION core.staff_document_guard()',
   `ALTER TABLE core.stored_file DROP CONSTRAINT stored_file_kind_check`,
   `ALTER TABLE core.stored_file ADD CONSTRAINT stored_file_kind_check CHECK (kind IN (${list(STORED_FILE_KINDS_BEFORE_1786722300000)}))`,
@@ -330,12 +447,16 @@ SELECT c.relname::text AS tbl,
  WHERE c.relnamespace = 'core'::regnamespace AND c.relname = ANY (ARRAY['staff_document', 'staff_document_requirement'])
  ORDER BY c.relname`;
 
+export const STAFF_DOCUMENT_FUNCTIONS = ['core.staff_document_guard()', 'core.staff_document_offer_block(uuid,text[],date)', 'core.staff_document_record_scan(uuid,text)'] as const;
+
 export const STAFF_DOCUMENT_FUNCTION_STATE_SQL = `
-SELECT pg_catalog.pg_get_userbyid(p.proowner)::text AS owner, p.prosecdef AS definer,
+SELECT f.sig AS fn, pg_catalog.pg_get_userbyid(p.proowner)::text AS owner, p.prosecdef AS definer,
        pg_catalog.array_to_string(p.proconfig, ';') AS config,
        pg_catalog.has_function_privilege('crewflow_app', p.oid, 'EXECUTE') AS app_execute,
        (p.proacl IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(p.proacl) x WHERE x.grantee = 0)) AS public_revoked
-  FROM pg_catalog.pg_proc p WHERE p.oid = pg_catalog.to_regprocedure('core.staff_document_guard()')`;
+  FROM (VALUES ('core.staff_document_guard()'), ('core.staff_document_offer_block(uuid,text[],date)'), ('core.staff_document_record_scan(uuid,text)')) AS f(sig)
+  JOIN pg_catalog.pg_proc p ON p.oid = pg_catalog.to_regprocedure(f.sig)
+ ORDER BY f.sig`;
 
 export interface StaffDocumentTableState {
   tbl: string;
@@ -365,7 +486,7 @@ export const EXPECTED_STAFF_DOCUMENT_STATE: Readonly<
       STAFF_DOCUMENT_UPDATABLE_COLUMNS.map((c) => `crewflow_app:UPDATE:${c}`),
     ),
     policies:
-      'staff_document_insert:a,staff_document_select:r,staff_document_update:w',
+      'staff_document_definer_scan:w,staff_document_definer_select:r,staff_document_insert:a,staff_document_select:r,staff_document_update:w',
     triggers: 'staff_document_guard:O,staff_document_truncate_guard:O',
   },
   staff_document_requirement: {
@@ -385,10 +506,15 @@ export const EXPECTED_STAFF_DOCUMENT_STATE: Readonly<
 });
 
 /** Every difference between the catalog and EXPECTED_STAFF_DOCUMENT_STATE (empty = as reviewed). */
-export function staffDocumentStateProblems(
-  rows: readonly StaffDocumentTableState[],
-  fn: Record<string, unknown> | undefined,
-): string[] {
+/** The reviewed posture of the three functions: guard = invoker, no EXECUTE; the two definers = EXECUTE for crewflow_app. */
+export const EXPECTED_STAFF_DOCUMENT_FUNCTIONS: Readonly<Record<(typeof STAFF_DOCUMENT_FUNCTIONS)[number], Record<string, unknown>>> = Object.freeze({
+  'core.staff_document_guard()': { owner: 'crewflow', definer: false, config: 'search_path=pg_catalog, pg_temp', app_execute: false, public_revoked: true },
+  'core.staff_document_offer_block(uuid,text[],date)': { owner: 'crewflow', definer: true, config: 'search_path=pg_catalog, pg_temp', app_execute: true, public_revoked: true },
+  'core.staff_document_record_scan(uuid,text)': { owner: 'crewflow', definer: true, config: 'search_path=pg_catalog, pg_temp', app_execute: true, public_revoked: true },
+});
+
+/** Every difference between the catalog and the expected tables / functions (empty = as reviewed). */
+export function staffDocumentStateProblems(rows: readonly StaffDocumentTableState[], fns: ReadonlyArray<Record<string, unknown>>): string[] {
   const problems: string[] = [];
   for (const t of STAFF_DOCUMENT_TABLES) {
     const got = rows.find((r) => r.tbl === t);
@@ -398,29 +524,19 @@ export function staffDocumentStateProblems(
     }
     const want = EXPECTED_STAFF_DOCUMENT_STATE[t];
     for (const key of Object.keys(want) as Array<keyof typeof want>) {
-      if (String(got[key]) !== String(want[key]))
-        problems.push(
-          `core.${t}.${key}: expected ${JSON.stringify(want[key])}, found ${JSON.stringify(got[key])}`,
-        );
+      if (String(got[key]) !== String(want[key])) problems.push(`core.${t}.${key}: expected ${JSON.stringify(want[key])}, found ${JSON.stringify(got[key])}`);
     }
   }
-  if (rows.length !== STAFF_DOCUMENT_TABLES.length)
-    problems.push(
-      `expected ${STAFF_DOCUMENT_TABLES.length} tables, found ${rows.length}`,
-    );
-  const wantFn = {
-    owner: 'crewflow',
-    definer: false,
-    config: 'search_path=pg_catalog, pg_temp',
-    app_execute: false,
-    public_revoked: true,
-  };
-  if (!fn) problems.push(`${STAFF_DOCUMENT_GUARD_FUNCTION}: missing`);
-  else
-    for (const [k, v] of Object.entries(wantFn))
-      if (fn[k] !== v)
-        problems.push(
-          `${STAFF_DOCUMENT_GUARD_FUNCTION}.${k}: expected ${JSON.stringify(v)}, found ${JSON.stringify(fn[k])}`,
-        );
+  if (rows.length !== STAFF_DOCUMENT_TABLES.length) problems.push(`expected ${STAFF_DOCUMENT_TABLES.length} tables, found ${rows.length}`);
+  for (const sig of STAFF_DOCUMENT_FUNCTIONS) {
+    const got = fns.find((f) => f.fn === sig);
+    if (!got) {
+      problems.push(`${sig}: missing`);
+      continue;
+    }
+    for (const [k, v] of Object.entries(EXPECTED_STAFF_DOCUMENT_FUNCTIONS[sig])) {
+      if (got[k] !== v) problems.push(`${sig}.${k}: expected ${JSON.stringify(v)}, found ${JSON.stringify(got[k])}`);
+    }
+  }
   return problems;
 }

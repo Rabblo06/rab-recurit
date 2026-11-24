@@ -10,6 +10,11 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import {
+  VirusScanner,
+  VirusScanVerdict,
+} from '../../engine/core-modules/storage/virus-scan/virus-scanner';
+import { assertNoExpiredRequiredDocument } from '../../modules/staff/services/assert-no-expired-required-document';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -25,6 +30,16 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * document of the same type satisfies the requirement; an offer sent before expiry is not revoked.
  */
 const RUN = integrationTestDatabaseReady();
+
+// Test double for the scanner so a document can be scanned clean and then verified (production without CLAMAV_HOST never
+// marks anything clean).
+const scannerDouble = {
+  engine: 'test-engine',
+  scan: async (): Promise<VirusScanVerdict> => ({
+    status: 'clean',
+    engine: 'test-engine',
+  }),
+};
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(180_000);
@@ -51,6 +66,10 @@ describeIfDb('staff documents: offer block (integration)', () => {
     const { organisation, managers } =
       await factory.createOrganisationWithManagers(1, { workspace: true });
     const a = managers[0]!;
+    await adminDataSource.query(
+      `UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`,
+      [a.userId],
+    );
     const token = await factory.login(a);
     const venue = await http()
       .post('/rest/v1/venues')
@@ -64,16 +83,13 @@ describeIfDb('staff documents: offer block (integration)', () => {
     expect(role.status).toBe(201);
     const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
     const endsAt = new Date(startsAt.getTime() + 6 * 3600 * 1000);
-    const shift = await http()
-      .post('/rest/v1/shifts')
-      .set(auth(token))
-      .send({
-        venueId: venue.body.id,
-        jobRoleId: role.body.id,
-        startsAt: startsAt.toISOString(),
-        endsAt: endsAt.toISOString(),
-        requiredCount: 3,
-      });
+    const shift = await http().post('/rest/v1/shifts').set(auth(token)).send({
+      venueId: venue.body.id,
+      jobRoleId: role.body.id,
+      startsAt: startsAt.toISOString(),
+      endsAt: endsAt.toISOString(),
+      requiredCount: 3,
+    });
     expect(shift.status).toBe(201);
     expect(
       (
@@ -121,10 +137,41 @@ describeIfDb('staff documents: offer block (integration)', () => {
     return res.body.id as string;
   };
 
+  /** The staff member uploads their own document (scanned clean by the double); a manager verifies it (maker-checker). */
+  const verifiedDoc = async (
+    w: World,
+    staff: TestIdentity,
+    expiresOn: string,
+  ) => {
+    const staffToken = await factory.login(staff);
+    const up = await http()
+      .post('/rest/v1/staff-documents/me')
+      .set(auth(staffToken))
+      .field('documentType', 'right_to_work')
+      .field('expiresOn', expiresOn)
+      .attach('file', pdf(), {
+        filename: 'doc.pdf',
+        contentType: 'application/pdf',
+      });
+    expect(up.status).toBe(201);
+    const v = await http()
+      .post(`/rest/v1/staff/${staff.profileId}/documents/${up.body.id}/verify`)
+      .set(auth(w.token))
+      .send({});
+    expect(v.status).toBe(200);
+    return up.body.id as string;
+  };
+  const send = (w: World, staff: TestIdentity) =>
+    http()
+      .post(`/rest/v1/shifts/${w.shiftId}/offers`)
+      .set(auth(w.token))
+      .send({ staffProfileId: staff.profileId });
+
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
-    }).compile();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(VirusScanner)
+      .useValue(scannerDouble)
+      .compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
@@ -198,7 +245,7 @@ describeIfDb('staff documents: offer block (integration)', () => {
     ).toEqual([fine.profileId, missing.profileId].sort());
   });
 
-  it('a newer current document of the same type satisfies the requirement; a revoked one does not count', async () => {
+  it('a newer VERIFIED document lifts the block; a revoked one and a merely pending one do not (review H2)', async () => {
     const w = await world();
     const staff = await activeStaff(w, 'renewed');
     await uploadDoc(w, staff, 'right_to_work', '2020-01-31');
@@ -216,15 +263,100 @@ describeIfDb('staff documents: offer block (integration)', () => {
           .send({ staffProfileId: staff.profileId })
       ).status,
     ).toBe(409);
+    // A pending upload with a far-future expiry does not lift it (review H2).
     await uploadDoc(w, staff, 'right_to_work', '2099-12-31');
-    expect(
-      (
-        await http()
-          .post(`/rest/v1/shifts/${w.shiftId}/offers`)
-          .set(auth(w.token))
-          .send({ staffProfileId: staff.profileId })
-      ).status,
-    ).toBe(201);
+    expect((await send(w, staff)).status).toBe(409);
+    // Only a verified, valid replacement does.
+    await verifiedDoc(w, staff, '2099-12-31');
+    expect((await send(w, staff)).status).toBe(201);
+  });
+
+  it('review H2: after an expired VERIFIED document, the staff member cannot lift the block with a self-upload expiring in 2070', async () => {
+    const w = await world();
+    const staff = await activeStaff(w, 'selfrenew');
+    await verifiedDoc(w, staff, '2020-01-31');
+    const staffToken = await factory.login(staff);
+    const self = await http()
+      .post('/rest/v1/staff-documents/me')
+      .set(auth(staffToken))
+      .field('documentType', 'right_to_work')
+      .field('expiresOn', '2070-01-01')
+      .attach('file', pdf(), {
+        filename: 'doc.pdf',
+        contentType: 'application/pdf',
+      });
+    expect(self.status).toBe(201);
+    const res = await send(w, staff);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('STAFF_REQUIRED_DOCUMENT_EXPIRED');
+  });
+
+  it('review H1: the block does not depend on what the CALLER can read — a CEO and a Venue Manager bound to the workspace get 409', async () => {
+    const w = await world();
+    const staff = await activeStaff(w, 'h1');
+    await uploadDoc(w, staff, 'right_to_work', '2020-01-31');
+    const ceo = await factory.createCeo({ id: w.orgId });
+    const vm = await factory.createVenueManager(
+      { id: w.orgId },
+      { owner: w.a },
+    );
+    const profile = {
+      userId: staff.userId,
+      organisationId: w.orgId,
+      workspaceId: w.a.workspaceId,
+    };
+    for (const caller of [ceo, vm]) {
+      // Neither caller sees this staff member's document rows under RLS (CEO: no manager_profile bound to the workspace;
+      // Venue Manager: excluded by the non-venue predicate) ...
+      const visible = await tenantContext.runInTenantContext(
+        {
+          organisationId: w.orgId,
+          workspaceId: w.a.workspaceId,
+          userId: caller.userId,
+          role: '',
+        },
+        (m) =>
+          m.query(
+            `SELECT id FROM core.staff_document WHERE staff_user_id = $1`,
+            [staff.userId],
+          ),
+      );
+      expect(visible).toEqual([]);
+      // ... yet the offer block still refuses (it reads through the tenant-pinned definer).
+      const err = await tenantContext
+        .runInTenantContext(
+          {
+            organisationId: w.orgId,
+            workspaceId: w.a.workspaceId,
+            userId: caller.userId,
+            role: '',
+          },
+          (m) =>
+            assertNoExpiredRequiredDocument(
+              m,
+              profile,
+              new Date(Date.now() + 48 * 3600 * 1000),
+            ),
+        )
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(
+        (err as { getResponse?: () => unknown })?.getResponse?.(),
+      ).toMatchObject({ code: 'STAFF_REQUIRED_DOCUMENT_EXPIRED' });
+    }
+    // With no tenant bound the definer refuses (fail closed), never "nothing expired".
+    const unbound = await dataSource.manager
+      .query(
+        `SELECT * FROM core.staff_document_offer_block($1, ARRAY['right_to_work'], current_date)`,
+        [staff.userId],
+      )
+      .then(
+        () => 'resolved',
+        (e: { driverError?: { code?: string } }) => e.driverError?.code,
+      );
+    expect(unbound).toBe('42501');
   });
 
   it('a type the organisation does not require blocks nothing; once required, it blocks', async () => {

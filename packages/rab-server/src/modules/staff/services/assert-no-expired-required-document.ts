@@ -6,11 +6,7 @@ import {
 import { ConflictException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import {
-  effectiveRequiredTypes,
-  HELD_STATUSES,
-  londonDate,
-} from './staff-document-rules';
+import { effectiveRequiredTypes, londonDate } from './staff-document-rules';
 
 /**
  * Lane D offer block: a staff member whose REQUIRED document has expired cannot receive a NEW offer. Called once, from the
@@ -18,16 +14,15 @@ import {
  * bulk send, create-and-send, Venue Manager request approval and the replacement workflow — so the bulk path cannot bypass
  * it. Existing offers and confirmed shifts are NOT revoked (brief).
  *
- * Rule (every part an ASSUMPTION flagged for the owner):
- *   - required types = the organisation's configuration, default DEFAULT_REQUIRED_STAFF_DOCUMENT_TYPES (Right to Work);
- *   - a type is satisfied when the staff member holds (pending or verified) at least one document of it with no expiry
- *     date or an expiry date on or after the check date; it BLOCKS only when every held document of it has expired;
- *   - a type with no held document does NOT block (missing evidence is a separate owner decision; existing staff have no
- *     uploaded documents yet);
- *   - the check date is the London date of the assignment start, or today if that is earlier, so an offer for a shift
- *     after the document expires is refused too.
- * Runs on the caller's tenant-bound EntityManager: RLS on core.staff_document applies (the sending manager, a non-venue
- * manager of the workspace, or the Worker marker, can read the rows).
+ * Independent security review (2026-11-24):
+ *   H1 — the documents are read through core.staff_document_offer_block(), a SECURITY DEFINER pinned to the bound
+ *        organisation + workspace, NOT through the caller's RLS. A caller whose own policies show no document rows (a CEO,
+ *        a custom-role Venue Manager whose manager_profile is bound elsewhere) used to see "nothing expired" and the offer
+ *        went out: the check failed open. It now answers the same for every caller; no tenant bound = an error.
+ *   H2 — once a required document has expired, only a VERIFIED valid replacement lifts the block; a pending upload (which a
+ *        staff member can make themselves, with any expiry date) never does. Owner decision 83, as updated by the review.
+ * Other rules (owner decisions): required types = the organisation's configuration, default Right to Work (decision 32); a
+ * type never held at all does not block; the check date is the London date of the assignment start, or today if earlier.
  */
 export async function assertNoExpiredRequiredDocument(
   manager: EntityManager,
@@ -41,46 +36,29 @@ export async function assertNoExpiredRequiredDocument(
   const required = (await effectiveRequiredTypes(manager, staff.organisationId))
     .filter((r) => r.required)
     .map((r) => r.documentType);
-  if (required.length === 0 || !staff.workspaceId) return;
+  if (required.length === 0) return;
   const today = londonDate(new Date());
   const shiftDay = londonDate(assignmentStartsAt);
   const onDate = shiftDay > today ? shiftDay : today;
-  const rows: Array<{
+  const blocked: Array<{
     document_type: StaffDocumentTypeType;
-    valid: boolean;
-    latest: string | null;
+    expired_on: string;
   }> = await manager.query(
-    `SELECT document_type,
-            bool_or(expires_on IS NULL OR expires_on >= $4::date) AS valid,
-            to_char(max(expires_on), 'YYYY-MM-DD') AS latest
-       FROM core.staff_document
-      WHERE organisation_id = $1 AND workspace_id = $2 AND staff_user_id = $3
-        AND status = ANY ($5::text[]) AND document_type = ANY ($6::text[])
-      GROUP BY document_type`,
-    [
-      staff.organisationId,
-      staff.workspaceId,
-      staff.userId,
-      onDate,
-      [...HELD_STATUSES],
-      required,
-    ],
+    `SELECT document_type, to_char(expired_on, 'YYYY-MM-DD') AS expired_on FROM core.staff_document_offer_block($1, $2::text[], $3::date)`,
+    [staff.userId, required, onDate],
   );
-  const expired = rows
-    .filter((r) => !r.valid)
-    .sort((a, b) => a.document_type.localeCompare(b.document_type));
-  if (expired.length === 0) return;
-  const detail = expired
+  if (blocked.length === 0) return;
+  const detail = blocked
     .map(
       (r) =>
-        `${STAFF_DOCUMENT_TYPE_LABELS[r.document_type] ?? r.document_type} (expired ${r.latest})`,
+        `${STAFF_DOCUMENT_TYPE_LABELS[r.document_type] ?? r.document_type} (expired ${r.expired_on})`,
     )
     .join(', ');
   throw new ConflictException({
     statusCode: 409,
     code: StaffDocumentOfferBlock.REQUIRED_DOCUMENT_EXPIRED,
     // The bulk-send result carries only the message, so the code is in the text too.
-    message: `Required document expired (${StaffDocumentOfferBlock.REQUIRED_DOCUMENT_EXPIRED}): ${detail}. Upload a current document before sending an offer.`,
-    documentTypes: expired.map((r) => r.document_type),
+    message: `Required document expired (${StaffDocumentOfferBlock.REQUIRED_DOCUMENT_EXPIRED}): ${detail}. A current document must be uploaded and verified before an offer can be sent.`,
+    documentTypes: blocked.map((r) => r.document_type),
   });
 }

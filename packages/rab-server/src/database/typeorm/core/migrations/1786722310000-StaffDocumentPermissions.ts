@@ -77,7 +77,7 @@ export class StaffDocumentPermissions1786722310000 implements MigrationInterface
       `SELECT (SELECT count(*) FROM core.permission WHERE key LIKE 'staff_document.%')::int AS perms,
               (SELECT count(*) FROM core.role_permission rp JOIN core.role r ON r.id = rp.role_id JOIN core.permission p ON p.id = rp.permission_id
                 WHERE p.key LIKE 'staff_document.%'
-                  AND NOT (r.is_system AND ((r.key = 'manager' AND p.key IN ('staff_document.view', 'staff_document.manage', 'staff_document.configure'))
+                  AND NOT (r.is_system AND r.workspace_id IS NULL AND ((r.key = 'manager' AND p.key IN ('staff_document.view', 'staff_document.manage', 'staff_document.configure'))
                                          OR (r.key = 'staff' AND p.key = 'staff_document.own'))))::int AS unexpected`,
     )) as Array<{ perms: number; unexpected: number }>;
     if (check.perms !== 4 || check.unexpected !== 0)
