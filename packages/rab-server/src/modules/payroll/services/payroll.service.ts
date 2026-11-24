@@ -269,7 +269,7 @@ interface LockedRecord {
   reviewed_by: string | null;
   /** Everyone the insert-only audit history names as having finalised this report or reviewed this seat (never edited). */
   history_preparers: string[] | null;
-  /** Both the report's finalisation and the seat's review are in the audit history (fail closed when not). */
+  /** The history holds the finalisation BY the live finaliser and the review BY the live reviewer (fail closed when not). */
   has_history: boolean;
 }
 
@@ -732,20 +732,23 @@ export class PayrollService {
     const t = businessTables(manager);
     return manager.query(
       `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.amount_pence, sp.user_id AS staff_user_id,
-              (SELECT sr.finalised_by FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised') AS finalised_by,
-              (SELECT sa.attendance_reviewed_by FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id WHERE a.id = pr.attendance_id) AS reviewed_by,
-              h.history_preparers, COALESCE(h.has_report_history AND h.has_seat_history, false) AS has_history
+              r.finalised_by, s.reviewed_by, h.history_preparers,
+              COALESCE(h.finaliser_in_history AND h.reviewer_in_history, false) AS has_history
          FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
+         LEFT JOIN LATERAL (SELECT sr.id AS report_id, sr.finalised_by FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised' LIMIT 1) r ON true
          LEFT JOIN LATERAL (
+           SELECT sa.id AS seat_id, sa.attendance_reviewed_by AS reviewed_by
+             FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id WHERE a.id = pr.attendance_id
+         ) s ON true
+         LEFT JOIN LATERAL (
+           -- Insert-only history; uuid = uuid on (organisation_id, entity_type, entity_id), the leading columns of audit_log_timeline_idx.
            SELECT array_agg(DISTINCT al.actor_user_id) FILTER (WHERE al.actor_user_id IS NOT NULL) AS history_preparers,
-                  bool_or(al.action = 'attendance.report_finalised') AS has_report_history,
-                  bool_or(al.action = 'attendance.reviewed') AS has_seat_history
+                  bool_or(al.entity_type = 'shift_report' AND al.actor_user_id = r.finalised_by) AS finaliser_in_history,
+                  bool_or(al.entity_type = 'shift_assignment' AND al.actor_user_id = s.reviewed_by) AS reviewer_in_history
              FROM core.audit_log al
             WHERE al.organisation_id = pr.organisation_id
-              AND ((al.action = 'attendance.report_finalised' AND al.entity_type = 'shift_report'
-                    AND al.entity_id::text IN (SELECT sr.id::text FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised'))
-                OR (al.action = 'attendance.reviewed' AND al.entity_type = 'shift_assignment'
-                    AND al.entity_id::text IN (SELECT a.shift_assignment_id::text FROM ${t.attendance} a WHERE a.id = pr.attendance_id)))
+              AND ((al.entity_type = 'shift_report' AND al.entity_id = r.report_id AND al.action = 'attendance.report_finalised')
+                OR (al.entity_type = 'shift_assignment' AND al.entity_id = s.seat_id AND al.action = 'attendance.reviewed'))
          ) h ON true
         WHERE pr.id = ANY($1::uuid[]) AND pr.organisation_id = $2 AND pr.workspace_id = $3
         ORDER BY pr.id
