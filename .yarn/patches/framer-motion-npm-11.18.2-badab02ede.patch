@@ -1,0 +1,104 @@
+diff --git a/dist/cjs/client.js b/dist/cjs/client.js
+index 8e3cf9abd9e7381d524150b6eded7f88d391daf3..a7fd6d7e695073436c87326c1d08e9f19b321502 100644
+--- a/dist/cjs/client.js
++++ b/dist/cjs/client.js
+@@ -4009,6 +4009,21 @@ class ExitAnimationFeature extends Feature {
+         if (register) {
+             this.unmount = register(this.id);
+         }
++        /**
++         * Crewflow patch (backport of the upstream fix, framer-motion #4049): an
++         * element can mount already exiting, e.g. when AnimatePresence commits a
++         * child queued by onExitComplete after the render that removed it. update()
++         * compares against the previous presence context, which is also not
++         * present, so it would never start the exit and AnimatePresence would wait
++         * on this child forever. Start its exit on mount instead.
++         */
++        const { isPresent, onExitComplete } = this.node.presenceContext || {};
++        if (isPresent === false && this.node.animationState) {
++            const exitAnimation = this.node.animationState.setActive("exit", true);
++            if (onExitComplete) {
++                exitAnimation.then(() => onExitComplete(this.id));
++            }
++        }
+     }
+     unmount() { }
+ }
+diff --git a/dist/cjs/index.js b/dist/cjs/index.js
+index 2918c45f931f419182ddea09ada8a50edac89a11..39b31b1d132ba9b2ac463c2f5b2773525d58cadb 100644
+--- a/dist/cjs/index.js
++++ b/dist/cjs/index.js
+@@ -4062,6 +4062,21 @@ class ExitAnimationFeature extends Feature {
+         if (register) {
+             this.unmount = register(this.id);
+         }
++        /**
++         * Crewflow patch (backport of the upstream fix, framer-motion #4049): an
++         * element can mount already exiting, e.g. when AnimatePresence commits a
++         * child queued by onExitComplete after the render that removed it. update()
++         * compares against the previous presence context, which is also not
++         * present, so it would never start the exit and AnimatePresence would wait
++         * on this child forever. Start its exit on mount instead.
++         */
++        const { isPresent, onExitComplete } = this.node.presenceContext || {};
++        if (isPresent === false && this.node.animationState) {
++            const exitAnimation = this.node.animationState.setActive("exit", true);
++            if (onExitComplete) {
++                exitAnimation.then(() => onExitComplete(this.id));
++            }
++        }
+     }
+     unmount() { }
+ }
+diff --git a/dist/es/motion/features/animation/exit.mjs b/dist/es/motion/features/animation/exit.mjs
+index bf4870edfbc66f8085057a38da768698a0291bc3..ffcae1e545b7fbb0c1826d7b1bc3310244b30874 100644
+--- a/dist/es/motion/features/animation/exit.mjs
++++ b/dist/es/motion/features/animation/exit.mjs
+@@ -24,6 +24,21 @@ class ExitAnimationFeature extends Feature {
+         if (register) {
+             this.unmount = register(this.id);
+         }
++        /**
++         * Crewflow patch (backport of the upstream fix, framer-motion #4049): an
++         * element can mount already exiting, e.g. when AnimatePresence commits a
++         * child queued by onExitComplete after the render that removed it. update()
++         * compares against the previous presence context, which is also not
++         * present, so it would never start the exit and AnimatePresence would wait
++         * on this child forever. Start its exit on mount instead.
++         */
++        const { isPresent, onExitComplete } = this.node.presenceContext || {};
++        if (isPresent === false && this.node.animationState) {
++            const exitAnimation = this.node.animationState.setActive("exit", true);
++            if (onExitComplete) {
++                exitAnimation.then(() => onExitComplete(this.id));
++            }
++        }
+     }
+     unmount() { }
+ }
+diff --git a/dist/framer-motion.dev.js b/dist/framer-motion.dev.js
+index f1b2924ca476564f269c5eb9f7bcec22f857b72b..cb09aea68faecd90e478ad5083a0ed365ce12a6d 100644
+--- a/dist/framer-motion.dev.js
++++ b/dist/framer-motion.dev.js
+@@ -4699,6 +4699,21 @@
+             if (register) {
+                 this.unmount = register(this.id);
+             }
++            /**
++             * Crewflow patch (backport of the upstream fix, framer-motion #4049): an
++             * element can mount already exiting, e.g. when AnimatePresence commits a
++             * child queued by onExitComplete after the render that removed it. update()
++             * compares against the previous presence context, which is also not
++             * present, so it would never start the exit and AnimatePresence would wait
++             * on this child forever. Start its exit on mount instead.
++             */
++            const { isPresent, onExitComplete } = this.node.presenceContext || {};
++            if (isPresent === false && this.node.animationState) {
++                const exitAnimation = this.node.animationState.setActive("exit", true);
++                if (onExitComplete) {
++                    exitAnimation.then(() => onExitComplete(this.id));
++                }
++            }
+         }
+         unmount() { }
+     }
