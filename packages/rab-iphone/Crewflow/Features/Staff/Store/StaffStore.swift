@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -87,6 +88,15 @@ final class StaffStore: ObservableObject {
     // MARK: Notifications
     @Published private(set) var unreadCount = 0
 
+    // MARK: Offline (M4 Lane B; off everywhere, see StaffOfflineAttendance)
+    /// Saved-on-this-phone actions and the offline gate for this identity.
+    /// nil in tests that do not need it; the live gate is always shut today.
+    let offline: StaffOfflineAttendance?
+    private let offlineSync: OfflineSyncEngine?
+    private var offlineForwarding: AnyCancellable?
+    private var offlineSyncing = false
+    @Published private(set) var sendingSaved = false
+
     /// The error of the last read of each kind (nil after a success), for
     /// the poller's backoff / `Retry-After`. The data itself stays on screen.
     private(set) var lastOffersFailure: Error?
@@ -105,12 +115,33 @@ final class StaffStore: ObservableObject {
     init(
         repository: StaffRepository,
         fence: StaffSessionFence,
-        monotonic: @escaping () -> UInt64 = StaffServerClock.systemMonotonicNanos
+        monotonic: @escaping () -> UInt64 = StaffServerClock.systemMonotonicNanos,
+        offline: StaffOfflineAttendance? = nil
     ) {
         self.repository = repository
         self.fence = fence
         self.monotonic = monotonic
         self.photos = StaffPhotoCache { fileId in try await repository.venuePhoto(fileId: fileId) }
+        self.offline = offline
+        if let offline {
+            offlineSync = OfflineSyncEngine(
+                queue: offline.queue,
+                bootClock: offline.clock,
+                onTicket: { [weak offline] raw, serverNow, started in
+                    offline?.renewTicket(raw, serverNow: serverNow, fetchStarted: started)
+                },
+                isOwnerSignedIn: { [weak offline] in offline?.isOwnerSignedIn() ?? false },
+                // Bound to the owner where the bearer is read (no await gap).
+                send: { [owner = offline.requestOwnerUserId] body in
+                    try await repository.syncOffline(body, ownerUserId: owner)
+                }
+            )
+        } else {
+            offlineSync = nil
+        }
+        offlineForwarding = offline?.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
     // MARK: - Trusted time
@@ -303,6 +334,9 @@ final class StaffStore: ObservableObject {
         if !silent { activeLoading = true }
         let epoch = fence.epoch
         defer { activeLoading = false }
+        // Boot clock before the request: an offline ticket whose fetch took
+        // over 10 s is thrown away (DESIGN §4.2).
+        let fetchStarted = offline?.clock.reading()
         do {
             let response = try await repository.activeAttendance(background: background)
             guard fence.isCurrent(epoch) else { return }
@@ -310,6 +344,12 @@ final class StaffStore: ObservableObject {
             clockInEarlyMinutes = response.clockInEarlyMinutes
             if let limits = response.locationEvidence { locationEvidence = limits }
             attendanceClock.anchor(response.serverNow, monotonicNanos: monotonic())
+            offline?.updateFromServer(
+                enabled: response.offline?.enabled,
+                ticket: response.offlineTicket,
+                serverNow: response.serverNow,
+                fetchStarted: fetchStarted
+            )
             activeError = nil
             lastActiveFailure = nil
         } catch {
@@ -318,6 +358,13 @@ final class StaffStore: ObservableObject {
             // still valid clock-in on a transient error).
             activeError = "Could not check attendance. Please try again."
             lastActiveFailure = error
+            return
+        }
+        activeLoading = false
+        // A successful read (30 s reconcile, resume, refresh) is the moment to
+        // send anything saved on this phone (DESIGN §3.5).
+        if offline?.queue.hasPending == true {
+            await syncOffline(trigger: .automatic)
         }
     }
 
@@ -370,14 +417,20 @@ final class StaffStore: ObservableObject {
         attendanceBusy = true
         defer { attendanceBusy = false }
         let epoch = fence.epoch
+        guard await savedActionsAllowOnline({ key in
+            OfflinePunchRequest(type: .checkIn, shiftId: shiftId, idempotencyKey: key, qrToken: nil, location: location)
+        }) else { return false }
+        let key = offlineKey()
         do {
-            let state = try await repository.checkIn(StaffCheckInBody(shiftId: shiftId, location: location))
+            let state = try await repository.checkIn(StaffCheckInBody(shiftId: shiftId, location: location), idempotencyKey: key)
             guard fence.isCurrent(epoch) else { return false }
             checkIns[shiftId] = state
             attendanceClock.anchor(state.serverNow, monotonicNanos: monotonic())
             return true
         } catch {
             guard fence.isCurrent(epoch), !Self.ignorable(error) else { return false }
+            let saved = key.map { OfflinePunchRequest(type: .checkIn, shiftId: shiftId, idempotencyKey: $0, qrToken: nil, location: location) }
+            if saveAfterFailure(error, saved) { return false }
             if let apiError = error as? APIError, apiError.isUncertainOutcome {
                 if let state = await loadCheckIn(shiftId: shiftId), state.checkedIn { return true }
                 attendanceError = StaffAttendanceFailure(message: StaffAttendanceMessages.uncertainCheckIn, code: nil)
@@ -399,14 +452,20 @@ final class StaffStore: ObservableObject {
         attendanceBusy = true
         defer { attendanceBusy = false }
         let epoch = fence.epoch
+        guard await savedActionsAllowOnline({ key in
+            OfflinePunchRequest(type: .clockIn, shiftId: shiftId, idempotencyKey: key, qrToken: qrToken, location: location)
+        }) else { return false }
+        let key = offlineKey()
         do {
-            let summary = try await repository.clockIn(StaffClockInBody(shiftId: shiftId, qrToken: qrToken, location: location))
+            let summary = try await repository.clockIn(StaffClockInBody(shiftId: shiftId, qrToken: qrToken, location: location), idempotencyKey: key)
             guard fence.isCurrent(epoch) else { return false }
             active = summary
             await refreshActive(silent: true)
             return true
         } catch {
             guard fence.isCurrent(epoch), !Self.ignorable(error) else { return false }
+            let saved = key.map { OfflinePunchRequest(type: .clockIn, shiftId: shiftId, idempotencyKey: $0, qrToken: qrToken, location: location) }
+            if saveAfterFailure(error, saved) { return false }
             if let apiError = error as? APIError, apiError.isUncertainOutcome {
                 await refreshActive(silent: true)
                 await loadCheckIn(shiftId: shiftId)
@@ -430,9 +489,14 @@ final class StaffStore: ObservableObject {
         attendanceBusy = true
         defer { attendanceBusy = false }
         let epoch = fence.epoch
+        let openShiftId = active?.shiftId
+        guard await savedActionsAllowOnline({ key in
+            openShiftId.map { shift in OfflinePunchRequest(type: .clockOut, shiftId: shift, idempotencyKey: key, qrToken: qrToken, location: location) }
+        }) else { return false }
         let previous = active
+        let key = previous == nil ? nil : offlineKey()
         do {
-            let completed = try await repository.clockOut(StaffClockOutBody(qrToken: qrToken, location: location))
+            let completed = try await repository.clockOut(StaffClockOutBody(qrToken: qrToken, location: location), idempotencyKey: key)
             guard fence.isCurrent(epoch) else { return false }
             history = [completed] + history.filter { $0.id != completed.id }
             active = nil
@@ -440,6 +504,11 @@ final class StaffStore: ObservableObject {
             return true
         } catch {
             guard fence.isCurrent(epoch), !Self.ignorable(error) else { return false }
+            var saved: OfflinePunchRequest?
+            if let key, let previous {
+                saved = OfflinePunchRequest(type: .clockOut, shiftId: previous.shiftId, idempotencyKey: key, qrToken: qrToken, location: location)
+            }
+            if saveAfterFailure(error, saved) { return false }
             if let apiError = error as? APIError, apiError.isUncertainOutcome {
                 await refreshActive(silent: true)
                 await loadHistory(silent: true)
@@ -454,6 +523,168 @@ final class StaffStore: ObservableObject {
 
     func clearAttendanceError() {
         attendanceError = nil
+    }
+
+    // MARK: - Offline (M4 Lane B: DESIGN §3; off everywhere today)
+
+    /// A fresh idempotency key when this tap could be saved offline, else nil
+    /// (no `Idempotency-Key` header: exactly today's request).
+    private func offlineKey() -> String? {
+        guard let offline, offline.canCapture else { return nil }
+        return offline.newIdempotencyKey()
+    }
+
+    private var offlineContext: OfflineAttendanceContext {
+        OfflineAttendanceContext(
+            activeShiftId: liveAttendance?.shiftId,
+            activeOnBreak: liveAttendance?.status == StaffStatus.onBreak
+        )
+    }
+
+    /// The online request failed before any answer (or timed out after it was
+    /// sent, an uncertain outcome): save it on the phone with the SAME key, so
+    /// the server applies it at most once (DESIGN §3.1, D17). true = handled:
+    /// saved (nothing optimistic is shown; the screen says "saved on this
+    /// phone, not yet confirmed") or the refusal's words are shown. Any other
+    /// failure, or a shut gate, keeps today's handling.
+    private func saveAfterFailure(_ error: Error, _ request: OfflinePunchRequest?) -> Bool {
+        // A real HTTP answer (a server or proxy 408 included) is never saved.
+        guard let request, let offline, let apiError = error as? APIError, apiError.isNoResponse else { return false }
+        do {
+            try offline.capture(request, context: offlineContext)
+            attendanceError = nil
+            return true
+        } catch let refusal as OfflineCaptureRefusal where refusal != .notEnabled {
+            attendanceError = StaffAttendanceFailure(message: refusal.message, code: nil)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// With saved actions waiting, a new punch sends them first. It is held
+    /// back ONLY when that attempt got no HTTP answer at all (offline, DNS,
+    /// TLS, client timeout): then it is saved behind them (gate open) or
+    /// refused (gate shut), since sending it would overtake them. On ANY
+    /// answer (4xx, 429, 5xx, an unknown outcome, an undecodable 200), or a
+    /// run already in flight, it goes online and the server decides: out of
+    /// order can only ever pay less (D3), and a server problem must never
+    /// lock a person out of clocking. true = go online.
+    private func savedActionsAllowOnline(_ makeRequest: (String) -> OfflinePunchRequest?) async -> Bool {
+        guard let offline, offline.queue.hasPending else { return true }
+        let result = await syncOffline(trigger: .manual)
+        guard offline.queue.hasPending else { return true }
+        let noAnswer = result != .deferred && (offlineSync?.lastRunEndedWithoutAnswer ?? false)
+        guard noAnswer else { return true }
+        guard offline.canCapture, let request = makeRequest(offline.newIdempotencyKey()) else {
+            attendanceError = StaffAttendanceFailure(message: StaffOfflinePresentation.sendSavedFirst, code: nil)
+            return false
+        }
+        do {
+            try offline.capture(request, context: offlineContext)
+            attendanceError = nil
+        } catch let refusal as OfflineCaptureRefusal {
+            attendanceError = StaffAttendanceFailure(message: refusal.message, code: nil)
+        } catch {
+            attendanceError = StaffAttendanceFailure(message: OfflineCaptureRefusal.notSaved.message, code: nil)
+        }
+        return false
+    }
+
+    /// Sends what is saved on this phone (DESIGN §3.5). Triggered by every
+    /// successful `/attendance/me/active` read (the 30 s reconcile, resume,
+    /// pull-to-refresh) and by "Send now". After anything was received, the
+    /// server's state is re-read: the screen only ever shows server truth.
+    @discardableResult
+    func syncOffline(trigger: OfflineSyncEngine.Trigger) async -> OfflineSyncEngine.RunResult {
+        guard let offlineSync, !offlineSyncing else { return .deferred }
+        offlineSyncing = true
+        sendingSaved = trigger == .manual
+        let epoch = fence.epoch
+        let result = await offlineSync.run(trigger: trigger, trustedNow: attendanceNow ?? offline?.ticketAnchoredNow())
+        sendingSaved = false
+        guard fence.isCurrent(epoch) else {
+            offlineSyncing = false
+            return result
+        }
+        if case .sent(let received, _) = result, received > 0 {
+            // Still flagged as syncing, so this re-read does not start a run.
+            await refreshActive(silent: true)
+            await loadHistory(silent: true)
+            offlineSyncing = false
+            await loadOffers(silent: true)
+        } else {
+            offlineSyncing = false
+        }
+        return result
+    }
+
+    /// Clock-out for a shift whose clock-in is still only on this phone. What
+    /// is saved is sent first: if the clock-in reaches the server this is an
+    /// ordinary (online) clock-out; otherwise the clock-out is saved as well.
+    func clockOutSavedShift(shiftId: String, qrToken: String, location: StaffLocationFix?) async -> Bool {
+        guard !attendanceBusy, let offline else { return false }
+        attendanceError = nil
+        if rejectFix(location) { return false }
+        await syncOffline(trigger: .manual)
+        if liveAttendance?.shiftId == shiftId {
+            return await clockOut(qrToken: qrToken, location: location)
+        }
+        guard offline.queue.pending(.clockIn, shiftId: shiftId) != nil else {
+            attendanceError = StaffAttendanceFailure(message: OfflineCaptureRefusal.notClockedIn.message, code: "NOT_CLOCKED_IN")
+            return false
+        }
+        attendanceBusy = true
+        defer { attendanceBusy = false }
+        do {
+            let request = OfflinePunchRequest(type: .clockOut, shiftId: shiftId, idempotencyKey: offline.newIdempotencyKey(), qrToken: qrToken, location: location)
+            try offline.capture(request, context: offlineContext)
+        } catch let refusal as OfflineCaptureRefusal {
+            attendanceError = StaffAttendanceFailure(message: refusal.message, code: nil)
+        } catch {
+            attendanceError = StaffAttendanceFailure(message: OfflineCaptureRefusal.notSaved.message, code: nil)
+        }
+        return false
+    }
+
+    /// Everything saved on this phone (empty while offline mode is off).
+    var savedActions: [OfflineQueuedPunch] { offline?.queue.items ?? [] }
+
+    func savedActions(forShift shiftId: String) -> [OfflineQueuedPunch] {
+        offline?.queue.punches(forShift: shiftId) ?? []
+    }
+
+    /// Not yet received by the server: logout asks first while > 0 (D18).
+    var unsentSavedCount: Int { offline?.queue.unsentCount ?? 0 }
+
+    /// The waiting (unsent) action of `type` for `shiftId`.
+    func savedPunch(_ type: OfflinePunchType, shiftId: String) -> OfflineQueuedPunch? {
+        offline?.queue.pending(type, shiftId: shiftId)
+    }
+
+    /// The shift whose clock-in is saved on this phone (not yet confirmed)
+    /// with no saved clock-out, while the server shows no open attendance.
+    var savedOpenShiftId: String? {
+        guard liveAttendance == nil, let offline,
+              let clockIn = offline.queue.pending.last(where: { $0.type == .clockIn })
+        else { return nil }
+        return offline.queue.pending(.clockOut, shiftId: clockIn.shiftId) == nil ? clockIn.shiftId : nil
+    }
+
+    /// The person dismissed a rejected, too-old or undeliverable action.
+    func dismissSaved(id: String) {
+        offline?.queue.dismiss(id: id)
+    }
+
+    /// The stored queue could not be read: it is never discarded (the person
+    /// cannot see it); sign-out keeps it on the phone instead.
+    var savedQueueUnreadable: Bool { offline?.queue.unreadable ?? false }
+
+    /// D18: the person explicitly discarded everything saved on this phone
+    /// (never sent; the manager is not told). false = refused (unreadable).
+    @discardableResult
+    func discardAllSaved() -> Bool {
+        offline?.queue.discardAll() ?? true
     }
 
     /// The fix fails the server's published limits: explain, send nothing.
@@ -481,8 +712,10 @@ final class StaffStore: ObservableObject {
         StaffCheckInRules.checkInRequired(offer, state: checkIns[offer.shiftId])
     }
 
+    /// A Check In saved on this phone counts (the server decides at sync).
     func needsCheckIn(_ offer: StaffOfferSummary) -> Bool {
         StaffCheckInRules.needsCheckIn(offer, state: checkIns[offer.shiftId])
+            && savedPunch(.checkIn, shiftId: offer.shiftId) == nil
     }
 
     func geofenceEnforced(shiftId: String, offer: StaffOfferSummary?) -> Bool? {
