@@ -5,6 +5,12 @@ import { DataSource } from 'typeorm';
 
 import { GuardedMigrationDataSource } from './core.datasource';
 import {
+  resetWorkspaceFingerprintSelectionForTests,
+  UnsupportedPostgresVersionError,
+  workspaceFingerprintMajor,
+  workspaceFingerprintMajorSelected,
+} from '../workspace-schema/v1/expected-fingerprints';
+import {
   assertProductionMigrationApproval,
   isApprovedForProduction,
   PRODUCTION_APPROVED_MIGRATIONS,
@@ -109,18 +115,23 @@ describe('production migration approval (N1): the reviewed list against the migr
 });
 
 describe('GuardedMigrationDataSource: runner refusal (N1)', () => {
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    jest.restoreAllMocks();
+    resetWorkspaceFingerprintSelectionForTests();
+  });
 
   /** Loaded migrations: the reviewed baseline from the directory plus the development-only ones (whether or not present yet). */
   const loaded = [...migrationNames.filter((n) => isApprovedForProduction(n)), ...DEV_ONLY];
 
   /** A runner whose database calls are stubbed: ledger present, `applied` recorded, `loaded` migrations loaded. */
-  function runnerFor(target: string | undefined, applied: string[]) {
+  function runnerFor(target: string | undefined, applied: string[], serverVersionNum = '160015') {
     const ds = new GuardedMigrationDataSource({ type: 'postgres', url: 'postgres://unused@127.0.0.1:1/unused' });
     const internals = ds as unknown as Record<string, unknown>;
     internals.dbTarget = target;
     Object.defineProperty(ds, 'migrations', { value: loaded.map((name) => ({ name, up: jest.fn(), down: jest.fn() })) });
-    const query = jest.fn(async (sql: string) => (/to_regclass/.test(sql) ? [{ hasLedger: true }] : applied.map((name) => ({ name }))));
+    const query = jest.fn(async (sql: string) =>
+      /server_version_num/.test(sql) ? [{ num: serverVersionNum }] : /to_regclass/.test(sql) ? [{ hasLedger: true }] : applied.map((name) => ({ name })),
+    );
     internals.query = query;
     const identity = jest.fn(async () => undefined);
     internals.assertIdentityForPendingMigrations = identity;
@@ -148,6 +159,21 @@ describe('GuardedMigrationDataSource: runner refusal (N1)', () => {
     await expect(ds.runMigrations()).resolves.toEqual([]);
     expect(identity).toHaveBeenCalledTimes(1);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('selects the workspace fingerprints of its server before any migration runs (the frozen migrations read them in up/down)', async () => {
+    const { ds, run } = runnerFor('test', baselineApplied, '180006');
+    expect(workspaceFingerprintMajorSelected()).toBe(false);
+    await expect(ds.runMigrations()).resolves.toEqual([]);
+    expect(workspaceFingerprintMajor()).toBe(18);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('an unsupported server major is refused before any migration runs, and nothing is selected', async () => {
+    const { ds, run } = runnerFor('test', baselineApplied, '150008');
+    await expect(ds.runMigrations()).rejects.toThrow(UnsupportedPostgresVersionError);
+    expect(run).not.toHaveBeenCalled();
+    expect(workspaceFingerprintMajorSelected()).toBe(false);
   });
 
   it('a runner whose target was never established is treated as restricted', async () => {

@@ -52,10 +52,15 @@ export const PENDING_FINGERPRINT_VERSIONS: readonly number[] = [];
  *
  * `EXPECTED_WORKSPACE_FINGERPRINTS` (below) is what every caller reads: the frozen migrations, the TypeScript provisioner,
  * the migrator and the drift job. It is a read-only view of the table selected for this process's database server:
- *   - nothing selected (every existing process that never calls the selector): the PostgreSQL 16 table, exactly as
- *     before, so separated mode on PostgreSQL 16 is unchanged byte for byte;
+ *   - nothing selected: every read THROWS WorkspaceFingerprintMajorNotSelectedError, in every environment. (It used to
+ *     fall back to the PostgreSQL 16 table; that silent default is what made the Worker's provisioner and drift job compare
+ *     PostgreSQL 17 / 18 workspaces against the PostgreSQL 16 values until PR #227. A read before any selection is a bug in
+ *     the caller, never a reason to guess a major.)
  *   - selectWorkspaceFingerprintsForServer(...) with 16, 17 or 18: that major's table. A process talks to ONE server, so a
  *     second selection with a different major is refused (never a silent switch).
+ * Who selects: the boot gates (API, Worker, CLI), the migrate child and every migration runner (locked-migration-runner.ts,
+ * GuardedMigrationDataSource), the TypeScript provisioner, the drift check, the workspace command runner and the scripts.
+ * Unit specs select explicitly (selectWorkspaceFingerprintMajor), integration specs from their server.
  * The frozen migrations read the view inside up() (never at import), so a migration run selected for PostgreSQL 18 bakes
  * the PostgreSQL 18 literal into core.provision_workspace(uuid), and the TypeScript provisioner compares against the same
  * major. A wrong selection fails closed: the fingerprint comparison refuses (FINGERPRINT_MISMATCH), it never passes.
@@ -80,11 +85,26 @@ export class UnsupportedPostgresVersionError extends Error {
   }
 }
 
+/**
+ * A read of the workspace fingerprints (the view, or workspaceFingerprintMajor()) before this process selected the major of
+ * its database server. Never caught to fall back to a default: the caller must select first (fail closed).
+ */
+export class WorkspaceFingerprintMajorNotSelectedError extends Error {
+  constructor() {
+    super(
+      'Workspace fingerprints were read before this process selected its PostgreSQL major. Select it first from the server ' +
+        '(selectWorkspaceFingerprintsForServer, or the boot gates / migration runner that call it); there is no default major. Refusing.',
+    );
+    this.name = 'WorkspaceFingerprintMajorNotSelectedError';
+  }
+}
+
 let selected: FingerprintMajor | null = null;
 
-/** The major whose table the view serves (16 when nothing was selected). */
+/** The major whose table the view serves. Throws WorkspaceFingerprintMajorNotSelectedError when nothing was selected. */
 export function workspaceFingerprintMajor(): FingerprintMajor {
-  return selected ?? 16;
+  if (selected === null) throw new WorkspaceFingerprintMajorNotSelectedError();
+  return selected;
 }
 
 /** True once a process selected a major explicitly. */
@@ -164,8 +184,8 @@ export async function selectWorkspaceFingerprintsForServer(
 
 /**
  * Test seam only: forget the selection (unit specs that exercise both majors in one process). Refused outside NODE_ENV=test
- * (security review I3, PR #227): a production process must never drop the major the boot gates selected, which would fall
- * back to the PostgreSQL 16 table.
+ * (security review I3, PR #227): a production process must never drop the major the boot gates selected (every later read
+ * would then throw).
  */
 export function resetWorkspaceFingerprintSelectionForTests(): void {
   if (process.env.NODE_ENV !== 'test') {
@@ -200,7 +220,8 @@ function selectedView(): Readonly<Record<number, string>> {
 }
 
 /**
- * The expected fingerprint per module version for the selected PostgreSQL major (PG16 unless selected otherwise). A
- * version without a value on the selected major reads `undefined`, exactly like a version that does not exist.
+ * The expected fingerprint per module version for the selected PostgreSQL major. A version without a value on the selected
+ * major reads `undefined`, exactly like a version that does not exist. Any read (a version, keys, entries, `in`) before a
+ * major was selected throws WorkspaceFingerprintMajorNotSelectedError.
  */
 export const EXPECTED_WORKSPACE_FINGERPRINTS: Readonly<Record<number, string>> = selectedView();

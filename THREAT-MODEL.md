@@ -10081,6 +10081,60 @@ Mitigation: default off; exactly true/false; one value for both services; still 
 Reversal:   restore AI_ENABLED: 'false' under PINNED on rab-api / rab-worker and revert the two gates' AI_ENABLED rules.
 ```
 
+## Worker marker bound only through the tenant-context binder (2026-11-18)
+
+- **Asset.** `rab.actor_type = 'worker'`: the RLS marker that opens the `*_worker_scan` / `*_worker_select` /
+  `*_worker_update` policies (staff_profile, payroll_record, payroll_run, payroll_run_line, shift_staff_review, ...).
+- **Threat.** A new code path writes the marker directly (a copied `set_config('rab.actor_type', 'worker', true)`), so a
+  wider read/write path opens outside the reviewed binder, without the binder's pool-safety checks and without anyone
+  noticing in review. Before this change `worker-actor-type-trusted-only.spec.ts` (#217) allowlisted three raw sites (HWS
+  backfill, the workspace -> core orphan check, the account-invite cleanup's level-22 pass), so a fourth raw site in one of
+  those files, or a moved one, was a matter of updating counts.
+- **Control.** All three now bind through `tenant-context.service.ts`, the one statement that writes the identity GUCs
+  (`bindGucsSql`, `rab.actor_type` from `ctx.actorType` only):
+  - HWS backfill read identity: `TenantContextService.bindCoreIdentityGucs` (RESET ROLE, then current_user = session_user,
+    then the binding statement), owner lookup, then the same binding with the owner as `rab.user_id`.
+  - Orphan check and level-22 pass: `bindMaintenanceSessionGucs`, the same statement and parameter mapping but no RESET
+    ROLE: the orphan connection acts as `crewflow` through a session-level SET ROLE on the owner login, which RESET ROLE
+    would drop for the rest of the connection (the check would then read as `crewflow_owner`). The orphan check stays
+    `BEGIN READ ONLY`. The level-22 pass re-binds the organisation, workspace and role in force, then binds them back with
+    the previous user and no marker, and refuses (the candidate is retained) if the marker or an optional scope GUC is
+    already set.
+  - The static spec's raw-GUC allowlists are now empty in rab-server and rab-worker: any direct `set_config` / `SET` of
+    `rab.actor_type` outside TenantContextService fails CI. The three files moved to the `actorType` allowlists (exactly one
+    literal `'worker'` site each).
+- **Behaviour change (none intended).** The binding statement also resets `rab.team_shift_id`, `rab.team_staff_id`,
+  `rab.admin_scope` and `rab.upgrade_scope` to `''`, and the orphan check's first binding sets `rab.user_id` / `rab.role` to
+  `''` instead of leaving the session value. None of these jobs sets those GUCs, and on a reused connection they already
+  read `''`, so the RLS outcome is unchanged; the HWS backfill gains RESET ROLE + the identity check (a no-op on its
+  connection, which never sets a role).
+- **Residual.** `bindMaintenanceSessionGucs` does not RESET ROLE or check the role (by design, see above). Two separate
+  misuses, two separate controls:
+  - *Setting the marker* through it needs an `actorType: 'worker'` literal in a file on the `actorType` allowlist of
+    `worker-actor-type-trusted-only.spec.ts`, which review sees.
+  - *Skipping RESET ROLE* needs NO such literal: a request path could call it with an ordinary context and lose the pool
+    safety layer of TenantContextService's binder (a session-level SET ROLE left on a pooled connection would survive).
+    `tenant-binder-callers.spec.ts` pins its callers to exactly the orphan check, the account-invite cleanup
+    and the Worker re-export; any other file that names the function fails CI.
+  - The Worker reaches it through `engine/worker-shared/maintenance-session-binder.ts`, a runtime re-export the
+    import-boundary checker cannot see through. `worker-shared-reexports.spec.ts` lists the runtime re-exports allowed in
+    that folder (today only this one), so a new one fails CI and needs an explicit entry (owner asked to accept the pattern).
+  - *Running the binding statement by hand* (`manager.query(bindGucsSql(), [..., 'worker'])`) needs neither a raw
+    set_config nor an `actorType` literal. `tenant-binder-callers.spec.ts` pins `bindGucsSql` too, with an EMPTY external
+    allow-list: only tenant-context.service.ts may name it outside tests.
+  - The raw-GUC pattern also catches `E'rab.actor_type'`, dollar quoting (`$$rab.actor_type$$`, `$tag$…$tag$`), a
+    parenthesised `('rab.actor_type')` and `UPDATE pg_settings … rab.actor_type`.
+  - **Known limits of these static fences (covered by review, deliberately not detected):**
+    - a wrapper exported from an allow-listed file (`export const g = bindMaintenanceSessionGucs`, or an exported function
+      that calls it or `bindGucsSql`) and then called elsewhere under its own name;
+    - a re-export under another name beyond its first hop, outside `engine/worker-shared/`;
+    - a run-time GUC name or a GUC name passed as a bound parameter, computed keys, access by a computed property name;
+    - non-`.ts` files.
+- **Tests.** `worker-actor-type-trusted-only.spec.ts` (empty raw allowlists; a raw site appended to any Worker file fails
+  it; the extended forms each tested), `tenant-binder-callers.spec.ts`, `worker-shared-reexports.spec.ts`; `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
+  `account-invite-cleanup*.integration.spec.ts` and `phase-d-account-invite-cleanup-worker.integration.spec.ts` (level-22
+  pass), `tenant-context.service.spec.ts` (binding statement text unchanged).
+
 ## CI supply chain — actions pinned to verified commit SHAs, release via gh, Dependabot covers composite actions (branch ci/actions-pins-sha, 2026-11-18; replaces Dependabot #222, #223, #224; no SQL, no runtime code)
 - **Threat:** *whoever can move a tag or push to an action's repository* (a compromised maintainer, a hijacked release, a
   fork commit served through the parent's API) → has their code run in our jobs with the job's GITHUB_TOKEN and secrets
@@ -10326,6 +10380,30 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   a seeded `user-notes-x` key removes it and keeps an unrelated key (fails without the start-up purge).
 - **Residual:** notes on this page are not saved at all until a server-side, RLS-scoped notes store backs it (a new
   table = owner SQL review).
+
+## engine/ stops importing modules/ — identity entities, venue resource scope, entity cache (branches refactor/engine-owns-identity-entities, refactor/engine-modules-scope-and-cache, refactor/engine-modules-venue-summary, 2026-11-21; no migration)
+- **Finding:** CLAUDE.md's "engine/ never imports from modules/" had 24 production violations (ratchet baseline
+  `engine-to-modules`), 20 of them auth, permissions, audit, email, platform-admin and user-deletion services importing
+  identity entities from `modules/identity`. A dependency in that direction lets a domain-module change silently alter
+  platform security code (and a domain module could add an entity relation the auth path then loads).
+- **Control:** the 18 identity/access entities move to `engine/core-modules/identity/entities` (pure file move, re-exported
+  from `modules/identity/entities`); `ManagerVenue` moves to `engine/core-modules/resource-scope/entities`; the by-owner
+  workspace and venue display-cache reads move to `modules/manager-workspace` and `modules/venue` (same cache kinds, keys and
+  projections, through `CoreEntityCacheService.getOrFetch`). The baseline loses the rule entirely, so any new engine ->
+  modules import fails ci-security (`tools/check-import-boundaries.cjs`; owner-dated approvals are the only exception).
+- **Changed read (authorisation input):** `ResourceScopeService.resolveTx`'s venue-manager scope no longer joins the
+  `ManagerProfile` entity; it filters `mv.manager_profile_id IN (SELECT mp.id FROM core.manager_profile mp WHERE mp.user_id
+  = $1)`. Same rows (mp.id is the primary key, so each manager_venue row joined at most one profile), same RLS on both
+  tables, `manager_venue` still schema-qualified by the bound manager, user id still a bound parameter. A venue manager with
+  no assignment still gets `{ kind: 'venue', venueIds: [] }` (sees nothing), never an owner scope.
+- **Tests:** `resource-scope.service.spec.ts` (exact SQL under core routing and a bound workspace schema, parameter binding,
+  empty-assignment fail-closed, non-venue-manager never queries manager_venue); `manager-workspace-display-cache.spec.ts`
+  and `venue-summary-cache.spec.ts` (same cache kind/key, no extra enabled/TTL argument, same projection, null never
+  cached, hit skips the database); `core-entity-cache.integration.spec.ts` follows the moved reads; the live venue scope
+  stays covered by `venue-manager-scoping.integration.spec.ts` (assign -> visible, unassign -> gone, another manager's venue
+  invisible).
+- **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
+  `core.manager_workspace`); the ratchet sees imports, not table names.
 
 ## Old User Profile page removed (owner decision 36, 2026-11-21; branch chore/front-remove-dead-user-profile, stacked on #275; no SQL, front only)
 - **Finding:** rab-front's `features/users/UserProfile.tsx` (`/users/:id`) called `GET/PATCH/DELETE /users/:id`, which no
