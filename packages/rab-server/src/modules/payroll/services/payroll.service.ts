@@ -688,6 +688,8 @@ export class PayrollService {
     const [row] = await manager.query(
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `SELECT sr.finalised_by, u.first_name, u.last_name, v.name AS venue_name,
+              COALESCE((SELECT bool_or(mp.type <> 'venue') FROM core.manager_profile mp
+                         WHERE mp.user_id = sr.finalised_by AND mp.organisation_id = pr.organisation_id), false) AS finaliser_sees_payroll,
               to_char((${assignmentTimeSql().start}) AT TIME ZONE COALESCE(NULLIF(o.timezone, ''), 'Europe/London'), 'YYYY-MM-DD') AS work_date
          FROM ${t.payroll_record} pr
          JOIN ${t.attendance} a ON a.id = pr.attendance_id
@@ -703,10 +705,15 @@ export class PayrollService {
     if (!row) return;
     const what = `${row.first_name} ${row.last_name}'s hours at ${row.venue_name} on ${row.work_date}`;
     if (row.finalised_by && row.finalised_by !== ctx.userId) {
+      // Review of #338: a Venue Manager (or anyone whose role cannot be read here: fail closed) must never see payroll
+      // content, so they get "needs re-checking" without the reason, in-app too; payroll managers see the reason in-app.
+      const seesPayroll = row.finaliser_sees_payroll === true;
       await this.notifications.notify(manager, {
         organisationId: ctx.organisationId!, userId: row.finalised_by as string, type: NotificationType.PAYROLL_RECORD_REJECTED,
-        title: 'Payroll record rejected',
-        message: `${what} were rejected for payroll: "${reason}". They are back in draft to be re-checked.`,
+        title: seesPayroll ? 'Payroll record rejected' : 'Hours need re-checking',
+        message: seesPayroll
+          ? `${what} were rejected for payroll: "${reason}". They are back in draft to be re-checked.`
+          : `${what} need re-checking.`,
         relatedEntityType: 'payroll_record', relatedEntityId: record.id,
         // The email never carries the free-text reason, the staff name or the hours (it may reach a Venue Manager, who
         // must never see payroll data, and mailboxes keep copies): it only says something needs re-checking.
