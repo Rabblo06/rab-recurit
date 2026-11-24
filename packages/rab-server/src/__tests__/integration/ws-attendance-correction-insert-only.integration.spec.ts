@@ -191,6 +191,11 @@ describeIfDb('S11: attendance_correction insert-only in workspace schemas, struc
       }
     };
 
+    it('the runtime login is crewflow_owner (the owner login), not SUPERUSER / BYPASSRLS: what the triggers bind', async () => {
+      const { rows } = await app.query(`SELECT current_user AS who, r.rolsuper AS su, r.rolbypassrls AS bypass FROM pg_roles r WHERE r.rolname = current_user`);
+      expect(rows[0]).toMatchObject({ who: 'crewflow_owner', su: false, bypass: false });
+    });
+
     it.each([
       ['UPDATE', `UPDATE __S__.attendance_correction SET new_value = '0' WHERE id = $1`],
       ['DELETE', `DELETE FROM __S__.attendance_correction WHERE id = $1`],
