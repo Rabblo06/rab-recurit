@@ -62,7 +62,7 @@ import { assertMigrationApproval, readMigrationApproval } from '../migration-app
 import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof } from './fresh-install';
 import { runCacheFlush } from '../../cache-flush';
-import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
+import { MinorReleaseResumeFailedError, UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
 import { createUpgradeCommandHost } from '../../../../../engine/core-modules/upgrade/upgrade-command-host';
 import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
@@ -281,6 +281,17 @@ export interface MigrateOnStartDeps {
    * instead of WORKSPACE_UPGRADE_COMMANDS, and the workspaces the runner and the fleet post-check look at.
    */
   testWorkspace?: { registry: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>; workspaceIds: readonly string[] };
+  /**
+   * Upgrade-runner test seam (the in-process cross-upgrade spec only; no environment variable maps to it; NODE_ENV=test only,
+   * like testWorkspace): the code version, the published list, the upgrade-from lists and the instance registry the start
+   * uses instead of readAppVersion() / CREWFLOW_PREVIOUS_VERSIONS / CREWFLOW_UPGRADE_FROM_VERSIONS / UPGRADE_COMMANDS.
+   */
+  testUpgrade?: {
+    codeVersion: string;
+    previousVersions: readonly string[];
+    upgradeFrom?: Readonly<Record<string, readonly string[]>>;
+    registry?: Readonly<Record<string, readonly UpgradeCommand[]>>;
+  };
 }
 
 /** How long the warning-only epoch bump may hold up the start (the migration lock is still held). */
@@ -422,6 +433,9 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     if (deps.testWorkspace && env.NODE_ENV !== 'test') {
       throw new TestSeamRefusal('the testWorkspace hook is a test seam: only NODE_ENV=test. Refusing.');
     }
+    if (deps.testUpgrade && env.NODE_ENV !== 'test') {
+      throw new TestSeamRefusal('the testUpgrade hook is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.');
+    }
     const pre = await readMarkerState(env);
     const first = synthesiseGuardEnv(env, pre.marker, pre.database, generatedId);
     guardEnvUsed = first.guardEnv;
@@ -430,14 +444,18 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const seams = readTestSeams(env, { production, disposableTestDatabase: pre.disposableTestDatabase });
     if (seams.failAt || seams.stopBefore) log(`TEST SEAMS ACTIVE: failAt=${seams.failAt ?? '-'} stopBefore=${seams.stopBefore ?? '-'}`);
     const seamCtx = { production, disposableTestDatabase: pre.disposableTestDatabase };
+    // Final review of #240: like readTestFailCommand, the upgrade-runner seam needs a disposable test database too.
+    assertTestUpgradeSeam(deps.testUpgrade, env, seamCtx);
     const testFailCommand = readTestFailCommand(env, seamCtx);
-    const codeVersion = readAppVersion(env);
+    const tu = deps.testUpgrade;
+    const codeVersion = tu?.codeVersion ?? readAppVersion(env);
     const probes = readTestUpgradeCommands(env, seamCtx);
     if (probes.length || testFailCommand) log(`TEST SEAMS ACTIVE: upgrade probe commands=${probes.map((c) => c.name).join(',') || '-'} failCommand=${testFailCommand ?? '-'}`);
-    const registry = probes.length ? withProbeCommands(UPGRADE_COMMANDS, codeVersion, probes) : undefined;
+    const registry = probes.length ? withProbeCommands(tu?.registry ?? UPGRADE_COMMANDS, codeVersion, probes) : tu?.registry;
     const tw = deps.testWorkspace;
     const run = new UpgradeRun({
       codeVersion,
+      ...(tu ? { previousVersions: tu.previousVersions, ...(tu.upgradeFrom ? { upgradeFrom: tu.upgradeFrom } : {}) } : {}),
       force: deps.upgradeForce === true,
       log,
       testFailCommand,
@@ -477,12 +495,14 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       },
       approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
       // OWNER-DB-ULTIMATE Part B: the upgrade logbook (engine/core-modules/upgrade/upgrade-runner.ts), hook calls only.
-      beforeApply: async ({ queryRunner: locked, classification: c, proof: p, code, guarded }) => {
+      beforeApply: async ({ queryRunner: locked, classification: c, proof: p, code, guarded, pendingBefore }) => {
         const fresh = c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p.fresh;
         await run.beforeApply(upgradeSessionOf(locked), {
           fresh,
           attribution: fresh ? null : attributeLedger(c.applied, code),
           unrestrictedTarget: guarded.target === 'local' || guarded.target === 'test',
+          // A patch start resumes its .0's failed commands BEFORE these apply (upgrade-runner.ts, order invariant).
+          pendingMigrations: pendingBefore,
         });
       },
       onApplyFailure: ({ queryRunner: locked, error }) => run.onApplyFailure(upgradeSessionOf(locked), error),
@@ -551,7 +571,8 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         const done = new Set(has ? ((await query('SELECT name FROM core.migrations')) as Array<{ name: string }>).map((r) => r.name) : []);
         return code.filter((n) => !done.has(n));
       });
-      if (outcome === 'migrationFailed' && pending.length) failedMigration = pending[0]!;
+      // Review A of #240: a patch's failed .0 retry stops the start BEFORE any migration ran; no migration failed.
+      if (outcome === 'migrationFailed' && pending.length && !(error instanceof MinorReleaseResumeFailedError)) failedMigration = pending[0]!;
     } catch {
       // Unreadable after the failure: keep the failure, report nothing as pending-known.
     }
@@ -559,7 +580,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     // migrations or the gates refuses (the C3 continue path and CREWFLOW_UPGRADE_FAILURE are removed: a failed
     // migration never serves). The logbook already holds the failed row (UpgradeRun.onApplyFailure); the next start is
     // attempt N+1. Only a failed upgrade COMMAND serves (exit 70), decided above in the success path.
-    if (outcome === 'migrationFailed') {
+    if (error instanceof MinorReleaseResumeFailedError) {
+      log(
+        `ERROR: the upgrade command ${error.step} (attempt ${error.attempt ?? '?'}) failed again before any migration of this start; no migration was applied (${pending.length} pending); refusing to start (exit 66). The next start retries it.`,
+      );
+    } else if (outcome === 'migrationFailed') {
       log(`ERROR: the schema upgrade FAILED at ${failedMigration ?? 'an unknown migration'}; refusing to start (exit 66). The next start retries it.`);
     }
     return result(outcome, { pending, failedMigration, serve: false, reason: message.slice(0, 300) });
@@ -598,6 +623,18 @@ export function withProbeCommands(
   }
   const key = majorMinorKey(codeVersion);
   return { ...registry, [key]: [...(registry[key] ?? []), ...probes] };
+}
+
+/** The testUpgrade hook: only NODE_ENV=test on a disposable test database, never production (TestSeamRefusal, 64). Pure. */
+export function assertTestUpgradeSeam(
+  testUpgrade: MigrateOnStartDeps['testUpgrade'],
+  env: Record<string, string | undefined>,
+  ctx: { production: boolean; disposableTestDatabase: boolean },
+): void {
+  if (testUpgrade === undefined) return;
+  if (env.NODE_ENV !== 'test' || ctx.production || !ctx.disposableTestDatabase) {
+    throw new TestSeamRefusal('the testUpgrade hook is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.');
+  }
 }
 
 export function readTestFailCommand(env: Record<string, string | undefined>, ctx: { production: boolean; disposableTestDatabase: boolean }): string | null {

@@ -802,7 +802,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_HwsCutover_1786721540100', 'completed', 1, '0.7.0') ON CONFLICT DO NOTHING`);
     }
     const at = (force: boolean) =>
-      new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.6.0', '0.7.0'], force, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [a.id, b.id] } }).beforeApply(session, {
+      new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.6.0', '0.7.0'], upgradeFrom: { '0.8.0': ['0.7.0'] }, force, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [a.id, b.id] } }).beforeApply(session, {
         fresh: false,
         attribution: null,
         unrestrictedTarget: true,

@@ -7,7 +7,8 @@ import { isNotYetRoutableWorkspace } from './workspace-routing';
 const DISCOVERY_PAGE_SIZE = 100;
 
 /** Four read-only scans at a time — bounds connection-pool use without serialising every empty workspace round trip. See P2.2 note below on why this number, not a higher one, is the safe lever to tune. */
-const CONCURRENCY = 4;
+export const WORKSPACE_DISCOVERY_CONCURRENCY = 4;
+const CONCURRENCY = WORKSPACE_DISCOVERY_CONCURRENCY;
 
 /**
  * Workspace discovery for workspace-scoped worker scans (Twenty-style runtime cutover).

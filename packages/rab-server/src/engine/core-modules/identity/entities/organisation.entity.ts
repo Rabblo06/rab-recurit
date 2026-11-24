@@ -1,6 +1,6 @@
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
-import { bigintAsNumber } from '../../../engine/utils/bigint-transformer';
+import { bigintAsNumber } from '../../../utils/bigint-transformer';
 
 /**
  * The tenant root. Has no `organisation_id` of its own — it IS the tenant —
