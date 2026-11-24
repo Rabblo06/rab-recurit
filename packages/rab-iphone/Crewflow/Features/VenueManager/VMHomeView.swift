@@ -13,6 +13,7 @@ struct VMHomeView: View {
 
     @EnvironmentObject private var store: VenueManagerStore
     @EnvironmentObject private var session: SessionCoordinator
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var mySpace = false
     @State private var destination: Destination?
     @State private var showsDiscover = false
@@ -27,10 +28,12 @@ struct VMHomeView: View {
                     VMInlineLoading(label: "Loading your venues")
                 } else if let error = store.error {
                     VMLoadFailure(message: error) { Task { await store.refresh() } }
-                } else if mySpace {
-                    personal
                 } else {
-                    organisation
+                    VStack(alignment: .leading, spacing: 16) {
+                        if mySpace { personal } else { organisation }
+                    }
+                    .id(mySpace)
+                    .transition(reduceMotion ? .identity : .opacity.combined(with: .offset(x: mySpace ? 12 : -12)))
                 }
             }
             .padding(.horizontal, ScheduleTokens.homeInset)
@@ -254,6 +257,7 @@ struct VMListRow: View {
                 Text(title).scheduleType(ScheduleType.body).frame(maxWidth: .infinity, alignment: .leading)
                 if let count {
                     Text("\(count)").scheduleType(ScheduleType.bodyStrong)
+                        .modifier(CountdownDigitMotion(value: String(count)))
                 } else if action != nil {
                     Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).accessibilityHidden(true)
                 }
@@ -281,6 +285,7 @@ struct VMOverviewRow: View {
                 Image(systemName: systemImage).frame(width: 24).accessibilityHidden(true)
                 Text(title).scheduleType(ScheduleType.body).frame(maxWidth: .infinity, alignment: .leading)
                 Text(count.map(String.init) ?? "—").scheduleType(ScheduleType.bodyStrong)
+                    .modifier(CountdownDigitMotion(value: count.map(String.init) ?? "—"))
                     .accessibilityLabel(count.map(String.init) ?? "Unavailable")
             }
             .foregroundStyle(ScheduleTokens.ink)
@@ -288,7 +293,7 @@ struct VMOverviewRow: View {
             .frame(minHeight: 52)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableButtonStyle())
     }
 }
 

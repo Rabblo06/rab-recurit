@@ -30,8 +30,8 @@ public struct Toast: Identifiable, Equatable, Sendable {
 ///
 /// Port of Flutter `ScheduleToast`: at most 3 visible, FIFO queue, an
 /// identical message+kind already showing or queued is ignored, error and
-/// warning stay 7 s, others 4.5 s, press-and-hold pauses, ✕ dismisses, a
-/// light semantic fill drains with the remaining time, every toast is
+/// warning stay 7 s, others 4.5 s, press-and-hold pauses, timers dismiss, a
+/// slim semantic countdown tracks the remaining time, every toast is
 /// announced to VoiceOver. Drawn in a pass-through window above sheets and
 /// never over bottom primary actions (top-aligned).
 @MainActor
@@ -140,7 +140,7 @@ public final class ToastCenter: ObservableObject {
         clocks[id] = clock
     }
 
-    /// Share of display time left (1 → 0), for the draining fill.
+    /// Share of display time left (1 → 0), for the countdown line.
     public func remainingFraction(for id: UUID, at date: Date) -> Double {
         guard let clock = clocks[id], let toast = visible.first(where: { $0.id == id }), toast.duration > 0 else { return 0 }
         var elapsed = clock.elapsed
@@ -163,18 +163,16 @@ public final class ToastCenter: ObservableObject {
     }
 }
 
-/// The toast surface: white card, thin border, soft shadow, left semantic
-/// icon, a very light semantic fill that drains with the remaining time,
-/// and a 48 pt ✕. Text stays neutral; icon and fill carry the meaning.
+/// The toast surface: dark card, thin border, soft shadow, left semantic
+/// icon badge, a slim semantic countdown line,
+/// and timer-only dismissal. Light text contrasts with the dark surface.
 public struct ToastCard: View {
     private let toast: Toast
     private let remaining: Double
-    private let onDismiss: () -> Void
 
-    public init(toast: Toast, remaining: Double = 1, onDismiss: @escaping () -> Void) {
+    public init(toast: Toast, remaining: Double = 1) {
         self.toast = toast
         self.remaining = remaining
-        self.onDismiss = onDismiss
     }
 
     static func accessibilityName(for kind: FeedbackKind) -> String {
@@ -201,40 +199,35 @@ public struct ToastCard: View {
             Image(systemName: style.icon)
                 .font(.system(size: 20))
                 .foregroundStyle(style.iconColor)
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(style.fill))
                 .accessibilityLabel(Self.accessibilityName(for: toast.kind))
             VStack(alignment: .leading, spacing: 2) {
-                if let title = toast.title {
-                    Text(title).scheduleType(ScheduleType.bodyStrong)
-                }
+                Text(toast.title ?? Self.accessibilityName(for: toast.kind))
+                    .scheduleType(ScheduleType.bodyStrong.colored(.white))
                 Text(toast.message)
-                    .scheduleType(toast.title == nil ? ScheduleType.bodyStrong : ScheduleType.secondary)
+                    .scheduleType(ScheduleType.secondary.colored(RGBA(argb: 0xFFE4E4E7).color))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 13)
             .frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(ScheduleTokens.muted)
-                    .frame(width: ScheduleTokens.touchTarget, height: ScheduleTokens.touchTarget)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss")
-            .accessibilityIdentifier("toast.dismiss")
         }
         .padding(.leading, 14)
-        .background(alignment: .leading) {
+        .padding(.trailing, 16)
+        .overlay(alignment: .bottomLeading) {
             GeometryReader { proxy in
-                Rectangle()
+                Capsule()
                     .fill(style.fill)
-                    .frame(width: proxy.size.width * min(max(remaining, 0), 1))
+                    .frame(width: proxy.size.width * min(max(remaining, 0), 1), height: 3)
             }
+            .frame(height: 3)
+            .padding(.horizontal, 20)
+            .allowsHitTesting(false)
         }
-        .background(Color.white)
+        .background(RGBA(argb: 0xFF111113).color)
         .clipShape(shape)
-        .overlay(shape.stroke(SchedulePalette.toastBorder.color, lineWidth: 1))
-        .shadow(color: RGBA(argb: 0x1A101828).color, radius: 8, x: 0, y: 6)
+        .overlay(shape.stroke(RGBA(argb: 0xFF343438).color, lineWidth: 1))
+        .shadow(color: RGBA(argb: 0x14101828).color, radius: 14, x: 0, y: 10)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("toast.\(toast.kind.rawValue)")
     }
@@ -303,9 +296,8 @@ private struct ToastRow: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: reduceMotion || pressing)) { context in
             ToastCard(
                 toast: toast,
-                // Reduced motion: no slide/fade and the fill holds still.
-                remaining: reduceMotion ? 1 : center.remainingFraction(for: toast.id, at: context.date),
-                onDismiss: { center.dismiss(toast.id) }
+                // Reduced motion: no slide/fade and the countdown holds still.
+                remaining: reduceMotion ? 1 : center.remainingFraction(for: toast.id, at: context.date)
             )
         }
         .simultaneousGesture(
