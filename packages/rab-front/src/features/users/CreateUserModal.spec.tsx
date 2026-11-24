@@ -58,27 +58,26 @@ const openCreateStaff = () => act(() => {
 
 /** Personal Details now also contains the former Employment fields (merged step) — this fills only the required name fields and advances, leaving Employment's optional fields untouched. */
 async function fillPersonalStep() {
-  await screen.findByText('Step 1 of 4');
+  await screen.findByText('Step 1 of 2');
+  await userEvent.click(screen.getByRole('button', { name: 'Expand name fields' }));
   await userEvent.type(screen.getByLabelText(/First name/), 'Jordan');
   await userEvent.type(screen.getByLabelText(/Last name/), 'QA');
   await userEvent.click(screen.getByRole('button', { name: 'Next' }));
-  await screen.findByText('Step 2 of 4');
+  await screen.findByText('Step 2 of 2');
 }
 
-/** Assumes the wizard is currently on General (Step 2) — fills it and advances to Emergency Contact. */
+/** Assumes the wizard is currently on General (Step 2) — fills the contact fields without changing pages. */
 async function fillGeneralStep() {
   await userEvent.type(screen.getByLabelText(/^Email/), 'jordan.qa@example.com');
   await userEvent.type(screen.getByLabelText(/^Mobile number/), '+447700900000');
-  await userEvent.click(screen.getByRole('button', { name: 'Next' }));
-  await screen.findByText('Step 3 of 4');
+
 }
 
 async function fillEmergencyStep() {
   await userEvent.type(screen.getByLabelText(/Full name/), 'Jane Doe');
   await userEvent.type(screen.getByLabelText(/Relationship/), 'Spouse');
   await userEvent.type(screen.getByLabelText(/^Phone number/), '+447700900001');
-  await userEvent.click(screen.getByRole('button', { name: 'Next' }));
-  await screen.findByText('Step 4 of 4');
+
 }
 
 beforeEach(() => {
@@ -90,26 +89,27 @@ beforeEach(() => {
 });
 
 describe('New Staff wizard — stage merge & removal (Part 1, Part 4/11, TEST 16/17)', () => {
-  it('has exactly 4 stages, Personal Details absorbing the former Employment stage, and never renders the removed Work Information / Right to Work / Additional stages', async () => {
+  it('has exactly 2 stages, Personal Details absorbing the former Employment stage, and never renders the removed Work Information / Right to Work / Additional stages', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
     expect(document.querySelector('.wizard-step-title')?.textContent).toBe('Personal Details');
     // Employment's fields (Job role, Employment type, Start date, Default
     // rate) render inside this same first step, under an in-page divider —
     // not as a second top-level step titled "Employment".
     expect(screen.getByLabelText('Job role')).toBeTruthy();
     expect(screen.getByLabelText('Employment type')).toBeTruthy();
+    expect(screen.queryByLabelText('Preferred name')).toBeNull();
     expect(screen.getByText('Employment')).toBeTruthy();
 
     await fillPersonalStep();
     expect(document.querySelector('.wizard-step-title')?.textContent).toBe('General');
 
-    await fillGeneralStep(); // -> Emergency Contact (Step 3 of 4)
-    expect(document.querySelector('.wizard-step-title')?.textContent).toBe('Emergency Contact');
+    await fillGeneralStep();
+    expect(screen.getByText('Emergency Contact')).toBeTruthy();
 
-    await fillEmergencyStep(); // -> Availability (Step 4 of 4, the last)
-    expect(document.querySelector('.wizard-step-title')?.textContent).toBe('Availability');
+    await fillEmergencyStep();
+    expect(screen.getByText('Availability')).toBeTruthy();
 
     expect(screen.queryByText(/of 8/)).toBeNull();
     expect(screen.queryByText(/of 6/)).toBeNull();
@@ -125,7 +125,7 @@ describe('New Staff wizard — stage merge & removal (Part 1, Part 4/11, TEST 16
   it('removed the "Status will be Pending..." sentence from the merged Personal Details/Employment stage', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
     expect(screen.queryByText(/Status will be Pending until the invitation is accepted/)).toBeNull();
   });
 });
@@ -136,10 +136,11 @@ describe('New Staff wizard — Job role (Part 5A, TEST 10/11/12)', () => {
   it('the Job role select offers None, predefined roles, and Custom role — with no decorative dashes', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
 
     const select = await screen.findByLabelText('Job role') as HTMLSelectElement;
-    const options = within(select).getAllByRole('option').map((o) => o.textContent);
+    await userEvent.click(select);
+    const options = within(await screen.findByRole('listbox', { name: 'Job role' })).getAllByRole('option').map((o) => o.textContent);
     expect(options).toEqual(['None', 'Bartender', 'Custom role']);
   });
 
@@ -147,10 +148,11 @@ describe('New Staff wizard — Job role (Part 5A, TEST 10/11/12)', () => {
   it('shows a "Custom job role" text input only once Custom role is selected', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
 
     expect(screen.queryByLabelText(/Custom job role/)).toBeNull();
-    await userEvent.selectOptions(await screen.findByLabelText('Job role'), 'Custom role');
+    await userEvent.click(await screen.findByLabelText('Job role'));
+    await userEvent.click(await screen.findByRole('option', { name: 'Custom role' }));
     expect(await screen.findByLabelText(/Custom job role/)).toBeTruthy();
   });
 
@@ -158,19 +160,21 @@ describe('New Staff wizard — Job role (Part 5A, TEST 10/11/12)', () => {
   it('a typed custom role survives Next then Back', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
+    await userEvent.click(screen.getByRole('button', { name: 'Expand name fields' }));
     await userEvent.type(screen.getByLabelText(/First name/), 'Jordan');
     await userEvent.type(screen.getByLabelText(/Last name/), 'QA');
 
-    await userEvent.selectOptions(await screen.findByLabelText('Job role'), 'Custom role');
+    await userEvent.click(await screen.findByLabelText('Job role'));
+    await userEvent.click(await screen.findByRole('option', { name: 'Custom role' }));
     await userEvent.type(await screen.findByLabelText(/Custom job role/), 'Banqueting Supervisor');
 
     await userEvent.click(screen.getByRole('button', { name: 'Next' })); // -> General
-    await screen.findByText('Step 2 of 4');
+    await screen.findByText('Step 2 of 2');
     await userEvent.click(screen.getByRole('button', { name: 'Back' })); // -> back to Personal Details/Employment
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
 
-    expect((await screen.findByLabelText('Job role') as HTMLSelectElement).value).toBe('__custom_job_role__');
+    expect(await screen.findByLabelText('Job role')).toHaveTextContent('Custom role');
     expect((await screen.findByLabelText(/Custom job role/) as HTMLInputElement).value).toBe('Banqueting Supervisor');
   });
 });
@@ -179,9 +183,9 @@ describe('New Staff wizard — Employment type (Part 5B)', () => {
   it('has no decorative dashes in the Employment type placeholder', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
     const select = await screen.findByLabelText('Employment type') as HTMLSelectElement;
-    expect(within(select).getAllByRole('option')[0]!.textContent).toBe('Select employment type');
+    expect(select).toHaveTextContent('Select employment type');
   });
 });
 
@@ -193,30 +197,34 @@ describe('Availability stage (Part 8A)', () => {
     await fillGeneralStep();
     await fillEmergencyStep();
     const select = screen.getByLabelText('Preferred shift times') as HTMLSelectElement;
-    expect(within(select).getAllByRole('option')[0]!.textContent).toBe('Select preferred shift time');
+    expect(select).toHaveTextContent('Select preferred shift time');
   });
 });
 
 describe('New Staff wizard — email validation (Part 6A, TEST 13/14)', () => {
-  it('blocks Next on an invalid email and shows the error', async () => {
+  it('blocks Create on an invalid email and shows the error', async () => {
     mount();
     openCreateStaff();
-    await fillPersonalStep(); // -> General (Step 2 of 4)
-    await screen.findByText('Step 2 of 4');
+    await fillPersonalStep(); // -> General (Step 2 of 2)
+    await screen.findByText('Step 2 of 2');
 
     await userEvent.type(screen.getByLabelText(/^Email/), 'foo@bar');
-    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await userEvent.type(screen.getByLabelText(/Mobile number/), '+447700900002');
+    await fillEmergencyStep();
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
 
-    expect(screen.getByText('Please enter a valid email address.')).toBeTruthy();
-    expect(screen.getByText('Step 2 of 4')).toBeTruthy(); // did not advance
+    expect(screen.getAllByText('Please enter a valid email address.').length).toBeGreaterThan(0);
+    expect(screen.getByText('Step 2 of 2')).toBeTruthy(); // did not advance
   });
 
-  it('allows Next once the email is valid and the rest of the step is filled', async () => {
+  it('keeps contact and availability on the same page as General', async () => {
     mount();
     openCreateStaff();
     await fillPersonalStep();
     await fillGeneralStep();
-    expect(screen.getByText('Step 3 of 4')).toBeTruthy();
+    expect(screen.getByText('Step 2 of 2')).toBeTruthy();
+    expect(screen.getByText('Emergency Contact')).toBeTruthy();
+    expect(screen.getByText('Availability')).toBeTruthy();
   });
 });
 
@@ -229,12 +237,27 @@ describe('New Staff wizard — full creation flow (TEST 19/20)', () => {
     await fillGeneralStep();
     await fillEmergencyStep();
 
+    await userEvent.type(screen.getByLabelText('Address', { exact: true }), '12 High Street');
+    await userEvent.type(screen.getByLabelText('Address 2'), 'Flat 3');
+    await userEvent.type(screen.getByLabelText('City'), 'London');
+    await userEvent.type(screen.getByLabelText('State'), 'Greater London');
+    await userEvent.type(screen.getByLabelText('Postcode'), 'SW1A 1AA');
+    await userEvent.click(screen.getByLabelText('Country'));
+    await userEvent.type(await screen.findByRole('combobox', { name: 'Search country' }), 'United Kingdom');
+    await userEvent.click(screen.getByRole('option', { name: 'United Kingdom' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Mon' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.getByLabelText('Address 2')).toHaveValue('Flat 3');
+    expect(screen.getByRole('checkbox', { name: 'Mon' })).toBeChecked();
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/staff', expect.objectContaining({
       email: 'jordan.qa@example.com',
       firstName: 'Jordan',
       lastName: 'QA',
+      address: '12 High Street\nFlat 3\nGreater London\nUnited Kingdom',
+      city: 'London', postcode: 'SW1A 1AA', availableDays: ['Monday'],
     })));
     // Removed-stage fields were never sent, and neither were the
     // now-server-generated Staff Reference or the removed Temporary
@@ -260,7 +283,7 @@ describe('New Staff wizard — avatar (Part 3/4)', () => {
   it('is clickable from the very first step and holds the picked file as a local preview only — no network call yet', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
 
     expect(screen.getByRole('button', { name: 'Change photo' })).toBeTruthy();
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
@@ -277,7 +300,7 @@ describe('New Staff wizard — avatar (Part 3/4)', () => {
     });
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     const file = pngFile();
     await userEvent.upload(input, file);
@@ -301,7 +324,7 @@ describe('New Staff wizard — avatar (Part 3/4)', () => {
     mockApi.post.mockRejectedValue({ response: { data: { message: 'A user with this email already exists.' } } });
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     await userEvent.upload(input, pngFile());
 
@@ -317,7 +340,7 @@ describe('New Staff wizard — avatar (Part 3/4)', () => {
   it('cancelling the panel after picking a file never uploads it', async () => {
     mount();
     openCreateStaff();
-    await screen.findByText('Step 1 of 4');
+    await screen.findByText('Step 1 of 2');
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     await userEvent.upload(input, pngFile());
 
@@ -340,10 +363,14 @@ describe('New venue manager (a Manager, own workspace)', () => {
 
     await screen.findByRole('button', { name: 'Create venue manager' });
     expect(screen.queryByLabelText(/Manager type/)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Expand name fields' }));
     await userEvent.type(screen.getByLabelText(/First name/), 'Venue');
     await userEvent.type(screen.getByLabelText(/Last name/), 'Test 4');
     await userEvent.type(screen.getByLabelText(/^Email/), 'venutest4@example.com');
-    await userEvent.selectOptions(await screen.findByLabelText(/Select Venue/), 'venue-1');
+    expect(screen.queryByLabelText('Job title')).toBeNull();
+    await userEvent.click(await screen.findByLabelText(/Select Venue/));
+    await userEvent.type(await screen.findByRole('combobox', { name: 'Search select venue' }), 'Venue Test');
+    await userEvent.click(await screen.findByRole('option', { name: 'Venue Test 3' }));
     await userEvent.click(screen.getByRole('button', { name: 'Create venue manager' }));
 
     await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/venue-managers/vm-1/venues', { venueId: 'venue-1' }));

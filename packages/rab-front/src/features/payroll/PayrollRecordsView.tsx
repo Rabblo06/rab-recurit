@@ -1,3 +1,5 @@
+import { recordAvatarStyle } from '../../shared/lib/recordAvatarColor';
+import RecordOpenAction from '../../shared/components/RecordOpenAction';
 import { useMemo, useState } from 'react';
 import { IconSend } from '@tabler/icons-react';
 import BulkActionBar from '../../shared/components/BulkActionBar';
@@ -100,7 +102,7 @@ export default function PayrollRecordsView({ rows, timezone, filter, canApprove,
             {visible.map((r) => (
               <tr key={r.attendanceId} className={selected.has(r.attendanceId) ? 'row-selected' : undefined}>
                 <td className="checkbox-col"><input type="checkbox" aria-label={`Select ${r.staffName} ${dayKey(r.startsAt, timezone)}`} checked={selected.has(r.attendanceId)} onChange={() => toggle(r.attendanceId)} /></td>
-                <td><span className="user-cell"><span className="payroll-avatar" aria-hidden="true">{initialsOf(r.staffName)}</span>{r.staffName}</span></td>
+                <td><button type="button" onClick={event => { event.stopPropagation(); document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: r.staffProfileId, type: 'staff' } })); }} className="user-cell record-chip object-name-chip"><span className="payroll-avatar" style={recordAvatarStyle(r.staffName)} aria-hidden="true">{r.staffName?.charAt(0).toUpperCase()}</span>{r.staffName}</button><RecordOpenAction label={`Open staff ${r.staffName}`} onOpen={() => document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: r.staffProfileId, type: 'staff' } }))}/></td>
                 <td className="cell-muted">{r.venueName}</td>
                 <td className="cell-muted">{fmtDate(r.startsAt, timezone)}</td>
                 <td className="cell-muted">{fmtPeriod(r.allocation?.payrollPeriod ?? null)}{r.allocation?.status === 'carried_forward' ? ' · late' : ''}</td>

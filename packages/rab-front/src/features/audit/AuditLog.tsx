@@ -1,3 +1,4 @@
+import { motion as arcMotion } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import { api } from '../../shared/api';
@@ -155,7 +156,7 @@ export default function AuditLog() {
                 const c = actionColor(log.action);
                 const ac = getColor(log.actor?.fullName || 'A');
                 return (
-                  <tr key={log.id}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={log.id}>
                     {isVisible('when') && (
                       <td className="cell-muted" style={{ width: 'auto' }} title={new Date(log.createdAt).toLocaleString('en-GB')}>
                         {timeAgo(log.createdAt)}
@@ -184,7 +185,7 @@ export default function AuditLog() {
                         {(log.metadata?.name as string | undefined) ?? (log.targetId ? log.targetId.slice(0, 8) : '–')}
                       </td>
                     )}
-                  </tr>
+                  </arcMotion.tr>
                 );
               })}
               {visible.length === 0 && (

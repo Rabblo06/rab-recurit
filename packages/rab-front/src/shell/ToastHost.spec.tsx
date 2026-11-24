@@ -31,6 +31,11 @@ function advance(ms: number) {
 
 beforeEach(() => {
   jest.useFakeTimers();
+  window.matchMedia = jest.fn().mockImplementation((media: string) => ({
+    matches: false, media, onchange: null,
+    addListener: jest.fn(), removeListener: jest.fn(),
+    addEventListener: jest.fn(), removeEventListener: jest.fn(), dispatchEvent: jest.fn(),
+  }));
 });
 
 afterEach(() => {
@@ -103,7 +108,7 @@ describe('dismissal', () => {
       toast.info('Draft saved.');
     });
     const [first] = screen.getAllByRole('button', { name: 'Dismiss notification' });
-    first!.focus();
+    act(() => first!.focus());
     expect(first).toHaveFocus();
     await user.keyboard('{Enter}');
     await waitFor(() => expect(screen.queryByText('Staff member removed from this venue manager.')).toBeNull());
@@ -129,7 +134,7 @@ describe('dismissal', () => {
     const card = screen.getByRole('status');
     advance(1000);
     fireEvent.mouseEnter(card);
-    expect(card).toHaveClass('is-paused');
+    await waitFor(() => expect(screen.getByRole('status')).toHaveClass('is-paused'));
     advance(20000);
     expect(screen.getByText('Profile updated.')).toBeInTheDocument();
     fireEvent.mouseLeave(card);
@@ -172,7 +177,7 @@ describe('stacking and de-duplication', () => {
     expect(screen.queryByText('Message 4')).toBeNull();
     fireEvent.click(screen.getAllByRole('button', { name: 'Dismiss notification' })[0]!);
     await waitFor(() => expect(screen.getByText('Message 4')).toBeInTheDocument());
-    expect(screen.queryByText('Message 1')).toBeNull();
+    await waitFor(() => expect(screen.queryByText('Message 1')).toBeNull());
     expect(screen.queryByText('Message 5')).toBeNull();
   });
 

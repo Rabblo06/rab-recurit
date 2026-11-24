@@ -1,0 +1,7 @@
+.progressive-avatar { position:relative; overflow:hidden; isolation:isolate; }
+.progressive-avatar .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.progressive-avatar img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:0; transition:opacity 250ms ease-out; }
+.progressive-avatar.is-loaded img { opacity:1; }
+.progressive-avatar.is-instant img { transition:none; }
+.avatar-image-placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--font-secondary,#697386); background:radial-gradient(ellipse at 35% 25%,var(--bg-hover,#e8eaed),transparent 70%),linear-gradient(135deg,var(--border-light,#e3e5e8),var(--bg-primary,#f6f7f8)); }
+@media(prefers-reduced-motion:reduce) { .progressive-avatar img { transition:none; } }

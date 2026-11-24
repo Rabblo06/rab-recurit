@@ -1,3 +1,6 @@
+import { motion as arcMotion } from 'framer-motion';
+import { recordAvatarStyle } from '../../shared/lib/recordAvatarColor';
+import RecordOpenAction from '../../shared/components/RecordOpenAction';
 import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
 import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useState } from 'react';
@@ -103,7 +106,7 @@ function openShiftRequest() {
 }
 const REQUEST_STATUSES = ['pending_manager_approval', 'declined'];
 
-export default function Shifts() {
+export default function Shifts({ fixedStatus, title = "Shifts" }: { fixedStatus?: string; title?: string } = {}) {
   const qc = useQueryClient();
   const { data: me } = useQuery(authMeQuery);
   const isVenueManager = me?.roles.includes('venue_manager') ?? false;
@@ -113,9 +116,10 @@ export default function Shifts() {
 
   const config: TableToolbarConfig = {
     ...SHIFTS_TABLE_CONFIG,
+    storageKey: fixedStatus ? `shifts-${fixedStatus}` : SHIFTS_TABLE_CONFIG.storageKey,
     filters: [
       { key: 'venueId', label: 'Venue', type: 'select', options: venues.map((v) => ({ value: v.id, label: v.name })) },
-      ...SHIFTS_TABLE_CONFIG.filters,
+      ...SHIFTS_TABLE_CONFIG.filters.filter(field => !fixedStatus || field.key !== 'status'),
       { key: 'jobRoleId', label: 'Job role', type: 'select', options: jobRoles.map((r) => ({ value: r.id, label: r.name })) },
     ],
   };
@@ -123,7 +127,7 @@ export default function Shifts() {
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { page, limit: LIST_PAGE_SIZE, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const params = { page, limit: LIST_PAGE_SIZE, q: search || undefined, ...filters, ...(fixedStatus ? { status: fixedStatus } : {}), sort: sort.sort, direction: sort.direction };
   const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['shifts', params],
     queryFn: async () => { const { data } = await api.get<{ data: Shift[]; total: number }>('/shifts', { params }); return data; },
@@ -158,7 +162,7 @@ export default function Shifts() {
 
   return (
     <div className="page">
-      <PageHeader title="Shifts" action={isVenueManager ? (
+      <PageHeader title={title} action={isVenueManager ? (
             <button className="btn btn-dark" onClick={openShiftRequest}>
               <IconPlus size={14}/> Request shift
             </button>
@@ -167,7 +171,7 @@ export default function Shifts() {
               <IconPlus size={14}/> New shift
             </button>
           )}
-        tabs={<>
+        tabs={!fixedStatus && <>
         {[{label:'All shifts', status:''}, {label:'Upcoming', status:'upcoming'}, {label:'Completed', status:'completed'}].map(view => {
           const active = view.status === 'upcoming' ? !!filters.startsAtFrom && !filters.status : view.status === 'completed' ? filters.status === 'completed' : !filters.status && !filters.startsAtFrom;
           return <button key={view.label} className={`tab-link ${active ? 'active' : ''}`} onClick={() => setFilters({...filters, status: view.status === 'completed' ? 'completed' : '', startsAtFrom: view.status === 'upcoming' ? new Date().toLocaleDateString('sv-SE') : ''})}>{view.label}{active && <span className="tab-count"> · {total}</span>}</button>;
@@ -176,7 +180,7 @@ export default function Shifts() {
       />
 
       <div className="list-toolbar-row">
-        <ListViewSelect label="Shifts view" value={filters.status ?? ''} options={[{value:'', label:'All shifts'}, ...SHIFT_STATUS_OPTIONS]} onChange={status => setFilters({...filters, status})} />
+        <ListViewSelect label="Shifts view" value={fixedStatus ?? filters.status ?? ''} options={fixedStatus ? [{value:fixedStatus, label:title}] : [{value:'', label:'All shifts'}, ...SHIFT_STATUS_OPTIONS]} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
           {selection.summary}
@@ -214,7 +218,7 @@ export default function Shifts() {
               {shifts.map((s) => {
                 const isRequest = REQUEST_STATUSES.includes(s.status);
                 return (
-                <tr
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}}
                   key={s.id}
                   className={selection.isSelected(s.id) ? "row-selected" : undefined}
                   onClick={isRequest ? () => openShiftApproval(s.id) : undefined}
@@ -223,10 +227,11 @@ export default function Shifts() {
                   <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(s.id,venueName(s.venueId))}</td>
                   {isVisible('venue') && (
                     <td>
-                      <span className="record-chip">
-                        <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{venueName(s.venueId)[0]}</span>
+                      <button type="button" onClick={event => { event.stopPropagation(); isRequest ? openShiftApproval(s.id) : setTimelineFor(s); }} className="record-chip object-name-chip">
+                        <span className="mini-avatar" style={recordAvatarStyle(venueName(s.venueId))}>{venueName(s.venueId)[0]}</span>
                         {venueName(s.venueId)}
-                      </span>
+                      </button>
+                      <RecordOpenAction label={`Open shift at ${venueName(s.venueId)}`} onOpen={() => isRequest ? openShiftApproval(s.id) : setTimelineFor(s)}/>
                     </td>
                   )}
                   {isVisible('role') && <td className="cell-muted">{roleName(s.jobRoleId)}</td>}
@@ -282,7 +287,7 @@ export default function Shifts() {
                       )}
                     </div>
                   </td>
-                </tr>
+                </arcMotion.tr>
                 );
               })}
               {shifts.length === 0 && (

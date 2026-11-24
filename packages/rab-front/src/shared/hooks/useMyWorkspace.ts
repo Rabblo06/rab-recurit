@@ -87,6 +87,8 @@ export function useMyWorkspace(opts: { pollWhileCreating?: boolean; pollInterval
     // instead of firing a request guaranteed to 404. UX-only: the real enforcement is still the
     // backend's own ownership-only `/manager-workspaces/me` lookup.
     enabled: opts.enabled ?? true,
+    // Preparation must not route from a cached pre-profile snapshot on a fresh visit (new UI).
+    refetchOnMount: opts.pollWhileCreating ? 'always' : undefined,
     // Phase C1 (shared/lib/polling.ts): while CREATING, poll only while the tab is visible and re-read once, at once, the
     // moment it becomes visible again. History: polling used to stall silently once the tab had been hidden (the app's
     // QueryClient disables refetchOnWindowFocus, so returning to the tab did not resume it — the live "stuck on

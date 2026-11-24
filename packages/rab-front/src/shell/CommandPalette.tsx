@@ -1,7 +1,9 @@
+import { SearchField } from '../shared/components/arc/search-field/search-field';
+import { OPERATIONAL_OBJECTS } from './operational-objects';
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  IconSearch, IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
+  IconSearch, IconClock, IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
   IconCalendarMonth, IconCash, IconMapPin, IconHistory, IconSettings,
   IconUserPlus, IconUserStar, IconPlus, IconTimelineEvent,
   IconFileImport, IconFileExport, IconTrash, IconUser, IconShieldLock, IconX, IconSparkles,
@@ -28,6 +30,7 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
   onAskAi?: () => void;
 }) {
   const nav = useNavigate();
+  const { pathname } = useLocation();
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -48,6 +51,8 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
     // Ask AI (U2): only when the server confirmed AI eligibility (the shell passes onAskAi then).
     ...(onAskAi ? [{ id: 'ask-ai', label: 'Ask AI', section: 'Navigation', Icon: IconSparkles, hint: askAiShortcutLabel(), run: () => { onClose(); onAskAi(); } }] : []),
     // Navigation
+    { id: 'nav-up-next', label: 'Go to Up next', section: 'Navigation', Icon: IconClock, run: () => go('/up-next') },
+    ...Object.entries(OPERATIONAL_OBJECTS).map(([id, object]) => ({ id: 'nav-' + id, label: 'Go to ' + object.label, section: 'Operational views', Icon: IconChecklist, run: () => go(object.to) })),
     { id: 'nav-dashboard',  label: 'Go to Dashboard',  section: 'Navigation', Icon: IconChartPie,            run: () => go('/') },
     { id: 'nav-users',      label: 'Go to Users',       section: 'Navigation', Icon: IconUsers,               run: () => go('/users') },
     { id: 'nav-shifts',     label: 'Go to Shifts',      section: 'Navigation', Icon: IconBuildingSkyscraper,  run: () => go('/shifts') },
@@ -94,10 +99,31 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [onClose, onOpenSearch, onOpenTimeline, onAskAi]);
 
+  const contextualCommands = useMemo<Command[]>(() => {
+    const contexts: Record<string, { label: string; ids: string[] }> = {
+      '/': { label: 'Dashboard', ids: ['nav-up-next', 'nav-calendar', 'nav-offers', 'nav-payroll'] },
+      '/up-next': { label: 'Up next', ids: ['nav-open-shifts', 'nav-awaiting-confirmation', 'nav-calendar'] },
+      '/users': { label: 'Users', ids: ['new-user', 'search-users'] },
+      '/shifts': { label: 'Shifts', ids: ['new-shift', 'search-shifts', 'nav-calendar'] },
+      '/venues': { label: 'Venues', ids: ['new-venue', 'search-venues'] },
+      '/offers': { label: 'Offers', ids: ['search-offers', 'nav-shifts'] },
+      '/calendar': { label: 'Calendar', ids: ['new-calendar', 'nav-shifts'] },
+      '/payroll': { label: 'Payroll', ids: ['nav-shifts', 'view-timeline'] },
+    };
+    const objectView = Object.values(OPERATIONAL_OBJECTS).some(object => object.to === pathname);
+    const context = contexts[pathname] ?? (objectView ? contexts['/' + pathname.split('/')[1]] : undefined);
+    if (!context) return commands;
+    const selected = context.ids.flatMap(id => {
+      const command = commands.find(item => item.id === id);
+      return command ? [{ ...command, section: 'Current page · ' + context.label }] : [];
+    });
+    return [...selected, ...commands.filter(command => !context.ids.includes(command.id))];
+  }, [commands, pathname]);
+
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
-    return q ? commands.filter(c => c.label.toLowerCase().includes(q)) : commands;
-  }, [commands, query]);
+    return q ? contextualCommands.filter(c => c.label.toLowerCase().includes(q)) : contextualCommands;
+  }, [contextualCommands, query]);
 
   // Group preserving order
   const sections = useMemo(() => {
@@ -125,17 +151,17 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
           if (e.key === 'Enter' && filtered[active]) filtered[active].run();
         }}
       >
-        <div className="side-panel-input">
+        <div className="side-panel-input command-search-input">
           <button className="btn-icon" onClick={onClose} title="Close"><IconX size={15}/></button>
-          <input
-            placeholder="Type anything…"
+          <SearchField label="Search commands" type="text"
+            aria-label="Search commands" placeholder="Type anything…"
             value={query}
             onChange={e => { setQuery(e.target.value); setActive(0); }}
             autoFocus
           />
           <span className="command-hint">esc</span>
         </div>
-        <div className="side-panel-body" ref={listRef}>
+        <div className="side-panel-body contextual-command-body" ref={listRef}>
           {filtered.length === 0 ? (
             <EmptyState compact variant="matches" title="No commands found" description="Try another search term." />
           ) : (

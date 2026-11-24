@@ -1,3 +1,4 @@
+import { SearchField } from '../shared/components/arc/search-field/search-field';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -87,10 +88,9 @@ export default function GlobalSearch({ open, onClose, initialQuery = '' }: {
           if (e.key === 'Enter' && results[active]) pick(results[active]);
         }}
       >
-        <div className="side-panel-input">
+        <div className="side-panel-input workspace-search-input">
           <button className="btn-icon" onClick={onClose} title="Close"><IconX size={15}/></button>
-          <IconSearch size={15}/>
-          <input
+          <SearchField label="Search staff, managers, shifts, offers, venues…" type="text"
             placeholder="Search staff, managers, shifts, offers, venues…"
             value={query}
             onChange={e => { setQuery(e.target.value); setActive(0); }}

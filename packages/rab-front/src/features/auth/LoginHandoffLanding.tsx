@@ -110,7 +110,7 @@ export default function LoginHandoffLanding() {
         <p style={s.subtitle}>
           You’ll be signed in as <strong data-testid="handoff-masked-email">{who.maskedEmail}</strong>. If that isn’t you, don’t continue.
         </p>
-        <button type="button" style={s.submitBtn} onClick={() => void exchange()}>Continue as {who.maskedEmail}</button>
+        <button type="button" className="flow-button" style={s.submitBtn} onClick={() => void exchange()}>Continue as {who.maskedEmail}</button>
         <button type="button" style={{ ...s.providerBtn, marginTop: 12 }} onClick={decline}>
           Not you? Sign in with another account
         </button>

@@ -1,3 +1,5 @@
+import DateInput from '../../shared/components/DateInput';
+import TimeInput from '../../shared/components/TimeInput';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { IconSend } from '@tabler/icons-react';
@@ -12,7 +14,7 @@ import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityC
 import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
 import { toast } from '../../shared/lib/toast';
 
-interface Venue { id: string; name: string; status: string; address?: { line1?: string; city?: string; postcode?: string } }
+interface Venue { id: string; name: string; status: string; instructions?: string | null; address?: { line1?: string; city?: string; postcode?: string } }
 interface JobRole { id: string; name: string; defaultRatePence: number }
 interface Shift {
   id: string;
@@ -48,7 +50,21 @@ export interface ReplacementContext {
 }
 
 const NEW_ROLE = '__new__';
+/** Advance the local calendar date, not a fixed 24 hours (DST-safe date rollover). */
+export function shiftEndDate(date: string, time: string, startTime: string) {
+  const nextDay = Boolean(startTime && time < startTime);
+  const [year,month,day]=date.split('-').map(Number);
+  const [hours,minutes]=time.split(':').map(Number);
+  return new Date(year,month-1,day+(nextDay?1:0),hours,minutes);
+}
+
 const emptyShift = { venueId: '', jobRoleId: '', address: '', date: '', startTime: '', endTime: '', breakMinutes: '0', payRatePence: '', notes: '' };
+/** Match the browser-local date/time semantics used by the shift form on submission. */
+export function currentShiftDraft(now = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return { ...emptyShift, date: `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`, startTime: `${pad(now.getHours())}:${pad(now.getMinutes())}` };
+}
+
 
 const fmtMoney = (pence: number) => `£${(pence / 100).toFixed(2)}`;
 const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -111,10 +127,13 @@ export default function ShiftDrawers() {
   const qc = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ ...emptyShift });
+  const initialCreateForm = useRef({ ...emptyShift });
   const [addressTouched, setAddressTouched] = useState(false);
+  const [notesTouched, setNotesTouched] = useState(false);
   const [newRoleName, setNewRoleName] = useState('');
   const [newRoleRate, setNewRoleRate] = useState('');
   const [createStaffIds, setCreateStaffIds] = useState<Set<string>>(new Set());
+  const [staffSettings, setStaffSettings] = useState<Record<string, Partial<{ jobRoleId: string; startTime: string; endTime: string }>>>({});
   const [createResults, setCreateResults] = useState<SendResult[] | null>(null);
   const [attemptedCreate, setAttemptedCreate] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<string | null>(null);
@@ -127,6 +146,7 @@ export default function ShiftDrawers() {
   // Rows chosen in the picker, kept so the drawer can show names; the Set state above stays the source of truth for sends.
   const [chosen, setChosen] = useState<{ create: RequestedStaff[]; assign: RequestedStaff[]; replacement: RequestedStaff[] }>({ create: [], assign: [], replacement: [] });
   // Replacement mode of the Send offers drawer: the existing shift being replaced on (by id only — details are loaded).
+  const [requiredHeadcount, setRequiredHeadcount] = useState(0);
   const [replacementShiftId, setReplacementShiftId] = useState<string | null>(null);
   const [replacementResults, setReplacementResults] = useState<SendResult[] | null>(null);
   const availabilityGate = useAvailabilityConflictGate();
@@ -142,9 +162,13 @@ export default function ShiftDrawers() {
   useEffect(() => {
     const handleCreate = () => {
       createdJobRoleId.current = null;
-      setForm({ ...emptyShift });
+      const draft = currentShiftDraft();
+      initialCreateForm.current = draft;
+      setForm(draft);
       setAddressTouched(false);
+      setNotesTouched(false);
       setCreateStaffIds(new Set());
+      setStaffSettings({});
       setChosen((c) => ({ ...c, create: [] }));
       setCreateResults(null);
       setAttemptedCreate(false);
@@ -169,6 +193,7 @@ export default function ShiftDrawers() {
       const shift = detail?.shift;
       if (!shift) return;
       setAssignTarget(shift);
+      setRequiredHeadcount(shift.requiredCount);
       setAssignStaffIds(new Set());
       setChosen((c) => ({ ...c, assign: [] }));
       setSendResults(null);
@@ -199,6 +224,23 @@ export default function ShiftDrawers() {
     queryFn: () => fetchAllPages<StaffMember>('/staff'),
     enabled: showCreate || !!assignTarget,
   });
+  const existingShifts = useQuery({
+    queryKey: ['shifts', 'add-staff', form.venueId],
+    queryFn: async () => (await api.get<{ data: Shift[] }>('/shifts', { params: { venueId: form.venueId, limit: 500, sort: 'startsAt', direction: 'asc' } })).data,
+    enabled: showCreate && !!form.venueId,
+  });
+  const availableShifts = (existingShifts.data?.data ?? []).filter(shift => shift.venueId === form.venueId && ['open', 'offered', 'partially_filled', 'fully_filled', 'confirmed'].includes(shift.status) && new Date(shift.endsAt).getTime() > Date.now());
+  const chooseExistingShift = (shiftId: string) => {
+    const shift = availableShifts.find(item => item.id === shiftId);
+    if (!shift) return;
+    setShowCreate(false);
+    setAssignTarget(shift);
+    setRequiredHeadcount(shift.requiredCount);
+    setAssignStaffIds(new Set());
+    setChosen(previous => ({ ...previous, assign: [] }));
+    setSendResults(null);
+  };
+
   const replacementContext = useQuery({
     queryKey: ['replacement-context', replacementShiftId],
     queryFn: async () => (await api.get<ReplacementContext>(`/shifts/${replacementShiftId}/replacement-context`)).data,
@@ -224,7 +266,7 @@ export default function ShiftDrawers() {
   });
 
   const createShiftAndSend = useMutation({
-    mutationFn: async ({ body, acknowledgedAvailabilityConflicts }: { body: typeof form; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
+    mutationFn: async ({ body, staffIds, settingsByStaff, acknowledgedAvailabilityConflicts }: { body: typeof form; staffIds: string[]; settingsByStaff: typeof staffSettings; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
       let jobRoleId = body.jobRoleId;
       if (jobRoleId === NEW_ROLE && createdJobRoleId.current) {
         jobRoleId = createdJobRoleId.current;
@@ -243,11 +285,19 @@ export default function ShiftDrawers() {
           jobRoleId,
           address: body.address || undefined,
           startsAt: new Date(`${body.date}T${body.startTime}`).toISOString(),
-          endsAt: new Date(`${body.date}T${body.endTime}`).toISOString(),
+          endsAt: shiftEndDate(body.date, body.endTime, body.startTime).toISOString(),
           breakMinutes: Number(body.breakMinutes) || 0,
           payRatePence: body.payRatePence ? Math.round(parseFloat(body.payRatePence) * 100) : undefined,
           notes: body.notes || undefined,
-          staffProfileIds: [...createStaffIds],
+          staffProfileIds: staffIds,
+          staffAssignments: staffIds.map(staffProfileId => {
+            const settings = { ...body, ...settingsByStaff[staffProfileId] };
+            return {
+              staffProfileId,
+              startsAt: new Date(`${body.date}T${settings.startTime}`).toISOString(),
+              endsAt: shiftEndDate(body.date, settings.endTime, settings.startTime).toISOString(),
+            };
+          }),
           acknowledgedAvailabilityConflicts,
         },
       );
@@ -302,10 +352,10 @@ export default function ShiftDrawers() {
   // with a shared offerBatchId. Same UX as before, one network round trip
   // instead of N.
   const sendOffers = useMutation({
-    mutationFn: async ({ shiftId, staffProfileIds, acknowledgedAvailabilityConflicts }: { shiftId: string; staffProfileIds: string[]; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
+    mutationFn: async ({ shiftId, staffProfileIds, requiredCount, expectedRequiredCount, acknowledgedAvailabilityConflicts }: { shiftId: string; staffProfileIds: string[]; requiredCount?: number; expectedRequiredCount?: number; acknowledgedAvailabilityConflicts?: AvailabilityAcknowledgement[] }) => {
       const { data } = await api.post<{ batchId: string; results: { staffProfileId: string; ok: boolean; message?: string }[] }>(
         `/shifts/${shiftId}/offers/bulk`,
-        { staffProfileIds, acknowledgedAvailabilityConflicts },
+        { staffProfileIds, ...(requiredCount !== undefined ? { requiredCount, expectedRequiredCount } : {}), acknowledgedAvailabilityConflicts },
       );
       return data.results.map((r) => {
         const s = activeStaff.find((s) => s.id === r.staffProfileId);
@@ -315,10 +365,14 @@ export default function ShiftDrawers() {
     onError: (error, variables) => {
       availabilityGate.intercept(error, (acks) => sendOffers.mutate({ ...variables, acknowledgedAvailabilityConflicts: acks }));
     },
-    onSuccess: (results) => {
+    onSuccess: (results, variables) => {
+      qc.invalidateQueries({ queryKey: ['venue-pipeline', variables.shiftId] });
+      qc.invalidateQueries({ queryKey: ['venue-offers'] });
+      document.dispatchEvent(new CustomEvent('offers-sent', { detail: { shiftId: variables.shiftId } }));
       qc.invalidateQueries({ queryKey: ['offers'] });
       qc.invalidateQueries({ queryKey: ['shifts'] });
       setSendResults(results);
+      if (variables.requiredCount !== undefined) setAssignTarget(current => current ? { ...current, requiredCount: variables.requiredCount! } : current);
       if (results.every((r) => r.ok)) {
         setAssignStaffIds(new Set());
         setAssignTarget(null);
@@ -382,11 +436,13 @@ export default function ShiftDrawers() {
     setForm((prev) => {
       const shouldAutofill = !addressTouched;
       const nextAddress = shouldAutofill ? formatVenueAddress(venues.find((v) => v.id === venueId)) : prev.address;
-      return { ...prev, venueId, address: nextAddress };
+      return { ...prev, venueId, address: nextAddress, notes: notesTouched ? prev.notes : (venues.find(v => v.id === venueId)?.instructions ?? '') };
     });
   };
 
-  const durationValid = form.startTime && form.endTime ? form.startTime < form.endTime : true;
+  const endsNextDay = Boolean(form.startTime && form.endTime && form.endTime < form.startTime);
+  const endDate = form.date && form.endTime ? shiftEndDate(form.date,form.endTime,form.startTime) : null;
+  const durationValid = form.date && form.startTime && endDate ? endDate.getTime() > new Date(`${form.date}T${form.startTime}`).getTime() : true;
   const errors = {
     venueId: !form.venueId ? 'Select a venue.' : undefined,
     jobRoleId: !form.jobRoleId || (form.jobRoleId === NEW_ROLE && !newRoleName) ? 'Select or create a role.' : undefined,
@@ -395,6 +451,10 @@ export default function ShiftDrawers() {
     startTime: !form.startTime ? 'Select a start time.' : undefined,
     endTime: !form.endTime ? 'Select an end time.' : !durationValid ? 'End time must be after start time.' : undefined,
     staff: createStaffIds.size === 0 ? 'Select at least one staff member.' : undefined,
+    staffSettings: [...createStaffIds].some(id => {
+      const setting = { ...form, ...staffSettings[id] };
+      return !setting.startTime || !setting.endTime || setting.startTime === setting.endTime;
+    }) ? 'Choose valid start and end times for every staff member.' : undefined,
   };
   const canSubmit = !Object.values(errors).some(Boolean);
 
@@ -419,7 +479,7 @@ export default function ShiftDrawers() {
         title="New shift"
         size="wide"
         loading={createShiftAndSend.isPending}
-        dirty={JSON.stringify(form) !== JSON.stringify(emptyShift) || createStaffIds.size > 0}
+        dirty={JSON.stringify(form) !== JSON.stringify(initialCreateForm.current) || createStaffIds.size > 0}
         footer={
           <>
             <button className="btn btn-outline" onClick={() => setShowCreate(false)}>Cancel</button>
@@ -430,7 +490,7 @@ export default function ShiftDrawers() {
                 setAttemptedCreate(true);
                 if (!canSubmit || createInFlight.current || createResults) return;
                 createInFlight.current = true;
-                createShiftAndSend.mutate({ body: form });
+                createShiftAndSend.mutate({ body: { ...form }, staffIds: [...createStaffIds], settingsByStaff: { ...staffSettings } });
               }}
             >
               <IconSend size={14} />
@@ -456,6 +516,11 @@ export default function ShiftDrawers() {
             {attemptedCreate && <FieldError message={errors.jobRoleId} />}
           </div>
         </div>
+        {form.venueId && <div className="field field-full">
+          <label>Add staff to an existing shift</label>
+          <SearchableSelect value="" placeholder={existingShifts.isPending ? 'Loading shifts…' : 'Choose an existing shift…'} options={availableShifts.map(shift => ({ id: shift.id, label: roleName(shift.jobRoleId) + ' · ' + fmtDate(shift.startsAt) + ' · ' + fmtTime(shift.startsAt) + '–' + fmtTime(shift.endsAt) }))} onChange={chooseExistingShift} />
+          {existingShifts.isError ? <button type="button" className="btn btn-outline" onClick={() => existingShifts.refetch()}>Could not load shifts. Retry</button> : <small className="cell-muted">Choose a shift to keep new staff in its existing pipeline, or continue below to create a new shift.</small>}
+        </div>}
         {form.jobRoleId === NEW_ROLE && (
           <div className="form-grid">
             <div className="field"><label>New role name</label><input value={newRoleName} onChange={(e) => setNewRoleName(e.target.value)} /></div>
@@ -472,21 +537,31 @@ export default function ShiftDrawers() {
           {attemptedCreate && <FieldError message={errors.address} />}
         </div>
         <div className="form-grid-3">
-          <div className="field"><label>Date</label><input type="date" value={form.date} onChange={f('date')} />{attemptedCreate && <FieldError message={errors.date} />}</div>
-          <div className="field"><label>Start time</label><input type="time" value={form.startTime} onChange={f('startTime')} />{attemptedCreate && <FieldError message={errors.startTime} />}</div>
-          <div className="field"><label>End time</label><input type="time" value={form.endTime} onChange={f('endTime')} />{attemptedCreate && <FieldError message={errors.endTime} />}</div>
+          <div className="field"><label>Date</label><DateInput value={form.date} autoFormat onChange={date=>setForm(previous=>({...previous,date}))} />{attemptedCreate && <FieldError message={errors.date} />}</div>
+          <div className="field"><label>Start time</label><TimeInput label="Start time" value={form.startTime} onChange={startTime=>setForm(previous=>({...previous,startTime}))} />{attemptedCreate && <FieldError message={errors.startTime} />}</div>
+          <div className="field"><label>End time</label><TimeInput label="End time" value={form.endTime} onChange={endTime=>setForm(previous=>({...previous,endTime}))} />{endsNextDay && endDate && Number.isFinite(endDate.getTime()) && <small className="cell-muted">Ends next day · {endDate.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}</small>}{attemptedCreate && <FieldError message={errors.endTime} />}</div>
         </div>
         <div className="form-grid">
           <div className="field"><label>Break (minutes)</label><input type="number" min={0} value={form.breakMinutes} onChange={f('breakMinutes')} /></div>
           <div className="field"><label>Pay rate override (£/hr)</label><input type="number" step="0.01" placeholder="Use venue/role rate" value={form.payRatePence} onChange={f('payRatePence')} /></div>
         </div>
-        <div className="field field-full"><label>Notes</label><textarea value={form.notes} onChange={f('notes')} rows={2} /></div>
+        <div className="field field-full"><label htmlFor="new-shift-notes">Notes</label><textarea id="new-shift-notes" value={form.notes} onChange={event=>{setNotesTouched(true);setForm(previous=>({...previous,notes:event.target.value}));}} rows={2} /></div>
 
         <SelectedStaffField
           staff={chosen.create}
           onOpenPicker={() => setPicker('create')}
           onChange={(staff) => { setChosen((c) => ({ ...c, create: staff })); setCreateStaffIds(new Set(staff.map((s) => s.staffProfileId))); }}
-          error={attemptedCreate && <FieldError message={errors.staff} />}
+          error={attemptedCreate && <FieldError message={errors.staff ?? errors.staffSettings} />}
+          renderSettings={staff => {
+            const setting = { ...form, ...staffSettings[staff.staffProfileId] };
+            const update = (values: Partial<typeof setting>) => setStaffSettings(previous => ({ ...previous, [staff.staffProfileId]: { ...previous[staff.staffProfileId], ...values } }));
+            const label = `${staff.firstName} ${staff.lastName}`;
+            return <div className="staff-assignment-settings">
+              {/* A per-recipient role needs AssignmentRole (held: new workspace structure level); every recipient takes the shift's role. */}
+              <div className="field"><label>Start</label><TimeInput label={`${label} start time`} value={setting.startTime} onChange={startTime => update({ startTime })} /></div>
+              <div className="field"><label>End</label><TimeInput label={`${label} end time`} value={setting.endTime} onChange={endTime => update({ endTime })} />{setting.startTime && setting.endTime && setting.endTime < setting.startTime && <small className="cell-muted">Ends next day</small>}</div>
+            </div>;
+          }}
         />
 
         {createShiftAndSend.isError && !createResults && !readAvailabilityConflict(createShiftAndSend.error) && (
@@ -554,12 +629,12 @@ export default function ShiftDrawers() {
             </button>
             <button
               className="btn btn-dark"
-              disabled={assignStaffIds.size === 0 || sendOffers.isPending || !assignTarget}
+              disabled={assignStaffIds.size === 0 || sendOffers.isPending || !assignTarget || !Number.isInteger(requiredHeadcount) || requiredHeadcount < assignTarget.requiredCount || requiredHeadcount > 1000 || requiredHeadcount <= assignTarget.filledCount}
               onClick={() => {
                 if (!assignTarget || sendInFlight.current) return;
                 sendInFlight.current = true;
                 setSendResults(null);
-                sendOffers.mutate({ shiftId: assignTarget.id, staffProfileIds: [...assignStaffIds] });
+                sendOffers.mutate({ shiftId: assignTarget.id, staffProfileIds: [...assignStaffIds], ...(requiredHeadcount > assignTarget.requiredCount ? { requiredCount: requiredHeadcount, expectedRequiredCount: assignTarget.requiredCount } : {}) });
               }}
             >
               <IconSend size={14} />
@@ -568,6 +643,11 @@ export default function ShiftDrawers() {
           </>
         }
       >
+        {assignTarget && <div className="field">
+          <label htmlFor="existing-shift-headcount">Total staff required</label>
+          <input id="existing-shift-headcount" type="number" min={assignTarget.requiredCount} max={1000} value={requiredHeadcount || ''} onChange={event => setRequiredHeadcount(Number(event.target.value))} />
+          <small className="cell-muted">{requiredHeadcount > assignTarget.requiredCount ? 'Adds ' + (requiredHeadcount - assignTarget.requiredCount) + ' places to this shift when offers are sent.' : 'Increase this total if the venue needs more staff. Existing staff stay on the same shift.'}</small>
+        </div>}
         <SelectedStaffField
           staff={chosen.assign}
           onOpenPicker={() => setPicker('assign')}

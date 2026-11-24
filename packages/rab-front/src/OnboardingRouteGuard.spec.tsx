@@ -138,7 +138,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
     // CreateProfileScreen sets this one-time trigger when onboarding genuinely completes.
     markPendingManagerWelcome('ws-1');
 
-    mountAuthenticatedAt('/onboarding/preparing');
+    mountAuthenticatedAt('/onboarding/welcome');
 
     // READY → the 8s presentation floor, then the animated welcome overlay. Never a sign-out.
     await waitFor(() => expect(document.querySelector('.welcome-overlay')).not.toBeNull(), { timeout: 10_000 });

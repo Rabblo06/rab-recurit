@@ -32,7 +32,7 @@ type Dialog = { kind: ReauthIntent; reauth?: ReauthResult } | null;
  * every value is server state (`GET /auth/mfa`, `GET /auth/me`, `GET /profile/sessions`). Each change runs in its
  * dialog and the page is re-read from the server only after the server confirmed it.
  */
-export default function SecurityPage() {
+export default function SecurityPage({ embedded = false }: { embedded?: boolean }) {
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -71,7 +71,7 @@ export default function SecurityPage() {
   const status = mfa.data;
 
   return (
-    <div className="acs acs-security-page">
+    <div className={`acs acs-security-page${embedded ? ' profile-security-inline' : ''}`}>
       <div className="acs-security-grid">
         <div className="acs-stack">
           {mfa.isLoading ? (
@@ -97,16 +97,17 @@ export default function SecurityPage() {
           ) : (
             <TwoFactorCard
               status={status}
+              compact={embedded}
               headingRef={headingRef}
               onTurnOn={() => setDialog({ kind: 'enrol' })}
               onRegenerate={() => setDialog({ kind: 'regenerate' })}
               onTurnOff={() => setDialog({ kind: 'disable' })}
             />
           )}
-          {status && usesPassword(status) && <PasswordCard email={me?.email} />}
-          <CurrentSessionCard sessions={sessions} />
+          {!embedded && status && usesPassword(status) && <PasswordCard email={me?.email} />}
+          {!embedded && <CurrentSessionCard sessions={sessions} />}
         </div>
-        <HowItWorksAside status={status} />
+        {!embedded && <HowItWorksAside status={status} />}
       </div>
 
       {status && dialog?.kind === 'enrol' && (

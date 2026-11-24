@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import './reference-ui.css'
+import './shared/components/flow-button.css'
 import './shared/motion.css'
 import App from './App'
 import { initTheme } from './shared/lib/theme'
@@ -27,3 +28,5 @@ if (loopbackTarget) {
     </StrictMode>,
   )
 }
+
+import './shared/components/object-chips.css';

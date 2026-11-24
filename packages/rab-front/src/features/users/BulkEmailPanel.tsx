@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import EmailComposerFields from './EmailComposerFields';
+import { IconSend } from '@tabler/icons-react';
+import { useEffect, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
@@ -78,17 +80,12 @@ export default function BulkEmailPanel() {
   const canSubmit = Boolean(subject.trim() && message.trim());
   const close = () => setOpen(false);
 
-  const recipientLabel = useMemo(() => {
-    if (!target) return '';
-    if (target.names.length <= 3) return target.names.join(', ');
-    return `${target.names.slice(0, 3).join(', ')} +${target.names.length - 3} more`;
-  }, [target]);
 
   return (
     <Drawer
       open={open}
       onClose={close}
-      title="Send email"
+      title="New email"
       description={target ? `${target.userIds.length} recipient${target.userIds.length === 1 ? '' : 's'}` : undefined}
       loading={send.isPending}
       dirty={isDirty}
@@ -98,8 +95,8 @@ export default function BulkEmailPanel() {
         ) : (
           <>
             <button className="btn btn-outline" onClick={close}>Cancel</button>
-            <button className="btn btn-dark" disabled={!canSubmit || send.isPending} onClick={() => { setError(''); send.mutate(); }}>
-              {send.isPending ? 'Sending…' : 'Send'}
+            <button className="btn btn-dark" disabled={true} title="Sending is disabled in this UI preview" onClick={() => { setError(''); send.mutate(); }}>
+              <IconSend size={14}/>{send.isPending ? 'Sending…' : 'Send'}
             </button>
           </>
         )
@@ -113,22 +110,8 @@ export default function BulkEmailPanel() {
           </p>
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>To</label>
-            <input readOnly value={recipientLabel} style={{ background: 'var(--bg-secondary)', cursor: 'not-allowed' }} />
-          </div>
-          <div className="field">
-            <label>Subject</label>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" />
-          </div>
-          <div className="field">
-            <label>Message</label>
-            <textarea rows={8} value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Write your message…" />
-          </div>
-          <p className="field-hint">
-            Sent through the same delivery queue as every other RAB email — recipients receive it shortly, not instantly.
-          </p>
+        <div className="crewflow-bulk-email">
+          <EmailComposerFields recipients={target?.names??[]} subject={subject} message={message} onSubjectChange={setSubject} onMessageChange={setMessage} disabled={send.isPending}/>
           {error && <p className="error" style={{ margin: '4px 0' }}>{error}</p>}
         </div>
       )}

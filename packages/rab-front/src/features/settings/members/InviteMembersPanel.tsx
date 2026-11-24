@@ -1,6 +1,8 @@
+import { motion as arcMotion } from 'framer-motion';
+import StaffSelect from '../../users/StaffSelect';
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconRefresh, IconX } from '@tabler/icons-react';
+import { IconRefresh, IconTrash, IconMail, IconUser, IconSend } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import ConfirmDialog from '../../../shared/components/ConfirmDialog';
 import { TableSkeleton } from '../../../shared/components/LoadingState';
@@ -170,7 +172,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
 
   return <>
     <section className="member-invite-card invite-by-email" aria-labelledby="invite-heading">
-      <div className="member-section-heading"><h3 id="invite-heading">Invite your team</h3><p>Send an invitation to join {workspaceName || 'your workspace'}.</p></div>
+      <div className="member-section-heading"><h3 id="invite-heading">Invite by email</h3><p>Send an invite email to your team.</p></div>
       {error && <p role="alert" className="member-error feedback-error">{error}</p>}
       {roles.isError ? (
         <p role="alert" className="member-error feedback-error">Workspace roles could not be loaded. <button type="button" className="btn btn-outline" onClick={() => roles.refetch()}>Retry</button></p>
@@ -181,7 +183,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
           {onCreateRole && <button type="button" className="btn btn-dark" onClick={onCreateRole}>Create a role</button>}
         </div>
       ) : (
-        <form onSubmit={submit} noValidate>
+        <form className={`compact-invite-form inline-invite-form${raw ? ' has-draft' : ''}`} onSubmit={submit} noValidate>
           <div className="invite-row">
             <div className="invite-field">
             <label htmlFor="member-emails">Email address</label>
@@ -192,7 +194,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
                 type="text"
                 inputMode="email"
                 autoComplete="off"
-                placeholder="name@company.com"
+                placeholder="name@company.com, colleague@company.com"
                 value={raw}
                 onChange={(e) => setRaw(e.target.value)}
                 aria-describedby="member-emails-help"
@@ -203,16 +205,16 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
             </div>
             <div className="invite-field">
             <label htmlFor="member-role">Workspace role</label>
-            <select id="member-role" className="invite-role-select" value={selectedRole?.id ?? ''} onChange={(e) => setRoleId(e.target.value)} disabled={send.isPending || !roles.data?.length}>
-              {roles.data?.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-            </select>
+            <StaffSelect id="member-role" label="Workspace role" value={selectedRole?.id ?? ''} onChange={setRoleId}
+              options={(roles.data ?? []).map((role) => ({ value: role.id, label: role.name, icon: <IconUser size={14} aria-hidden="true" /> }))}
+              placeholder="Select role" searchable={false} compact disabled={send.isPending || !roles.data?.length} />
             </div>
           </div>
           <p id="member-emails-help" className="invite-help">
             {selectedRole ? `${describeRole(selectedRole)} ` : ''}Separate several addresses with commas. Each link works for 24 hours.
           </p>
           {parsed.invalid.length > 0 && <p className="invite-invalid feedback-error" role="status">Check {parsed.invalid.length === 1 ? 'this address' : 'these addresses'}: {parsed.invalid.join(', ')}</p>}
-          <button className="btn btn-dark invite-submit" disabled={send.isPending || !roles.data?.length}>{send.isPending ? 'Sending…' : 'Send invitation'}</button>
+          <button className="btn btn-dark invite-submit" aria-label="Send invitation" disabled={!raw.trim() || send.isPending || !roles.data?.length}><IconSend size={14} aria-hidden="true" />{send.isPending ? 'Sending…' : 'Invite'}</button>
         </form>
       )}
       {results && results.some((r) => r.outcome !== 'invited') && (
@@ -237,8 +239,8 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
                 const status = STATUS[inv.status];
                 const canResend = inv.sendCount < inv.maxSends;
                 const failed = inv.status === 'delivery_failed';
-                return <tr key={inv.id}>
-                  <td>{inv.email}</td>
+                return <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={inv.id}>
+                  <td><span className="invitation-email"><IconMail size={13} aria-hidden="true" />{inv.email}</span></td>
                   <td>{inv.role.name}</td>
                   <td className={failed ? 'feedback-error' : 'cell-muted'}>
                     {failed ? status.label : <>• {expiresIn(inv.expiresAt)}</>}
@@ -253,9 +255,9 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
                       title={canResend ? `Send again (${inv.sendCount} of ${inv.maxSends} sent)` : 'All three sends used — revoke and invite again'}
                       onClick={() => action.mutate({ id: inv.id, kind: 'resend' })}
                     ><IconRefresh size={14} /></button>
-                    <button type="button" className="btn-icon" aria-label={`Revoke invitation to ${inv.email}`} disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconX size={14} /></button>
+                    <button type="button" className="btn-icon" aria-label={`Revoke invitation to ${inv.email}`} disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconTrash size={14} /></button>
                   </td>
-                </tr>;
+                </arcMotion.tr>;
               })}
             </tbody>
           </table>
@@ -271,6 +273,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
     </section>
 
     <ConfirmDialog
+      dialogClassName="invitation-confirm-dialog"
       open={!!revokeTarget}
       title="Revoke this invitation?"
       description={revokeTarget ? `The link sent to ${revokeTarget.email} will stop working immediately.` : ''}

@@ -1,3 +1,191 @@
 /* Settings → Members → Team: row actions. Red / green only on the result message (feedback-* classes). */
 .member-role-select { min-width: 160px; max-width: 220px; height: 30px; padding-block: 0; }
+.settings-refined .members-page { max-width:800px; margin:0 auto; padding:28px 24px 60px; }
+.settings-refined .members-page .settings-page-heading { text-align:center; margin-bottom:24px; }
+.settings-refined .members-page .member-tabs { justify-content:center; background:transparent; border-bottom:1px solid var(--border-light); border-radius:0; margin-bottom:32px; }
+.settings-refined .members-page .member-tabs button { display:inline-flex; align-items:center; gap:6px; background:transparent; border-radius:0; border-bottom:1px solid transparent; }
+.settings-refined .members-page .member-tabs button.active { box-shadow:none; border-bottom-color:var(--font-primary); }
+.members-page .member-section-heading h3 { font-size:14px; font-weight:600; }
+.members-page .member-section-heading p { color:var(--font-tertiary); font-size:13px; line-height:1.5; }
+.members-page .members-table-wrap { border:0; border-radius:0; overflow-x:auto; }
+.members-page .members-table-wrap th { text-transform:none; letter-spacing:0; font-weight:400; background:transparent; }
+.members-page .members-table-wrap td { border-bottom:1px solid var(--border-light); padding-block:12px; }
+.member-name-button { border:0; background:transparent; padding:4px 0; text-align:left; color:inherit; font:inherit; cursor:pointer; }
+.member-name-button:hover { color:var(--color-blue); }
+.member-name-button:focus-visible { outline:2px solid var(--color-blue); outline-offset:3px; border-radius:4px; }
+.member-name-button .mini-avatar { width:20px; height:20px; font-size:10px; }
+.member-detail > h3 { margin:24px 0; font-size:18px; }
+.member-info-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.member-info-grid label,.member-info-email { display:block; font-size:12px; color:var(--font-tertiary); }
+.member-info-email { margin:28px 0; }
+.member-detail input { display:block; width:100%; margin-top:6px; }
+.member-role-card { display:flex; align-items:center; gap:10px; border:1px solid var(--border-light); border-radius:7px; padding:12px; color:inherit; text-decoration:none; margin:8px 0; }
+.member-role-card > svg:last-child { margin-left:auto; }
+.members-inline-invites { margin-top:44px; padding-top:28px; border-top:1px solid var(--border-light); }
+.settings-refined .members-page .member-tabs button { border:0; border-bottom:1px solid transparent; color:var(--font-secondary); outline:none; }
+.settings-refined .members-page .member-tabs button.active { color:var(--font-primary); border-bottom-color:var(--font-primary); }
+.settings-refined .members-page .member-tabs button:focus-visible { outline:2px solid var(--color-blue); outline-offset:2px; }
+.members-page .members-table-wrap table { width:100%; min-width:0; }
+.members-page .members-table-wrap th,.members-page .members-table-wrap td { padding:10px 8px; font-size:12px; white-space:normal; }
+.members-page .members-table-wrap .member-role-select { min-width:120px; max-width:140px; font-size:12px; }
+.members-page .members-table-wrap td.cell-muted { overflow-wrap:anywhere; }
+.members-page .members-table-wrap .btn { font-size:11px; padding:4px 8px; }
+@media(max-width:700px) {
+  .members-page .members-table-wrap table { min-width:680px; }
+  .members-page .members-table-wrap td.cell-muted { overflow-wrap:normal; white-space:nowrap; }
+}
+@media(max-width:540px) { .settings-refined .members-page { padding:18px 12px 90px; } .member-info-grid { grid-template-columns:1fr; } .members-toolbar { flex-wrap:wrap; } }
 .members-table-wrap .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* Reference member directory: two clear columns; management lives in the detail view. */
+.members-page .members-table-wrap table { min-width:0; table-layout:fixed; }
+.members-page .members-table-wrap th:first-child { width:30%; }
+.member-row-meta { display:block; padding-left:28px; color:var(--font-tertiary); font-size:10px; margin-top:2px; }
+.member-email-button { display:flex; align-items:center; justify-content:space-between; gap:8px; width:100%; border:0; background:transparent; color:var(--font-secondary); padding:4px 0; font:inherit; cursor:pointer; overflow-wrap:anywhere; text-align:left; }
+.member-email-button svg { flex-shrink:0; }
+.member-email-button:hover { color:var(--font-primary); }
+.member-email-button:focus-visible { outline:2px solid var(--color-blue); border-radius:4px; }
+.member-name-button { max-width:100%; flex-wrap:wrap; gap:6px; }
+.member-detail-actions { display:flex; gap:8px; }
+.member-role-editor { margin-top:24px; }
+.member-role-editor h3 { font-size:13px; font-weight:500; }
+.members-page .members-table-wrap td.cell-muted { white-space:normal; overflow-wrap:anywhere; }
+@media(max-width:540px) { .member-row-meta { padding-left:0; } .members-page .members-table-wrap th,.members-page .members-table-wrap td { padding:10px 4px; } }
+
+/* Compact Members directory, aligned with the settings reference. */
+.topbar:has(.members-header-title) { position:relative; }
+.members-header-title { position:absolute; left:50%; transform:translateX(-50%); margin:0; font-size:13px; font-weight:600; max-width:28%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.settings-refined .members-page { max-width:748px; padding:0 24px 60px; }
+.settings-refined .members-page .members-section-switcher { justify-content:flex-end; gap:14px; margin:0 0 22px; border:0; }
+.settings-refined .members-page .members-section-switcher button { min-width:0; height:26px; padding:0 3px; font-size:11px; }
+.member-link-invite { margin-bottom:34px; }
+.members-page .member-section-heading { margin-bottom:12px; }
+.members-page .member-section-heading h3 { font-size:13px; margin:0 0 8px; }
+.members-page .member-section-heading p { font-size:12px; margin:0; }
+.member-link-row { display:flex; gap:8px; align-items:center; }
+.member-link-row input { min-width:0; flex:1; height:32px; border:1px solid var(--border-light); border-radius:7px; background:var(--bg-secondary); padding:0 10px; font-size:12px; }
+.member-link-row .btn { height:32px; min-height:32px; padding:0 10px; white-space:nowrap; gap:6px; font-size:12px; }
+.member-preview-note { color:var(--font-tertiary); font-size:11px; margin:8px 0 0; }
+.members-page .members-toolbar { margin:12px 0 8px; }
+.members-page .members-toolbar .toolbar-search { background:var(--bg-secondary); border:1px solid var(--border-light); border-radius:7px; height:32px; }
+.members-page .members-table-wrap th,.members-page .members-table-wrap td { padding:6px 8px; height:34px; }
+.members-page .members-table-wrap td { border-bottom:0; }
+.members-page .members-table-wrap tbody { border-bottom:1px solid var(--border-light); }
+.member-name-button { flex-wrap:nowrap; font-size:12px; }
+.member-name-button .mini-avatar { width:16px; height:16px; min-width:16px; font-size:9px; }
+.member-email-button { justify-content:flex-end; font-size:12px; gap:12px; }
+.member-empty-row { display:block; padding:8px 0; color:var(--font-tertiary); font-size:12px; }
+.members-inline-invites { margin-top:32px; padding:0; border:0; }
+.members-page .invite-row { gap:12px; grid-template-columns:minmax(0,2fr) minmax(0,1fr); }
+.members-page .invite-row input,.members-page .invite-row .invite-role-select { height:32px; border-color:var(--border-light); background:var(--bg-secondary); }
+.members-page .invite-field > label { font-size:11px; margin-bottom:6px; color:var(--font-tertiary); }
+.members-page .invite-by-email .member-section-heading { margin-bottom:12px; }
+.members-page .invite-by-email form > .invite-submit { min-width:0; height:28px; margin-top:10px; }
+.members-page .pending-invitations { margin-top:16px; padding-top:0; border:0; }
+.members-page .pending-invitations > h3 { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.members-page .invitations-table th:first-child { width:39%; }
+.members-page .invitations-table th:last-child { width:64px; }
+.invitation-email { display:flex; align-items:center; gap:8px; overflow-wrap:anywhere; }
+.invitation-email svg { flex-shrink:0; }
+@media(max-width:700px) {
+  .members-header-title { display:none; }
+  .settings-refined .members-page { padding:0 0 80px; }
+  .member-link-row { flex-wrap:wrap; }
+  .member-link-row input { flex-basis:60%; }
+  .member-link-row > .btn:last-child { margin-left:auto; }
+  .members-page .invite-row { grid-template-columns:1fr; }
+  .members-page .invitations-table { table-layout:auto; }
+  .members-page .invitations-table th:first-child { width:auto; }
+  .member-email-button { text-align:right; }
+}
+.settings-refined .members-page .members-toolbar .toolbar-search input:not([type='checkbox']):not([type='radio']):not([type='file']) { border:0; background:transparent; box-shadow:none; min-width:0; }
+.members-page .members-toolbar .toolbar-search:focus-within { outline:2px solid var(--color-blue); outline-offset:1px; }
+.members-page .members-toolbar .toolbar-search input:focus-visible { outline:none; }
+.member-name-label,.member-email-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.member-name-button .mini-avatar { flex-shrink:0; }
+@media(max-width:540px) { .members-page .members-table-wrap th:first-child { width:42%; } }
+
+/* Team and Invite are separate views; centered navigation matches the settings header. */
+.settings-refined .members-page .members-section-switcher { justify-content:center; gap:20px; border-bottom:1px solid var(--border-light); margin:-20px -24px 32px; padding:0 0 0; }
+.settings-refined .members-page .members-section-switcher button { height:38px; font-size:12px; gap:6px; padding:0 6px; }
+.members-page .compact-invite-form .invite-row { display:block; }
+.members-page .compact-invite-form .invite-field:first-child > label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.members-page .compact-invite-form .invite-email-group { position:relative; align-items:center; gap:0; }
+.members-page .compact-invite-form .invite-email-group > svg { position:absolute; left:10px; color:var(--font-tertiary); pointer-events:none; }
+.members-page .compact-invite-form .invite-email-group input { padding-left:30px; }
+.members-page .compact-invite-form .invite-email-group.has-mode > svg { display:none; }
+.members-page .compact-invite-form .invite-email-group.has-mode input { padding-left:10px; }
+.members-page .compact-invite-form:not(.inline-invite-form):not(:focus-within):not(.has-draft) .invite-field:nth-child(2),
+.members-page .compact-invite-form:not(.inline-invite-form):not(:focus-within):not(.has-draft) .invite-help,
+.members-page .compact-invite-form:not(.inline-invite-form):not(:focus-within):not(.has-draft) > .invite-submit { display:none; }
+.members-page .compact-invite-form .invite-field:nth-child(2) { margin-top:12px; }
+.members-page .compact-invite-form .invite-role-select { max-width:260px; }
+.members-page .pending-invitations { margin-top:10px; }
+@media(max-width:700px) { .settings-refined .members-page .members-section-switcher { margin:-12px 0 28px; gap:16px; } }
+
+.member-link-invite .member-section-heading h3 { font-size:14px; margin:0 0 8px; }
+.member-link-invite .member-section-heading p { font-size:12px; margin:0 0 14px; color:var(--font-secondary); }
+.member-link-unavailable { font-size:11px; color:var(--font-tertiary); margin:8px 0 0; }
+.member-link-row .member-mode-select { flex-shrink:0; }
+
+.modal.invitation-confirm-dialog { width:min(300px, calc(100vw - 32px)); padding:24px; text-align:center; border-radius:8px; }
+.invitation-confirm-dialog h3 { font-size:16px; margin:0 0 12px; }
+.invitation-confirm-dialog p { line-height:1.5; }
+.invitation-confirm-dialog .modal-actions { display:flex; flex-direction:column; gap:8px; margin-top:24px; }
+.invitation-confirm-dialog .modal-actions .btn { width:100%; justify-content:center; min-height:32px; }
+
+/* Email, role and action stay visible together, including before typing. */
+.members-page .inline-invite-form { display:grid; grid-template-columns:minmax(0,1fr) 130px auto; gap:8px; align-items:start; }
+.members-page .inline-invite-form .invite-row { display:contents; }
+.members-page .inline-invite-form .invite-field:nth-child(2) { display:block; position:relative; margin:0; }
+.members-page .inline-invite-form .invite-field > label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.members-page .inline-invite-form .invite-email-group input { padding-left:10px; }
+.members-page .inline-invite-form .invite-role-select { padding-left:28px; }
+.invite-role-icon { position:absolute; top:9px; left:9px; pointer-events:none; color:var(--font-secondary); }
+.members-page .inline-invite-form > .invite-submit { display:flex !important; grid-column:3; grid-row:1; height:32px; min-height:32px; margin:0; gap:5px; padding:0 10px; justify-content:center; }
+.members-page .inline-invite-form .invite-help { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.members-page .inline-invite-form .invite-invalid { grid-column:1 / -1; }
+@media(max-width:520px) {
+ .members-page .inline-invite-form { grid-template-columns:minmax(0,1fr) auto; }
+ .members-page .inline-invite-form .invite-field:first-child { grid-column:1 / -1; }
+ .members-page .inline-invite-form > .invite-submit { grid-column:2; grid-row:2; width:auto; }
+ .members-page .inline-invite-form .invite-role-select { max-width:none; }
+}
+
+.members-page .invite-by-email .inline-invite-form > .invite-submit { margin:0; height:32px;  }
+.members-page .invite-by-email .inline-invite-form > .invite-submit:disabled { opacity:.5; }
+
+/* Invitation controls reuse the shared searchable selection card. */
+.members-page .member-mode-select .staff-select-trigger { width:80px; }
+.members-page .inline-invite-form .staff-select-trigger { height:32px; min-height:32px; font-size:12px; }
+.members-page .member-mode-select .staff-select-trigger:focus-visible,
+.members-page .inline-invite-form .staff-select-trigger:focus-visible,
+.members-page .inline-invite-form input:focus-visible { outline:2px solid #6478ff; outline-offset:1px; box-shadow:none; }
+
+.invite-mode-label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+
+.members-page .leadership-invite-form { grid-template-columns:minmax(0,1fr) 180px auto; }
+.members-page .inline-invite-form .field { margin:0; }
+.members-page .inline-invite-form .field > label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.members-page .inline-invite-form .field > input { height:32px; min-height:32px; }
+.members-page .inline-invite-form > .invite-submit:disabled { cursor:not-allowed; opacity:.5; }
+@media(max-width:520px) { .members-page .leadership-invite-form { grid-template-columns:minmax(0,1fr) auto; } }
+
+.members-page .initial-manager-form.inline-invite-form > .field { grid-column:auto; }
+@media(max-width:520px) { .members-page .initial-manager-form.inline-invite-form > .field:first-child { grid-column:1 / -1; } }
+/* Member detail uses the same quiet, compact settings fields as Profile. */
+.member-detail .member-tabs { justify-content:flex-start !important; gap:24px; margin-bottom:32px; }
+.member-picture-section { margin-bottom:32px; }
+.member-picture-row { display:flex; align-items:center; gap:16px; }
+.member-picture-row .avatar-panel { width:64px; height:64px; border-radius:6px; }
+.member-picture-row .btn { display:inline-flex; align-items:center; gap:6px; font-size:12px; min-height:30px; }
+.member-detail .role-footnote { color:var(--font-tertiary); font-size:12px; line-height:1.5; }
+.member-detail .form-input { background:var(--bg-secondary); border:1px solid var(--border-light); border-radius:7px; min-height:32px; font-size:12px; }
+.member-field-description { display:block; margin:8px 0 16px; color:var(--font-tertiary); font-size:12px; }
+.member-info-email { color:var(--font-primary); }
+.member-permission-summary { margin-top:36px; }
+.member-access-table { width:100%; border-collapse:collapse; font-size:12px; }
+.member-access-table th { color:var(--font-tertiary); font-weight:400; text-align:left; }
+.member-access-table th,.member-access-table td { padding:12px 8px; border-bottom:1px solid var(--border-light); overflow-wrap:anywhere; }
+.member-access-table td svg { vertical-align:middle; margin-right:8px; color:var(--font-tertiary); }
+.member-settings-access { margin-top:32px; }

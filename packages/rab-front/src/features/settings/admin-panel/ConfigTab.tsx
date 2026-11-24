@@ -1,4 +1,6 @@
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useMemo, useState } from 'react';
+import { IconTools } from '@tabler/icons-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
@@ -35,8 +37,10 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
   return (
     <>
       <section className="ap-block" aria-label="Maintenance mode">
-        <div className="ap-block-head"><h2 className="ap-h2">Maintenance mode (this organisation)</h2></div>
-        <div className="ap-card ap-flagrow">
+        <div className="ap-block-head"><div><h2 className="ap-h2">Maintenance</h2><p className="ap-sub">Manage availability for this organisation</p></div></div>
+        <div className="ap-card ap-maintenance-card">
+        <div className="ap-flagrow">
+          <IconTools size={22} aria-hidden="true" />
           <div>
             Maintenance mode for your organisation
             <small>
@@ -53,6 +57,15 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
             />
             <span />
           </label>
+        </div>
+        <fieldset className="ap-maintenance-preview" disabled aria-describedby="maintenance-preview-note">
+          <legend>Scheduling · unavailable preview</legend>
+          <label>Start date<span className="ap-date-preview"><input placeholder="DD/MM/YYYY" aria-label="Maintenance start date" /><span>UTC</span></span></label>
+          <label>End date<span className="ap-date-preview"><input placeholder="DD/MM/YYYY" aria-label="Maintenance end date" /><span>UTC</span></span></label>
+          <label>Link<input className="ap-input" placeholder="https://status.example.com" aria-label="Maintenance status link" /></label>
+        </fieldset>
+        <p id="maintenance-preview-note" className="ap-sub">Scheduled windows and a status link are not supported yet. The switch above changes maintenance immediately after confirmation.</p>
+        <div className="ap-maintenance-status"><span className={`ap-pill ${enabled ? 'ap-warn' : ''}`}>{!config.data ? (config.isError ? 'Unavailable' : 'Loading…') : enabled ? 'Active' : 'Inactive'}</span></div>
         </div>
         {config.isError && <p className="ap-callout ap-warn">The maintenance setting could not be loaded.</p>}
       </section>
@@ -90,7 +103,7 @@ export default function ConfigTab({ organisationName }: { organisationName?: str
           <p className="ap-sub">Read-only, from an allowlist. Secrets and URLs show only whether they are set, never values or hostnames. Change them in OpenShip and redeploy.</p>
         </div>
         <div className="ap-row">
-          <input className="ap-input ap-grow" type="search" placeholder="Filter variables" aria-label="Filter variables" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <SearchField label="Filter variables" className="ap-input ap-grow" type="search" placeholder="Filter variables" aria-label="Filter variables" value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
         <div className="ap-tablewrap">
           <table className="ap-table">

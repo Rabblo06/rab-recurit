@@ -1,3 +1,4 @@
+jest.mock('../../shared/components/arc/hold-to-confirm/hold-to-confirm', () => ({ __esModule:true, default: ({label,onConfirm,disabled}:any) => <button disabled={disabled} onClick={onConfirm}>{label}</button> }));
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -42,7 +43,7 @@ describe('eligibility (preview mirrors the server lifecycle rules)', () => {
 describe('UsersBulkActions', () => {
   it('shows only permitted actions, with the reference labels and order', () => {
     mount(<Harness kind="venueManager" initial={[['vm-1', { name: 'VM One', accountStatus: 'active' }]]} />);
-    expect(within(bar()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Activate', 'Deactivate', 'Send Email', 'Delete']);
+    expect(within(bar()).getAllByRole('button').map((b) => b.textContent)).toEqual(['Activate', 'Deactivate', 'Send Email', 'Hold to delete 1']);
     expect(bar()).toHaveTextContent('Selected: 1');
   });
 
@@ -70,23 +71,33 @@ describe('UsersBulkActions', () => {
     expect(screen.getByTestId('selected').textContent).toBe('vm-2,vm-3');
   });
 
-  it('delete requires the current password, sends it with each request, and stops when the step-up is refused', async () => {
-    mockApi.delete.mockImplementationOnce(() => fail(401, 'Current password is incorrect.'));
+  it('hold completion asks for the current password (decision 73 b), sends it, and stops on a refused step-up', async () => {
+    mockApi.delete.mockImplementationOnce(() => fail(403, 'Re-enter your current password to continue.'));
     mount(<Harness kind="staff" initial={[
       ['s-1', { name: 'Staff One', accountStatus: 'active', employmentStatus: 'active' }],
       ['s-2', { name: 'Staff Two', accountStatus: 'active', employmentStatus: 'active' }],
     ]} />);
-    fireEvent.click(within(bar()).getByRole('button', { name: 'Delete' }));
-    const dialog = await screen.findByRole('alertdialog', { name: 'Delete accounts' });
-    const go = within(dialog).getByRole('button', { name: 'Delete 2' });
-    expect(go).toBeDisabled();
-    fireEvent.change(within(dialog).getByLabelText('Your current password'), { target: { value: 'pw-123' } });
-    fireEvent.click(go);
+    fireEvent.click(within(bar()).getByRole('button', { name: 'Hold to delete 2' }));
+    // The hold alone never deletes: it opens the password step-up.
+    expect(mockApi.delete).not.toHaveBeenCalled();
+    const submit = screen.getByRole('button', { name: 'Delete' });
+    expect(submit).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Your current password'), { target: { value: 'my-own-password' } });
+    fireEvent.click(submit);
+    const dialog = await screen.findByRole('alertdialog', {name:'Delete accounts'});
     await waitFor(() => expect(dialog).toHaveTextContent('0 of 2 deleted'));
     expect(mockApi.delete).toHaveBeenCalledTimes(1);
-    expect(mockApi.delete).toHaveBeenCalledWith('/staff/s-1', { data: { currentPassword: 'pw-123' } });
+    expect(mockApi.delete).toHaveBeenCalledWith('/staff/s-1', { data: { currentPassword: 'my-own-password' } });
     expect(within(dialog).getByRole('list', { name: 'Results' })).toHaveTextContent('Staff TwoNot attempted.');
     expect(screen.getByTestId('selected').textContent).toBe('s-1,s-2');
+  });
+
+  it('cancelling the password step-up deletes nothing', () => {
+    mount(<Harness kind="staff" initial={[['s-1', { name: 'Staff One', accountStatus: 'active', employmentStatus: 'active' }]]} />);
+    fireEvent.click(within(bar()).getByRole('button', { name: 'Hold to delete 1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(mockApi.delete).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText('Your current password')).toBeNull();
   });
 
   it('Send Email hands exactly this roster\'s ids to the existing composer (never another record type)', () => {

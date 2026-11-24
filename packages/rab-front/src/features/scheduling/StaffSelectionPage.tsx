@@ -1,3 +1,6 @@
+import { motion as arcMotion } from 'framer-motion';
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
+import { recordAvatarStyle } from '../../shared/lib/recordAvatarColor';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -115,7 +118,7 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
     <section className="staff-selection-page" aria-label={draft ? 'Select staff for this shift' : 'Select staff for shift approval'} aria-busy={save.isPending}>
       <div className="staff-selection-topbar">
         <button className="btn btn-outline" disabled={save.isPending} onClick={onCancel}>Cancel</button>
-        <button className="btn btn-accent-outline" disabled={((mode === 'replacement' || draft) && selected.size === 0) || selectedUnavailable || save.isPending || staff.isPending || staff.isError || (!draft && rows.length === 0) || selected.size > capacity || search.trim() !== query} onClick={() => save.mutate(undefined)}>
+        <button className={`btn btn-accent-outline${mode !== 'replacement' ? ' flow-button flow-button-light' : ''}`} aria-busy={save.isPending || undefined} disabled={((mode === 'replacement' || draft) && selected.size === 0) || selectedUnavailable || save.isPending || staff.isPending || staff.isError || (!draft && rows.length === 0) || selected.size > capacity || search.trim() !== query} onClick={() => save.mutate(undefined)}>
           {save.isPending ? 'Saving...' : mode === 'replacement' ? 'Send offers' : 'Confirm'}
         </button>
       </div>
@@ -126,7 +129,7 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
       </div>
       <div className="staff-selection-tab">Staff <span>Active only</span></div>
       <div className="list-toolbar">
-        <div className="toolbar-search"><IconSearch size={14} /><input aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={save.isPending} /></div>
+        <div className="toolbar-search"><SearchField label="Search staff" type="text" aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={save.isPending} /></div>
       </div>
       {selectedUnavailable && <p className="staff-selection-notice feedback-warning" role="status">A selected staff member is unavailable for this shift. Uncheck them and choose a replacement.</p>}
       {notice && <p className="staff-selection-notice feedback-warning" role="status">{notice}</p>}
@@ -145,13 +148,13 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
           <div className="staff-selection-empty"><h2>No active staff available</h2><p>Try adjusting your search or return to the shift request.</p></div>
         ) : <table className="table staff-selection-table">
           <thead><tr><th><span aria-label="Selection" /></th>{['Name', 'Ref', 'Email', 'Phone', 'Rate', 'Status', 'Added'].map((name) => <th scope="col" key={name}>{name}</th>)}</tr></thead>
-          <tbody>{rows.map((row) => <tr key={row.id} className={selected.has(row.id) ? 'staff-selection-selected' : ''} onClick={() => toggle(row.id)}>
+          <tbody>{rows.map((row) => <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={row.id} className={selected.has(row.id) ? 'staff-selection-selected' : ''} onClick={() => toggle(row.id)}>
             <td><input type="checkbox" aria-label={`Select ${row.firstName} ${row.lastName}`} checked={selected.has(row.id)} disabled={save.isPending || (!row.available && !selected.has(row.id))} onClick={(e) => e.stopPropagation()} onChange={() => toggle(row.id)} /></td>
-            <td><span className="staff-selection-name"><span className="mini-avatar" aria-hidden="true">{row.firstName[0]}</span>{row.firstName} {row.lastName}</span></td>
+            <td><span className="staff-selection-name record-chip object-name-chip"><span className="mini-avatar" style={recordAvatarStyle([row.firstName,row.lastName].filter(Boolean).join(' '))} aria-hidden="true">{row.firstName?.charAt(0).toUpperCase()}</span>{row.firstName} {row.lastName}</span></td>
             <td>{row.staffRef || '—'}</td><td>{row.email}</td><td>{row.phone || '—'}</td>
             <td>{row.defaultPayRatePence == null ? '—' : `£${(row.defaultPayRatePence / 100).toFixed(2)}/hr`}</td>
             <td><span className="badge badge-active">active</span>{!row.available && <span style={{ marginLeft: 8 }}>Unavailable</span>}</td><td>{timeAgo(row.createdAt)}</td>
-          </tr>)}</tbody>
+          </arcMotion.tr>)}</tbody>
         </table>}
       </div>
       <footer className="staff-selection-footer"><span>{selected.size} selected <span aria-hidden="true">·</span> {total} active staff</span><div>

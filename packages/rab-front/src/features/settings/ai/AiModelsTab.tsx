@@ -1,3 +1,4 @@
+import { motion as arcMotion } from 'framer-motion';
 import { useId, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconFlag, IconMessageCircle, IconRefresh, IconRobot } from '@tabler/icons-react';
@@ -390,13 +391,13 @@ function ModelTable({ models }: { models: AiModelView[] }) {
           </thead>
           <tbody>
             {models.map((m) => (
-              <tr key={m.id} data-model={m.id}>
+              <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={m.id} data-model={m.id}>
                 <td><span className="ai-model-name">{m.label}</span><span className="ai-model-id">{m.id}</span></td>
                 <td>{m.tier === 'fast' ? 'Fast' : 'Smart'}</td>
                 <td className="ai-num">{`${p(m.priceUsdPerMTok.input)} / ${p(m.priceUsdPerMTok.cachedInput)} / ${p(m.priceUsdPerMTok.output)}`}</td>
                 <td title={m.dataRegion}>{REGION[m.region] ?? m.region}</td>
                 <td><span className={`badge ai-models-state ai-models-state--${m.state}`}>{m.stateLabel || AI_MODEL_STATE_LABEL[m.state]}</span></td>
-              </tr>
+              </arcMotion.tr>
             ))}
           </tbody>
         </table>

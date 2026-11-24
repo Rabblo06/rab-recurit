@@ -1,3 +1,4 @@
+import { motion as arcMotion } from 'framer-motion';
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AI_MODEL_STATE_LABEL, type AiModelView } from '@rab/shared';
@@ -262,7 +263,7 @@ export function AiConfigSection() {
             <thead><tr><th>Model</th><th>Provider</th><th>Tier</th><th className="ap-num">Input / 1M</th><th className="ap-num">Cached / 1M</th><th className="ap-num">Output / 1M</th><th>Region</th><th>State</th></tr></thead>
             <tbody>
               {modelsOf(o).map((m) => (
-                <tr key={m.id}>
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={m.id}>
                   <td>{m.label} <span className="ap-muted ap-mono">{m.id}</span></td>
                   <td>{m.provider}</td>
                   <td>{m.tier}</td>
@@ -271,7 +272,7 @@ export function AiConfigSection() {
                   <td className="ap-num">{usd(m.priceUsdPerMTok.output)}</td>
                   <td title={m.dataRegion}>{m.region}</td>
                   <td><span className={`ap-pill ${m.state === 'available' ? 'ap-ok' : m.state === 'deprecated' ? 'ap-warn' : ''}`}>{m.stateLabel || AI_MODEL_STATE_LABEL[m.state]}</span></td>
-                </tr>
+                </arcMotion.tr>
               ))}
             </tbody>
           </table>

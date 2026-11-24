@@ -1,0 +1,7 @@
+.notifications-panel { overflow:hidden; }
+.notification-list { max-height:min(360px,calc(100dvh - 140px)); overflow:auto; overscroll-behavior:contain; }
+.notification-row { display:flex; width:100%; height:auto; min-height:84px; flex-shrink:0; padding:12px 14px; border:0; border-bottom:1px solid var(--border-light); border-radius:0; line-height:1.5; color:var(--font-primary); background:transparent; cursor:pointer; }
+.notification-row > span { display:block; width:100%; flex-shrink:0; overflow-wrap:anywhere; }
+.notification-row:hover { background:var(--bg-secondary)!important; }
+.notification-row:focus-visible { outline:2px solid var(--color-accent,#4062df); outline-offset:-3px; }
+.notification-row:last-child { border-bottom:0; }

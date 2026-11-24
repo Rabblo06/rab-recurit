@@ -10506,3 +10506,38 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## 2026-11-24 — Shift headcount increase while sending offers (new web UI; lane UI, from the crewflow-ui checkout)
+
+- **Asset:** a shift's `required_count` and status, and the offers created against it.
+- **Threat:** a manager of another workspace or organisation resizes a shift by id; a retry or two concurrent sends add
+  places twice; a failed send leaves an inflated headcount; resize used to bypass the replacement or confirmation gates.
+- **Controls (five layers):** route `PermissionGuard(OFFER_SEND)`; service re-checks `offer.send` AND `schedule.create`
+  (`OfferService.increaseHeadcountTx`); workspace transaction with the shift row locked (`pessimistic_write`); the shift must
+  be the caller's own (`created_by`) in the caller's organisation and workspace (404 otherwise, never 403), not archived,
+  not ended (database clock) and in open/offered/partially_filled/fully_filled/confirmed; FORCE RLS on the workspace shift
+  table unchanged. The body carries an absolute `requiredCount` (1..1000, above the current value) and the
+  `expectedRequiredCount` the client last saw: a mismatch is 409, so a retry cannot add twice. A full shift reopens to
+  partially_filled only through `assertTransition`. Resize, audit row (`shift.headcount_increased`) and offers share one
+  transaction: zero successful offers rolls all of it back. Not combinable with replacement mode (400). Staff acceptance and
+  manager confirmation stay mandatory; no seat is claimed by the resize.
+- **Also:** create-with-offers accepts per-recipient windows (validated like sendBulk's, inside the parent shift) and
+  rejects duplicate recipients; a direct manager-created shift may open the venue offer pipeline (ownership unchanged).
+- **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` (concurrent resize, stale guard, rollback, foreign 404,
+  shrink 400, replacement 400, missing schedule.create 403, direct-shift pipeline owner-only).
+
+
+## 2026-11-24 — New web UI: hold-to-delete keeps the current-password step-up (owner decision 73 b)
+
+- **Change (web only):** deleting a Staff / Manager / Venue Manager (single or bulk) is now an uninterrupted 1.8 s hold
+  followed by the existing "Your current password" prompt; the request is sent only from the password submit, with
+  `currentPassword` in the body exactly as before. The hold is intent only, never a control.
+- **Server unchanged:** the DELETE routes still verify the actor's password first (P2.8 `assertCurrentPassword`), then
+  permissions, tenant scope and deletion invariants. A refused step-up stops a bulk run (no repeated wrong-password calls).
+- **Tests:** `UserDetailPanel.spec.tsx` and `UsersBulkActions.spec.tsx` (the hold alone sends nothing; the password is
+  sent; a refusal is shown; cancel deletes nothing).
+- **Review fix (2026-11-24):** per-recipient windows on sendBulk and create-with-offers must sit inside the shift's own
+  window (400 otherwise) and never extend the shift, so scheduled hours and estimated pay cannot grow from an individual
+  time (FLAGGED pay assumption for the owner). The Venue-Manager request path keeps its wider rule. Tests: windows before
+  the start / after the end refused with the shift and assignments unchanged; a second manager of the same workspace gets
+  404 on the resize and on the pipeline.

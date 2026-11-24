@@ -1,3 +1,4 @@
+import { OPERATIONAL_OBJECTS } from './operational-objects';
 /**
  * Personal sidebar shortcuts (Operations "+" → Add menu item). NAVIGATION ONLY: a shortcut is a pointer to something that
  * already exists — never a new entity, view definition, permission or page. Opening one goes through the normal route, so
@@ -9,13 +10,15 @@
  */
 
 export type ShortcutKind = 'object' | 'view' | 'record' | 'folder' | 'link';
-export type ShortcutIcon = 'object' | 'view' | 'person' | 'venue' | 'shift' | 'offer' | 'folder' | 'link' | 'star' | 'bolt';
+export type { SidebarIcon as ShortcutIcon } from './sidebar-icons';
+import { SIDEBAR_ICON_IDS, type SidebarIcon as ShortcutIcon } from './sidebar-icons';
 
 export interface Shortcut {
   id: string;
   kind: ShortcutKind;
   label: string;
   icon: ShortcutIcon;
+  color?: string;
   /** object/view: registry key; record: `${type}:${id}`; link: the validated destination. Folders have none. */
   target?: string;
   /** Folder this item sits in (one level of folders keeps the tree acyclic by construction). */
@@ -24,6 +27,9 @@ export interface Shortcut {
 
 /** Existing pages a shortcut may point at (Object). `audit` is only offered/shown to roles that hold it by default. */
 export const OBJECTS: Record<string, { label: string; to: string; icon: ShortcutIcon; requires?: 'audit' }> = {
+  ...OPERATIONAL_OBJECTS,
+  'up-next': { label: 'Up next', to: '/up-next', icon: 'clock' },
+  dashboard: { label: 'Dashboard', to: '/', icon: 'object' },
   users: { label: 'Users', to: '/users', icon: 'person' },
   shifts: { label: 'Shifts', to: '/shifts', icon: 'shift' },
   offers: { label: 'Offers', to: '/offers', icon: 'offer' },
@@ -33,6 +39,7 @@ export const OBJECTS: Record<string, { label: string; to: string; icon: Shortcut
   'venue-offers': { label: 'Venue Offers', to: '/venue-offers', icon: 'offer' },
   audit: { label: 'Audit Log', to: '/audit', icon: 'object', requires: 'audit' },
   help: { label: 'Help Center', to: '/help', icon: 'object' },
+  support: { label: 'Support', to: '/support', icon: 'object' },
 };
 
 /**
@@ -40,6 +47,7 @@ export const OBJECTS: Record<string, { label: string; to: string; icon: Shortcut
  * Stored by key, never as a free-form query string. `to` is computed when opened (Upcoming = from today).
  */
 export const VIEWS: Record<string, { label: string; object: string; to: () => string }> = {
+  'offers-all': { label: 'All offers', object: 'offers', to: () => '/offers' },
   'shifts-upcoming': { label: 'Shifts · Upcoming', object: 'shifts', to: () => `/shifts?startsAtFrom=${new Date().toLocaleDateString('sv-SE')}` },
   'shifts-completed': { label: 'Shifts · Completed', object: 'shifts', to: () => '/shifts?status=completed' },
   'offers-pending': { label: 'Offers · Pending', object: 'offers', to: () => '/offers?status=pending' },
@@ -53,7 +61,7 @@ export const VIEWS: Record<string, { label: string; object: string; to: () => st
 };
 
 /** First path segments that are real Crewflow pages (internal Link validation). */
-const INTERNAL_ROOTS = new Set(['', 'users', 'shifts', 'offers', 'venue-offers', 'calendar', 'payroll', 'venues', 'audit', 'settings', 'help', 'support', 'chat']);
+const INTERNAL_ROOTS = new Set(['', 'up-next', 'users', 'shifts', 'offers', 'venue-offers', 'calendar', 'payroll', 'venues', 'audit', 'settings', 'help', 'support', 'chat']);
 
 export type LinkCheck = { ok: true; kind: 'internal'; to: string } | { ok: true; kind: 'external'; href: string } | { ok: false; error: string };
 
@@ -80,8 +88,8 @@ export function validateLink(raw: string): LinkCheck {
   return { ok: true, kind: 'external', href: url.toString() };
 }
 
-const ICONS: ShortcutIcon[] = ['object', 'view', 'person', 'venue', 'shift', 'offer', 'folder', 'link', 'star', 'bolt'];
-export const PICKABLE_ICONS: ShortcutIcon[] = ['star', 'bolt', 'object', 'view', 'person', 'venue', 'shift', 'offer', 'link'];
+const ICONS = SIDEBAR_ICON_IDS;
+export const PICKABLE_ICONS: ShortcutIcon[] = ['star', 'bolt', 'bell', 'heart', 'eye', 'pencil', 'globe', 'smile', 'flag', 'tag', 'clock', 'clipboard', 'briefcase', 'home', 'settings', 'shield', 'layout', 'object', 'view', 'person', 'venue', 'shift', 'offer', 'link'];
 const KINDS: ShortcutKind[] = ['object', 'view', 'record', 'folder', 'link'];
 const RECORD_TYPES = new Set(['Staff', 'Manager', 'Venue', 'Shift', 'Offer']);
 export const MAX_SHORTCUTS = 40;
@@ -103,7 +111,8 @@ export function parseShortcuts(raw: string | null): Shortcut[] {
     const s = item as Record<string, unknown>;
     if (typeof s.id !== 'string' || !KINDS.includes(s.kind as ShortcutKind) || typeof s.label !== 'string' || !s.label.trim()) continue;
     const icon = ICONS.includes(s.icon as ShortcutIcon) ? (s.icon as ShortcutIcon) : 'object';
-    const base = { id: s.id, kind: s.kind as ShortcutKind, label: s.label.slice(0, 60), icon };
+    const color = typeof s.color === 'string' && /^#[0-9a-f]{6}$/i.test(s.color) ? s.color : undefined;
+    const base = { ...(color ? { color } : {}), id: s.id, kind: s.kind as ShortcutKind, label: s.label.slice(0, 60), icon };
     if (s.kind === 'folder') { folders.add(s.id); out.push({ ...base, parentId: null }); continue; }
     const target = typeof s.target === 'string' ? s.target : '';
     if (s.kind === 'object' && !OBJECTS[target]) continue;

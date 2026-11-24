@@ -8,15 +8,16 @@ import { PageSlotsProvider } from '../shared/page-slots';
 import { DelayedFallback, PageSkeleton } from '../shared/components/RouteFallback';
 import { preloadMainPages, preloadNavTarget, whenIdle } from './consolePages';
 import { spring, usePrefersReducedMotion } from '../shared/motion';
+import NavigationIndicator, { NavigationIndicatorScope } from '../shared/components/NavigationIndicator';
 import WelcomeOverlay from '../features/onboarding/WelcomeOverlay';
 import type { WelcomeRole } from '../features/onboarding/WelcomeOverlay';
 import { hasPendingWelcome, clearPendingWelcome } from '../features/onboarding/onboardingMotion';
 import {
-  IconSettings, IconChevronDown,
+  IconSettings, IconChevronDown, IconClock,
   IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
   IconCalendarMonth, IconCash, IconMapPin, IconHistory,
   IconDots, IconMail, IconSend2, IconAdjustmentsHorizontal, IconHelpCircle, IconLifebuoy,
-  IconSearch, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand, IconMenu2, IconX, IconLayoutGrid, IconCalendarCheck, IconSparkles, IconLayoutSidebarRightExpand, IconPencilPlus,
+  IconSearch, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand, IconHome, IconMenu2, IconMessageCircle, IconMessageCirclePlus, IconX, IconLayoutGrid, IconCalendarCheck, IconSparkles, IconLayoutSidebarRightExpand, IconPencilPlus,
 } from '@tabler/icons-react';
 import AdminDropdown from './AdminDropdown';
 import GlobalSearch from './GlobalSearch';
@@ -33,7 +34,7 @@ import ShiftApprovalDrawer from '../features/scheduling/ShiftApprovalDrawer';
 import ShiftRequestDrawer from '../features/scheduling/ShiftRequestDrawer';
 import OrganisationDetailHost from '../features/settings/admin-panel/OrganisationDetailHost';
 import NotificationBell from '../features/notifications/NotificationBell';
-import Avatar from '../shared/components/Avatar';
+import Avatar, { ImageWorkspaceContext } from '../shared/components/Avatar';
 import { useCurrentProfile } from '../shared/hooks/useCurrentProfile';
 import { useRealtimeStatus } from '../shared/lib/RealtimeProvider';
 import { useMyWorkspace } from '../shared/hooks/useMyWorkspace';
@@ -45,14 +46,16 @@ import { askAiShortcutLabel, isApplePlatform, isAskAiShortcut } from '../feature
 import SettingsSidebar from '../features/settings/layout/SettingsSidebar';
 import LogoutDialog from '../features/settings/LogoutDialog';
 import NavigationModes, { navigationMode, type NavigationMode } from './NavigationModes';
-import { AddMenuItem, ShortcutList, useNavShortcuts } from './NavShortcuts';
+import SidebarNavigation from './SidebarNavigation';
 import './sidebar-motion.css';
+import './mobile-workspace.css';
 import '../features/ai/ai-chat.css';
 
 type NavEntry = { to: string; label: string; Icon: typeof IconUsers; dot?: string };
 
 // Crewflow reference grouping. Same destinations as before (nothing removed); every route stays enforced server-side.
 const workspaceNav: NavEntry[] = [
+  { to: '/up-next', label: 'Up next', Icon: IconClock },
   { to: '/',           label: 'Dashboard',  Icon: IconLayoutGrid },
   { to: '/users',      label: 'Users',       Icon: IconUsers },
   { to: '/shifts',     label: 'Shifts',      Icon: IconCalendarCheck },
@@ -63,7 +66,6 @@ const workspaceNav: NavEntry[] = [
 const operationsNav: NavEntry[] = [
   { to: '/calendar',     label: 'Calendar',     Icon: IconCalendarMonth, dot: 'var(--color-brand)' },
   { to: '/venues',       label: 'Venues',       Icon: IconMapPin,        dot: 'var(--color-brand-secondary)' },
-  { to: '/venue-offers', label: 'Venue Offers', Icon: IconSend2,         dot: 'var(--color-brand-yellow)' },
 ];
 
 // Audit Log is manager-only server-side (PermissionGuard(AUDIT_VIEW)); listed for the roles that hold it by default.
@@ -97,10 +99,8 @@ function SidebarLink({ item, badge }: { item: NavEntry; badge?: number }) {
     <NavLink to={to} end={to === '/'} title={label} aria-label={label} className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'} onMouseEnter={intent} onFocus={intent}>
       {({ isActive }) => <>
         {/* One shared highlight that slides between items (navigation is never delayed for it). */}
-        {isActive && (reduce
-          ? <span className="nav-active-pill" aria-hidden="true"/>
-          : <motion.span layoutId="sidebar-active-pill" className="nav-active-pill" aria-hidden="true" transition={spring}/>)}
-        {dot ? <span className="nav-dot" style={{ background: dot }} aria-hidden="true"/> : <Icon size={16} stroke={1.6}/>}
+        <NavigationIndicator active={isActive} priority={to.length} />
+        <Icon size={16} stroke={1.6} style={dot ? { color: dot } : undefined} aria-hidden="true"/>
         <span>{label}</span>
         {badge ? <span className="nav-count" aria-hidden="true">{badge}</span> : null}
       </>}
@@ -108,25 +108,11 @@ function SidebarLink({ item, badge }: { item: NavEntry; badge?: number }) {
   );
 }
 
-function SidebarSection({ id, label, collapsed, onToggle, action, children }: { id: string; label: string; collapsed: boolean; onToggle: (id: string) => void; action?: ReactNode; children: ReactNode }) {
-  return (
-    <div className={`sidebar-section sidebar-group${collapsed ? ' is-collapsed' : ''}`}>
-      <div className="sidebar-group-head">
-        <button type="button" className="sidebar-group-label" aria-expanded={!collapsed} onClick={() => onToggle(id)}>
-          <IconChevronDown size={12} className="sidebar-group-caret" aria-hidden="true"/>{label}
-        </button>
-        {action}
-      </div>
-      {!collapsed && <nav className="sidebar-nav" aria-label={label}>{children}</nav>}
-    </div>
-  );
-}
-
 export default function Layout() {
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get<{ roles: string[] }>('/auth/me')).data, staleTime: 5 * 60 * 1000 });
   const { data: workspace } = useMyWorkspace({ enabled: !!me?.roles.some(role => ['manager', 'ceo'].includes(role)) });
   // Synchronous remount fences every draft on account/session/workspace changes.
-  return <AiChatProvider workspaceId={workspace?.id}><LayoutContent /></AiChatProvider>;
+  return <ImageWorkspaceContext.Provider value={workspace?.id ?? 'default'}><AiChatProvider workspaceId={workspace?.id}><LayoutContent /></AiChatProvider></ImageWorkspaceContext.Provider>;
 }
 
 /**
@@ -215,6 +201,9 @@ function LayoutContent() {
   const workspaceName = workspace?.name || 'Crewflow';
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  const [mobileNavMode, setMobileNavMode] = useState<NavigationMode | null>(null);
+  const sidebarMode = mobile && mobileNavMode ? mobileNavMode : mode;
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
   const [workspaceMenu, setWorkspaceMenu] = useState(false);
   const reducedMotion = useReducedMotion();
   const [collapsedSections, setCollapsedSections] = useState<string[]>(readCollapsed);
@@ -225,7 +214,7 @@ function LayoutContent() {
   });
   const canSeeAudit = !!me?.roles.some(role => ['manager', 'ceo'].includes(role));
   const isOrgAdmin = !!(me?.isPlatformAdmin || me?.roles.includes('ceo'));
-  const shortcuts = useNavShortcuts(me?.id ?? null, workspace?.id);
+
   // AI entry points (Ask AI, the AI mode) exist only for a user the server confirms as eligible right now
   // (GET /ai/availability → available: true, or not_configured / demo_data_only, which the server answers only to an
   // eligible user of an enabled organisation; the chat then opens with its input disabled). Loading, refused or
@@ -255,7 +244,7 @@ function LayoutContent() {
   const { data: navSummary } = useQuery({ queryKey: ['dashboard-summary'], enabled: !!me && !isPlatformAdminOnly, queryFn: async () => (await api.get('/dashboard/summary')).data as { activeOfferCount?: number | null }, staleTime: 60_000 });
   const activePage = [...workspaceNav, ...operationsNav, auditNav, ...helpNav, ...additionalPages].find(item => item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to));
   const PageIcon = activePage?.Icon || IconUsers;
-  useEffect(() => { setMobileNav(false); setWorkspaceMenu(false); }, [location.pathname]);
+  useEffect(() => { setMobileNav(false); setMobileNavMode(null); setWorkspaceMenu(false); }, [location.pathname]);
   useEffect(() => {
     if (workspaceMenu) workspaceContent.current?.querySelector<HTMLElement>('button')?.focus();
   }, [workspaceMenu]);
@@ -340,9 +329,9 @@ function LayoutContent() {
         />
       )}
       {mobileNav && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => { setMobileNav(false); mobileTrigger.current?.focus(); }} />}
-      <aside className="sidebar" ref={sidebarRef} aria-label="Main navigation" onKeyDown={event => {
+      <NavigationIndicatorScope><aside className="sidebar" ref={sidebarRef} aria-label="Main navigation" onKeyDown={event => {
         if (!mobileNav || event.key !== 'Tab') return;
-        const controls = [...(sidebarRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href]') ?? [])].filter(el => el.offsetParent !== null);
+        const controls = [...(sidebarRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href]') ?? []), ...document.querySelectorAll<HTMLElement>('.mobile-workspace-nav button:not(:disabled)')].filter(el => el.offsetParent !== null);
         const first = controls[0], last = controls[controls.length - 1];
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
         if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -369,25 +358,13 @@ function LayoutContent() {
         </button>
         <NavigationModes mode={mode} expanded={!collapsed || mobile} onSelect={selectMode} onIntent={(m) => { if (m === 'settings') preloadNavTarget('/settings/profile', queryClient); }} showAi={aiEligible}/>
 
-        <motion.div className="sidebar-mode-content" key={mode} initial={reducedMotion || previousMode.current === mode ? false : { opacity: 0, x: modeDirection * (document.documentElement.dir === 'rtl' ? -8 : 8) }} animate={{ opacity: 1, x: 0 }} transition={{ duration: reducedMotion ? 0 : .18, ease: [.2, .8, .2, 1] }}>
-        {mode === 'ai' ? <AiChatNavigation /> : mode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} showAi={aiEligible && !!me?.roles.includes('ceo')} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
-          <>
-            <div className="sidebar-section sidebar-primary">
-              <nav className="sidebar-nav" aria-label="Workspace">
-                {workspaceNav.map(item => <SidebarLink key={item.to} item={item} badge={item.to === '/offers' ? navSummary?.activeOfferCount ?? undefined : undefined}/>)}
-              </nav>
-            </div>
-            <SidebarSection id="operations" label="Operations" collapsed={collapsedSections.includes('operations')} onToggle={toggleSection}
-              action={shortcuts.ready ? <AddMenuItem shortcuts={shortcuts.items} canSeeAudit={canSeeAudit} onAdd={shortcuts.add}/> : undefined}>
-              {operationsNav.map(item => <SidebarLink key={item.to} item={item}/>)}
-              <ShortcutList items={shortcuts.items} canSeeAudit={canSeeAudit} isOrgAdmin={isOrgAdmin} onRename={shortcuts.rename} onRemove={shortcuts.remove}/>
-            </SidebarSection>
-            <SidebarSection id="workspace" label="Workspace" collapsed={collapsedSections.includes('workspace')} onToggle={toggleSection}>
-              {canSeeAudit && <SidebarLink item={auditNav}/>}
-              {helpNav.map(item => <SidebarLink key={item.to} item={item}/>)}
-            </SidebarSection>
-          </>
-        )}
+        <motion.div className="sidebar-mode-content" key={sidebarMode} initial={reducedMotion || previousMode.current === mode ? false : { opacity: 0, x: modeDirection * (document.documentElement.dir === 'rtl' ? -8 : 8) }} animate={{ opacity: 1, x: 0 }} transition={{ duration: reducedMotion ? 0 : .18, ease: [.2, .8, .2, 1] }}>
+        {sidebarMode === 'ai' ? <AiChatNavigation /> : sidebarMode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} showAi={aiEligible && !!me?.roles.includes('ceo')} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
+          <SidebarNavigation userId={me?.id ?? null} workspaceId={workspace?.id} canSeeAudit={canSeeAudit} isOrgAdmin={isOrgAdmin} collapsed={collapsedSections} onToggle={toggleSection}
+            workspace={<>{workspaceNav.map(item => <SidebarLink key={item.to} item={item} badge={item.to === '/offers' ? navSummary?.activeOfferCount ?? undefined : undefined}/>)}</>}
+            operations={<>{operationsNav.map(item => <SidebarLink key={item.to} item={item}/>)}</>}
+            guide={<>{canSeeAudit && <SidebarLink item={auditNav}/>} {helpNav.map(item => <SidebarLink key={item.to} item={item}/>)}</>}
+          />       )}
         </motion.div>
 
         <div className="sidebar-footer">
@@ -397,12 +374,11 @@ function LayoutContent() {
             <IconAdjustmentsHorizontal size={16} stroke={1.6} aria-hidden="true"/>
           </button>
         </div>
-      </aside>
+      </aside></NavigationIndicatorScope>
 
       <div className="main-content">
         <div className="topbar">
-          <button ref={mobileTrigger} className="btn-icon mobile-nav-toggle" aria-label="Open navigation" onClick={() => setMobileNav(true)}><IconMenu2 size={20}/></button>
-          {/\/settings\/workspace\/members\/roles\//.test(location.pathname)
+          {/\/settings\/workspace\/members(?:\/|$)/.test(location.pathname)
             ? <div className="topbar-breadcrumb role-breadcrumb-slot" data-role-breadcrumb-slot />
             : <div className="topbar-breadcrumb">{mode === 'ai' ? <strong>AI assistant</strong> : <><PageIcon size={18} stroke={1.6}/><span>Workspace</span><span>/</span><strong>{activePage?.label || 'Workspace'}</strong><span ref={setBreadcrumbSuffixSlot} className="topbar-breadcrumb-suffix" data-breadcrumb-suffix-slot /></>}</div>}
           {/* Page tabs / title (PageHeader). The breadcrumb before it only shows when a page has none (CSS :has). */}
@@ -413,7 +389,7 @@ function LayoutContent() {
           <div className="topbar-actions">
             <div ref={setActionsSlot} className="topbar-page-actions" data-page-actions-slot />
             {mode === 'ai' ? aiEligible && <>
-              <button className="btn-icon" aria-label="New chat" title="New chat" onClick={chat.newChat}><IconPencilPlus size={17}/></button>
+              <button className="sidebar-new-chat" aria-label="New chat" title="New chat" onClick={chat.newChat}><IconPencilPlus size={15}/><span>New chat</span></button>
               <button className="btn-icon" aria-label="Continue chat beside workspace" title="Continue chat beside workspace" onClick={continueInPanel}><IconLayoutSidebarRightExpand size={17}/></button>
             </> : aiEligible && <button className="btn-icon ask-ai-trigger" aria-label="Ask AI" aria-keyshortcuts={isApplePlatform() ? 'Meta+J' : 'Control+J'} title={`Ask AI (${askAiShortcutLabel()})`} onClick={openAskAi}><IconSparkles size={17}/></button>}
             {isUserProfile && (
@@ -445,10 +421,21 @@ function LayoutContent() {
             style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
           >
             <Suspense key={contentSection(location.pathname)} fallback={<DelayedFallback><PageSkeleton/></DelayedFallback>}>
-              <Outlet/>
+              <Outlet context={{ openSearch }}/>
             </Suspense>
           </div>
       </div>
+
+      {mobile && <nav className="mobile-workspace-nav" aria-label="Mobile workspace">
+        <button ref={mobileTrigger} className="mobile-tools-toggle" type="button" aria-label={mobileToolsOpen ? 'Close mobile menu' : 'Open mobile menu'} aria-expanded={mobileToolsOpen} aria-controls="mobile-workspace-actions" onClick={() => { setMobileToolsOpen(value => !value); if (mobileToolsOpen) setMobileNav(false); }}>{mobileToolsOpen ? <IconX size={23}/> : <IconMenu2 size={23}/>}</button>
+        {mobileToolsOpen && <div id="mobile-workspace-actions" className="mobile-workspace-actions">
+          <button type="button" aria-label="Home" aria-expanded={mobileNav && sidebarMode === 'home'} onClick={() => { setMobileNavMode('home'); setMobileNav(true); }}><IconHome size={21}/></button>
+          <button type="button" aria-label="Settings" aria-expanded={mobileNav && sidebarMode === 'settings'} onClick={() => { if (mode === 'settings') { setMobileNavMode('settings'); setMobileNav(true); } else { setMobileNav(false); selectMode('settings'); } }}><IconSettings size={21}/></button>
+          <button type="button" aria-label="Search workspace" onClick={() => { setMobileNav(false); openSearch(); }}><IconSearch size={21}/></button>
+          <button type="button" aria-label="Open chat" title={aiEligible ? 'Open chat' : 'Chat is not available for this account'} disabled={!aiEligible} onClick={() => { setMobileNav(false); openChatPage(); }}><IconMessageCircle size={21}/></button>
+          <button type="button" aria-label="New chat" title={aiEligible ? 'New chat' : 'Chat is not available for this account'} disabled={!aiEligible} onClick={() => { setMobileNav(false); chat.newChat(); openChatPage(); }}><IconMessageCirclePlus size={21}/></button>
+        </div>}
+      </nav>}
 
       {mode !== 'ai' && aiEligible && <AskAiPanel onExpand={openChatPage}/>}
       <LogoutDialog open={showLogout} onClose={() => setShowLogout(false)}/>

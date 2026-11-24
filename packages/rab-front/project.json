@@ -5,6 +5,7 @@
   "targets": {
     "start": {
       "executor": "nx:run-commands",
+      "dependsOn": ["^build"],
       "options": {
         "command": "vite --port 5173",
         "cwd": "packages/rab-front"

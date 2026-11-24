@@ -1,0 +1,16 @@
+/* Shared record and overflow presentation; existing handlers and menu permissions stay unchanged. */
+tbody td .record-chip,.object-name-chip {display:inline-flex;align-items:center;gap:5px;max-width:100%;padding:3px 5px;border-radius:5px;background:var(--bg-tertiary);line-height:1.35;vertical-align:middle;font-size:inherit}
+.object-name-chip .mini-avatar,.object-name-chip .round-avatar,.object-name-chip .payroll-avatar {display:inline-grid;place-items:center;width:17px;height:17px;min-width:17px;flex-shrink:0;border:0;border-radius:50%;font-size:10px;line-height:1}
+td:has(>.object-name-chip):hover {box-shadow:inset 0 0 0 1px var(--border-light);border-radius:5px}
+.object-name-chip:focus-visible {outline:2px solid #4663ed;outline-offset:2px}
+.object-name-chip[aria-disabled=true]{opacity:.5}
+button:has(>svg.tabler-icon-dots),button:has(>svg.tabler-icon-dots-vertical){display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:5px;background:var(--bg-secondary);color:var(--font-tertiary);padding:3px;min-width:24px;min-height:24px;transition:background .12s,color .12s}
+button:has(>svg.tabler-icon-dots):hover,button:has(>svg.tabler-icon-dots-vertical):hover{background:var(--bg-tertiary);color:var(--font-primary)}
+button:has(>svg.tabler-icon-dots):focus-visible,button:has(>svg.tabler-icon-dots-vertical):focus-visible{outline:2px solid #536cf0;outline-offset:2px}
+button:has(>svg.tabler-icon-dots):disabled,button:has(>svg.tabler-icon-dots-vertical):disabled{opacity:.4;cursor:not-allowed}
+button:has(>svg.tabler-icon-dots)[aria-expanded=true],button:has(>svg.tabler-icon-dots-vertical)[aria-expanded=true]{background:var(--bg-tertiary);color:var(--font-primary)}
+@media(prefers-reduced-motion:reduce){button:has(>svg.tabler-icon-dots),button:has(>svg.tabler-icon-dots-vertical){transition:none}}
+
+.user-name-chip .mini-avatar,.object-name-chip .mini-avatar,.object-name-chip .round-avatar,.object-name-chip .payroll-avatar{background:var(--record-avatar-bg,#d9effa)!important;color:var(--record-avatar-fg,#286781)!important}
+
+button.object-name-chip{border:0;color:inherit;font-family:inherit;font-weight:inherit;text-align:left;cursor:pointer}button.object-name-chip:hover{background:var(--bg-quaternary,var(--bg-tertiary))}button.object-name-chip:focus-visible{outline:2px solid #536cf0;outline-offset:2px}

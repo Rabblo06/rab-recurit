@@ -17,6 +17,7 @@ import './account-security.css';
  */
 export default function SecurityModal({
   open,
+  presentation = 'default',
   titleId,
   descriptionId,
   icon = 'shield',
@@ -31,6 +32,7 @@ export default function SecurityModal({
   /** When given, the body and footer are one <form> (Enter submits; the footer's submit button is `type="submit"`). */
   onSubmit?: () => void;
   open: boolean;
+  presentation?: 'default' | 'compact' | 'setup-page';
   titleId: string;
   descriptionId: string;
   icon?: AcsIconName;
@@ -61,7 +63,7 @@ export default function SecurityModal({
   return createPortal(
     <ModalFrame
       open={open}
-      overlayClassName="acs acs-modal-layer"
+      overlayClassName={`acs acs-modal-layer acs-presentation-${presentation}`}
       dialogClassName="acs-modal"
       dialogProps={{
         role: 'dialog',

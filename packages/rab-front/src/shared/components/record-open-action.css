@@ -1,0 +1,7 @@
+td:has(> .record-open-action) { position:relative; padding-right:40px !important; }
+.record-open-action { position:absolute; right:5px; top:50%; transform:translateY(-50%); display:grid; place-items:center; width:26px; height:26px; padding:0; background:var(--background-primary,#fff); color:var(--font-secondary,#777); border:1px solid var(--border-color,#ddd); border-radius:8px; box-shadow:0 1px 3px #00000008; opacity:0; cursor:pointer; transition:opacity .12s,background .12s; }
+tr:hover > td > .record-open-action,tr:focus-within > td > .record-open-action { opacity:1; }
+.record-open-action:hover { background:var(--background-tertiary,#f3f3f3); }
+.record-open-action:focus-visible { outline:2px solid #526bff; outline-offset:1px; opacity:1; }
+@media(hover:none) { .record-open-action { opacity:1; } }
+@media(prefers-reduced-motion:reduce) { .record-open-action { transition:none; } }

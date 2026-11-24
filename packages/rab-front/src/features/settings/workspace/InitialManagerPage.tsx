@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconSend, IconBan, IconUserExclamation } from '@tabler/icons-react';
+import { IconRefresh, IconTrash, IconMail, IconUserExclamation } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import { FormSkeleton } from '../../../shared/components/LoadingState';
 import InitialManagerFormFields, { type InitialManagerFormValues } from '../InitialManagerFormFields';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from '../../users/staffStatus';
 import { getApiErrorCode, getApiErrorMessage } from '../../../shared/lib/apiError';
+import { expiresIn } from '../members/InviteMembersPanel';
 import { toast } from '../../../shared/lib/toast';
 
 interface InitialManagerSummary {
@@ -15,7 +16,7 @@ interface InitialManagerSummary {
   lastName: string;
   accountStatus: string;
   invitationStatus: InvitationStatus;
-  pendingInvite: PendingInvite | null;
+  pendingInvite: (PendingInvite & { expiresAt?: string }) | null;
 }
 
 /**
@@ -35,7 +36,7 @@ interface InitialManagerSummary {
  * cooldown this screen does not try to replicate) — a too-early attempt simply surfaces the
  * server's own honest `REPLACE_COOLDOWN_ACTIVE` message below, never a fabricated local check.
  */
-export default function InitialManagerPage() {
+export default function InitialManagerPage({ roleControl, draftEmail, onDraftEmailChange }: { roleControl?: ReactNode; draftEmail?: string; onDraftEmailChange?: (email: string) => void } = {}) {
   const qc = useQueryClient();
   const endpoint = '/managers/initial-manager-invite';
   const invalidate = () => {
@@ -117,42 +118,38 @@ export default function InitialManagerPage() {
     const atMaxAttempts = (manager.pendingInvite?.sendNumber ?? 0) >= 3;
     const exhausted = !isPending && (isCancelled || isExpired) && atMaxAttempts;
 
-    if (created) {
-      return (
-        <div className="settings-page" style={{ maxWidth: 560 }}>
-          <div className="settings-section">
-            <h3 style={{ marginBottom: 4 }}>Initial Manager</h3>
-            <p role="status" style={{ fontSize: 13, color: 'var(--feedback-success)', margin: '0 0 10px' }}>Invitation created for {created.email}.</p>
-            <p style={{ fontSize: 12, color: 'var(--font-tertiary)' }}>
-              The invitation email has been queued for delivery — it has not necessarily been received yet.
-            </p>
-          </div>
-        </div>
-      );
-    }
-
     return (
-      <div className="settings-page" style={{ maxWidth: 560 }}>
-        <div className="settings-section">
-          <h3 style={{ marginBottom: 4 }}>Initial Manager</h3>
-          <p style={{ marginBottom: 12 }}>An organisation may only have one Initial Manager invitation. Additional managers use the ordinary Add Manager flow.</p>
+      <div className="member-invite-card invite-by-email">
+        <div className="member-section-heading">
+          <h3>Invite by email</h3>
+          <p>Send an invite email to your team.</p>
+        </div>
+        {roleControl && <InitialManagerFormFields idPrefix="im-existing" roleControl={roleControl}
+          draftEmail={draftEmail} onDraftEmailChange={onDraftEmailChange}
+          onSubmit={() => undefined} submitting={false} disabled submitLabel="Send Invitation" />}
+        <div className="pending-invitations">
+          {created && <p role="status">Invitation created for {created.email}.</p>}
 
-          <div className="settings-row"><span>Name</span><span style={{ color: 'var(--font-primary)' }}>{manager.firstName} {manager.lastName}</span></div>
-          <div className="settings-row"><span>Email</span><span style={{ color: 'var(--font-primary)' }}>{manager.email}</span></div>
-          <div className="settings-row"><span>Status</span><span className={`badge badge-${displayStatus.tone}`}>{displayStatus.label}</span></div>
-
+          <div className="members-table-wrap">
+          <table className="table invitations-table" aria-label="Initial Manager invitations">
+            <thead><tr><th>Email</th><th>Role</th><th>Expires in</th><th><span className="visually-hidden">Actions</span></th></tr></thead>
+            <tbody><tr>
+              <td><span className="invitation-email"><IconMail size={13} aria-hidden="true" />{manager.email}</span></td>
+              <td className="cell-muted">Initial Manager</td>
+              <td className="cell-muted">{isPending && manager.pendingInvite?.expiresAt
+                ? expiresIn(manager.pendingInvite.expiresAt)
+                : <span className={`badge badge-${displayStatus.tone}`}>{displayStatus.label}</span>}</td>
+              <td className="invitation-actions">
           {!showReplaceForm && (isPending || isCancelled || isExpired) && (
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <>
               {!atMaxAttempts && (
-                <button type="button" className="btn btn-outline" style={{ gap: 6 }} disabled={resend.isPending} onClick={() => resend.mutate()}>
-                  <IconSend size={14} />
-                  {isExpired || isCancelled ? 'Re-invite' : 'Resend invitation'}
+                <button type="button" className="btn-icon" aria-label={isExpired || isCancelled ? 'Re-invite' : 'Resend invitation'} title="Resend invitation" disabled={resend.isPending} onClick={() => resend.mutate()}>
+                  <IconRefresh size={14} />
                 </button>
               )}
               {isPending && (
-                <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => setRevokeConfirm(true)}>
-                  <IconBan size={14} />
-                  Revoke invitation
+                <button type="button" className="btn-icon" aria-label="Revoke invitation" title="Revoke invitation" onClick={() => setRevokeConfirm(true)}>
+                  <IconTrash size={14} />
                 </button>
               )}
               {exhausted && (
@@ -161,8 +158,12 @@ export default function InitialManagerPage() {
                   Replace Invitation
                 </button>
               )}
-            </div>
+            </>
           )}
+              </td>
+            </tr></tbody>
+          </table>
+          </div>
 
           {/* While the replace form is open, `InitialManagerFormFields` below shows this SAME
               `error` string itself (passed as its own `error` prop) — showing it here too would
@@ -204,12 +205,13 @@ export default function InitialManagerPage() {
   }
 
   return (
-    <div className="settings-page" style={{ maxWidth: 560 }}>
-      <div className="settings-section">
-        <h3 style={{ marginBottom: 4 }}>Invite your Initial Manager</h3>
-        <p style={{ marginBottom: 12 }}>
-          They'll set up their own workspace name and subdomain after accepting the invitation.
+    <div className="member-invite-card invite-by-email">
+      <div className="member-section-heading">
+        <h3>Invite by email</h3>
+        <p>
+          Send an invite email to your team.
         </p>
+      </div>
 
         {created ? (
           <div>
@@ -221,12 +223,20 @@ export default function InitialManagerPage() {
         ) : (
           <InitialManagerFormFields
             idPrefix="im"
+            roleControl={roleControl}
+            draftEmail={draftEmail}
+            onDraftEmailChange={onDraftEmailChange}
             onSubmit={(values) => { setError(''); invite.mutate(values); }}
             submitting={invite.isPending}
             submitLabel="Send Invitation"
             error={error}
           />
         )}
+      <div className="pending-invitations members-table-wrap">
+        <table className="table invitations-table" aria-label="Initial Manager invitations">
+          <thead><tr><th>Email</th><th>Role</th><th>Expires in</th><th><span className="visually-hidden">Actions</span></th></tr></thead>
+          <tbody><tr><td colSpan={4} className="pending-empty">{created ? 'Refreshing invitation details…' : 'No Initial Manager invitations pending.'}</td></tr></tbody>
+        </table>
       </div>
     </div>
   );

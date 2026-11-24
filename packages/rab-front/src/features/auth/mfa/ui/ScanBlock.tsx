@@ -9,8 +9,10 @@ import SetupKeyBox from './SetupKeyBox';
  */
 export default function ScanBlock({
   material,
+  compactKey = false,
 }: {
   material: EnrolmentMaterial;
+  compactKey?: boolean;
 }) {
   const { issuer, account } = otpauthLabel(material.otpauthUri);
   return (
@@ -32,7 +34,7 @@ export default function ScanBlock({
           </span>
         </div>
       </div>
-      <SetupKeyBox manualKey={material.manualKey} />
+      {compactKey ? <details className="acs-setup-key-details"><summary>Can’t scan? Show the setup key</summary><SetupKeyBox manualKey={material.manualKey} /></details> : <SetupKeyBox manualKey={material.manualKey} />}
     </>
   );
 }

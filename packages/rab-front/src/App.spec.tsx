@@ -215,7 +215,7 @@ describe('App', () => {
       </QueryClientProvider>,
     );
 
-    await user.click(screen.getByRole('button', { name: 'Continue with email' }));
+  await user.click(await screen.findByRole('button', { name: 'Continue with email' }));
   await user.type(await screen.findByLabelText('Work email'), 'bailey@acme.test');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await screen.findByLabelText('Password');

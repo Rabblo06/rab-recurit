@@ -1,7 +1,7 @@
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AnimatePresence, motion } from 'framer-motion';
 import {
   IconMoon, IconSun, IconDeviceDesktop, IconUserPlus, IconUserStar, IconBuildingStore, IconMailPlus, IconSettings, IconLogout,
 } from '@tabler/icons-react';
@@ -83,6 +83,7 @@ export default function AdminDropdown({ open, onClose, onLogout, triggerRef }: {
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ThemeIcon = THEME_ICON[theme];
+  const reduced = useReducedMotion();
   const run = (action: () => void) => () => { close(false); action(); };
   const openCreate = (detail: Record<string, string>) => document.dispatchEvent(new CustomEvent('open-create-user', { detail }));
 
@@ -130,7 +131,7 @@ export default function AdminDropdown({ open, onClose, onLogout, triggerRef }: {
           )}
           {operational && <div className="dropdown-divider" />}
           <button role="menuitem" className="dropdown-item" onClick={() => setTheme(cycleTheme())}>
-            <ThemeIcon size={17} stroke={1.6} />Theme<span className="dropdown-hint">{THEME_LABEL[theme]}</span>
+            <AnimatePresence initial={false} mode="wait"><motion.span key={theme} style={{display:"inline-flex"}} initial={reduced ? false : {opacity:0,rotate:-35,scale:.8}} animate={{opacity:1,rotate:0,scale:1}} exit={{opacity:0}} transition={{duration:reduced ? 0 : .15}}><ThemeIcon size={17} stroke={1.6} /></motion.span></AnimatePresence>Theme<span className="dropdown-hint">{THEME_LABEL[theme]}</span>
           </button>
           <button role="menuitem" className="dropdown-item" onClick={run(() => nav('/settings'))}>
             <IconSettings size={17} stroke={1.6} />Settings

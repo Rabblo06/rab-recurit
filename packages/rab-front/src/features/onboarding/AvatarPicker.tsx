@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Avatar from '../../shared/components/Avatar';
 import { toast } from '../../shared/lib/toast';
-import { IconBuilding, IconTrash, IconUser } from '@tabler/icons-react';
+import { IconUpload, IconTrash, IconUser } from '@tabler/icons-react';
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const ACCEPTED = ['image/png', 'image/jpeg', 'image/webp'];
@@ -48,11 +48,11 @@ export default function AvatarPicker({ label, title = 'Picture', onChange }: { l
 
   return (
     <div className="avatar-upload onboarding-avatar-upload">
-      {previewUrl ? <Avatar previewUrl={previewUrl} label={label} alt={label} /> : <span className={`onboarding-avatar-example ${title === 'Profile picture' ? 'profile' : ''}`} aria-hidden="true">{title === 'Profile picture' ? <IconUser size={22} stroke={1.5} /> : <IconBuilding size={22} stroke={1.5} />}</span>}
+      {previewUrl ? <Avatar previewUrl={previewUrl} label={label} alt={label} /> : <span className={`onboarding-avatar-example ${title === 'Profile picture' ? 'profile' : ''}`} aria-hidden="true">{title === 'Profile picture' ? <IconUser size={22} stroke={1.5} /> : label.trim().charAt(0).toUpperCase()}</span>}
       <div className="avatar-upload-actions">
         <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" style={{ display: 'none' }} onChange={onFileSelected} />
         <button type="button" className="btn btn-outline" title="PNG, JPG or WEBP. Up to 10 MB." onClick={() => inputRef.current?.click()}>
-          {previewUrl ? 'Change' : title === 'Profile picture' ? 'Upload photo' : 'Upload logo'}
+          <IconUpload size={14} aria-hidden="true" />{previewUrl ? 'Change' : title === 'Profile picture' ? 'Upload photo' : 'Upload logo'}
         </button>
         <button
           type="button"

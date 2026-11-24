@@ -1,3 +1,4 @@
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconSearch, IconX } from '@tabler/icons-react';
@@ -62,8 +63,7 @@ export default function VenueManagerTeamSection({ venueManagerId, venueManagerNa
       ) : (
         <>
           <label className="vm-team-search">
-            <IconSearch size={13} aria-hidden="true" />
-            <input aria-label="Search assigned staff" placeholder="Search assigned staff" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <SearchField label="Search assigned staff" type="text" aria-label="Search assigned staff" placeholder="Search assigned staff" value={search} onChange={(e) => setSearch(e.target.value)} />
           </label>
           {rows.length === 0 ? (
             <p className="vm-team-muted">No staff assigned yet. {venueManagerName} cannot see or select anyone until you add staff.</p>

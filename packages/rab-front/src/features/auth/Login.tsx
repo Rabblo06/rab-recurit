@@ -3,7 +3,7 @@ import { INVALID_CREDENTIALS_MESSAGE, loginError, SessionNotEstablishedError } f
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconBrandGoogle, IconBrandWindows, IconEye, IconEyeOff } from '@tabler/icons-react';
+import { IconArrowRight, IconBrandGoogle, IconBrandWindows, IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
@@ -35,6 +35,12 @@ interface AuthProvidersConfig {
   authProviders: { password: boolean; google: boolean; microsoft: boolean };
 }
 
+// Presentation preference only; never stores an email, token or session identity.
+const LAST_SIGN_IN_METHOD_KEY = 'crewflow:last-sign-in-method:v1';
+function usedEmailLast(): boolean {
+  try { return localStorage.getItem(LAST_SIGN_IN_METHOD_KEY) === 'email'; } catch { return false; }
+}
+
 export default function Login() {
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -48,6 +54,7 @@ export default function Login() {
   /** W6-E2E-02: where to sign in instead when this host is not the account's workspace (the server's default URL, validated). */
   const [signInElsewhere, setSignInElsewhere] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lastEmailSignIn] = useState(usedEmailLast);
   const pending = useRef(false);
   const [cooldownUntil, setCooldownUntil] = useState(0);
   const [now, setNow] = useState(Date.now());
@@ -132,6 +139,8 @@ export default function Login() {
     // identity store and broadcasts to other tabs internally — nothing further to do here.
     const ok = await resolveIdentityViaCookie();
     if (!ok) throw new SessionNotEstablishedError();
+    // Only a fully established email/password session (including MFA) updates the hint.
+    if (email) { try { localStorage.setItem(LAST_SIGN_IN_METHOD_KEY, 'email'); } catch { /* Storage is optional. */ } }
     // Defense-in-depth alongside LogoutDialog's own qc.clear() — any cached
     // query from a previous session on this tab (e.g. one that ended by
     // token expiry rather than an explicit logout) must not be shown to
@@ -160,7 +169,8 @@ export default function Login() {
    * Server-initiated redirect (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.9) — a full browser
    * navigation, never an XHR/fetch. The callback sets the SAME `rab_rt` cookie login already
    * sets and redirects to `/oauth/callback-complete`, which reuses the EXISTING
-   * `bootstrapSession()` to finish — no new frontend session mechanism.
+   * `bootstrapSession()` to finish — no new frontend session mechanism. Kept from main in the new
+   * UI so SSO-only accounts can still sign in.
    */
   function startOAuth(provider: 'google' | 'microsoft'): void {
     const base = (api.defaults.baseURL ?? '').replace(/\/$/, '');
@@ -193,12 +203,14 @@ export default function Login() {
   return (
     <AuthLayout>
       <AnimatePresence mode="wait">
+        {/* Kept from main: the provider choice first (SSO-only accounts sign in here), then the email step in the new look. */}
         {step === 'welcome' ? <motion.div className="auth-welcome" key="welcome" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{oauthError ? 'Try signing in again' : workspaceLabel ? `Sign in to ${workspaceLabel}` : 'Welcome to your workspace'}</h1>
+          <p style={s.subtitle}>Your team. Your shifts. All in sync.</p>
           {oauthError && <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Something didn’t go as planned. Let’s give it another try.</p>}
           {providers.google && <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}><IconBrandGoogle size={18} /> Continue with Google</button>}
           {providers.microsoft && <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}><IconBrandWindows size={18} /> Continue with Microsoft</button>}
-          {providers.password && <button className="auth-email-start" type="button" style={s.providerBtn} onClick={() => setStep('email')}>Continue with email</button>}
+          {providers.password && <div className="auth-last-action"><button className="auth-email-start" type="button" style={s.providerBtn} onClick={() => setStep('email')}>Continue with email</button>{lastEmailSignIn && <span className="auth-last-used">Last used</span>}</div>}
           {!providers.password && !providers.google && !providers.microsoft && <p role="status" style={s.error}>Sign-in is not available. Please contact your workspace administrator.</p>}
         </motion.div> : step === 'email' ? <motion.div key="email" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>Sign in with email</h1>
@@ -206,7 +218,7 @@ export default function Login() {
           <form onSubmit={handleEmailContinue}>
             <label style={s.label} htmlFor="email">Work email</label>
             <input id="email" style={s.input} type="email" placeholder="you@company.com" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" autoFocus required />
-            <button type="submit" style={s.submitBtn}>Continue</button>
+            <button type="submit" className="flow-button" style={s.submitBtn}>Continue <IconArrowRight size={14} aria-hidden="true" /></button>
           </form>
           <button type="button" style={s.backBtn} onClick={() => setStep('welcome')}>← Back to sign in</button>
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
@@ -228,6 +240,7 @@ export default function Login() {
           <button type="button" style={s.backBtn} onClick={() => {setStep('email');setError('');setPassword('');}}>← Back to sign in</button>
         </motion.div>}
       </AnimatePresence>
+      <p className="auth-legal">By using Crewflow, you agree to the <a href="https://www.adolphusgroup.com/terms" target="_blank" rel="noopener noreferrer">Terms of Service</a> and <a href="https://www.adolphusgroup.com/privacy" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.</p>
     </AuthLayout>
   );
 }

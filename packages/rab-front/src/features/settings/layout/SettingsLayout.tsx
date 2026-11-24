@@ -1,4 +1,5 @@
 import { Suspense } from 'react';
+import './settings-refined.css';
 import PageHeader from '../../../shared/components/PageHeader';
 import { DelayedFallback, SettingsPageSkeleton } from '../../../shared/components/RouteFallback';
 import { settingsContentKey } from './settingsContentKey';
@@ -15,10 +16,13 @@ interface Me {
 const CRUMBS: Record<string, [string, string]> = {
   '/settings/profile': ['User', 'Profile'],
   '/settings/experience': ['User', 'Experience'],
-  '/settings/account': ['User', 'Account'],
-  '/settings/security': ['User', 'Security'],
+  '/settings/account': ['User', 'Accounts'],
+  '/settings/account/emails': ['Accounts', 'Emails'],
+  '/settings/account/calendar': ['Accounts', 'Calendar'],
+  '/settings/account/new': ['Accounts', 'New account'],
+  '/settings/security': ['User', 'Profile'],
   '/settings/my-workspace': ['Workspace', 'General'],
-  '/settings/my-workspace/domains': ['Workspace', 'Domains'],
+  '/settings/my-workspace/domains': ['Workspace / General', 'Subdomain'],
   '/settings/workspace/roles': ['Workspace', 'Roles'],
   '/settings/workspace/team': ['Workspace', 'Team'],
   '/settings/ai': ['Workspace', 'AI'],
@@ -43,7 +47,7 @@ export default function SettingsLayout() {
   const isMembersPage = location.pathname === '/settings/workspace/members';
   const leadership = useLeadershipCapabilities(isPlatformAdminOnly && isMembersPage);
 
-  const crumbKey = Object.keys(CRUMBS).find((k) => location.pathname === k || location.pathname.startsWith(`${k}/`));
+  const crumbKey = Object.keys(CRUMBS).sort((a,b)=>b.length-a.length).find((k) => location.pathname === k || location.pathname.startsWith(`${k}/`));
   const crumb = crumbKey ? CRUMBS[crumbKey] : undefined;
 
   // Members' compact leadership form needs no personal workspace. Explicit capability is required;
@@ -54,13 +58,11 @@ export default function SettingsLayout() {
   }
 
   return (
-    <div className="page settings-frame">
+    <div className="page settings-frame settings-refined">
       {/* Members supplies its own page title; role details supply the global breadcrumb plus their Save/Cancel row. */}
-      {!/\/members(?:\/|$)/.test(location.pathname) && <PageHeader title="Settings" />}
+      {!location.pathname.includes('/members') && !location.pathname.startsWith('/settings/admin') ? <header className="settings-reference-header"><div className="settings-reference-crumb">{crumb?.[0] ?? 'Settings'} <span>/</span> <strong>{crumb?.[1] ?? 'Settings'}</strong></div><h1>{crumb?.[1] ?? 'Settings'}</h1><div data-settings-actions /></header> : !location.pathname.includes('/members') && <PageHeader title="Settings" />}
       <div className="settings-shell">
       <div className="settings-shell-content">
-        {/* The Admin panel draws its own page header ("Admin panel", mockup v2), so the generic heading is skipped there. */}
-        {!location.pathname.includes('/profile') && !location.pathname.includes('/members') && !location.pathname.includes('/roles') && !location.pathname.startsWith('/settings/admin') && <div className="settings-page-heading"><h2>{crumb?.[1] ?? (location.pathname.endsWith('/security') ? 'Security' : 'Settings')}</h2><p>{location.pathname === '/settings/security' ? 'Manage how you sign in and keep your account secure.' : `Manage your ${crumb?.[0] === 'User' ? 'personal' : 'workspace'} preferences.`}</p></div>}
         <Suspense key={settingsContentKey(location.pathname)} fallback={<DelayedFallback><SettingsPageSkeleton /></DelayedFallback>}>
           <Outlet />
         </Suspense>

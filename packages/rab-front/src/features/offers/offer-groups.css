@@ -1,0 +1,39 @@
+.offers-table .offer-parent-row>td{background:var(--bg-primary,#fff);border-right:1px solid var(--border-light);height:34px;padding-top:4px;padding-bottom:4px}
+.offer-shift-toggle{display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--font-secondary);cursor:pointer}
+.offer-shift-toggle:hover{background:var(--bg-secondary,#f3f3f3)}
+.offer-shift-toggle>svg{transition:transform 160ms ease}.offer-shift-toggle>svg.is-collapsed{transform:rotate(-90deg)}
+.offer-shift-toggle:focus-visible{outline:2px solid var(--color-blue,#536cf0);outline-offset:2px}
+.offers-table .offer-nested-container>td{padding:10px 0 14px 24px!important;background:var(--bg-secondary,#f7f7f8);border-bottom:1px solid var(--border-light)}
+.offer-nested-branch{position:relative;padding-left:0}
+.offer-staff-table{width:100%;background:var(--bg-primary,#fff);border-collapse:collapse}
+.offers-table .offer-staff-table th{font-size:12px;font-weight:400;text-transform:none;letter-spacing:normal;background:var(--bg-primary,#fff);height:32px}
+.offers-table .offer-staff-table td,.offers-table .offer-staff-table th{border-right:1px solid var(--border-light);padding-top:4px;padding-bottom:4px}
+@media(prefers-reduced-motion:reduce){.offer-shift-toggle>svg{transition:none}}
+.offers-table .offer-staff-table tbody>tr>td{height:34px}
+
+.offer-parent-name{display:flex;align-items:center;gap:4px;min-width:0}
+.offer-parent-name .offer-shift-toggle{flex:none;width:18px;height:24px}
+.offers-table .offer-staff-table .offer-tree-gutter{position:relative;width:14px;min-width:14px;padding:0!important;border:0;background:var(--bg-secondary,#f7f7f8);overflow:visible}
+.offer-tree-gutter:before{content:'';position:absolute;left:0;top:0;bottom:0;border-left:1px solid var(--font-secondary,#7a7a82)}
+.offer-staff-table thead .offer-tree-gutter:before{top:-10px}
+.offer-staff-table tbody .offer-tree-gutter:after{content:'';position:absolute;left:0;top:0;width:14px;height:50%;border-left:1px solid var(--font-secondary,#7a7a82);border-bottom:1px solid var(--font-secondary,#7a7a82);border-bottom-left-radius:6px}
+.offer-staff-table tbody tr:last-child .offer-tree-gutter:before{display:none}
+/* Keep selection controls inside their own column: the shared first-cell
+   padding otherwise places a 16px checkbox against the 40px cell edge. */
+.table.offers-table .checkbox-col{box-sizing:border-box;width:40px;min-width:40px;max-width:40px;padding:0 12px!important;text-align:center;border-right:0}
+.table.offers-table .offer-parent-row>td:nth-child(2){padding-left:4px}
+.table.offers-table .offer-nested-container>td{padding-left:20px!important}
+.offer-parent-name{gap:6px}
+.offer-parent-row td:has(>.record-open-action):hover,.offer-parent-row td:has(>.record-open-action):focus-within{box-shadow:inset 0 0 0 1px var(--border-light);border-radius:5px}
+/* Quiet feedback without shifting table columns or checkbox hit targets. */
+.offer-shift-toggle>svg{transition:transform var(--motion-dropdown-in,180ms) var(--ease-out,ease)}
+.offer-shift-toggle{transition:background-color var(--motion-hover,150ms),transform var(--motion-press,100ms)}
+.offer-shift-toggle:active{transform:scale(.94)}
+.offer-staff-table tbody>tr>td,.offer-parent-row>td{transition:background-color var(--motion-hover,150ms) ease}
+.offer-staff-table .record-chip{transition:background-color var(--motion-hover,150ms) ease}
+@media(prefers-reduced-motion:reduce){.offer-shift-toggle,.offer-shift-toggle>svg,.offer-staff-table tbody>tr>td,.offer-parent-row>td,.offer-staff-table .record-chip{transition:none}.offer-shift-toggle:active{transform:none}}
+/* Parent headings describe the shift group, children describe individual staff. */
+.table.offers-table>thead>tr>th{height:32px;font-size:12px;font-weight:400;text-transform:none;letter-spacing:normal;background:var(--bg-primary,#fff);border-right:1px solid var(--border-light)}
+.table.offers-table>thead>tr>th.checkbox-col{border-right:0}
+.table.offers-table>thead>tr>th:nth-child(2){padding-left:28px}
+

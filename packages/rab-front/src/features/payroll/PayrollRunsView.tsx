@@ -1,3 +1,4 @@
+import { motion as arcMotion } from 'framer-motion';
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatPence } from '@rab/shared';
@@ -150,7 +151,7 @@ export default function PayrollRunsView({ capabilities }: { capabilities: Record
               <thead><tr><th>Period</th><th>Payday</th><th>Run</th><th>Records</th><th>Gross</th><th aria-label="Actions" /></tr></thead>
               <tbody>
                 {(periods.data?.periods ?? []).map(({ period, run: pr }) => (
-                  <tr key={period.id} className={openRunId && pr?.id === openRunId ? 'row-selected' : undefined}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={period.id} className={openRunId && pr?.id === openRunId ? 'row-selected' : undefined}>
                     <td>{fmtPeriod(period)}</td>
                     <td className="cell-muted">{fmtCalendarDate(period.payday)}</td>
                     <td>{pr ? <span className={`payroll-pill tone-${pr.status === 'finalised' ? 'green' : 'amber'}`}>{pr.status === 'finalised' ? 'Finalised' : 'Prepared'}</span> : <span className="payroll-muted">Not prepared</span>}</td>
@@ -162,7 +163,7 @@ export default function PayrollRunsView({ capabilities }: { capabilities: Record
                       )}{' '}
                       {pr && <button type="button" className="btn btn-outline" aria-label={`Open run ${fmtPeriod(period)}`} onClick={() => setOpenRunId(pr.id)}>Open</button>}
                     </td>
-                  </tr>
+                  </arcMotion.tr>
                 ))}
                 {periods.data && periods.data.periods.length === 0 && <tr><td colSpan={6} className="payroll-muted payroll-empty-cell">No calendar periods yet.</td></tr>}
               </tbody>

@@ -91,13 +91,14 @@ it('has exactly two tabs (Permissions, Settings), a breadcrumb, and starts a new
   const crumbs = screen.getByRole('navigation', { name: 'Breadcrumb' });
   expect(crumbs).toHaveTextContent('Workspace/Members/Roles/Untitled role');
   expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Untitled role');
-  expect(screen.getByRole('checkbox', { name: 'All Objects' })).not.toBeChecked();
-  expect(screen.getByRole('checkbox', { name: 'See Records on All Objects' })).not.toBeChecked();
-  // Edit / Delete / Destroy are shown but never offered as fake toggles.
-  for (const label of ['Edit', 'Delete', 'Destroy']) expect(screen.getByRole('checkbox', { name: `${label} Records on All Objects (not available)` })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'All objects access: No access' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'All objects access: No access' }));
+  expect(screen.getByRole('button', { name: 'Edit · unavailable' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'All · unavailable' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'No access' }));
   // Layout / Logic: honest, disabled switches (no layout/logic permission model exists for members).
-  expect(screen.getByRole('switch', { name: 'Layout All Access (not available)' })).toHaveAttribute('aria-checked', 'false');
-  expect(screen.getByRole('switch', { name: 'Logic All Access (not available)' })).toHaveAttribute('aria-checked', 'false');
+  expect(screen.getByRole('switch', { name: 'Settings All Access (not available)' })).toHaveAttribute('aria-checked', 'false');
+  expect(screen.getByRole('switch', { name: 'General All Access (not available)' })).toHaveAttribute('aria-checked', 'false');
   expect(screen.getByText('No permissions have been set for individual objects.')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
 });
@@ -133,7 +134,7 @@ it('creates a role through the two-step wizard: object, fields and a record filt
   fireEvent.change(screen.getByRole('textbox', { name: 'Value' }), { target: { value: 'London' } });
   fireEvent.click(screen.getByRole('link', { name: 'Finish' }));
 
-  expect(await screen.findByText('Object-Level')).toBeInTheDocument();
+  expect(await screen.findByText('Overrides')).toBeInTheDocument();
   expect(screen.getByText(/See: granted · 1 hidden field · 1 record filter/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(post).toHaveBeenCalledTimes(1));

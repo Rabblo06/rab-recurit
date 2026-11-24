@@ -1,0 +1,2 @@
+.auth-page:has(.activation-password-form) .auth-onboarding-pattern { z-index: 0; }
+.auth-page:has(.activation-password-form) .auth-form-side { position: relative; z-index: 1; }

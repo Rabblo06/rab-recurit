@@ -1,3 +1,7 @@
+import { motion as arcMotion } from 'framer-motion';
+import { recordAvatarStyle } from '../../shared/lib/recordAvatarColor';
+import './user-records.css';
+import RecordOpenAction from '../../shared/components/RecordOpenAction';
 import { ListViewSelect, RecordFooter, ListError, listErrorStatus, useRetryUnlessPermanent } from '../../shared/table-toolbar/ListPresentation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient, type Query } from '@tanstack/react-query';
@@ -173,14 +177,6 @@ interface ManagerRow {
   archivedAt?: string | null;
 }
 
-const avatarColors = [
-  { bg: '#dbe9fe', color: '#1961ed' },
-  { bg: '#d9f0de', color: '#2a8e44' },
-  { bg: '#fdf2d4', color: '#946c00' },
-  { bg: '#f1e6fd', color: '#7d3bc8' },
-  { bg: '#fde2ef', color: '#c2185d' },
-];
-const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % avatarColors.length];
 
 /**
  * The invitation email send is genuinely async now (durable outbox +
@@ -326,7 +322,7 @@ function UserStatusBadge({ userType, accountStatus, employmentStatus, invitation
   pendingInvite: PendingInvite | null;
 }) {
   const status = getStaffDisplayStatus({ userType, accountStatus, employmentStatus, invitationStatus, pendingInvite });
-  return <span className={`badge badge-${status.tone}`}>{status.label}</span>;
+  return <span className={`badge badge-${status.tone} user-account-status`}>{status.label}</span>;
 }
 
 interface SelectionProps {
@@ -453,11 +449,10 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
             <tbody>
               {staff.map((s) => {
                 const name = `${s.firstName} ${s.lastName}`;
-                const c = getColor(name);
                 const active = s.employmentStatus === 'active';
                 const isSelected = selected.has(s.id);
                 return (
-                  <tr key={s.id} className={isSelected ? 'row-selected' : undefined}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={s.id} className={isSelected ? 'row-selected' : undefined}>
                     <td className="checkbox-col">
                       <input
                         type="checkbox"
@@ -468,10 +463,11 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
                     </td>
                     {isVisible('name') && (
                       <td>
-                        <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(s.id, 'staff')}>
-                          <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
+                        <button type="button" className="record-chip user-name-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(s.id, 'staff')}>
+                          <span className="mini-avatar" style={recordAvatarStyle(name)}>{name.trim().charAt(0).toUpperCase()}</span>
                           {name}
                         </button>
+                        <RecordOpenAction label={`Open ${name}`} onOpen={() => openDetail(s.id, 'staff')}/>
                       </td>
                     )}
                     {isVisible('staffRef') && <td className="cell-muted">{s.staffRef}</td>}
@@ -529,7 +525,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
                         ) : null}
                       </div>
                     </td>
-                  </tr>
+                  </arcMotion.tr>
                 );
               })}
               {staff.length === 0 && (
@@ -659,11 +655,10 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
             <tbody>
               {managers.map((m) => {
                 const name = `${m.firstName} ${m.lastName}`;
-                const c = getColor(name);
                 const active = m.accountStatus === 'active';
                 const isSelected = selected.has(m.id);
                 return (
-                  <tr key={m.id} className={isSelected ? 'row-selected' : undefined}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={m.id} className={isSelected ? 'row-selected' : undefined}>
                     <td className="checkbox-col">
                       <input
                         type="checkbox"
@@ -674,10 +669,11 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
                     </td>
                     {isVisible('name') && (
                       <td>
-                        <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'manager')}>
-                          <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
+                        <button type="button" className="record-chip user-name-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'manager')}>
+                          <span className="mini-avatar" style={recordAvatarStyle(name)}>{name.trim().charAt(0).toUpperCase()}</span>
                           {name}
                         </button>
+                        <RecordOpenAction label={`Open ${name}`} onOpen={() => openDetail(m.id, 'manager')}/>
                       </td>
                     )}
                     {isVisible('email') && <td className="cell-muted">{m.email}</td>}
@@ -734,7 +730,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
                         ) : null}
                       </div>
                     </td>
-                  </tr>
+                  </arcMotion.tr>
                 );
               })}
               {managers.length === 0 && (
@@ -825,16 +821,15 @@ function VenueManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, o
             <tbody>
               {rows.map((m) => {
                 const name = `${m.firstName} ${m.lastName}`;
-                const c = getColor(name);
                 const isSelected = selected.has(m.id);
                 return (
-                  <tr key={m.id} className={isSelected ? 'row-selected' : undefined}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={m.id} className={isSelected ? 'row-selected' : undefined}>
                     <td className="checkbox-col">
                       <input type="checkbox" checked={isSelected} onChange={() => onToggle(m.id, { name, accountStatus: m.accountStatus })} aria-label={`Select ${name}`} />
                     </td>
                     <td>
-                      <button type="button" className="record-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'venueManager')}>
-                        <span className="mini-avatar" style={{ background: c.bg, color: c.color }}>{name.split(' ').filter(Boolean).map(part => part[0]).slice(0,2).join('')}</span>
+                      <button type="button" className="record-chip user-name-chip" style={{ cursor: 'pointer' }} onClick={() => openDetail(m.id, 'venueManager')}>
+                        <span className="mini-avatar" style={recordAvatarStyle(name)}>{name.trim().charAt(0).toUpperCase()}</span>
                         {name}
                       </button>
                     </td>
@@ -849,7 +844,7 @@ function VenueManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, o
                         <button className="btn-icon" title="View" onClick={() => openDetail(m.id, 'venueManager')}><IconEye size={14}/></button>
                       </div>
                     </td>
-                  </tr>
+                  </arcMotion.tr>
                 );
               })}
               {rows.length === 0 && (

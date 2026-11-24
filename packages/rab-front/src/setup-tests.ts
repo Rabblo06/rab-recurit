@@ -17,3 +17,14 @@ class ResizeObserverStub {
   disconnect() {}
 }
 Object.assign(global, { ResizeObserver: ResizeObserverStub });
+
+// Motion libraries query the OS preference; jsdom has no native matchMedia.
+if (!window.matchMedia) {
+  Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true,
+    value: jest.fn().mockImplementation((media: string) => ({
+      matches: false, media, onchange: null,
+      addListener: jest.fn(), removeListener: jest.fn(),
+      addEventListener: jest.fn(), removeEventListener: jest.fn(), dispatchEvent: jest.fn(),
+    })),
+  });
+}

@@ -108,7 +108,7 @@ export default function CreateProfileScreen() {
       // extra round trip before it can decide whether to wait or go straight to the welcome
       // transition.
       // replace, not push — same reasoning as CreateWorkspaceScreen's identical comment.
-      nav('/onboarding/preparing', { replace: true });
+      nav('/onboarding/welcome', { replace: true });
     } catch (err: any) {
       // Say what DID succeed: after the profile PATCH, a failure is in finishing onboarding, not in saving the details.
       setError(
@@ -121,7 +121,7 @@ export default function CreateProfileScreen() {
   }
 
   return (
-    <AuthLayout>
+    <AuthLayout variant="onboarding" onBack={() => setLeaving(true)}>
         <h1 style={s.title}>Create your profile</h1>
         <p style={s.subtitle}>Let your team know who you are.</p>
 
@@ -172,7 +172,7 @@ export default function CreateProfileScreen() {
             {submitting ? 'Saving…' : 'Complete setup'}
           </motion.button>
         </motion.form>
-      <button type="button" style={s.backBtn} onClick={()=>setLeaving(true)}>← Back to sign in</button>
+
       <LogoutDialog open={leaving} onClose={()=>setLeaving(false)} />
     </AuthLayout>
   );

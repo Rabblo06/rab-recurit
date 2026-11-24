@@ -585,7 +585,9 @@ services:
       # The repo is bind-mounted from Windows, where file events do not reach the container: poll for changes here only
       # (vite.config.ts keeps polling off by default; it costs ~30 % of a CPU core while idle).
       VITE_WATCH_POLLING: "true"
-    command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
+    # Package exports point at generated ESM/CJS files. Installing dependencies alone
+    # does not create them after a fresh checkout or recovery of deleted build outputs.
+    command: sh -c "corepack enable && yarn install --immutable && NX_DAEMON=false yarn nx run-many -t build -p rab-shared rab-ui --parallel=1 && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
     # notices. `docker compose stop` still stops it.
     restart: unless-stopped
