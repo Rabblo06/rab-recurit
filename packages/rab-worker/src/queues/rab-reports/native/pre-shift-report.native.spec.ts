@@ -24,7 +24,7 @@ import { renderNativePdf } from './render-native';
  *   - The footer prints the same strings as the Chromium footer template, plus react-pdf's page numbers.
  *   - The 40-row page segments (D4) each repeat the table header; the bottom section is printed once, at the end.
  *   - The QR printed is the QR service's own image: decoded back from the PDF it is the signed token, unchanged.
- *   - Output is deterministic (D7) and goes through the switch: PDF_RENDERER=native renders this kind natively.
+ *   - Output is deterministic (D7) and goes through the seam: renderReportPdf renders this kind natively.
  */
 jest.setTimeout(120_000);
 
@@ -242,10 +242,10 @@ describe('pre-shift attendance sheet, native PDF bytes', () => {
     expect(rendered.props.title).toBe('Shift attendance sheet — The Grand Hall & Terrace <Main>');
   });
 
-  it('goes through the switch: PDF_RENDERER=native renders the pre-shift kind natively', async () => {
+  it('goes through the seam: renderReportPdf renders the pre-shift kind natively', async () => {
     expect(NATIVE_KINDS.has('pre-shift')).toBe(true);
     const data = PRE_SHIFT_FIXTURES['four-staff']!;
-    const viaSwitch = await renderReportPdf({ kind: 'pre-shift', data }, { PDF_RENDERER: 'native' });
+    const viaSwitch = await renderReportPdf({ kind: 'pre-shift', data });
     expect(viaSwitch.equals(await renderNativePdf({ kind: 'pre-shift', data }))).toBe(true);
   });
 });

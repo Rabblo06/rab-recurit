@@ -144,7 +144,79 @@ Source only, NOT compiled or run. Server contract: `docs/account-security/STEP1_
 - The update-required screen offers a store button only for an allowlisted HTTPS `apps.apple.com` URL from the server.
 - Debug-only canned backend `TwoFactorUITestStub` (`#if DEBUG`, needs `-CrewflowUITesting` + `-CrewflowTwoFactorStub`).
 
-## 7. Open items / flagged assumptions
+## 7. Offline punch queue (M4 Lane B, NOT enabled anywhere)
+
+Design: `docs/plans/m4-offline/DESIGN.md` (owner-approved 2026-11-21). **HARD RULE:** offline clocking stays off
+everywhere until M5 payroll adjustments exist and `POST /attendance/me/sync` has been pen-tested. Code:
+`Crewflow/Features/Staff/OfflineSync/`.
+
+- **Off by construction.** An action is saved on the phone only when ALL hold: the build switch Info.plist
+  `CrewflowOfflineAttendance` = YES (the key is in no configuration, so it is off in every build); a device-key signer
+  exists (none does: `POST /attendance/me/device-key` is not on the server, and `StaffOfflineAttendance.live` passes
+  `signer: nil`); the last `/attendance/me/active` said `offline.enabled: true` and carried an `offlineTicket`; and the
+  ticket arrived in this boot less than 16 h ago. Anything else (an older server without the fields, a reboot, a
+  malformed ticket, a ticket whose fetch took > 10 s) leaves it off.
+- **Storage.** Per user, Keychain items through the existing `SecureStore` in `<bundle id>.device`
+  (`AfterFirstUnlockThisDeviceOnly`, not synchronizable): `rab.offline.queue.<userId>` (the queue, JSON),
+  `rab.offline.ticket.<userId>` (the ticket + the boot reading when it arrived + its `serverNow`),
+  `rab.offline.installId`, `rab.offline.seq.<installId>`. Never UserDefaults or a plain file. Another user on the same
+  phone never reads, sends or overwrites the queue (keyed by user id; the server would also refuse it: ticket subject).
+  `FreshInstallGuard` wipes it on reinstall. Reads are three-way (`SecureStore.read`: value / absent / failed with the
+  OSStatus): a FAILED Keychain read (e.g. before first unlock) is "unreadable", never an empty queue, so it is never
+  overwritten or discarded, and is re-checked right before every write; a failed or corrupt counter / install-id read
+  refuses capture (clientSeq is never numbered from a guess). An unreadable queue blocks capture and sign-out asks first.
+- **Limits (D5, §3.4).** 30 entries and 48 KB per user; no capture more than 16 h after the ticket; an entry captured
+  more than 72 h ago (server-anchored clock, never the wall clock) is never sent and stays visible until dismissed.
+- **Entry (§3.2) and time.** Exactly the DESIGN members, nothing else (forbidNonWhitelisted). Never
+  `organisationId`, `workspaceId`, `staffProfileId`, `status`, `clockInAt`/`clockOutAt` or money. Time evidence is the
+  boot clock only: `CLOCK_MONOTONIC_RAW` (counts sleep, unaffected by time/frequency adjustment) + sysctl `kern.bootsessionuuid`, never
+  `ProcessInfo.systemUptime` (stops in sleep: earlier punch, more pay). `deviceWallClockAt` is diagnostics for the
+  server's skew flags. The phone never computes paid time; the server anchors and bounds every time (§4).
+- **Signature.** Each entry is signed over its RFC 8785 canonical JSON (every member except `sig`;
+  `OfflineCanonicalJSON`, tested against the RFC number samples). The signer is a protocol only (`OfflineEntrySigning`):
+  the Secure Enclave P-256 key and its registration wait for the server's device-key route.
+- **Sync (`OfflineSyncEngine`, `POST /attendance/me/sync`, DESIGN §3.5 / §7).** `clientSeq` order, at most 25 per
+  request, one request at a time. Per-item outcomes by idempotency key: `applied` / `duplicate` / `replayed` delete the
+  entry; `rejected` keeps it visible with the server's code (only `^[A-Z][A-Z_]{2,48}$` is stored; the words shown come
+  from a client table, never server text); a missing or unknown outcome leaves it pending (never assumed received)
+  and ends the run, so no later batch overtakes an unanswered earlier punch. The signed-in user must equal the queue's
+  owner before every request, and the request itself is bound to that user id (`RequestOptions.requiredSessionUserId`,
+  checked where the bearer token is read, so an account switch cannot slip in between); `Retry-After` is capped at 15 min. Size limits apply to appends only (recording an
+  outcome can never be refused for size). A
+  whole-batch 400/413/422 is resent one entry at a time and the refused one is parked as undeliverable. 429 waits for
+  `Retry-After` whatever the trigger; network, timeout, 5xx, 403, 404 and undecodable answers back off 1 s to 5 min
+  (Send now skips the backoff, never `Retry-After`). A timeout is an uncertain outcome: the entry is kept and resent
+  with the same key (the server answers `replayed`). A ticket in a sync answer only renews an open gate, never opens a
+  closed one, and obeys the same 10 s rule. Never auto-retried by the transport (`RetryPolicy.never`).
+- **Clock screen wiring (`StaffStore`, `StaffClockFlow`, `StaffClockScreen`, Profile).** Online first, always. Only
+  while the gate is open does a check-in / clock-in / clock-out carry an `Idempotency-Key` (UUID v4 made at the tap);
+  if that request gets no answer (offline) or times out after sending (uncertain), the action is saved with the SAME key
+  so the server applies it at most once (D17). Only a genuine no-response failure is saved (`APIError.isNoResponse`:
+  connection, DNS, TLS, connection lost, or the client's own timeout); any HTTP answer is not, and a server or proxy
+  408 now maps to `.http(408)`, kept apart from the client timeout (still an uncertain outcome that reloads, never a
+  resend). While saved actions are waiting, a new punch first sends them; it is held back (saved behind them with the
+  gate open, refused with it shut) ONLY when that attempt got no HTTP answer at all. On any answer (4xx, 429, 5xx, an
+  unknown outcome, an undecodable 200) it goes online and the server decides: out of order can only pay less (D3), and
+  a server fault never locks anyone out of clocking. With the gate shut
+  (every build today) requests carry no header and the existing uncertain-outcome handling is unchanged. Nothing is
+  optimistic: no attendance is shown until the server answers; a saved clock-in replaces the running timer with fixed
+  text "Clocked in 09:02, saved on this phone, not yet confirmed" (D10; the time is the server-anchored estimate, never
+  the wall clock). A clock-out after a saved clock-in first sends what is saved; it becomes an ordinary online clock-out
+  if the clock-in reaches the server, otherwise it is saved too. Sending is triggered by every successful
+  `/attendance/me/active` read (30 s reconcile, resume, refresh) and "Send now"; afterwards the server state is re-read.
+  `RequestOptions.headers` can never set or replace `Authorization`, `Content-Type`, `Accept`, `Cookie`, `Host`,
+  `X-Client-*` or `X-Crewflow-Background`.
+- **Sign-out (D18).** While any action is unsent (pending, too old, undeliverable, or an unreadable queue), Log out
+  asks first: Send now, Discard and log out (explicit; discarded actions are never sent and the manager is not told),
+  or Cancel. An unreadable stored queue is never discarded (not even explicitly): the dialog offers "Log out and keep
+  them" instead, and the item stays under the user's id. A forced sign-out (session ended by the server) does not discard: the queue stays in the Keychain under
+  that user's id and is sent after the same user signs in again (or ages out after 72 h).
+- **Integrity signal.** `rootedSignal` is a weak client-asserted jailbreak path check, a flag on the receipt only (D11).
+- **Residual.** A jailbroken, hooked app can sign lies within the server's bounds (DESIGN §2 trade-off: schedule clamp,
+  no untrusted clock-out, manager review). Keychain `ThisDeviceOnly` items are restored by an encrypted backup to the
+  SAME device, so a restore can bring back an old queue; the server refuses it after 72 h (`SYNC_TOO_LATE`).
+
+## 8. Open items / flagged assumptions
 
 - **Assumption:** shift times display in Europe/London regardless of the
   device zone (Flutter uses the device zone; identical for UK devices).
