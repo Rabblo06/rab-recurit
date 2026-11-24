@@ -97,16 +97,24 @@ describeIfDb('M4 §13 PR 2: core attendance breaks, sync receipts and device key
       }
     });
 
-    it('the key, thumbprint, owner and session family never change (42501); revocation columns do; TRUNCATE is refused', async () => {
+    it('the key, thumbprint, owner and session family never change (42501); revocation is one-way; DELETE and TRUNCATE are refused', async () => {
       const out = await as(fx.users.staffA, async () => {
         const id = (await register(fx.users.staffA)).rows[0].id as string;
         const swap = await code(app.query(`UPDATE core.attendance_device_key SET public_key_spki = $2 WHERE id = $1`, [id, spki()]));
         const family = await code(app.query(`UPDATE core.attendance_device_key SET session_family_id = $2 WHERE id = $1`, [id, randomUUID()]));
         const revoke = (await app.query(`UPDATE core.attendance_device_key SET revoked_at = now(), revoked_reason = 'logout' WHERE id = $1`, [id])).rowCount;
+        await app.query('SAVEPOINT k');
+        const unrevoke = await code(app.query(`UPDATE core.attendance_device_key SET revoked_at = NULL, revoked_reason = NULL WHERE id = $1`, [id]));
+        await app.query('ROLLBACK TO SAVEPOINT k');
+        const touch = await code(app.query(`UPDATE core.attendance_device_key SET last_used_at = now() WHERE id = $1`, [id]));
+        await app.query('ROLLBACK TO SAVEPOINT k');
+        const remove = await code(app.query(`DELETE FROM core.attendance_device_key WHERE id = $1`, [id]));
+        await app.query('ROLLBACK TO SAVEPOINT k');
         const truncate = await code(app.query(`TRUNCATE core.attendance_device_key`));
-        return { swap, family, revoke, truncate };
+        return { swap, family, revoke, unrevoke, touch, remove, truncate };
       });
-      expect(out).toEqual({ swap: '42501', family: '42501', revoke: 1, truncate: '42501' });
+      // Review of #353 item 4: a revoked key never changes again (no un-revoke, no reuse); DELETE is refused for the runtime.
+      expect(out).toEqual({ swap: '42501', family: '42501', revoke: 1, unrevoke: '42501', touch: '42501', remove: '42501', truncate: '42501' });
     });
   });
 
@@ -122,5 +130,16 @@ describeIfDb('M4 §13 PR 2: core attendance breaks, sync receipts and device key
       await admin.query('ROLLBACK');
     }
     expect((await admin.query(`SELECT to_regclass('core.attendance_break') IS NOT NULL AS t`)).rows[0].t).toBe(true);
+  });
+
+  it('review item 1: down() as an RLS-bound migrator (the owner login crewflow_owner) cannot count the evidence and refuses; it never reads 0 and drops', async () => {
+    await admin.query('BEGIN');
+    try {
+      await admin.query('SET LOCAL ROLE crewflow_owner');
+      await expect(new AttendanceBreaksReceipts1786722140000().down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: the pay evidence could not be counted without row-level security/);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+    expect((await admin.query(`SELECT to_regclass('core.attendance_sync_receipt') IS NOT NULL AS t`)).rows[0].t).toBe(true);
   });
 });

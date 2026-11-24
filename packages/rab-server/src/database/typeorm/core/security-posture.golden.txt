@@ -167,6 +167,10 @@ execute|ai_skill_limit_guard()|crewflow|true
 execute|ai_usage_purge_expired(interval)|PUBLIC|false
 execute|ai_usage_purge_expired(interval)|crewflow_app|true
 execute|ai_usage_purge_expired(interval)|crewflow|true
+execute|attendance_break_write_guard()|crewflow_app|false
+execute|attendance_break_write_guard()|crewflow|true
+execute|attendance_device_key_revoked_guard()|crewflow_app|false
+execute|attendance_device_key_revoked_guard()|crewflow|true
 execute|audit_existing_user_ids(uuid[])|PUBLIC|false
 execute|audit_existing_user_ids(uuid[])|crewflow_app|true
 execute|audit_existing_user_ids(uuid[])|crewflow|true
@@ -588,6 +592,8 @@ owner|function|ai_purge_expired_conversations(interval,integer,boolean)|crewflow
 owner|function|ai_settings_writer()|crewflow|definer=false
 owner|function|ai_skill_limit_guard()|crewflow|definer=false
 owner|function|ai_usage_purge_expired(interval)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|attendance_break_write_guard()|crewflow|definer=false
+owner|function|attendance_device_key_revoked_guard()|crewflow|definer=false
 owner|function|audit_existing_user_ids(uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|audit_identity_violations(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|audit_identity_violations_in(uuid,uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -749,7 +755,10 @@ owner|table|ai_message|crewflow
 owner|table|ai_skill|crewflow
 owner|table|ai_usage_daily|crewflow
 owner|table|ai_usage|crewflow
+owner|table|attendance_break|crewflow
 owner|table|attendance_correction|crewflow
+owner|table|attendance_device_key|crewflow
+owner|table|attendance_sync_receipt|crewflow
 owner|table|attendance|crewflow
 owner|table|audit_log|crewflow
 owner|table|deployment_identity_history|rab_secure_owner
@@ -847,7 +856,10 @@ rls|ai_message|enable=true|force=true
 rls|ai_skill|enable=true|force=true
 rls|ai_usage_daily|enable=true|force=true
 rls|ai_usage|enable=true|force=true
+rls|attendance_break|enable=true|force=true
 rls|attendance_correction|enable=true|force=true
+rls|attendance_device_key|enable=true|force=true
+rls|attendance_sync_receipt|enable=true|force=true
 rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
 rls|deployment_identity_history|enable=true|force=true
@@ -962,8 +974,14 @@ table|ai_usage_daily|crewflow_app|S,I
 table|ai_usage_daily|crewflow|S,I,U,D,T,R,G
 table|ai_usage|crewflow_app|S
 table|ai_usage|crewflow|S,I,U,D,T,R,G
+table|attendance_break|crewflow_app|S,I
+table|attendance_break|crewflow|S,I,U,D,T,R,G
 table|attendance_correction|crewflow_app|S,I
 table|attendance_correction|crewflow|S,I,U,D,T,R,G
+table|attendance_device_key|crewflow_app|S,I
+table|attendance_device_key|crewflow|S,I,U,D,T,R,G
+table|attendance_sync_receipt|crewflow_app|S,I
+table|attendance_sync_receipt|crewflow|S,I,U,D,T,R,G
 table|attendance|crewflow_app|S,I,U,D
 table|attendance|crewflow|S,I,U,D,T,R,G
 table|audit_log|crewflow_app|S,I
@@ -1158,8 +1176,12 @@ worker-delta|execute|worker_claim_statement_dispatch(integer)|true
 worker-delta|execute|worker_delete_expired_invited_user(uuid)|true
 worker-delta|execute|worker_expire_account_invites(integer)|true
 worker-delta|execute|worker_release_dispatch_claim(text,uuid,uuid,integer)|true
+ws|acl|attendance_break|crewflow_app|INSERT,SELECT
+ws|acl|attendance_break|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
 ws|acl|attendance_correction|crewflow_app|INSERT,SELECT
 ws|acl|attendance_correction|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|acl|attendance_sync_receipt|crewflow_app|INSERT,SELECT
+ws|acl|attendance_sync_receipt|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
 ws|acl|attendance|crewflow_app|DELETE,INSERT,SELECT,UPDATE
 ws|acl|attendance|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
 ws|acl|job_offer|crewflow_app|DELETE,INSERT,SELECT,UPDATE
@@ -1200,7 +1222,9 @@ ws|acl|venue_role_rate|crewflow_app|DELETE,INSERT,SELECT,UPDATE
 ws|acl|venue_role_rate|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
 ws|acl|venue|crewflow_app|DELETE,INSERT,SELECT,UPDATE
 ws|acl|venue|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
+ws|bound|attendance_break|attendance_break_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
 ws|bound|attendance_correction|attendance_correction_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|bound|attendance_sync_receipt|attendance_sync_receipt_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
 ws|bound|attendance|attendance_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
 ws|bound|job_offer|job_offer_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
 ws|bound|job_role|job_role_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
@@ -1221,6 +1245,9 @@ ws|bound|user_note|user_note_workspace_bound|CHECK (((workspace_id IS NOT NULL) 
 ws|bound|venue_manager_staff|venue_manager_staff_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
 ws|bound|venue_role_rate|venue_role_rate_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
 ws|bound|venue|venue_workspace_bound|CHECK (((workspace_id IS NOT NULL) AND (workspace_id = '<workspace_id>'::uuid)))|validated=true
+ws|column|attendance_break.end_source|crewflow_app|UPDATE
+ws|column|attendance_break.ended_at|crewflow_app|UPDATE
+ws|column|attendance_break.updated_at|crewflow_app|UPDATE
 ws|column|payroll_record.approved_at|crewflow_app|UPDATE
 ws|column|payroll_record.approved_by|crewflow_app|UPDATE
 ws|column|payroll_record.rejected_at|crewflow_app|UPDATE
@@ -1250,7 +1277,13 @@ ws|column|payslip.paid_by|crewflow_app|UPDATE
 ws|column|payslip.payment_reference|crewflow_app|UPDATE
 ws|column|payslip.updated_at|crewflow_app|UPDATE
 ws|column|payslip.version|crewflow_app|UPDATE
+ws|fk|attendance_break|attendance_break_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE RESTRICT
+ws|fk|attendance_break|attendance_break_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
 ws|fk|attendance_correction|attendance_correction_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE RESTRICT
+ws|fk|attendance_sync_receipt|attendance_sync_receipt_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE RESTRICT
+ws|fk|attendance_sync_receipt|attendance_sync_receipt_break_id_fkey|FOREIGN KEY (break_id) REFERENCES workspace_*.attendance_break(id) ON DELETE RESTRICT
+ws|fk|attendance_sync_receipt|attendance_sync_receipt_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id) ON DELETE RESTRICT
+ws|fk|attendance_sync_receipt|attendance_sync_receipt_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id) ON DELETE RESTRICT
 ws|fk|attendance|attendance_shift_assignment_id_fkey|FOREIGN KEY (shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
 ws|fk|attendance|attendance_shift_assignment_workspace_fkey|FOREIGN KEY (shift_assignment_id, workspace_id) REFERENCES workspace_*.shift_assignment(id, workspace_id)
 ws|fk|attendance|attendance_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
@@ -1306,14 +1339,26 @@ ws|fk|venue_role_rate|venue_role_rate_job_role_id_fkey|FOREIGN KEY (job_role_id)
 ws|fk|venue_role_rate|venue_role_rate_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE CASCADE
 ws|fk|venue_role_rate|venue_role_rate_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
 ws|fk|venue|venue_photo_file_id_fkey|FOREIGN KEY (photo_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
+ws|owner|i|attendance_break_attendance_idx|crewflow
+ws|owner|i|attendance_break_no_overlap|crewflow
+ws|owner|i|attendance_break_one_open|crewflow
+ws|owner|i|attendance_break_pkey|crewflow
+ws|owner|i|attendance_break_workspace_id_idx|crewflow
 ws|owner|i|attendance_correction_attendance_idx|crewflow
 ws|owner|i|attendance_correction_pkey|crewflow
+ws|owner|i|attendance_offline_idx|crewflow
 ws|owner|i|attendance_one_active_per_staff|crewflow
 ws|owner|i|attendance_pkey|crewflow
 ws|owner|i|attendance_post_shift_due|crewflow
 ws|owner|i|attendance_shift_assignment_id_key|crewflow
 ws|owner|i|attendance_shift_idx|crewflow
 ws|owner|i|attendance_staff_history_idx|crewflow
+ws|owner|i|attendance_sync_receipt_attendance_idx|crewflow
+ws|owner|i|attendance_sync_receipt_key|crewflow
+ws|owner|i|attendance_sync_receipt_pkey|crewflow
+ws|owner|i|attendance_sync_receipt_shift_idx|crewflow
+ws|owner|i|attendance_sync_receipt_staff_idx|crewflow
+ws|owner|i|attendance_sync_receipt_workspace_id_idx|crewflow
 ws|owner|i|attendance_workspace_id_idx|crewflow
 ws|owner|i|job_offer_batch_idx|crewflow
 ws|owner|i|job_offer_created_by_sent_at_idx|crewflow
@@ -1406,7 +1451,9 @@ ws|owner|i|venue_role_rate_venue_role_idx|crewflow
 ws|owner|i|venue_role_rate_workspace_id_idx|crewflow
 ws|owner|i|venue_search_vector_idx|crewflow
 ws|owner|i|venue_workspace_id_idx|crewflow
+ws|owner|r|attendance_break|crewflow
 ws|owner|r|attendance_correction|crewflow
+ws|owner|r|attendance_sync_receipt|crewflow
 ws|owner|r|attendance|crewflow
 ws|owner|r|job_offer|crewflow
 ws|owner|r|job_role|crewflow
@@ -1469,7 +1516,9 @@ ws|policy|venue_manager_staff|venue_manager_staff_vm_select|PERMISSIVE|{public}|
 ws|policy|venue_manager_staff|venue_manager_staff_vm_update|PERMISSIVE|{public}|UPDATE|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM ((core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) JOIN workspace_*.venue v ON ((v.id = mv.venue_id))) WHERE ((mp.id = venue_manager_staff.manager_profile_id) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.workspace_id = core.current_workspace()) AND (mp.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (v.workspace_id = core.current_workspace()) AND (v.organisation_id = core.current_org())))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (EXISTS ( SELECT 1 FROM ((core.manager_profile mp JOIN workspace_*.manager_venue mv ON ((mv.manager_profile_id = mp.id))) JOIN workspace_*.venue v ON ((v.id = mv.venue_id))) WHERE ((mp.id = venue_manager_staff.manager_profile_id) AND (mp.user_id = core.current_uid()) AND (mp.type = 'venue'::text) AND (mp.workspace_id = core.current_workspace()) AND (mp.organisation_id = core.current_org()) AND (mv.workspace_id = core.current_workspace()) AND (mv.organisation_id = core.current_org()) AND (v.workspace_id = core.current_workspace()) AND (v.organisation_id = core.current_org())))))
 ws|policy|venue_role_rate|venue_role_rate_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
 ws|policy|venue|venue_tenant|PERMISSIVE|{public}|ALL|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))
+ws|rls|attendance_break|enable=true|force=true
 ws|rls|attendance_correction|enable=true|force=true
+ws|rls|attendance_sync_receipt|enable=true|force=true
 ws|rls|attendance|enable=true|force=true
 ws|rls|job_offer|enable=true|force=true
 ws|rls|job_role|enable=true|force=true
@@ -1496,8 +1545,12 @@ ws|schema|acl|rab_secure_owner|CREATE,USAGE
 ws|schema|crewflow_app|usage=true|create=false
 ws|schema|crewflow|usage=true|create=true
 ws|schema|owner|rab_secure_owner
+ws|table|attendance_break|crewflow_app|S,I
+ws|table|attendance_break|crewflow|S,I,U,D,T,R,G
 ws|table|attendance_correction|crewflow_app|S,I
 ws|table|attendance_correction|crewflow|S,I,U,D,T,R,G
+ws|table|attendance_sync_receipt|crewflow_app|S,I
+ws|table|attendance_sync_receipt|crewflow|S,I,U,D,T,R,G
 ws|table|attendance|crewflow_app|S,I,U,D
 ws|table|attendance|crewflow|S,I,U,D,T,R,G
 ws|table|job_offer|crewflow_app|S,I,U,D
@@ -1538,9 +1591,16 @@ ws|table|venue_role_rate|crewflow_app|S,I,U,D
 ws|table|venue_role_rate|crewflow|S,I,U,D,T,R,G
 ws|table|venue|crewflow_app|S,I,U,D
 ws|table|venue|crewflow|S,I,U,D,T,R,G
+ws|trigger|attendance_break|attendance_break_guard_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_break|attendance_break_guard_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_break|attendance_break_guard_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_break|attendance_break_write_guard|enabled=O|core.attendance_break_write_guard()
 ws|trigger|attendance_correction|attendance_correction_insert_only_delete|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|attendance_correction|attendance_correction_insert_only_truncate|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|attendance_correction|attendance_correction_insert_only_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_sync_receipt|attendance_sync_receipt_insert_only_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_sync_receipt|attendance_sync_receipt_insert_only_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|attendance_sync_receipt|attendance_sync_receipt_insert_only_update|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|attendance|attendance_post_shift_reset|enabled=O|core.reset_attendance_post_shift()
 ws|trigger|payroll_record|_payroll_record_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|payroll_record|_payroll_record_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()

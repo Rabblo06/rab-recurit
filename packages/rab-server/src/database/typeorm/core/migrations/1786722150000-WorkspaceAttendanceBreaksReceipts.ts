@@ -27,7 +27,7 @@ const LEVEL = 27;
  * opens), applied per existing READY workspace by the workspace command runner after level 26.
  *
  * Read-only first: the core copies must already be AttendanceBreaksReceipts1786722140000's exact end state (the workspace
- * triggers call its core.attendance_break_time_guard()). Then, in ONE transaction:
+ * triggers call its core.attendance_break_write_guard()). Then, in ONE transaction:
  *  1. core.verify_workspace_schema_v1 re-created with the level-27 counts (structure-level-27.ts: 23 tables, 112 indexes,
  *     47 policies, 62 foreign keys, 23 bound CHECKs at level 27; every rule below level 27 unchanged);
  *  2. core.provision_workspace re-created (guarded v3 body) over template(20) + levels 21-26 + the level-27 statements,

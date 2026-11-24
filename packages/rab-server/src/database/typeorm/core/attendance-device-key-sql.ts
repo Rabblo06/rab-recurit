@@ -4,9 +4,9 @@
  * DRAFT — NEW SQL, owner SQL review FIRST (M4 design Appendix A.5; §13 PR 2). `core.attendance_device_key`: the public half of
  * a phone's offline-signing key (ES256, SPKI DER), core only (tied to the user and the session family, like core.push_device).
  * Not read by any pre-auth lookup, so ENABLE + FORCE with one own-row policy (organisation AND user); with no tenant context
- * bound it returns zero rows. No DELETE grant: revoked rows are purged 90 days after revoked_at by the Worker on its owner
- * connection (D15, §13 PR 10), never by the runtime. Revocation of another user's key goes through the session family, not
- * this table (§6.3).
+ * bound it returns zero rows. No DELETE grant and a DELETE guard: revoked rows are purged 90 days after revoked_at by the Worker
+ * through a crewflow definer (D15, §13 PR 10), never by the runtime. Revocation of another user's key goes through the session
+ * family, not this table (§6.3).
  */
 export const ATTENDANCE_DEVICE_KEY_SQL: readonly string[] = Object.freeze([
   `CREATE TABLE core.attendance_device_key (
@@ -48,16 +48,22 @@ export const ATTENDANCE_DEVICE_KEY_SQL: readonly string[] = Object.freeze([
   `GRANT SELECT, INSERT ON core.attendance_device_key TO crewflow_app`,
   `GRANT UPDATE (last_used_at, revoked_at, revoked_reason) ON core.attendance_device_key TO crewflow_app`,
   // A.7 for the runtime login (it inherits the owner, so the column grant above does not bind it): the key, its thumbprint, its
-  // owner and its session family can never change after registration; TRUNCATE is refused. DELETE stays open to the own-row
-  // policy (the D15 purge job, §13 PR 10, decides how it deletes: a revoked key is useless to an attacker, a live one is the
-  // user's own).
+  // owner and its session family can never change after registration; a revoked key never changes again (no un-revoke;
+  // core.attendance_device_key_revoked_guard, review of #353 item 4); DELETE and TRUNCATE are refused for the runtime (the D15
+  // purge, §13 PR 10, deletes through a crewflow definer, which the guard lets through).
   `CREATE TRIGGER attendance_device_key_guard_update BEFORE UPDATE ON core.attendance_device_key FOR EACH ROW
   EXECUTE FUNCTION core.owner_login_grant_parity_guard('last_used_at', 'revoked_at', 'revoked_reason')`,
+  `CREATE TRIGGER attendance_device_key_revoked_guard BEFORE UPDATE ON core.attendance_device_key FOR EACH ROW
+  EXECUTE FUNCTION core.attendance_device_key_revoked_guard()`,
+  `CREATE TRIGGER attendance_device_key_guard_delete BEFORE DELETE ON core.attendance_device_key FOR EACH STATEMENT
+  EXECUTE FUNCTION core.owner_login_grant_parity_guard()`,
   `CREATE TRIGGER attendance_device_key_guard_truncate BEFORE TRUNCATE ON core.attendance_device_key FOR EACH STATEMENT
   EXECUTE FUNCTION core.owner_login_grant_parity_guard()`,
 ]);
 
 export const ATTENDANCE_DEVICE_KEY_TRIGGERS = [
-  { name: 'attendance_device_key_guard_update', tgtype: 19 },
-  { name: 'attendance_device_key_guard_truncate', tgtype: 34 },
+  { name: 'attendance_device_key_guard_update', tgtype: 19, fn: 'core.owner_login_grant_parity_guard()' },
+  { name: 'attendance_device_key_revoked_guard', tgtype: 19, fn: 'core.attendance_device_key_revoked_guard()' },
+  { name: 'attendance_device_key_guard_delete', tgtype: 10, fn: 'core.owner_login_grant_parity_guard()' },
+  { name: 'attendance_device_key_guard_truncate', tgtype: 34, fn: 'core.owner_login_grant_parity_guard()' },
 ] as const;

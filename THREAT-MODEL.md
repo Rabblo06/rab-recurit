@@ -10816,21 +10816,32 @@ This entry covers only what release 0.7.0 adds to switch it on.
   - A break added to a closed / reviewed / approved attendance (payroll tampering) -> INSERT policy requires the staff
     member's OWN attendance in `clocked_in` / `on_break`; UPDATE requires it open or `missing_clock_out`.
   - A break moved or re-sized after the fact -> row-level allow-list guard (only `ended_at`, `end_source`, `updated_at`
-    may change: 42501 otherwise); DELETE / TRUNCATE refused per statement (42501).
-  - A staff member back-dating or future-dating a break online -> `core.attendance_break_time_guard()`: a `staff` start or
-    end more than 120 s from `now()` is 23514 (a CHECK cannot read now()); offline / manager / clock-out sources are bounded
-    by their own rules (PR 6).
+    may change: 42501 otherwise); a CLOSED break never changes again (`core.attendance_break_write_guard()`, 42501;
+    corrections go through attendance_correction); DELETE / TRUNCATE refused per statement (42501).
+  - A staff member back-dating or future-dating a break online -> the write guard: a `staff` start or end more than 120 s
+    from `now()` is 23514 with constraint `attendance_break_staff_window` (a CHECK cannot read now()).
+  - The same staff member dodging the window by naming another source (review of #353, item 2) -> each source names its
+    writer: `staff` / `offline_sync` only the break's own staff member, `offline_sync` only while the venue's offline flag is
+    on, `manager` only a workspace Manager or the shift's Venue Manager, `clock_out` only at the attendance's own
+    `clock_out_at` (23514, `attendance_break_clock_out_end`; the service writes clock_out_at, closes the break, then moves
+    the status). 42501 otherwise.
+  - Offline attendance switched on before M5 (D12) -> `CHECK venue_offline_attendance_disabled (NOT
+    offline_attendance_enabled)` on every venue copy; only the owner-approved M5 migration may drop it (review item 5).
   - Receipts (idempotency + offline evidence) edited or deleted -> no UPDATE / DELETE policy and statement-level guards
-    (42501 even on zero rows); INSERT only by the staff member's own session (`user_id = current_uid()` AND own profile).
+    (42501 even on zero rows); INSERT only by the staff member's own session (`user_id = current_uid()` AND own profile),
+    and every reference (attendance, break, shift via an assignment) must belong to that staff member (review item 6).
+    Receipts are never pay input: pay reads attendance and breaks only; a receipt is evidence and an idempotency record.
   - Pay evidence lost through a cascade -> every evidence key ON DELETE RESTRICT (attendance, staff profile, shift, break).
   - A device key swapped to sign forged offline punches -> own-row policy; row allow-list guard (only last_used_at /
-    revoked_at / revoked_reason change); TRUNCATE refused.
+    revoked_at / revoked_reason change); a revoked key never changes again (no un-revoke, review item 4); DELETE and
+    TRUNCATE refused for the runtime (the D15 purge goes through a crewflow definer, PR 10).
+  - A rollback that drops evidence (review item 1) -> AttendanceBreaksReceipts.down() counts with `row_security = off`:
+    an RLS-bound migrator gets an error and down() refuses; it never reads 0 under FORCE RLS and drops the tables.
   - No tenant context -> zero rows on every new table (tested on each copy).
 - **SECURITY TRADE-OFFS / assumptions (flagged for veto):**
   - The SELECT policies admit the worker marker (`rab.actor_type = 'worker'`, as attendance since #305) so post-shift and
     payroll jobs can read breaks; it can never write them. Not in Appendix A.
   - `request_sha256` is `text` (64 lower-case hex, CHECK) instead of `bytea` (the metadata catalogue has no bytea type).
-  - `attendance_device_key` DELETE stays open to the own-row policy (the D15 purge, PR 10, decides how it deletes).
   - Organisation hard delete: core.organisation -> attendance CASCADE meets attendance <- break / receipt RESTRICT, so
     deleting an organisation that has breaks or receipts is refused (same as corrections since #306). Tenant offboarding
     (LC-2) must delete or anonymise evidence explicitly. Workspace schemas have no organisation key (level 22).
@@ -10847,4 +10858,6 @@ This entry covers only what release 0.7.0 adds to switch it on.
   guards) share `helpers/attendance-break-abuse.ts`: staff isolation both ways, the open-attendance insert rule, one open
   break / no overlap, the allow-list, ±2 min, insert-only receipts, CHECKs, RESTRICT, exact crewflow_app grants, zero rows
   without context, the runtime login is crewflow_owner. `structure-level-27.spec.ts` (static).
+- **Core copies after the cutover:** `core.attendance_break` / `core.attendance_sync_receipt` carry the C3 fence
+  (`core.hws_cutover_core_fence()`, as the 21 template copies): a cut-over workspace's core rows are read-only.
 - **Residual:** fingerprints for PostgreSQL 16/17/18 and the posture / semantic goldens are measured by CI on this DRAFT.

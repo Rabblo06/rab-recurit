@@ -6,14 +6,16 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  * the frozen C3 copy list (hws-cutover-tables.ts) stays at 21 tables, so these rows are never written before the cutover.
  *
  * THE statements, in one place, for every copy:
- *   - `core` (HWS off): migration AttendanceBreaksReceipts1786722140000 (+ core.attendance_device_key and the break time-guard
- *     function, core-only objects);
+ *   - `core` (HWS off): migration AttendanceBreaksReceipts1786722140000 (+ core.attendance_device_key and the break / device key
+ *     guard functions, core-only objects);
  *   - every `workspace_<hex>` (HWS on): the level-27 workspace command at the end of this file, and
  *     WorkspaceAttendanceBreaksReceipts1786722150000 folds the same SQL into core.provision_workspace.
  *
  * For one schema, in order (every statement idempotent; no DROP of any kind, so `mayDrop` is unset):
  *   1. A.2: attendance +5 columns and their CHECK (NOT VALID, then VALIDATE: existing rows all take the defaults) + the
- *      offline index; shift_assignment.check_in_offline + CHECK; venue.offline_attendance_enabled (default false, D1).
+ *      offline index; shift_assignment.check_in_offline + CHECK; venue.offline_attendance_enabled (default false, D1) with
+ *      CHECK venue_offline_attendance_disabled (NOT offline_attendance_enabled): D12 in the database; only the owner-approved
+ *      M5 migration may drop it (review of #353, item 5).
  *   2. A.3: attendance_break. One open break per attendance (partial unique) and no overlap (GiST exclusion, btree_gist). The
  *      attendance key is ON DELETE RESTRICT (A.7). ENABLE + FORCE RLS; SELECT / INSERT / UPDATE policies; no DELETE policy.
  *   3. A.4: attendance_sync_receipt (idempotency + offline evidence, insert-only). Every key RESTRICT. ENABLE + FORCE RLS;
@@ -22,8 +24,8 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  *   4. A.7 enforcement for the runtime login (crewflow_owner inherits the owner crewflow, so grants never bind it):
  *        - attendance_break: a ROW-level BEFORE UPDATE allow-list guard (core.owner_login_grant_parity_guard('ended_at',
  *          'end_source', 'updated_at'): any other column changing is 42501), statement-level BEFORE DELETE / TRUNCATE guards
- *          (42501), and core.attendance_break_time_guard() BEFORE INSERT OR UPDATE (a `staff` start or end more than 120 s
- *          from now() is 23514; offline_sync / manager / clock_out are bounded by their own rules);
+ *          (42501), and core.attendance_break_write_guard() BEFORE INSERT OR UPDATE (closed breaks are frozen; each source
+ *          names its writer; a `staff` start or end more than 120 s from now() is 23514; see the function);
  *        - attendance_sync_receipt: statement-level BEFORE UPDATE / DELETE / TRUNCATE guards (42501, even on zero rows).
  *      The guards let through only crewflow, rab_secure_owner and superusers (migrations, definers, foreign-key actions).
  *   5. Grants for parity (the schema role crewflow_app): SELECT, INSERT on both; UPDATE (ended_at, end_source, updated_at)
@@ -66,16 +68,107 @@ export const ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS = 120;
 
 const list = (values: readonly string[]): string => values.map((v) => `'${v}'`).join(', ');
 
-export const ATTENDANCE_BREAK_TIME_GUARD_FUNCTION = 'core.attendance_break_time_guard';
+export const ATTENDANCE_BREAK_WRITE_GUARD_FUNCTION = 'core.attendance_break_write_guard';
 export const ATTENDANCE_GUARD_FUNCTION = 'core.owner_login_grant_parity_guard';
+/** The constraint names the write guard reports (23514), so the service can map them (review of #353, item 7). */
+export const ATTENDANCE_BREAK_STAFF_WINDOW = 'attendance_break_staff_window';
+export const ATTENDANCE_BREAK_CLOCK_OUT_END = 'attendance_break_clock_out_end';
 
 /**
- * The core-only trigger function (AttendanceBreaksReceipts1786722140000 creates it; every copy's trigger calls it). SECURITY
- * INVOKER, search_path pinned, owner crewflow (as core.owner_login_grant_parity_guard), EXECUTE revoked from PUBLIC.
- * A CHECK cannot reference now(), hence a trigger (A.7). It never changes NEW.
+ * The core-only trigger function (AttendanceBreaksReceipts1786722140000 creates it; every copy's trigger calls it, ROW BEFORE
+ * INSERT OR UPDATE). SECURITY INVOKER (its reads run under the writer's own RLS), search_path pinned, owner crewflow (as
+ * core.owner_login_grant_parity_guard), EXECUTE revoked from PUBLIC. It never changes NEW. Owner roles (crewflow,
+ * rab_secure_owner) and superusers pass; for everyone else (the runtime login):
+ *   - a closed break (OLD.ended_at set) is never changed again: 42501 (review item 3; corrections go through
+ *     attendance_correction);
+ *   - the source names the writer (review item 2): `staff` start / end only by the break's own staff member and within
+ *     ±120 s of now() (23514, constraint attendance_break_staff_window; a CHECK cannot read now(), A.7); `offline_sync` only by
+ *     the staff member AND only while the venue has offline attendance enabled (it cannot be enabled before M5: venue CHECK,
+ *     review item 5); `manager` only by a Manager of the workspace or a Venue Manager of the shift's venue; `clock_out` only by
+ *     the staff member or such a manager AND only at the attendance's own clock_out_at (23514, constraint
+ *     attendance_break_clock_out_end: the service writes clock_out_at, closes the open break, then moves the status);
+ *   - an attendance the writer cannot read refuses the write (42501).
  */
-// sql-injection-reviewed: the function name and the tolerance are constants of this file; no input reaches this DDL.
-export const ATTENDANCE_BREAK_TIME_GUARD_FUNCTION_SQL = `CREATE FUNCTION ${ATTENDANCE_BREAK_TIME_GUARD_FUNCTION}()
+// sql-injection-reviewed: the function name, constraint names and the tolerance are constants of this file; no input reaches this DDL.
+export const ATTENDANCE_BREAK_WRITE_GUARD_FUNCTION_SQL = `CREATE FUNCTION ${ATTENDANCE_BREAK_WRITE_GUARD_FUNCTION}()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $guard$
+DECLARE
+  v record;
+  v_end boolean;
+BEGIN
+  IF current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
+     OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE' AND OLD.ended_at IS NOT NULL THEN
+    RAISE EXCEPTION 'attendance_break: a closed break is never changed (corrections go through attendance_correction)'
+      USING ERRCODE = '42501';
+  END IF;
+  EXECUTE pg_catalog.format($q$
+    SELECT a.clock_out_at,
+           coalesce(ve.offline_attendance_enabled, false) AS offline,
+           EXISTS (SELECT 1 FROM %1$I.staff_profile sp WHERE sp.id = $1 AND sp.user_id = core.current_uid()) AS own,
+           (EXISTS (SELECT 1 FROM core.manager_profile mp
+                     WHERE mp.user_id = core.current_uid() AND mp.organisation_id = core.current_org()
+                       AND mp.workspace_id = core.current_workspace() AND mp.type <> 'venue')
+            OR EXISTS (SELECT 1 FROM %1$I.manager_venue mv JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
+                        WHERE mv.venue_id = s.venue_id AND mp.user_id = core.current_uid() AND mp.type = 'venue'
+                          AND mp.organisation_id = core.current_org() AND mp.workspace_id = core.current_workspace())) AS manager
+      FROM %1$I.attendance a
+      JOIN %1$I.shift s ON s.id = a.shift_id
+      LEFT JOIN %1$I.venue ve ON ve.id = s.venue_id
+     WHERE a.id = $2 AND a.staff_profile_id = $1 $q$, TG_TABLE_SCHEMA)
+    INTO v USING NEW.staff_profile_id, NEW.attendance_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'attendance_break: the attendance is not visible to this writer' USING ERRCODE = '42501';
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NOT v.own OR (NEW.start_source = 'offline_sync' AND NOT v.offline) THEN
+      RAISE EXCEPTION 'attendance_break: % start not permitted for this writer', NEW.start_source USING ERRCODE = '42501';
+    END IF;
+    IF NEW.start_source = 'staff'
+       AND pg_catalog.abs(EXTRACT(EPOCH FROM (NEW.started_at - pg_catalog.now()))) > ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} THEN
+      RAISE EXCEPTION 'attendance_break: a staff break start must be within ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} seconds of the server time'
+        USING ERRCODE = '23514', CONSTRAINT = '${ATTENDANCE_BREAK_STAFF_WINDOW}';
+    END IF;
+  END IF;
+  v_end := NEW.ended_at IS NOT NULL
+           AND (TG_OP = 'INSERT' OR NEW.ended_at IS DISTINCT FROM OLD.ended_at OR NEW.end_source IS DISTINCT FROM OLD.end_source);
+  IF v_end THEN
+    IF NOT CASE NEW.end_source
+             WHEN 'staff' THEN v.own
+             WHEN 'offline_sync' THEN v.own AND v.offline
+             WHEN 'manager' THEN v.manager
+             WHEN 'clock_out' THEN v.own OR v.manager
+             ELSE false
+           END THEN
+      RAISE EXCEPTION 'attendance_break: % end not permitted for this writer', NEW.end_source USING ERRCODE = '42501';
+    END IF;
+    IF NEW.end_source = 'staff'
+       AND pg_catalog.abs(EXTRACT(EPOCH FROM (NEW.ended_at - pg_catalog.now()))) > ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} THEN
+      RAISE EXCEPTION 'attendance_break: a staff break end must be within ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} seconds of the server time'
+        USING ERRCODE = '23514', CONSTRAINT = '${ATTENDANCE_BREAK_STAFF_WINDOW}';
+    END IF;
+    IF NEW.end_source = 'clock_out' AND (v.clock_out_at IS NULL OR NEW.ended_at IS DISTINCT FROM v.clock_out_at) THEN
+      RAISE EXCEPTION 'attendance_break: a clock_out end is the attendance''s own clock-out time'
+        USING ERRCODE = '23514', CONSTRAINT = '${ATTENDANCE_BREAK_CLOCK_OUT_END}';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$guard$`;
+
+export const ATTENDANCE_DEVICE_KEY_REVOKED_GUARD_FUNCTION = 'core.attendance_device_key_revoked_guard';
+
+/**
+ * Review of #353, item 4: a revoked device key never changes again (no un-revoke, no new last_used_at, no new reason) for any
+ * non-owner role. ROW BEFORE UPDATE on core.attendance_device_key; core only.
+ */
+// sql-injection-reviewed: the function name is a constant of this file; no input reaches this DDL.
+export const ATTENDANCE_DEVICE_KEY_REVOKED_GUARD_FUNCTION_SQL = `CREATE FUNCTION ${ATTENDANCE_DEVICE_KEY_REVOKED_GUARD_FUNCTION}()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
@@ -85,16 +178,8 @@ BEGIN
      OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
     RETURN NEW;
   END IF;
-  IF TG_OP = 'INSERT' AND NEW.start_source = 'staff'
-     AND pg_catalog.abs(EXTRACT(EPOCH FROM (NEW.started_at - pg_catalog.now()))) > ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} THEN
-    RAISE EXCEPTION 'attendance_break: a staff break start must be within ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} seconds of the server time'
-      USING ERRCODE = '23514';
-  END IF;
-  IF NEW.end_source = 'staff' AND NEW.ended_at IS NOT NULL
-     AND (TG_OP = 'INSERT' OR NEW.ended_at IS DISTINCT FROM OLD.ended_at OR NEW.end_source IS DISTINCT FROM OLD.end_source)
-     AND pg_catalog.abs(EXTRACT(EPOCH FROM (NEW.ended_at - pg_catalog.now()))) > ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} THEN
-    RAISE EXCEPTION 'attendance_break: a staff break end must be within ${ATTENDANCE_BREAK_STAFF_TOLERANCE_SECONDS} seconds of the server time'
-      USING ERRCODE = '23514';
+  IF OLD.revoked_at IS NOT NULL THEN
+    RAISE EXCEPTION 'attendance_device_key: a revoked key never changes' USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
 END;
@@ -105,7 +190,7 @@ export const ATTENDANCE_BREAK_TRIGGERS = [
   { name: 'attendance_break_guard_update', timing: 'BEFORE UPDATE', level: 'ROW', fn: `${ATTENDANCE_GUARD_FUNCTION}('ended_at', 'end_source', 'updated_at')`, tgtype: 19 },
   { name: 'attendance_break_guard_delete', timing: 'BEFORE DELETE', level: 'STATEMENT', fn: `${ATTENDANCE_GUARD_FUNCTION}()`, tgtype: 10 },
   { name: 'attendance_break_guard_truncate', timing: 'BEFORE TRUNCATE', level: 'STATEMENT', fn: `${ATTENDANCE_GUARD_FUNCTION}()`, tgtype: 34 },
-  { name: 'attendance_break_time_guard', timing: 'BEFORE INSERT OR UPDATE', level: 'ROW', fn: `${ATTENDANCE_BREAK_TIME_GUARD_FUNCTION}()`, tgtype: 23 },
+  { name: 'attendance_break_write_guard', timing: 'BEFORE INSERT OR UPDATE', level: 'ROW', fn: `${ATTENDANCE_BREAK_WRITE_GUARD_FUNCTION}()`, tgtype: 23 },
 ] as const;
 
 export const ATTENDANCE_SYNC_RECEIPT_TRIGGERS = [
@@ -179,7 +264,14 @@ END
 $offline_columns$;
 ALTER TABLE ${a} VALIDATE CONSTRAINT attendance_time_source_check;
 CREATE INDEX IF NOT EXISTS attendance_offline_idx ON ${a} USING btree (shift_id) WHERE offline_recorded;
-ALTER TABLE "${s}".venue ADD COLUMN IF NOT EXISTS offline_attendance_enabled boolean NOT NULL DEFAULT false`;
+ALTER TABLE "${s}".venue ADD COLUMN IF NOT EXISTS offline_attendance_enabled boolean NOT NULL DEFAULT false;
+DO $offline_venue$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid = '"${s}".venue'::pg_catalog.regclass AND k.conname = 'venue_offline_attendance_disabled') THEN
+    ALTER TABLE "${s}".venue ADD CONSTRAINT venue_offline_attendance_disabled CHECK (NOT offline_attendance_enabled);
+  END IF;
+END
+$offline_venue$`;
 }
 
 /** A.3 table + indexes for one schema; the core copy keeps its core keys. */
@@ -360,6 +452,15 @@ export function attendanceBreaksReceiptsPolicies(schema: string): ReadonlyArray<
     ${TENANT}
     AND user_id = core.current_uid()
     AND ${staffOwn(s, 'attendance_sync_receipt')}
+    AND (attendance_id IS NULL OR EXISTS (SELECT 1 FROM "${s}".attendance a
+                                           WHERE a.id = attendance_sync_receipt.attendance_id
+                                             AND a.staff_profile_id = attendance_sync_receipt.staff_profile_id))
+    AND (break_id IS NULL OR EXISTS (SELECT 1 FROM "${s}".attendance_break b
+                                      WHERE b.id = attendance_sync_receipt.break_id
+                                        AND b.staff_profile_id = attendance_sync_receipt.staff_profile_id))
+    AND (shift_id IS NULL OR EXISTS (SELECT 1 FROM "${s}".shift_assignment sa
+                                      WHERE sa.shift_id = attendance_sync_receipt.shift_id
+                                        AND sa.staff_profile_id = attendance_sync_receipt.staff_profile_id))
   )`,
     },
   ];

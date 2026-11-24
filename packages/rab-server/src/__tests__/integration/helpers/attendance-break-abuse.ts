@@ -17,6 +17,8 @@ export interface BreakAbuseContext {
 }
 
 const code = (p: Promise<unknown>) => p.then(() => 'ok', (e: { code?: string }) => e.code ?? 'error');
+/** The SQLSTATE and, when the server names one, the constraint (review of #353, item 7). */
+const coded = (p: Promise<unknown>) => p.then(() => 'ok', (e: { code?: string; constraint?: string }) => (e.constraint ? `${e.code}:${e.constraint}` : (e.code ?? 'error')));
 
 export function registerBreakAbuseCases(ctx: BreakAbuseContext): void {
   const q = () => `"${ctx.fx().schema}"`;
@@ -97,12 +99,86 @@ export function registerBreakAbuseCases(ctx: BreakAbuseContext): void {
     });
   });
 
-  it('Staff A starts their own break on their own open attendance; ±2 minutes: a staff start 5 minutes off is refused (23514), an offline_sync one is not', async () => {
+  it('Staff A starts their own break on their own open attendance; ±2 minutes: a staff start 5 minutes off is refused (23514, attendance_break_staff_window)', async () => {
     const fx = ctx.fx();
     expect(await as({ user: fx.users.staffA }, async () => (await insertBreak(fx.att.xA, fx.profiles.a)).rowCount)).toBe(1);
-    expect(await as({ user: fx.users.staffA }, () => code(insertBreak(fx.att.xA, fx.profiles.a, `now() - interval '5 minutes'`)))).toBe('23514');
-    expect(await as({ user: fx.users.staffA }, () => code(insertBreak(fx.att.xA, fx.profiles.a, `now() + interval '5 minutes'`)))).toBe('23514');
-    expect(await as({ user: fx.users.staffA }, async () => (await insertBreak(fx.att.xA, fx.profiles.a, `now() - interval '20 minutes'`, 'offline_sync')).rowCount)).toBe(1);
+    expect(await as({ user: fx.users.staffA }, () => coded(insertBreak(fx.att.xA, fx.profiles.a, `now() - interval '5 minutes'`)))).toBe('23514:attendance_break_staff_window');
+    expect(await as({ user: fx.users.staffA }, () => coded(insertBreak(fx.att.xA, fx.profiles.a, `now() + interval '5 minutes'`)))).toBe('23514:attendance_break_staff_window');
+  });
+
+  it('review item 2: a staff member cannot dodge the window with another source: offline_sync start / end (the venue flag is off and cannot be turned on), manager end, clock_out end off the clock-out time', async () => {
+    const fx = ctx.fx();
+    expect(await as({ user: fx.users.staffA }, () => code(insertBreak(fx.att.xA, fx.profiles.a, `now() - interval '20 minutes'`, 'offline_sync')))).toBe('42501');
+    const ends = await as({ user: fx.users.staffA }, async () => {
+      const id = (await insertBreak(fx.att.xA, fx.profiles.a, `now() - interval '1 minute'`)).rows[0].id as string;
+      const out: Record<string, string> = {};
+      for (const src of ['manager', 'offline_sync', 'clock_out']) {
+        await run('SAVEPOINT e');
+        out[src] = await coded(run(`UPDATE ${q()}.attendance_break SET ended_at = now() - interval '30 seconds', end_source = $2 WHERE id = $1`, [id, src]));
+        await run('ROLLBACK TO SAVEPOINT e');
+      }
+      return out;
+    });
+    expect(ends).toEqual({ manager: '42501', offline_sync: '42501', clock_out: '23514:attendance_break_clock_out_end' });
+  });
+
+  it('review item 2: a manager closes a break only as `manager` (not as `staff`), and a `clock_out` end only at the attendance\'s clock-out time', async () => {
+    const fx = ctx.fx();
+    const admin = ctx.admin();
+    const id = (
+      await admin.query(
+        `INSERT INTO ${q()}.attendance_break (organisation_id, workspace_id, attendance_id, staff_profile_id, started_at, start_source) VALUES ($1, $2, $3, $4, now() - interval '10 minutes', 'staff') RETURNING id`,
+        [ctx.w().org, ctx.w().id, fx.att.xB, fx.profiles.b],
+      )
+    ).rows[0].id as string;
+    try {
+      const out = await as({ user: fx.users.manager }, async () => {
+        const r: Record<string, string> = {};
+        await run('SAVEPOINT m');
+        r.asStaff = await code(run(`UPDATE ${q()}.attendance_break SET ended_at = now(), end_source = 'staff' WHERE id = $1`, [id]));
+        await run('ROLLBACK TO SAVEPOINT m');
+        r.asManager = await code(run(`UPDATE ${q()}.attendance_break SET ended_at = now(), end_source = 'manager' WHERE id = $1`, [id]));
+        return r;
+      });
+      expect(out).toEqual({ asStaff: '42501', asManager: 'ok' });
+      // clock_out at the attendance's own clock_out_at (written first by the service): accepted; any other time is 23514.
+      const clock = await as({ user: fx.users.manager }, async () => {
+        await run(`UPDATE ${q()}.attendance SET clock_out_at = now() WHERE id = $1`, [fx.att.xB]);
+        return coded(run(`UPDATE ${q()}.attendance_break SET ended_at = now() - interval '1 minute', end_source = 'clock_out' WHERE id = $1`, [id]));
+      });
+      expect(clock).toBe('23514:attendance_break_clock_out_end');
+      const right = await as({ user: fx.users.manager }, async () => {
+        await run(`UPDATE ${q()}.attendance SET clock_out_at = now() WHERE id = $1`, [fx.att.xB]);
+        return (await run(`UPDATE ${q()}.attendance_break SET ended_at = now(), end_source = 'clock_out' WHERE id = $1`, [id])).rowCount;
+      });
+      expect(right).toBe(1);
+    } finally {
+      await admin.query(`DELETE FROM ${q()}.attendance_break WHERE id = $1`, [id]);
+    }
+  });
+
+  it('review item 3: a closed break is never changed again, by its staff member or a manager (42501)', async () => {
+    const fx = ctx.fx();
+    const reopened = await as({ user: fx.users.staffA }, async () => {
+      const id = (await insertBreak(fx.att.xA, fx.profiles.a, `now() - interval '1 minute'`)).rows[0].id as string;
+      await run(`UPDATE ${q()}.attendance_break SET ended_at = now(), end_source = 'staff' WHERE id = $1`, [id]);
+      return code(run(`UPDATE ${q()}.attendance_break SET ended_at = now() - interval '30 seconds' WHERE id = $1`, [id]));
+    });
+    expect(reopened).toBe('42501');
+    await seeded(async ({ breakA }) => {
+      expect(await as({ user: fx.users.manager }, () => code(run(`UPDATE ${q()}.attendance_break SET ended_at = ended_at - interval '5 minutes', end_source = 'manager' WHERE id = $1`, [breakA])))).toBe('42501');
+      expect(await as({ user: fx.users.staffA }, () => code(run(`UPDATE ${q()}.attendance_break SET updated_at = now() WHERE id = $1`, [breakA])))).toBe('42501');
+    });
+  });
+
+  it('review item 5: offline attendance cannot be switched on for a venue in the database (CHECK venue_offline_attendance_disabled), even by the superuser', async () => {
+    const admin = ctx.admin();
+    await admin.query('BEGIN');
+    try {
+      expect(await coded(admin.query(`UPDATE ${q()}.venue SET offline_attendance_enabled = true WHERE workspace_id = $1`, [ctx.w().id]))).toBe('23514:venue_offline_attendance_disabled');
+    } finally {
+      await admin.query('ROLLBACK');
+    }
   });
 
   it('Staff A cannot start a break on Staff B\'s attendance, nor as Staff B, nor on a clocked-out attendance (42501)', async () => {
@@ -161,6 +237,25 @@ export function registerBreakAbuseCases(ctx: BreakAbuseContext): void {
       // Staff A cannot close Staff B's break (0 rows); the worker marker cannot write one.
       expect(await as({ user: fx.users.staffA }, async () => (await run(`UPDATE ${q()}.attendance_break SET ended_at = now(), end_source = 'staff' WHERE id = $1`, [breakB])).rowCount)).toBe(0);
       expect(await as({ user: '', actor: 'worker' }, async () => (await run(`UPDATE ${q()}.attendance_break SET end_source = 'manager' WHERE id = $1`, [breakB])).rowCount)).toBe(0);
+    });
+  });
+
+  it('review item 6: a receipt references only its own staff member\'s attendance, break and shift (42501 otherwise)', async () => {
+    const fx = ctx.fx();
+    expect(await as({ user: fx.users.staffA }, () => code(insertReceipt(fx.users.staffA, fx.profiles.a, { attendance: fx.att.xB })))).toBe('42501');
+    expect(await as({ user: fx.users.staffA }, () => code(insertReceipt(fx.users.staffA, fx.profiles.a, { shift: fx.shifts.y, attendance: null })))).toBe('42501');
+    await seeded(async ({ breakB }) => {
+      const out = await as({ user: fx.users.staffA }, () =>
+        code(
+          run(
+            `INSERT INTO ${q()}.attendance_sync_receipt (organisation_id, workspace_id, staff_profile_id, user_id, idempotency_key, request_sha256, channel, event_type,
+                                                          shift_id, attendance_id, break_id, outcome, time_trust, applied_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'online', 'break_end', $7, $8, $9, 'applied', 'server', now())`,
+            [ctx.w().org, ctx.w().id, fx.profiles.a, fx.users.staffA, randomUUID(), SHA, fx.shifts.x, fx.att.xA, breakB],
+          ),
+        ),
+      );
+      expect(out).toBe('42501');
     });
   });
 
