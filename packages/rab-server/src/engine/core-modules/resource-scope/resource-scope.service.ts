@@ -3,8 +3,8 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { Role, UserRole } from '../identity/entities';
-import { ManagerProfile, ManagerVenue } from '../../../modules/manager/entities';
 import { AuthContext } from '../tenant/auth-context.interface';
+import { ManagerVenue } from './entities/manager-venue.entity';
 
 /**
  * `owner`: creator-based record ownership. `ownerUserId` is the user whose records (`created_by`) this caller may
@@ -55,8 +55,10 @@ export class ResourceScopeService {
     if (roleKeys.some((r) => r.key === 'venue_manager')) {
       const rows = await manager
         .createQueryBuilder(ManagerVenue, 'mv')
-        .innerJoin(ManagerProfile, 'mp', 'mp.id = mv.manager_profile_id')
-        .where('mp.user_id = :userId', { userId: ctx.userId })
+        // core.manager_profile by table name, not the ManagerProfile entity (modules/manager owns it; engine/ never imports
+        // modules/). Same rows as the former INNER JOIN on mp.id = mv.manager_profile_id: mp.id is the primary key, so each
+        // manager_venue row matched at most one profile, and the subquery reads manager_profile under the same RLS.
+        .where('mv.manager_profile_id IN (SELECT mp.id FROM core.manager_profile mp WHERE mp.user_id = :userId)', { userId: ctx.userId })
         .select('mv.venue_id', 'venueId')
         .getRawMany<{ venueId: string }>();
       return { kind: 'venue', venueIds: rows.map((r) => r.venueId) };
