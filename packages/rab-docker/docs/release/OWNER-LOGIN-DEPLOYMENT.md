@@ -965,7 +965,8 @@ never change them, and the compose defaults for them stay `false`.**
   `docker-compose.production.yml` defaults it to `true`; for `docker-compose.image.yml` it is the active line in
   `env/runtime.env.example`, so copy it into `${CREWFLOW_SECRETS_DIR}/runtime.env` (an existing `runtime.env` written
   before this change does NOT have it: add the line, lint the file, then `docker compose up -d`). The first platform admin
-  (`BOOTSTRAP_ADMIN_EMAIL` or `bootstrap-admin`) is refused without it. Check: Admin panel, Configuration, MFA shows
+  (`BOOTSTRAP_ADMIN_EMAIL` or `bootstrap-admin`) is refused without it. The gate refuses it off: `compose-owner-login.cjs` (also `--lint-env-file runtime`) fails on a committed
+  or linted `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` that is not `true`. Check: Admin panel, Configuration, MFA shows
   enforcement on for platform admins; a platform admin without an authenticator is asked to enrol at the next sign-in.
 - [ ] **Step 2, at the DigitalOcean move, before any real data: organisation owners and the Initial Manager.** On rab-api
   set `AUTH_MFA_ENFORCE_ORGANISATION_OWNER=true` (role `ceo`) and `AUTH_MFA_ENFORCE_INITIAL_MANAGER=true` in the new
