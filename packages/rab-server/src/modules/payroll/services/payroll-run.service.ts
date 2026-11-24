@@ -288,13 +288,14 @@ export class PayrollRunService {
         [lines.map((l) => l.payroll_record_id), ctx.workspaceId])) as [unknown, number];
       if (moved !== lines.length) throw new ConflictException('Payroll changed while the run was being finalised. Refresh and try again.');
       await m.query(`UPDATE ${t.payroll_run} SET status = 'finalised', finalised_at = now(), finalised_by = $2, updated_at = now() WHERE id = $1`, [runId, ctx.userId]);
-      // Owner decision 3: the run's adjustments are locked with it; core.payroll_adjustment_guard() refuses any later change.
-      await this.adjustments.lockForRun(m, ctx, runId);
-      // Review fix: the run's `finalised` fact with its payroll records (insert-only). From now on the database refuses an
-      // adjustment joining this run and a holiday-pay line for any of these records.
+      // Review fix: the run's `finalised` fact with its payroll records (insert-only; its guard checks it against the run).
+      // From now on the database refuses an adjustment joining this run and a holiday-pay line for any of these records.
       await m.query(
         `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, payroll_record_ids, created_by) VALUES ($1, $2, $3, 'finalised', $4::uuid[], $5)`,
         [ctx.organisationId, ctx.workspaceId, runId, lines.map((l) => l.payroll_record_id), ctx.userId]);
+      // Owner decision 3: the run's adjustments are locked with it (the guard requires the `finalised` fact above first);
+      // core.payroll_adjustment_guard() refuses any later change.
+      await this.adjustments.lockForRun(m, ctx, runId);
       for (const staffId of [...new Set([...lines.map((l) => l.staff_profile_id), ...adjustmentLines.map((a) => a.staffProfileId)])]) {
         await m.query(`INSERT INTO ${t.payslip} (organisation_id, workspace_id, run_id, staff_profile_id) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
           [ctx.organisationId, ctx.workspaceId, runId, staffId]);

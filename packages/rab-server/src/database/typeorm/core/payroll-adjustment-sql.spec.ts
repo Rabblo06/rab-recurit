@@ -4,6 +4,7 @@ import {
   PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL,
   PAYROLL_ADJUSTMENT_INSERT_GUARD_FUNCTION_SQL,
   PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL,
+  AUTHORITATIVE_COPIES_SQL,
   PAYROLL_ADJUSTMENT_MAX_PENCE,
   PAYROLL_ADJUSTMENT_OWNERSHIP_SQL,
   PAYROLL_ADJUSTMENT_PARITY_TRIGGERS,
@@ -118,6 +119,25 @@ describe('core.payroll_adjustment SQL (owner decision 3)', () => {
     expect(security).toContain('CREATE TRIGGER payroll_adjustment_guard BEFORE UPDATE ON core.payroll_adjustment FOR EACH ROW EXECUTE FUNCTION core.payroll_adjustment_guard()');
   });
 
+  it('third review: ONE authoritative copy from database state (cutover routing), no core fallback once cut over', () => {
+    const a = flat(AUTHORITATIVE_COPIES_SQL);
+    expect(a).toContain('SELECT s.state INTO cut_state FROM core.hws_cutover_state s WHERE s.workspace_id = NEW.workspace_id;');
+    expect(a).toContain("IF cut_state = 'started' OR (cut_state IS DISTINCT FROM 'verified' AND EXISTS (SELECT 1 FROM core.hws_cutover_activation)) THEN");
+    expect(a).toContain("copies := CASE WHEN cut_state = 'verified' THEN ARRAY[ws_schema] ELSE ARRAY[ws_schema, 'core'] END;");
+    // Every business-copy read in the three guards goes through it.
+    for (const fn of [PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL, PAYROLL_ADJUSTMENT_INSERT_GUARD_FUNCTION_SQL, PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL]) {
+      expect(flat(fn)).toContain(a);
+      expect(flat(fn)).not.toContain("ARRAY[ws_schema, 'core'] LOOP");
+    }
+  });
+
+  it('third review: joining needs the run LIVE prepared in the authoritative copy; locked_at only with a finalised fact', () => {
+    const g = flat(PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL);
+    expect(g).toContain("pg_catalog.format('SELECT r.id, r.status FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3 FOR SHARE OF r', sch)");
+    expect(g).toContain("IF run_found IS NULL OR run_status IS DISTINCT FROM 'prepared' THEN");
+    expect(g).toContain("IF NEW.locked_at IS NOT NULL AND OLD.locked_at IS NULL AND NOT EXISTS (SELECT 1 FROM core.payroll_run_event e WHERE e.run_id = NEW.run_id AND e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'finalised') THEN");
+  });
+
   it('review fix: the guard refuses a run without an `opened` fact of the SAME organisation and workspace, and a finalised run', () => {
     const g = flat(PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL);
     expect(g).toContain('IF NEW.run_id IS NOT NULL AND OLD.run_id IS NULL THEN');
@@ -154,8 +174,9 @@ describe('core.payroll_adjustment SQL (owner decision 3)', () => {
     const g = flat(PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION_SQL);
     expect(g).toContain('SET search_path = pg_catalog, core');
     expect(g).not.toMatch(/SECURITY DEFINER/);
-    expect(g).toContain("FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP");
-    expect(g).toContain('ARRAY(SELECT l.payroll_record_id FROM %I.payroll_run_line l WHERE l.run_id = r.id ORDER BY l.payroll_record_id) FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3');
+    expect(g).toContain('FOREACH sch IN ARRAY copies LOOP');
+    expect(g).toContain(flat(AUTHORITATIVE_COPIES_SQL));
+    expect(g).toContain('ARRAY(SELECT l.payroll_record_id FROM %I.payroll_run_line l WHERE l.run_id = r.id ORDER BY l.payroll_record_id) FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3 FOR SHARE OF r');
     expect(g).toContain("OR (NEW.event = 'opened' AND run_status IS DISTINCT FROM 'prepared')");
     expect(g).toContain("OR (NEW.event = 'finalised' AND (run_status IS DISTINCT FROM 'finalised' OR run_records IS DISTINCT FROM ARRAY(SELECT x FROM pg_catalog.unnest(NEW.payroll_record_ids) AS x ORDER BY x)))");
     expect(g).toContain("USING ERRCODE = '42501'");
