@@ -92,7 +92,12 @@ export default function WorkspacePreparationScreen({ welcomeOnly = false }: { we
     setResuming(true);
     try {
       const { data } = await api.post('/manager-workspaces', { name: target.name, subdomain: target.subdomain });
-      if (data) qc.setQueryData(['manager-workspace'], data);
+      if (data) {
+        // The mount-time refetch (refetchOnMount 'always') may still be in flight with the pre-resume state: cancel it so
+        // it cannot overwrite this fresher answer (otherwise READY is lost until the next poll).
+        await qc.cancelQueries({ queryKey: ['manager-workspace'] });
+        qc.setQueryData(['manager-workspace'], data);
+      }
       setResumeFailed(false);
     } catch (err: any) {
       const code = err?.response?.status;

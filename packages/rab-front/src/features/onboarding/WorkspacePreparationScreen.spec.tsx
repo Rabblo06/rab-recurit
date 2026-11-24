@@ -20,7 +20,7 @@ jest.mock('../../shared/api', () => ({
   broadcastLogout: jest.fn(),
   withAuthLock: jest.fn((fn: () => Promise<unknown>) => fn()),
 }));
-jest.mock('../../shared/lib/auth-session', () => ({ markUnauthenticated: jest.fn() }));
+jest.mock('../../shared/lib/auth-session', () => ({ ...jest.requireActual('../../shared/lib/auth-session'), markUnauthenticated: jest.fn() }));
 
 const get = api.get as jest.Mock;
 const post = api.post as jest.Mock;
@@ -448,7 +448,7 @@ describe('workspace creation before profile setup', () => {
     await advance(MIN_ANIMATION_MS);
     expect(screen.queryByText('PROFILE SETUP')).toBeNull();
     currentStatus = 'READY';
-    await advance(2500 + READY_BEAT_MS);
+    await advance(3000 + READY_BEAT_MS); // one poll: 2.5 s ±20 % jitter (shared/lib/polling.ts)
     expect(screen.getByText('PROFILE SETUP')).toBeInTheDocument();
     expect(document.querySelector('.welcome-overlay')).toBeNull();
   });

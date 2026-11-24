@@ -75,7 +75,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
 
     mountAuthenticatedAt('/onboarding/profile');
 
-    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
     expect(screen.queryByText('Create your profile')).toBeNull();
     expect(mockApi.post).toHaveBeenCalledWith('/auth/logout');
     expect(mockBroadcastLogout).toHaveBeenCalled();
@@ -90,7 +90,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
 
     mountAuthenticatedAt('/onboarding/workspace');
 
-    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
     expect(screen.queryByText('Create your workspace')).toBeNull();
     expect(mockApi.post).toHaveBeenCalledWith('/auth/logout');
   });
@@ -105,7 +105,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
 
     mountAuthenticatedAt('/onboarding/profile');
 
-    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
     expect(screen.queryByText('Create your profile')).toBeNull();
   });
 
@@ -161,7 +161,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
       throw new Error(`unexpected GET ${url}`);
     });
     const first = mountAuthenticatedAt('/onboarding/profile');
-    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
     first.unmount();
 
     // Second mount, same tab — the QueryClient singleton (and its cache) survives the unmount.
