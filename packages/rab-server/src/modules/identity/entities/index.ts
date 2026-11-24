@@ -1,23 +1,8 @@
-export * from './organisation.entity';
-export * from './user.entity';
-export * from './role.entity';
-export * from './permission.entity';
-export * from './role-permission.entity';
-export * from './user-role.entity';
-export * from './user-permission-override.entity';
-export * from './refresh-token.entity';
-export * from './login-history.entity';
-export * from './password-reset-token.entity';
-export * from './audit-log.entity';
-export * from './platform-admin.entity';
+// The identity and access entities engine/ needs live in engine/core-modules/identity/entities (engine/ never imports
+// modules/); this barrel re-exports them so domain code keeps one import path for every identity entity.
+export * from '../../../engine/core-modules/identity/entities';
 export * from './user-preference.entity';
 export * from './notification-preference.entity';
-export * from './platform-config.entity';
 export * from './organisation-member.entity';
-export * from './admin-inspect-session.entity';
-export * from './account-invite.entity';
-export * from './member-invitation.entity';
-export * from './email-outbox.entity';
 export * from './user-note.entity';
-export * from './user-session.entity';
 export * from './realtime-event.entity';

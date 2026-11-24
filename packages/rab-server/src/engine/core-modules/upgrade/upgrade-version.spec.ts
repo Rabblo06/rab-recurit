@@ -1,4 +1,4 @@
-import { ADOPTION_VERSION_BY_RELEASE, AppVersionError, compareVersions, CREWFLOW_PREVIOUS_VERSIONS, isPatchRelease, majorMinorKey, minorReleaseOf, readAppVersion, upgradeFromVersions } from './upgrade-version';
+import { ADOPTION_VERSION_BY_RELEASE, AppVersionError, compareVersions, CREWFLOW_PREVIOUS_VERSIONS, CREWFLOW_UPGRADE_FROM_VERSIONS, isPatchRelease, majorMinorKey, minorReleaseOf, readAppVersion, upgradeFromVersions } from './upgrade-version';
 
 describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
   it('compares MAJOR.MINOR.PATCH numerically and refuses anything else', () => {
@@ -13,9 +13,12 @@ describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
     expect(ADOPTION_VERSION_BY_RELEASE).toEqual({ R254: '0.4.0', R256: '0.5.0' });
   });
 
-  it('0.6.0 (adoption) upgrades from 0.4.0 or 0.5.0; later releases only from the immediately previous one', () => {
+  it('0.6.0 (adoption) upgrades from 0.4.0 or 0.5.0; a later minor release only from the versions on its reviewed list', () => {
     expect(upgradeFromVersions('0.6.0')).toEqual(['0.4.0', '0.5.0']);
-    expect(upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'])).toEqual(['0.6.0']);
+    expect(CREWFLOW_UPGRADE_FROM_VERSIONS).toEqual({ '0.6.0': ['0.4.0', '0.5.0'] });
+    expect(upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'], { '0.7.0': ['0.6.0'] })).toEqual(['0.6.0']);
+    // No reviewed list for the release: refused (config, 64), never a guessed default.
+    expect(() => upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'])).toThrow(/CREWFLOW_UPGRADE_FROM_VERSIONS\['0\.7\.0'\] is missing/);
   });
 
   it('a patch release (0.6.1) upgrades from the earlier published versions of its own minor line only; its .0 must be published', () => {
