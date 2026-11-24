@@ -67,6 +67,15 @@ describe('App', () => {
     window.history.pushState({}, '', '/');
   });
 
+  it('CF-23: deletes notes an older build left in localStorage at start-up, on any page (other keys kept)', async () => {
+    window.localStorage.setItem('user-notes-x', JSON.stringify([{ id: 'n1', text: 'old note', createdAt: '2026-11-01T00:00:00Z' }]));
+    window.localStorage.setItem('unrelated-key', 'kept');
+    render(<App />);
+    expect(await screen.findByText('Welcome to your workspace')).toBeInTheDocument();
+    expect(window.localStorage.getItem('user-notes-x')).toBeNull();
+    expect(window.localStorage.getItem('unrelated-key')).toBe('kept');
+  });
+
   it('redirects an unauthenticated visitor to the login form', async () => {
     render(<App />);
     expect(await screen.findByText('Welcome to Crewflow')).toBeInTheDocument();

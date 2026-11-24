@@ -20,6 +20,7 @@ import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
 import WorkspaceHostGate from './features/workspace-host/WorkspaceHostGate';
 import StepUpHost from './features/auth/stepup/StepUpHost';
+import { purgeLegacyNotes } from './features/users/legacyNotes';
 import { getApiErrorCode } from './shared/lib/apiError';
 import { isSilentError, notifyApiError } from './shared/lib/mutationFeedback';
 // Console pages (inside Layout) live in the shell's registry so the shell can preload them (idle after sign-in, and on nav
@@ -375,6 +376,8 @@ function OnboardingRouteGuard({ children }: { children: JSX.Element }) {
 }
 
 export default function App() {
+  // CF-23: delete notes an older build left in localStorage (user-notes-*), whatever page this browser opens first.
+  useEffect(() => { purgeLegacyNotes(); }, []);
   return (
     <QueryClientProvider client={qc}>
       {/* App-wide motion policy: with OS "reduce motion", Framer Motion drops transforms everywhere (opacity only). */}
