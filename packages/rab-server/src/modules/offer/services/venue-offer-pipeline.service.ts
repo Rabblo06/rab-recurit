@@ -68,8 +68,8 @@ export class VenueOfferPipelineService {
       shift.organisationId !== ctx.organisationId ||
       !ctx.workspaceId ||
       shift.workspaceId !== ctx.workspaceId ||
-      shift.createdBy !== ctx.userId ||
-      !shift.requestedBy
+      // Direct (manager-created) shifts open the same pipeline as Venue-Manager-requested ones; ownership is unchanged.
+      shift.createdBy !== ctx.userId
     )
       throw new NotFoundException('Shift not found.');
     if (['pending_manager_approval', 'declined'].includes(shift.status))

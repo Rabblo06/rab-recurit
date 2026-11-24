@@ -296,6 +296,102 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     PermissionFlag.OFFER_CONFIRM,
   ];
 
+  describe('existing shift headcount increase (sendBulk requiredCount)', () => {
+    const bulk = (shiftId: string, token: string, body: object) =>
+      request(app.getHttpServer()).post(`/rest/v1/shifts/${shiftId}/offers/bulk`).set('Authorization', `Bearer ${token}`).send(body);
+    const shiftRow = async (shiftId: string) =>
+      (await adminDataSource.query(`SELECT required_count, status FROM ${await businessTableOf(adminDataSource.manager, 'shift', shiftId)} WHERE id = $1`, [shiftId]))[0];
+
+    it('serializes concurrent capacity changes without adding twice', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token);
+      const staff = await seedStaff(own.organisation);
+      const body = { staffProfileIds: [staff.staffProfileId], requiredCount: 2, expectedRequiredCount: 1 };
+      const results = await Promise.all([bulk(shift.id, token, body), bulk(shift.id, token, body)]);
+      expect(results.filter((r) => r.status === 201)).toHaveLength(1);
+      expect(results.filter((r) => [400, 409].includes(r.status))).toHaveLength(1);
+      expect((await shiftRow(shift.id)).required_count).toBe(2);
+      const assignments = siblingTable(await businessTableOf(adminDataSource.manager, 'shift', shift.id), 'shift_assignment');
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${assignments} WHERE shift_id = $1`, [shift.id]);
+      expect(n).toBe(1);
+    });
+
+    it('a stale expectedRequiredCount is a 409 and changes nothing', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token, { requiredCount: 2 });
+      const staff = await seedStaff(own.organisation);
+      expect((await bulk(shift.id, token, { staffProfileIds: [staff.staffProfileId], requiredCount: 3, expectedRequiredCount: 1 })).status).toBe(409);
+      expect((await shiftRow(shift.id)).required_count).toBe(2);
+    });
+
+    it('rolls the headcount back when no staff can receive an offer', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token);
+      expect((await bulk(shift.id, token, { staffProfileIds: [randomUUID()], requiredCount: 2, expectedRequiredCount: 1 })).status).toBe(409);
+      expect((await shiftRow(shift.id)).required_count).toBe(1);
+    });
+
+    it('another organisation gets 404, a shrink or same count is 400, and replacement + headcount is 400', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const other = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const otherToken = await login(other.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token, { requiredCount: 2 });
+      const staff = await seedStaff(own.organisation);
+      const body = { staffProfileIds: [staff.staffProfileId], requiredCount: 3, expectedRequiredCount: 2 };
+      expect((await bulk(shift.id, otherToken, body)).status).toBe(404);
+      expect((await bulk(shift.id, token, { ...body, requiredCount: 2 })).status).toBe(400);
+      expect((await bulk(shift.id, token, { ...body, requiredCount: 1 })).status).toBe(400);
+      expect((await bulk(shift.id, token, { ...body, mode: 'replacement' })).status).toBe(400);
+      expect((await shiftRow(shift.id)).required_count).toBe(2);
+    });
+
+    it('a manager without schedule.create cannot resize (403) and nothing changes', async () => {
+      const own = await seedOrg(MANAGER_PERMS.filter((p) => p !== PermissionFlag.SCHEDULE_CREATE));
+      const token = await login(own.adminEmail);
+      const staff = await seedStaff(own.organisation);
+      // No schedule.create means no shift of their own either: any id is refused before it is read.
+      expect((await bulk(randomUUID(), token, { staffProfileIds: [staff.staffProfileId], requiredCount: 2, expectedRequiredCount: 1 })).status).toBe(403);
+    });
+  });
+
+  describe('create shift with offers — per-recipient windows', () => {
+    it('stores each recipient window on the one new shift, and rejects duplicates and windows outside the shift', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const staffA = await seedStaff(own.organisation);
+      const staffB = await seedStaff(own.organisation);
+      const role = await request(app.getHttpServer()).post('/rest/v1/job-roles').set('Authorization', `Bearer ${token}`).send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
+      expect(role.status).toBe(201);
+      const start = new Date(Date.now() + 72 * 3600000);
+      const end = new Date(start.getTime() + 8 * 3600000);
+      const later = new Date(start.getTime() + 2 * 3600000);
+      const base = { venueId: own.venue.id, jobRoleId: role.body.id, startsAt: start.toISOString(), endsAt: end.toISOString() };
+      const send = (payload: object) => request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${token}`).send(payload);
+
+      expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId, staffA.staffProfileId] })).status).toBe(400);
+      const outside = new Date(end.getTime() + 3600000).toISOString();
+      expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId], staffAssignments: [{ staffProfileId: staffA.staffProfileId, startsAt: start.toISOString(), endsAt: outside }] })).status).toBe(400);
+      expect((await send({ ...base, staffProfileIds: [staffA.staffProfileId], staffAssignments: [{ staffProfileId: staffB.staffProfileId, startsAt: start.toISOString(), endsAt: end.toISOString() }] })).status).toBe(400);
+      const [{ n: none }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(own.venue.workspaceId!, 'shift')} WHERE venue_id = $1`, [own.venue.id]);
+      expect(none).toBe(0);
+
+      const ok = await send({ ...base, staffProfileIds: [staffA.staffProfileId, staffB.staffProfileId], staffAssignments: [{ staffProfileId: staffB.staffProfileId, startsAt: later.toISOString(), endsAt: end.toISOString() }] });
+      expect(ok.status).toBe(201);
+      expect(ok.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+      const rows = await adminDataSource.query(
+        `SELECT staff_profile_id, lower(period) AS start FROM ${businessTable(own.venue.workspaceId!, 'shift_assignment')} WHERE shift_id = $1`,
+        [ok.body.shiftId],
+      );
+      expect(rows).toHaveLength(2);
+      const b = rows.find((r: { staff_profile_id: string }) => r.staff_profile_id === staffB.staffProfileId);
+      expect(new Date(b.start).toISOString()).toBe(later.toISOString());
+    });
+  });
+
   describe('two-step acceptance — staff accepting never confirms the shift', () => {
     it('staff accepting an offer moves it to staff_accepted, not manager_confirmed, and does not claim a seat', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
