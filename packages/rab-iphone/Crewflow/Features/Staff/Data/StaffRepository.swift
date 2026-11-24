@@ -97,6 +97,19 @@ struct StaffRepository {
         try await api.post("/attendance/clock-out", body: body, options: Self.nonRepeatable, as: StaffAttendanceSummary.self)
     }
 
+    /// `POST /attendance/me/sync` (docs/plans/m4-offline/DESIGN.md §7): the
+    /// actions saved on this phone, one per-item outcome each, matched by
+    /// idempotency key. Never auto-retried by the transport: `OfflineSyncEngine`
+    /// owns the backoff, and a later resend is safe because the server answers
+    /// `replayed` for a key it has already seen. The server route is not
+    /// merged yet and nothing calls this while offline mode is off.
+    /// `ownerUserId` binds the request to the queue's owner: it is never sent
+    /// under another account's token (`RequestOptions.requiredSessionUserId`).
+    func syncOffline(_ body: OfflineSyncRequestBody, ownerUserId: String? = nil) async throws -> OfflineSyncResponse {
+        let options = RequestOptions(retry: .never, requiredSessionUserId: ownerUserId)
+        return try await api.post("/attendance/me/sync", body: body, options: options, as: OfflineSyncResponse.self)
+    }
+
     func team(shiftId: String, background: Bool = false) async throws -> [StaffTeamMember] {
         try await api.get("/attendance/me/shift/\(StaffPath.segment(shiftId))/team", options: reads(background), as: [StaffTeamMember].self)
     }
