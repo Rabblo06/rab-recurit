@@ -10525,3 +10525,29 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## Venue Manager bulk email skips out-of-scope recipients in the service itself (owner decision 1, 2026-11-21; #248 review L-2; branch fix/manager-bulk-email-skip-out-of-scope, stacked on #248; no SQL)
+- **Finding (#248 "related, different shape"):** `ManagerService.bulkEmail` accepted the Venue Manager route's flag
+  (`venue_manager.create`) but filtered the ids by organisation only. `VenueManagerService.bulkEmail` (the web route)
+  narrows them to the caller's own Venue Managers first, but a direct caller (job, CLI command, another service) passing
+  that flag could email any Manager of the organisation it can see: Internal Managers, the CEO, other workspaces' Venue
+  Managers. Actor: a holder of `venue_manager.create` reaching the service without the route. Consequence: messages sent
+  under the organisation's name to people outside the caller's reach.
+- **Control:** with `venue_manager.create`, the recipient query itself is `organisation_id` + the caller's
+  `workspace_id` + `type = venue` + the given ids, in the same tenant transaction as the flag re-check (layer 2). Every
+  other id is skipped, never emailed, and only counted (owner decision 1, option b: the batch is not refused). No
+  workspace in the context: nothing is queried and every id is skipped (an undefined `workspaceId` would otherwise drop
+  that predicate). The response stays `{ queued, skipped }`: two counts, no ids, and an existing out-of-scope id is
+  indistinguishable from an unknown one, so it adds nothing to what the caller already knows (the ids it sent). The
+  audit row records the two counts and the subject, never the skipped ids. The `/managers` flag (`manager.manage`) is
+  unchanged (organisation-wide, as `list()`).
+- **Tests:** `venue-manager-bulk-email-scope.integration.spec.ts` (real PostgreSQL, RLS on as `crewflow_app`, service
+  called directly by a CEO holding `venue_manager.create` through a real grant override): positive control (the
+  `/managers` flag does email the Internal Manager, so it is visible under RLS); a mixed batch (two own Venue Managers, the
+  Internal Manager, the CEO, another workspace's and another organisation's Venue Manager, an unknown id) queues exactly
+  the two own Venue Managers' outbox rows and answers `{ queued: 2, skipped: 5 }`, with no out-of-scope identity in the
+  outbox or the audit row; only out-of-scope ids -> `{ queued: 0, skipped: N }`, no outbox row, no error; an existing
+  out-of-scope id and an unknown id give the same answer; no workspace -> everything skipped; the web route's
+  `VenueManagerService.bulkEmail` gives the same counts (no double counting after the second filter).
+- **Residual:** the count reveals how many of the sent ids were out of reach, which the caller can already work out from
+  `queued`. `ManagerProfile.type` / `workspace_id` invariants are the same ones #248's pins rely on.
