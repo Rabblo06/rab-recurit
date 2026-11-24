@@ -60,6 +60,11 @@ export const NotificationType = {
   PAYSLIP_AVAILABLE: 'payslip_available',
   // ...and a calendar period ended with records still waiting for a timesheet or approval (workspace owner).
   PAYROLL_PERIOD_ATTENTION: 'payroll_period_attention',
+  // Owner decision 6 (PayrollRejectionNotificationTypes1786723010000 widens the preference CHECK): a payroll record was
+  // rejected. The manager who finalised those hours is told why (in-app + email); the staff member gets a neutral notice
+  // that their hours are being re-checked (in-app, never the reason, which may mention other people).
+  PAYROLL_RECORD_REJECTED: 'payroll_record_rejected',
+  PAYROLL_HOURS_RECHECKED: 'payroll_hours_rechecked',
 } as const;
 
 export type NotificationTypeType = (typeof NotificationType)[keyof typeof NotificationType];

@@ -130,6 +130,7 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   // ── payroll approval ────────────────────────────────────────────────────────────────────────────────────────────
   'payroll_record.approved': c('payroll_approval', 'warning'),
   'payroll_record.rejected': c('payroll_approval', 'warning'),
+  'payroll_record.returned_to_draft': c('payroll_approval', 'warning'),
   'payroll_run.prepared': c('payroll_approval'),
   'payroll_run.finalised': c('payroll_approval', 'warning'),
   'payroll_run.late_carried_forward': c('payroll_approval'),

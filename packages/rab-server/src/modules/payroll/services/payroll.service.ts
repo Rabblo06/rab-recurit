@@ -1,6 +1,7 @@
 import {
   assertSafePence,
   assertTransition,
+  NotificationType,
   payForMinutes,
   PAYROLL_RECORD_TRANSITIONS,
   PayrollRecordStatus,
@@ -18,6 +19,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { NotificationService } from '../../notification/services/notification.service';
 import { ShiftStatementWakeService } from '../../../engine/core-modules/statement-wake/shift-statement-wake.service';
 import { payrollAudience, RealtimeRecipient } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -241,12 +243,14 @@ function toView(r: Record<string, unknown>): PayrollRecordView {
   };
 }
 
-export function payrollStage(status: string | null): PayrollStage {
+/** `rejected`: the record carries a rejection (decision 6: a rejected record is back in draft, shown as rejected until re-checked). */
+export function payrollStage(status: string | null, rejected = false): PayrollStage {
   if (!status) return 'in_progress';
   if (status === PayrollRecordStatus.PENDING_APPROVAL) return 'ready';
   if ((PAYROLL_APPROVED_STATUSES as readonly string[]).includes(status)) return 'completed';
   if (status === PayrollRecordStatus.REJECTED) return 'rejected';
-  return 'in_progress'; // draft / corrected: not approvable, not completed
+  if (status === PayrollRecordStatus.DRAFT && rejected) return 'rejected';
+  return 'in_progress'; // draft (never rejected) / corrected: not approvable, not completed
 }
 
 interface LockedRecord {
@@ -306,6 +310,10 @@ export class PayrollService {
 
   @Inject(FieldPolicyService)
   private readonly fieldPolicy!: FieldPolicyService;
+
+  /** Owner decision 6: the rejection notices (in the same transaction as the decision). Property-injected, not optional. */
+  @Inject(NotificationService)
+  private readonly notifications!: NotificationService;
 
   /**
    * Phase X J1b: after the approving (or retrying) transaction COMMITS, wake the Worker's statement dispatcher. A hint only:
@@ -417,7 +425,7 @@ export class PayrollService {
       const rows: Array<Record<string, unknown>> = await manager.query(
         // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT a.id AS attendance_id, a.status AS attendance_status, pr.id AS payroll_record_id, pr.status AS payroll_status,
-                pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, ${STATEMENT_SELECT},
+                pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, (pr.rejected_at IS NOT NULL) AS was_rejected, ${STATEMENT_SELECT},
                 sp.id AS staff_profile_id, sp.staff_ref, sp.employment_status, sp.default_pay_rate_pence, (sp.user_id = $3) AS own_hours,
                 u.first_name, u.last_name, u.email, v.name AS venue_name, jr.name AS role_name,
                 ${start} AS starts_at, ${assignmentTimeSql().end} AS ends_at
@@ -450,7 +458,7 @@ export class PayrollService {
             attendanceId: r.attendance_id as string,
             payrollRecordId: recordId,
             payrollStatus: (r.payroll_status as PayrollRecordStatusType) ?? null,
-            stage: payrollStage((r.payroll_status as string) ?? null),
+            stage: payrollStage((r.payroll_status as string) ?? null, Boolean(r.was_rejected)),
             attendanceStatus: r.attendance_status as string,
             staffProfileId: r.staff_profile_id as string,
             staffName: `${r.first_name} ${r.last_name}`,
@@ -625,7 +633,17 @@ export class PayrollService {
     });
   }
 
-  /** Reason required (DTO 3-500 chars). The record leaves the approval queue and never reaches staff History. */
+  /**
+   * Reason required (DTO 3-500 chars). Owner decision 6 (2026-11-21), in ONE transaction:
+   *  - pending_approval → rejected (the decision: who, when, why; audited), then rejected → draft (audited): the record is out
+   *    of the approval queue, can never be approved or paid as it is (draft only moves to pending_approval), and keeps the
+   *    rejection reason for the people who re-check it;
+   *  - the manager who finalised those hours (`shift_report.finalised_by`) is told, with the reason, in-app and by email
+   *    (not when that is the rejecting manager themselves);
+   *  - the staff member gets a neutral in-app notice that their hours are being re-checked, never the reason.
+   * Re-opening the finalised timesheet and re-snapshotting the corrected figures (draft → pending_approval) is NOT built here:
+   * it needs a database change (the record's money snapshot is immutable for the runtime role) — see THREAT-MODEL.md.
+   */
   async reject(ctx: AuthContext, id: string, reason: string): Promise<PayrollRecordView> {
     const trimmed = reason.trim();
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
@@ -645,9 +663,69 @@ export class PayrollService {
         entityId: id,
         metadata: { attendanceId: record.attendance_id, shiftId: record.shift_id, staffProfileId: record.staff_profile_id, reason: trimmed },
       });
+      // Decision 6: straight back to draft (state machine rejected → draft), in the same transaction.
+      assertTransition(PAYROLL_RECORD_TRANSITIONS, PayrollRecordStatus.REJECTED, PayrollRecordStatus.DRAFT);
+      const [, drafted] = (await manager.query(
+        `UPDATE ${t.payroll_record} SET status = $3, updated_at = now() WHERE id = $1 AND workspace_id = $2 AND status = $4`,
+        [id, ctx.workspaceId, PayrollRecordStatus.DRAFT, PayrollRecordStatus.REJECTED],
+      )) as [unknown, number];
+      if (drafted !== 1) throw new ConflictException('Payroll changed while you were rejecting it. Refresh and try again.');
+      await this.auditService.record(manager, ctx, AuditAction.PAYROLL_RECORD_RETURNED_TO_DRAFT, {
+        entityType: 'payroll_record',
+        entityId: id,
+        metadata: { attendanceId: record.attendance_id, shiftId: record.shift_id, staffProfileId: record.staff_profile_id },
+      });
+      await this.notifyRejection(manager, ctx, record, trimmed);
       await this.emitPayrollChanged(manager, ctx, ctx.workspaceId!, 'payroll_record', id, 'rejected'); // C1b realtime
       const [view] = await this.views(manager, ctx, [id]);
       return view!;
+    });
+  }
+
+  /** Decision 6: the two rejection notices. Every value comes from rows of THIS workspace, read in this transaction. */
+  private async notifyRejection(manager: EntityManager, ctx: AuthContext, record: LockedRecord, reason: string): Promise<void> {
+    const t = businessTables(manager);
+    const [row] = await manager.query(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
+      `SELECT sr.finalised_by, u.first_name, u.last_name, v.name AS venue_name,
+              COALESCE((SELECT bool_or(mp.type <> 'venue') FROM core.manager_profile mp
+                         WHERE mp.user_id = sr.finalised_by AND mp.organisation_id = pr.organisation_id), false) AS finaliser_sees_payroll,
+              to_char((${assignmentTimeSql().start}) AT TIME ZONE COALESCE(NULLIF(o.timezone, ''), 'Europe/London'), 'YYYY-MM-DD') AS work_date
+         FROM ${t.payroll_record} pr
+         JOIN ${t.attendance} a ON a.id = pr.attendance_id
+         JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id
+         JOIN ${t.shift} s ON s.id = pr.shift_id
+         JOIN ${t.venue} v ON v.id = s.venue_id
+         JOIN core."user" u ON u.id = $3
+         JOIN core.organisation o ON o.id = pr.organisation_id
+         LEFT JOIN ${t.shift_report} sr ON sr.shift_id = pr.shift_id AND sr.status = 'finalised'
+        WHERE pr.id = $1 AND pr.workspace_id = $2`,
+      [record.id, ctx.workspaceId, record.staff_user_id],
+    );
+    if (!row) return;
+    const what = `${row.first_name} ${row.last_name}'s hours at ${row.venue_name} on ${row.work_date}`;
+    if (row.finalised_by && row.finalised_by !== ctx.userId) {
+      // Review of #338: a Venue Manager (or anyone whose role cannot be read here: fail closed) must never see payroll
+      // content, so they get "needs re-checking" without the reason, in-app too; payroll managers see the reason in-app.
+      const seesPayroll = row.finaliser_sees_payroll === true;
+      await this.notifications.notify(manager, {
+        organisationId: ctx.organisationId!, userId: row.finalised_by as string, type: NotificationType.PAYROLL_RECORD_REJECTED,
+        title: seesPayroll ? 'Payroll record rejected' : 'Hours need re-checking',
+        message: seesPayroll
+          ? `${what} were rejected for payroll: "${reason}". They are back in draft to be re-checked.`
+          : `${what} need re-checking.`,
+        relatedEntityType: 'payroll_record', relatedEntityId: record.id,
+        // The email never carries the free-text reason, the staff name or the hours (it may reach a Venue Manager, who
+        // must never see payroll data, and mailboxes keep copies): it only says something needs re-checking.
+        forceEmail: true,
+        emailMessage: 'A payroll record for hours you approved needs re-checking.\n\nSign in to Crewflow to see the details.',
+      });
+    }
+    await this.notifications.notify(manager, {
+      organisationId: ctx.organisationId!, userId: record.staff_user_id, type: NotificationType.PAYROLL_HOURS_RECHECKED,
+      title: 'Your hours are being re-checked',
+      message: `Your hours at ${row.venue_name} on ${row.work_date} are being re-checked before they are paid.`,
+      relatedEntityType: 'payroll_record', relatedEntityId: record.id,
     });
   }
 
