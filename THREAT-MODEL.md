@@ -10536,3 +10536,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   permissions, tenant scope and deletion invariants. A refused step-up stops a bulk run (no repeated wrong-password calls).
 - **Tests:** `UserDetailPanel.spec.tsx` and `UsersBulkActions.spec.tsx` (the hold alone sends nothing; the password is
   sent; a refusal is shown; cancel deletes nothing).
+- **Review fix (2026-11-24):** per-recipient windows on sendBulk and create-with-offers must sit inside the shift's own
+  window (400 otherwise) and never extend the shift, so scheduled hours and estimated pay cannot grow from an individual
+  time (FLAGGED pay assumption for the owner). The Venue-Manager request path keeps its wider rule. Tests: windows before
+  the start / after the end refused with the shift and assignments unchanged; a second manager of the same workspace gets
+  404 on the resize and on the pipeline.

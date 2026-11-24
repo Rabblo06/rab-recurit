@@ -52,6 +52,7 @@ function renderAt(path: string, ui: ReactElement) {
 
 async function toPasswordStep(email = 'ada@example.test') {
   renderAt('/login', <Login />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Continue with email' }));
   fireEvent.change(await screen.findByLabelText('Work email'), { target: { value: email } });
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
   return screen.findByLabelText('Password');
@@ -61,10 +62,10 @@ describe('Login (item 1 + 2)', () => {
   it('shows Last used on the email action only when a prior successful method was remembered', async () => {
     localStorage.setItem('crewflow:last-sign-in-method:v1', 'email');
     renderAt('/login', <Login />);
-    const action = await screen.findByRole('button', { name: 'Continue' });
+    const action = await screen.findByRole('button', { name: 'Continue with email' });
     expect(action.parentElement).toHaveTextContent('Last used');
-    expect((await screen.findByRole('button', { name: 'Continue' })).parentElement).toHaveTextContent('Last used');
-    expect(screen.getByLabelText('Work email')).toHaveValue('');
+    fireEvent.click(action);
+    expect(await screen.findByLabelText('Work email')).toHaveValue('');
   });
 
   it('does not remember a failed login as a last-used method', async () => {

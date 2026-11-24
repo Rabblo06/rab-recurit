@@ -3,7 +3,7 @@ import { INVALID_CREDENTIALS_MESSAGE, loginError, SessionNotEstablishedError } f
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconArrowRight, IconEye, IconEyeOff } from '@tabler/icons-react';
+import { IconArrowRight, IconBrandGoogle, IconBrandWindows, IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
@@ -165,6 +165,21 @@ export default function Login() {
     pending.current = false;
   }
 
+  /**
+   * Server-initiated redirect (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.7.9) — a full browser
+   * navigation, never an XHR/fetch. The callback sets the SAME `rab_rt` cookie login already
+   * sets and redirects to `/oauth/callback-complete`, which reuses the EXISTING
+   * `bootstrapSession()` to finish — no new frontend session mechanism. Kept from main in the new
+   * UI so SSO-only accounts can still sign in.
+   */
+  function startOAuth(provider: 'google' | 'microsoft'): void {
+    const base = (api.defaults.baseURL ?? '').replace(/\/$/, '');
+    // A same-origin return path (validated again by the server) brings the user back where they were going.
+    const returnTo = searchParams.get('returnTo');
+    const safeReturnTo = returnTo && returnTo.startsWith('/') && !returnTo.startsWith('//') && !returnTo.startsWith('/\\') ? returnTo : null;
+    window.location.href = `${base}/auth/${provider}${safeReturnTo ? `?returnTo=${encodeURIComponent(safeReturnTo)}` : ''}`;
+  }
+
   if (challenge) {
     return (
       <SecurityAuthLayout>
@@ -188,15 +203,24 @@ export default function Login() {
   return (
     <AuthLayout>
       <AnimatePresence mode="wait">
-        {step !== 'password' ? <motion.div key="email" variants={stepVariants} initial="initial" animate="animate" exit="exit">
-          <h1 style={s.title}>{oauthError ? 'Try signing in again' : workspaceLabel ? `Sign in to ${workspaceLabel}` : 'Welcome to Crewflow'}</h1>
+        {/* Kept from main: the provider choice first (SSO-only accounts sign in here), then the email step in the new look. */}
+        {step === 'welcome' ? <motion.div className="auth-welcome" key="welcome" variants={stepVariants} initial="initial" animate="animate" exit="exit">
+          <h1 style={s.title}>{oauthError ? 'Try signing in again' : workspaceLabel ? `Sign in to ${workspaceLabel}` : 'Welcome to your workspace'}</h1>
           <p style={s.subtitle}>Your team. Your shifts. All in sync.</p>
           {oauthError && <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Something didn’t go as planned. Let’s give it another try.</p>}
-          {providers.password ? <form onSubmit={handleEmailContinue}>
+          {providers.google && <button type="button" style={s.providerBtn} onClick={() => startOAuth('google')}><IconBrandGoogle size={18} /> Continue with Google</button>}
+          {providers.microsoft && <button type="button" style={s.providerBtn} onClick={() => startOAuth('microsoft')}><IconBrandWindows size={18} /> Continue with Microsoft</button>}
+          {providers.password && <div className="auth-last-action"><button className="auth-email-start" type="button" style={s.providerBtn} onClick={() => setStep('email')}>Continue with email</button>{lastEmailSignIn && <span className="auth-last-used">Last used</span>}</div>}
+          {!providers.password && !providers.google && !providers.microsoft && <p role="status" style={s.error}>Sign-in is not available. Please contact your workspace administrator.</p>}
+        </motion.div> : step === 'email' ? <motion.div key="email" variants={stepVariants} initial="initial" animate="animate" exit="exit">
+          <h1 style={s.title}>Sign in with email</h1>
+          <p style={s.subtitle}>Use the email linked to your workspace.</p>
+          <form onSubmit={handleEmailContinue}>
             <label style={s.label} htmlFor="email">Work email</label>
-            <input id="email" style={s.input} type="email" placeholder="you@company.com" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />
-            <div className="auth-last-action"><button type="submit" className="flow-button" style={s.submitBtn}>Continue <IconArrowRight size={14} aria-hidden="true" /></button>{lastEmailSignIn && <span className="auth-last-used">Last used</span>}</div>
-          </form> : <p role="status" style={s.error}>Email sign-in is not available. Please contact your workspace administrator.</p>}
+            <input id="email" style={s.input} type="email" placeholder="you@company.com" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" autoFocus required />
+            <button type="submit" className="flow-button" style={s.submitBtn}>Continue <IconArrowRight size={14} aria-hidden="true" /></button>
+          </form>
+          <button type="button" style={s.backBtn} onClick={() => setStep('welcome')}>← Back to sign in</button>
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
           {/* The one announcement for a failed sign-in (no toast). Both fields point at it; they are marked invalid only for

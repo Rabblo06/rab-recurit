@@ -65,8 +65,8 @@ it('polls every 15 seconds (metrics every 30 s: the server caches them that long
 it('health cards come from the server report (status pill + fixed detail text)', async () => {
   renderWithQuery(<HealthTab />);
   expect(await screen.findByText('PostgreSQL · 18 ms · pool 4 of 10 in use')).toBeTruthy();
-  expect(screen.getByText('Healthy')).toBeTruthy();
-  expect(screen.getByText('Warning')).toBeTruthy();
+  expect(screen.getAllByText('Healthy').length).toBeGreaterThan(0); // new UI: pill + Status detail
+  expect(screen.getAllByText('Warning').length).toBeGreaterThan(0);
 });
 
 it('X1.1: the security audit events card shows failed-login drops over the 10,000 backlog', async () => {
@@ -212,11 +212,11 @@ describe('X2.4 health indicators (Twenty admin-panel/indicators)', () => {
     routeGet(get, { '/admin/health/report': indicatorReport, '/admin/queues': queues });
     renderWithQuery(<HealthTab />);
     expect(await screen.findByText('Version 2.4.0 · Node v24.1.0 · up 3 h 2 min')).toBeTruthy();
-    for (const label of ['API', 'Database', 'Redis', 'Worker', 'BullMQ schedulers']) expect(screen.getByText(label, { selector: 'b' })).toBeTruthy();
+    for (const label of ['API', 'Database', 'Redis', 'Worker', 'BullMQ schedulers']) expect(screen.getByText(label, { selector: 'summary > span' })).toBeTruthy();
     expect(screen.getByText('PostgreSQL 16 · 4 ms · 12 of 100 connections (12%)')).toBeTruthy();
     expect(screen.getByText('Redis 7.2.4 · 1.0 MB of 64.0 MB (2%) · 1 ms')).toBeTruthy();
     expect(screen.getByText('No BullMQ schedulers in Redis: scans are not being triggered.')).toBeTruthy();
-    expect(screen.getByText('Degraded')).toBeTruthy();
+    expect(screen.getAllByText('Degraded').length).toBeGreaterThan(0);
     const worker = screen.getByLabelText('Worker details');
     expect(within(worker).getByText('rab-email')).toBeTruthy();
     expect(within(worker).getByText('2 failed · 3 waiting · 0 active · 0 delayed')).toBeTruthy();

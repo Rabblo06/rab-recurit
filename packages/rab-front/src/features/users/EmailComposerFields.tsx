@@ -18,12 +18,13 @@ export default function EmailComposerFields({recipients,subject,message,onSubjec
  const editor=useRef<HTMLDivElement | null>(null);
  const fileInput=useRef<HTMLInputElement>(null);
  const expandButton=useRef<HTMLButtonElement>(null);
- const savedHtml=useRef('');
+ // The editor's own nodes, cloned (never re-parsed from an HTML string) so switching views cannot inject markup.
+ const savedNodes=useRef<Node[]>([]);
  const savedSelection=useRef<Range | null>(null);
  const options=[['H₁','Heading 1','h1'],['H₂','Heading 2','h2'],['H₃','Heading 3','h3'],['❝','Quote','blockquote'],['☷','Bullet List','ul']];
- const sync=()=>{savedHtml.current=editor.current?.innerHTML??'';onMessageChange(editor.current?.innerText??'');};
+ const sync=()=>{savedNodes.current=Array.from(editor.current?.childNodes??[]).map(n=>n.cloneNode(true));onMessageChange(editor.current?.innerText??'');};
  const switchView=(value:boolean)=>{sync();setCommands(false);setExpanded(value);};
- const attachEditor=(node:HTMLDivElement|null)=>{editor.current=node;if(node && !node.innerHTML){if(savedHtml.current)node.innerHTML=savedHtml.current;else node.textContent=message;}};
+ const attachEditor=(node:HTMLDivElement|null)=>{editor.current=node;if(node && !node.hasChildNodes()){if(savedNodes.current.length)node.replaceChildren(...savedNodes.current.map(n=>n.cloneNode(true)));else node.textContent=message;}};
  const format=(tag:string)=>{
    const selection=window.getSelection();editor.current?.focus();if(savedSelection.current){selection?.removeAllRanges();selection?.addRange(savedSelection.current);}
    // The browser editing commands preserve the current selection and undo history.
@@ -49,6 +50,6 @@ export default function EmailComposerFields({recipients,subject,message,onSubjec
    {expanded&&createPortal(<div className="email-fullscreen" role="dialog" aria-modal="true" aria-label="Text Editor" onKeyDown={event=>{if(event.key==='Escape'&&!commands){event.preventDefault();event.stopPropagation();switchView(false);requestAnimationFrame(()=>expandButton.current?.focus());}if(event.key==='Tab'){const buttons=event.currentTarget.querySelectorAll<HTMLElement>('button,[contenteditable="true"]');const first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}}}}><header><button autoFocus type="button" className="btn-icon" aria-label="Close text editor" onClick={()=>switchView(false)}><IconX size={16}/></button>Text Editor</header>{body}</div>,document.body)}
    {!!files.length&&<div className="email-local-files">{files.map((file,index)=><span key={index}>{file.name}<button type="button" aria-label={'Remove attachment '+file.name} onClick={()=>setFiles(current=>current.filter((_,i)=>i!==index))}><IconX size={12}/></button></span>)}</div>}
    <span className="visually-hidden" role="status">{notice}</span>
-   <footer className="email-preview-footer"><input ref={fileInput} type="file" multiple hidden onChange={e=>{setFiles(current=>[...current,...Array.from(e.target.files??[])]);e.target.value='';}}/><button type="button" className="btn-icon" aria-label="Clear preview draft" onClick={()=>{onSubjectChange('');onMessageChange('');savedHtml.current='';if(editor.current)editor.current.innerHTML='';setFiles([]);setCopyValues({Cc:'',Bcc:''});setTo(recipients);setNotice('Preview draft cleared.');}}><IconTrash size={16}/></button><button type="button" className="btn-icon" aria-label="Attach local preview files" onClick={()=>fileInput.current?.click()}><IconPaperclip size={16}/></button><button className="email-preview-send" type="button" disabled title="Sending is disabled in this UI preview"><IconSend size={14}/>Send <span>Ctrl ↵</span></button></footer>
+   <footer className="email-preview-footer"><input ref={fileInput} type="file" multiple hidden onChange={e=>{setFiles(current=>[...current,...Array.from(e.target.files??[])]);e.target.value='';}}/><button type="button" className="btn-icon" aria-label="Clear preview draft" onClick={()=>{onSubjectChange('');onMessageChange('');savedNodes.current=[];editor.current?.replaceChildren();setFiles([]);setCopyValues({Cc:'',Bcc:''});setTo(recipients);setNotice('Preview draft cleared.');}}><IconTrash size={16}/></button><button type="button" className="btn-icon" aria-label="Attach local preview files" onClick={()=>fileInput.current?.click()}><IconPaperclip size={16}/></button><button className="email-preview-send" type="button" disabled title="Sending is disabled in this UI preview"><IconSend size={14}/>Send <span>Ctrl ↵</span></button></footer>
  </div>;
 }

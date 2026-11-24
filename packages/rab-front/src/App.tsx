@@ -255,9 +255,7 @@ function OnboardingGate({ children }: { children: JSX.Element }) {
   if (!mustOwnWorkspace) return children;
   if (workspaceLoading || workspaceErrored) return null;
   if (!workspace) return <Navigate to="/onboarding/workspace" replace />;
-  // New UI: an unfinished onboarding goes to the preparation screen first while the schema it needs is still being
-  // built (only when this session routes through the workspace schema, as below), otherwise to the profile step.
-  if (!workspace.onboardingCompletedAt) return <Navigate to={workspace.schemaRequired === true && (workspace.schemaStatus === 'CREATING' || workspace.schemaStatus === 'FAILED') ? '/onboarding/preparing' : '/onboarding/profile'} replace />;
+  if (!workspace.onboardingCompletedAt) return <Navigate to="/onboarding/profile" replace />;
   // Phase B P8: a workspace whose schema is still being built (CREATING) or whose last attempt failed (FAILED) is resumed
   // or retried ONLY by its owner's own request — the preparation screen auto-resumes CREATING and offers "Try again" on
   // FAILED. Redirect there only when the server says this session actually routes through the workspace schema
