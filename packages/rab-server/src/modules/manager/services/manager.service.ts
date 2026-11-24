@@ -104,6 +104,11 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // stays withheld from every tenant role and guards no tenant route.
       PermissionFlag.SETTINGS_VIEW,
       PermissionFlag.AI_USE,
+      // Staff documents (StaffDocumentPermissions1786722310000; OWNER DECISION pending): own workspace only, non-venue managers
+      // only, never one's own document (StaffDocumentService + RLS).
+      PermissionFlag.STAFF_DOCUMENT_VIEW,
+      PermissionFlag.STAFF_DOCUMENT_MANAGE,
+      PermissionFlag.STAFF_DOCUMENT_CONFIGURE,
     ],
   },
   [ManagerType.VENUE]: {

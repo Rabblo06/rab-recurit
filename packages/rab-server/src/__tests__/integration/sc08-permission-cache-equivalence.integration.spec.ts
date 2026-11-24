@@ -26,7 +26,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 
 /**
  * SC-08 (Phase X Stage 0, S0-C-caches.md §C6): before any cache is switched on, prove that caching cannot change an
- * authorisation answer. For ALL 46 permission flags and every identity shape the auth layer distinguishes:
+ * authorisation answer. For ALL 50 permission flags and every identity shape the auth layer distinguishes:
  *
  *   role grant · no grant · override grant · override revoke · a custom role of ANOTHER workspace · suspended workspace
  *   membership · platform admin · Admin Inspect of a target
@@ -46,7 +46,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 const ALL_FLAGS = Object.values(PermissionFlag) as PermissionFlagType[];
 type Answers = Record<string, boolean>;
 
-describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity shape (integration)', () => {
+describeIfDb('SC-08 cached ≡ uncached for all 50 permissions, every identity shape (integration)', () => {
   jest.setTimeout(240_000);
 
   let app: INestApplication;
@@ -204,8 +204,8 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
     await app?.close();
   });
 
-  it('there are 46 flags and every identity shape is covered', () => {
-    expect(ALL_FLAGS).toHaveLength(46);
+  it('there are 50 flags and every identity shape is covered', () => {
+    expect(ALL_FLAGS).toHaveLength(50);
     expect(shapes.map((s) => s.name)).toHaveLength(7);
   });
 

@@ -14,6 +14,8 @@ export const FileKind = {
   APPROVED_SHIFT_STATEMENT_PDF: 'APPROVED_SHIFT_STATEMENT_PDF',
   /** The payroll provider's official payslip PDF for one staff member in one finalised run (manager upload, versioned). Policy: PayslipFilePolicy. */
   PAYSLIP_PDF: 'PAYSLIP_PDF',
+  /** A staff member's document (right to work, licence, certificate): PDF / PNG / JPEG, manager or own upload. Policy: StaffDocumentFilePolicy. */
+  STAFF_DOCUMENT: 'STAFF_DOCUMENT',
 } as const;
 export type FileKindType = (typeof FileKind)[keyof typeof FileKind];
 
@@ -28,10 +30,13 @@ export type FileStatusType = (typeof FileStatus)[keyof typeof FileStatus];
 export interface FileKindRules {
   /** Folder segment in the object key. */
   folder: string;
-  content: 'image' | 'pdf';
+  /** `document` = a PDF or a PNG / JPEG scan, decided by magic bytes. */
+  content: 'image' | 'pdf' | 'document';
   maxBytes: number;
-  /** Images render inline for the app (proxied bytes); PDFs are always `attachment`. */
+  /** Images render inline for the app (proxied bytes); PDFs and documents are always `attachment`. */
   inline: boolean;
+  /** Presigned download lifetime for this kind when shorter than S3_SIGNED_URL_TTL_SECONDS (a URL cannot be revoked once minted). */
+  signedUrlTtlSeconds?: number;
 }
 
 const MB = 1024 * 1024;
@@ -45,6 +50,7 @@ export const FILE_KIND_RULES: Record<FileKindType, FileKindRules> = {
   VENUE_PHOTO: { folder: 'venues', content: 'image', maxBytes: 5 * MB, inline: true },
   APPROVED_SHIFT_STATEMENT_PDF: { folder: 'payroll', content: 'pdf', maxBytes: 10 * MB, inline: false },
   PAYSLIP_PDF: { folder: 'payslips', content: 'pdf', maxBytes: 10 * MB, inline: false },
+  STAFF_DOCUMENT: { folder: 'staff-documents', content: 'document', maxBytes: 10 * MB, inline: false, signedUrlTtlSeconds: 60 },
 };
 
 /** Kinds a client may ever ask to upload directly. Generated evidence (PDFs) is worker-produced only. */

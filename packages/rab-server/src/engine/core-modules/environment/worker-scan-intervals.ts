@@ -57,6 +57,8 @@ export const WORKER_SCAN_INTERVAL_SETTINGS = Object.freeze({
   WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS: s('final-timesheet', 300, 60, 900),
   WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: s('shift-statement-dispatch', 5, 1, 300),
   WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS: s('payroll-period-attention', 1_800, 300, 7_200),
+  // Lane D: staff document expiry alerts (30 / 7 / 0 days; idempotent per document and threshold).
+  WORKER_STAFF_DOCUMENT_EXPIRY_INTERVAL_SECONDS: s('staff-document-expiry', 3_600, 300, 86_400),
   WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: s('realtime-outbox-publish', 2, 1, 60),
 } as const satisfies Record<string, WorkerScanIntervalSetting>);
 

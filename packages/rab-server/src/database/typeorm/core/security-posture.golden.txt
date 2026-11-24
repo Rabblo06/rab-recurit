@@ -467,6 +467,14 @@ execute|resolve_released_host_label(text)|crewflow|false
 execute|resolve_workspace_by_host_label(text)|PUBLIC|false
 execute|resolve_workspace_by_host_label(text)|crewflow_app|true
 execute|resolve_workspace_by_host_label(text)|crewflow|false
+execute|staff_document_guard()|crewflow_app|false
+execute|staff_document_guard()|crewflow|true
+execute|staff_document_offer_block(uuid,text[],date)|PUBLIC|false
+execute|staff_document_offer_block(uuid,text[],date)|crewflow_app|true
+execute|staff_document_offer_block(uuid,text[],date)|crewflow|true
+execute|staff_document_record_scan(uuid,text)|PUBLIC|false
+execute|staff_document_record_scan(uuid,text)|crewflow_app|true
+execute|staff_document_record_scan(uuid,text)|crewflow|true
 execute|suspend_workspace_membership(uuid)|PUBLIC|false
 execute|suspend_workspace_membership(uuid)|crewflow_app|true
 execute|suspend_workspace_membership(uuid)|crewflow|true
@@ -699,6 +707,9 @@ owner|function|resolve_membership_for_session(uuid)|rab_secure_owner|definer=tru
 owner|function|resolve_membership_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|resolve_released_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|resolve_workspace_by_host_label(text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|staff_document_guard()|crewflow|definer=false
+owner|function|staff_document_offer_block(uuid,text[],date)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|staff_document_record_scan(uuid,text)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|suspend_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|unlink_provider_identities_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|user_owns_manager_workspace(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
@@ -814,6 +825,8 @@ owner|table|shift_report|crewflow
 owner|table|shift_request_staff|crewflow
 owner|table|shift_staff_review|crewflow
 owner|table|shift|crewflow
+owner|table|staff_document_requirement|crewflow
+owner|table|staff_document|crewflow
 owner|table|staff_profile|crewflow
 owner|table|stored_file|crewflow
 owner|table|upgrade_migration|rab_secure_owner
@@ -911,6 +924,8 @@ rls|shift_report|enable=true|force=true
 rls|shift_request_staff|enable=true|force=true
 rls|shift_staff_review|enable=true|force=true
 rls|shift|enable=true|force=true
+rls|staff_document_requirement|enable=true|force=true
+rls|staff_document|enable=true|force=true
 rls|staff_profile|enable=true|force=true
 rls|stored_file|enable=true|force=true
 rls|upgrade_migration|enable=true|force=true
@@ -1092,6 +1107,10 @@ table|shift_staff_review|crewflow_app|S,I,U
 table|shift_staff_review|crewflow|S,I,U,D,T,R,G
 table|shift|crewflow_app|S,I,U,D
 table|shift|crewflow|S,I,U,D,T,R,G
+table|staff_document_requirement|crewflow_app|S,I,D
+table|staff_document_requirement|crewflow|S,I,U,D,T,R,G
+table|staff_document|crewflow_app|S,I
+table|staff_document|crewflow|S,I,U,D,T,R,G
 table|staff_profile|crewflow_app|S,I,U,D
 table|staff_profile|crewflow|S,I,U,D,T,R,G
 table|stored_file|crewflow_app|S,I,U

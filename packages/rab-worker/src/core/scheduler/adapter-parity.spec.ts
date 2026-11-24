@@ -14,6 +14,7 @@ jest.mock('../../queues/rab-reports/shift-report-scheduler.job', () => ({ runShi
 jest.mock('../../queues/rab-reports/final-timesheet.job', () => ({ runFinalTimesheetCycle: jest.fn() }));
 jest.mock('../../queues/rab-reports/shift-statement.job', () => ({ runShiftStatementDispatchCycle: jest.fn(), processShiftStatementJob: jest.fn() }));
 jest.mock('../../queues/rab-reports/payroll-period-attention.job', () => ({ runPayrollPeriodAttentionCycle: jest.fn() }));
+jest.mock('../../queues/rab-reports/staff-document-expiry.job', () => ({ runStaffDocumentExpiryCycle: jest.fn() }));
 jest.mock('../../queues/rab-realtime/publish-outbox.job', () => ({ runRealtimeOutboxPublishCycle: jest.fn() }));
 jest.mock('../../queues/rab-maintenance/account-invite-cleanup.job', () => ({
   runAccountInviteCleanupCycle: jest.fn(),
@@ -40,6 +41,7 @@ import * as report from '../../queues/rab-reports/shift-report-scheduler.job';
 import * as finalTs from '../../queues/rab-reports/final-timesheet.job';
 import * as statement from '../../queues/rab-reports/shift-statement.job';
 import * as payroll from '../../queues/rab-reports/payroll-period-attention.job';
+import * as staffDocs from '../../queues/rab-reports/staff-document-expiry.job';
 import * as realtime from '../../queues/rab-realtime/publish-outbox.job';
 import * as invite from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import * as token from '../../queues/rab-maintenance/token-cleanup.job';
@@ -149,11 +151,13 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     (report.runShiftReportSchedulerCycle as jest.Mock).mockResolvedValue({});
     (finalTs.runFinalTimesheetCycle as jest.Mock).mockResolvedValue({});
     (payroll.runPayrollPeriodAttentionCycle as jest.Mock).mockResolvedValue({});
+    (staffDocs.runStaffDocumentExpiryCycle as jest.Mock).mockResolvedValue({ notified: 0, candidates: 0 });
     (statement.runShiftStatementDispatchCycle as jest.Mock).mockResolvedValue({ claimed: 0 });
     const p = new ReportScanProcessor(holder);
     await p.shiftReportScheduler();
     await p.finalTimesheet();
     await p.payrollPeriodAttention();
+    await p.staffDocumentExpiry();
     await expect(p.shiftStatementDispatch()).resolves.toBe(false);
     expect((report.runShiftReportSchedulerCycle as jest.Mock).mock.calls[0]).toEqual([
       d.directDataSource, d.tenantContext, d.attendanceQrService, d.qrImageService, d.emailOutboxService, d.fileService, 60, { audit: d.auditService },
@@ -161,6 +165,7 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     expect((report.runShiftReportSchedulerCycle as jest.Mock).mock.calls[0][0]).toBe(d.directDataSource);
     expect((finalTs.runFinalTimesheetCycle as jest.Mock).mock.calls[0]).toEqual([d.directDataSource, d.tenantContext, d.emailOutboxService, d.fileService, { audit: d.auditService }]);
     expect((payroll.runPayrollPeriodAttentionCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.tenantContext, d.notificationService]);
+    expect((staffDocs.runStaffDocumentExpiryCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.tenantContext, d.notificationService]);
     const publish = (statement.runShiftStatementDispatchCycle as jest.Mock).mock.calls[0][2];
     // D-Q1: organisation ids are UUIDs (the declared tenant scope is validated); the add() itself is unchanged.
     const [r1, o, w] = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-0000000000a1'];
