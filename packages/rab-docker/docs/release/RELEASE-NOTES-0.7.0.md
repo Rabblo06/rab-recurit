@@ -18,7 +18,8 @@ publish.
   interrupted copy keeps it blocked, never half-switched, and the next start continues where it stopped. Each start
   spends at most about 5 minutes on the copy.
 - **The core copies are never changed.** After the cutover they are read-only for the application.
-- **Version:** root `package.json` 0.7.0; `CREWFLOW_PREVIOUS_VERSIONS` gains 0.6.0.
+- **Version:** root `package.json` 0.7.0; `CREWFLOW_PREVIOUS_VERSIONS` gains 0.6.0; `CREWFLOW_UPGRADE_FROM_VERSIONS['0.7.0']`
+  is `['0.6.0']` (every published 0.6.x).
 - **Upgrade path:** from 0.7.0 on, the code upgrades strictly from the previous release. **0.7.0 accepts only a database
   that completed 0.6.0.** An R254 (0.4.0) or R256 (0.5.0) database must take 0.6.0 first.
 

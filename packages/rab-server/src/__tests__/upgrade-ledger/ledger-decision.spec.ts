@@ -111,10 +111,11 @@ describeIfB1('LV-3 the previous-version check (pure decideUpgradeStart)', () => 
     }
   });
 
-  it('after 0.6.0 only the immediately previous version is accepted, and nothing recorded never adopts again', () => {
+  it('after 0.6.0 only a version on the reviewed upgrade-from list is accepted, and nothing recorded never adopts again', () => {
     const previousVersions = ['0.4.0', '0.5.0', '0.6.0'];
-    expect(B1!.decide({ ...base, codeVersion: '0.7.0', previousVersions, complete: { '0.6.0': true } })).toMatchObject({ kind: 'continue', from: '0.6.0' });
-    expect(refusal(() => B1!.decide({ ...base, codeVersion: '0.7.0', previousVersions, complete: { '0.5.0': true } }))).toBe(TOO_OLD);
-    expect(refusal(() => B1!.decide({ ...base, codeVersion: '0.7.0', previousVersions, ledgerExists: false, hasInstanceRows: false, attribution: r256 }))).toBe(TOO_OLD);
+    const upgradeFrom = { '0.7.0': ['0.6.0'] };
+    expect(B1!.decide({ ...base, codeVersion: '0.7.0', previousVersions, upgradeFrom, complete: { '0.6.0': true } })).toMatchObject({ kind: 'continue', from: '0.6.0' });
+    expect(refusal(() => B1!.decide({ ...base, codeVersion: '0.7.0', previousVersions, upgradeFrom, complete: { '0.5.0': true } }))).toBe(TOO_OLD);
+    expect(refusal(() => B1!.decide({ ...base, codeVersion: '0.7.0', previousVersions, upgradeFrom, ledgerExists: false, hasInstanceRows: false, attribution: r256 }))).toBe(TOO_OLD);
   });
 });
