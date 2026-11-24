@@ -13,8 +13,9 @@ import { scope, tbl } from '../lib/tenant';
 /**
  * Scenario 2 — Manager A runs a real agency day in workspace A: venue (geofenced), job role, staff invited and activated
  * from the worker email log, shift, offer, staff accepts on the mobile API, manager confirms, check-in → clock-in →
- * clock-out with location evidence, attendance review, report finalise (timesheet), payroll record approval, payroll run.
- * Then: every row is where this mode puts it (HWS on: workspace A's schema; HWS off: `core`, organisation A) and none is B's.
+ * clock-out with location evidence, attendance review, report finalise (timesheet), payroll record approval, payroll run,
+ * and the staff member's own payslip (processing → provider PDF available and downloadable → paid). Then: every row is
+ * where this mode puts it (HWS on: workspace A's schema; HWS off: `core`, organisation A) and none is B's.
  */
 const tag = RUN_ID.toLowerCase();
 const uniq = Date.now().toString(36).slice(-5);
@@ -175,7 +176,66 @@ test.describe.serial('S2 Manager A business flow in workspace A', () => {
     await shot(page, '02-workspace-a-shifts');
   });
 
-  test("2.5 every business row is where this mode puts it (HWS on: workspace A schema; HWS off: core, organisation A), none is B's", async () => {
+  test('2.5 staff views their payslip after the payroll run (processing → provider PDF available → paid), own copy only', async () => {
+    const s = loadState();
+    m ??= await managerFor('A');
+    staff ??= await staffMobile(s.A.staffEmail!);
+    const runId = s.A.payrollRunId!;
+    const mine = async (what: string) => {
+      const body = expectStatus(await staff.get('/rest/v1/payroll/me/payslips'), 200, what).body;
+      const entry = rows(body).find((e) => e.runId === runId);
+      expect(entry, `${what}: an entry for run ${runId}`).toBeTruthy();
+      return entry;
+    };
+
+    // Finalised run, no provider document yet: the staff member sees the period, gross pay and "processing".
+    const processing = await mine('my payslips after finalise');
+    expect(processing).toMatchObject({ status: 'processing', shiftCount: 1, grossPence: 4 * 1450, document: null, netPence: null, paidAt: null });
+
+    // The manager uploads the provider's official payslip (multipart `file`, PDF only) and copies its net pay.
+    const pdf = [
+      '%PDF-1.4',
+      '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj',
+      '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj',
+      '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj',
+      'trailer<</Root 1 0 R>>',
+      `%W6 e2e synthetic provider payslip ${tag} ${uniq}`,
+      '%%EOF',
+      '',
+    ].join('\n');
+    const boundary = `----crewflow-e2e-${uniq}`;
+    const multipart = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="payslip.pdf"\r\nContent-Type: application/pdf\r\n\r\n${pdf}\r\n--${boundary}--\r\n`;
+    expectStatus(
+      await m.req('POST', `/rest/v1/payroll/runs/${runId}/payslips/${s.A.staffProfileId}/document`, multipart, { 'Content-Type': `multipart/form-data; boundary=${boundary}` }),
+      200,
+      'upload provider payslip',
+    );
+    expectStatus(await m.put(`/rest/v1/payroll/runs/${runId}/payslips/${s.A.staffProfileId}/net`, { netPence: 5000 }), 200, 'record provider net pay');
+
+    const available = await mine('my payslips after upload');
+    expect(available).toMatchObject({ status: 'available', grossPence: 4 * 1450, netPence: 5000, netSource: 'provider_document', paidAt: null });
+    const fileId: string = available.document?.fileId;
+    expect(fileId, 'the available payslip names its PDF').toBeTruthy();
+
+    // The staff member opens their own payslip: the exact bytes the manager uploaded.
+    const own = await staff.get(`/rest/v1/files/${fileId}/download`);
+    expectStatus(own, 200, 'download own payslip');
+    expect(String(own.headers['content-type'])).toContain('application/pdf');
+    expect(own.raw.toString('utf8')).toBe(pdf);
+    // Without a session the payslip is not served.
+    expect((await anonMobile().get(`/rest/v1/files/${fileId}/download`)).status).toBe(401);
+
+    // Payment confirmed by the manager: the staff member sees it as paid.
+    expectStatus(await m.post(`/rest/v1/payroll/runs/${runId}/payslips/${s.A.staffProfileId}/mark-paid`, { paymentReference: `W6-E2E-${uniq}` }), 200, 'mark payslip paid');
+    const paid = await mine('my payslips after payment');
+    expect(paid.status).toBe('paid');
+    expect(paid.paidAt).toBeTruthy();
+    updateState((st) => {
+      st.notes.payslip = { processing: processing.status, available: available.status, paid: paid.status, fileId, downloadBytes: own.raw.length };
+    });
+  });
+
+  test("2.6 every business row is where this mode puts it (HWS on: workspace A schema; HWS off: core, organisation A), none is B's", async () => {
     const s = loadState();
     const tables = ['venue', 'job_role', 'staff_profile', 'shift', 'shift_assignment', 'job_offer', 'attendance', 'attendance_correction', 'shift_report', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip'];
     const tableIn = async (schema: string, t: string) => (await sql(`select 1 from information_schema.tables where table_schema = $1 and table_name = $2`, [schema, t])).length > 0;

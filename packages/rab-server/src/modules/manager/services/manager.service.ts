@@ -35,7 +35,7 @@ import { ListManagersDto } from '../dto/list-managers.dto';
 import { ListVenueManagersDto } from '../dto/list-venue-managers.dto';
 import { UpdateManagerDto } from '../dto/update-manager.dto';
 import { ManagerProfile } from '../entities/manager-profile.entity';
-import { ManagerVenue } from '../entities/manager-venue.entity';
+import { ManagerVenue } from '../entities';
 import { EmailChangeRequestResult, EmailChangeService } from '../../identity/services/email-change.service';
 import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 import { assertPlatformAdminTargetAllowed } from '../../../engine/core-modules/platform-admin/platform-admin-target-guard';

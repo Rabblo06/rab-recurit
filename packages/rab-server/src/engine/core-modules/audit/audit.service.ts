@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { AuditLog } from '../../../modules/identity/entities';
+import { AuditLog } from '../identity/entities';
 import { shipAuditRowAfterCommit } from '../audit-events/audit-event-shipping';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
