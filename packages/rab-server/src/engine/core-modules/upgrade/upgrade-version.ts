@@ -1,10 +1,18 @@
 /**
- * OWNER-DB-ULTIMATE Part B3: the release version, Twenty's model. Twenty: `APP_VERSION` + `TWENTY_PREVIOUS_VERSIONS`
- * (twentyhq/twenty @ eedb0a73 `database/commands/run-instance-commands.command.ts:142-143`: the previous version is the
- * last entry of the previous-versions list). Re-implemented, not copied.
+ * OWNER-DB-ULTIMATE Part B3: the release version, Twenty's model. Twenty: `APP_VERSION` + `TWENTY_PREVIOUS_VERSIONS`, and the
+ * versions an upgrade is supported from, `TWENTY_CROSS_UPGRADE_SUPPORTED_VERSIONS` = the previous versions plus the current one
+ * (twentyhq/twenty @ eedb0a73 `engine/core-modules/upgrade/constants/twenty-cross-upgrade-supported-version.constant.ts`,
+ * read by `upgrade-command-registry.service.ts:166-205`). Re-implemented, not copied.
  *
  * The version is `MAJOR.MINOR.PATCH`, one per release, from the root `package.json` and baked into the image as
  * `CREWFLOW_APP_VERSION` (Dockerfile ARG → ENV). R254 = 0.4.0, R256 = 0.5.0, the first release with the logbook = 0.6.0.
+ *
+ * Patch releases (owner decision 2026-11-18): a patch carries no command and resumes its minor .0's incomplete instance
+ * commands under the .0's own step names. ORDER INVARIANT (review R1 of #240): those commands run BEFORE any migration of
+ * the patch's start (never after this start's migrations; on the .0 schema unless an earlier --force or fresh patch start
+ * applied later ones), and only when the .0's migrations step is completed; otherwise the start refuses (65, nothing
+ * applied) unless --force. Exceptions (after every migration): a start with no instance row
+ * (fresh install / unchecked local history) and that --force start. Implemented in upgrade-runner.ts.
  *
  * Pure apart from readAppVersion's file read; no side effects on import.
  */
@@ -22,6 +30,26 @@ export const VERSION_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1
  * 0.6.2 after 0.7.0) is never appended on main: it is built from that line's own branch, whose list ends at its own line.
  */
 export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0']);
+
+/**
+ * The versions each MINOR release (`M.m.0`) upgrades FROM: an explicit list, reviewed with that release (owner decision
+ * 2026-11-18; Twenty keeps the same kind of explicit list as TWENTY_PREVIOUS_VERSIONS and derives
+ * TWENTY_CROSS_UPGRADE_SUPPORTED_VERSIONS from it). Rules (assertUpgradeFromList; AppVersionError = config, exit 64):
+ *   - every MINOR code version needs an entry; a missing one refuses every start (fail closed, like an unbumped version);
+ *   - each entry is a published version (in CREWFLOW_PREVIOUS_VERSIONS), older than the release, strictly ascending;
+ *   - the adoption release 0.6.0 lists exactly its two adoptable histories (R254 = 0.4.0, R256 = 0.5.0);
+ *   - any other release lists only versions of the PREVIOUS minor line (e.g. 0.7.0: 0.6.0, 0.6.1, 0.6.2): a release runs only
+ *     its own instance commands, so an upgrade from an older line would skip that line's commands. Patches carry no
+ *     commands (upgrade-sequence.ts), so every published version of the previous line is safe to list;
+ *   - a key is a minor release (`M.m.0`); a patch release has no entry (upgradeFromVersions: its own minor line).
+ * Append the next release's entry in its release PR, together with the version bump and CREWFLOW_PREVIOUS_VERSIONS; never
+ * edit a published release's entry.
+ */
+export const CREWFLOW_UPGRADE_FROM_VERSIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  '0.6.0': Object.freeze(['0.4.0', '0.5.0']),
+});
+
+export type UpgradeFromVersions = Readonly<Record<string, readonly string[]>>;
 
 /** The adoption release (B3): the one version that accepts an R254 or R256 history with no logbook rows. */
 export const ADOPTION_RELEASE_VERSION = '0.6.0';
@@ -64,8 +92,9 @@ export function compareVersions(a: string, b: string): number {
 
 /**
  * Security review L-2: the published list must be valid versions, strictly ascending, with no duplicate. The upgrade-from
- * rule reads its LAST entry and, for a patch, the entries of its own line; an out-of-order entry (a backport patch appended
- * after a newer minor) would make either read the wrong version. Throws AppVersionError (config, 64).
+ * rules read its LAST entry (a minor release's list must stay on that entry's line) and, for a patch, the entries of its own
+ * line; an out-of-order entry (a backport patch appended after a newer minor) would make either read the wrong version.
+ * Throws AppVersionError (config, 64).
  */
 export function assertPreviousVersions(previous: readonly string[]): void {
   for (let i = 0; i < previous.length; i += 1) {
@@ -100,8 +129,46 @@ export function minorReleaseOf(version: string): string {
 }
 
 /**
- * The versions the code may upgrade FROM (B3). 0.6.0 is the adoption release and accepts both R254 (0.4.0) and R256
- * (0.5.0); from 0.7.0 on, strict: only the immediately previous version (the last CREWFLOW_PREVIOUS_VERSIONS entry).
+ * Fail closed (config, 64): the reviewed upgrade-from list of the MINOR release `codeVersion` (see
+ * CREWFLOW_UPGRADE_FROM_VERSIONS). Returns the list. Pure.
+ */
+export function assertUpgradeFromList(codeVersion: string, list: readonly string[] | undefined, previous: readonly string[]): readonly string[] {
+  const where = `CREWFLOW_UPGRADE_FROM_VERSIONS['${codeVersion}']`;
+  if (!Array.isArray(list) || list.length === 0) {
+    throw new AppVersionError(`${where} is missing: every minor release lists the versions it upgrades from (an explicit, reviewed list). Refusing.`);
+  }
+  for (let i = 0; i < list.length; i += 1) {
+    const v = list[i]!;
+    parseVersion(v);
+    if (i > 0 && compareVersions(list[i - 1]!, v) >= 0) throw new AppVersionError(`${where} must be strictly ascending with no duplicate: ${list[i - 1]} is followed by ${v}. Refusing.`);
+    if (compareVersions(v, codeVersion) >= 0) throw new AppVersionError(`${where} lists ${v}, which is not older than ${codeVersion}. Refusing.`);
+    if (!previous.includes(v)) throw new AppVersionError(`${where} lists ${v}, which is not a published version (CREWFLOW_PREVIOUS_VERSIONS). Refusing.`);
+  }
+  if (codeVersion === ADOPTION_RELEASE_VERSION) {
+    const adoptable = [...Object.values(ADOPTION_VERSION_BY_RELEASE)].sort(compareVersions);
+    if (list.join(',') !== adoptable.join(',')) {
+      throw new AppVersionError(`${where} must be exactly the adoptable histories ${adoptable.join(', ')} (the adoption release). Refusing.`);
+    }
+    return list;
+  }
+  const last = previous[previous.length - 1];
+  const line = last ? minorReleaseOf(last) : null;
+  for (const v of list) {
+    if (minorReleaseOf(v) !== line) {
+      throw new AppVersionError(
+        `${where} lists ${v}, which is not on the previous minor line (${line ?? 'none'}): ${codeVersion} runs only its own commands, so an upgrade from ${v} would skip the commands of the releases in between. Refusing.`,
+      );
+    }
+  }
+  return list;
+}
+
+/**
+ * The versions the code may upgrade FROM (B3).
+ *
+ * A MINOR release (`M.m.0`, the adoption release 0.6.0 included) accepts exactly the versions on its reviewed list in
+ * CREWFLOW_UPGRADE_FROM_VERSIONS (owner decision 2026-11-18: 0.7.0 upgrades from any published 0.6.x it lists; this replaces
+ * the earlier "only the last CREWFLOW_PREVIOUS_VERSIONS entry" rule). A missing or invalid list refuses (AppVersionError, 64).
  *
  * A patch release M.m.p (p > 0) has no step of its own beyond its migrations step, so it accepts every EARLIER published
  * version of its own minor line (M.m.0 … M.m.(p-1)); with an append-only list that set already holds the last entry. It
@@ -109,8 +176,11 @@ export function minorReleaseOf(version: string): string {
  * so a jump from the previous minor straight to a patch would skip them. Fail closed: a patch whose `.0` is not a
  * published previous version refuses (AppVersionError, config 64), like an unbumped version.
  */
-export function upgradeFromVersions(codeVersion: string, previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS): string[] {
-  if (codeVersion === ADOPTION_RELEASE_VERSION) return previous.filter((v) => Object.values(ADOPTION_VERSION_BY_RELEASE).includes(v));
+export function upgradeFromVersions(
+  codeVersion: string,
+  previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS,
+  upgradeFrom: UpgradeFromVersions = CREWFLOW_UPGRADE_FROM_VERSIONS,
+): string[] {
   if (isPatchRelease(codeVersion)) {
     const line = minorReleaseOf(codeVersion);
     if (!previous.includes(line)) {
@@ -120,8 +190,20 @@ export function upgradeFromVersions(codeVersion: string, previous: readonly stri
     }
     return previous.filter((v) => minorReleaseOf(v) === line && compareVersions(v, codeVersion) < 0);
   }
-  const last = previous[previous.length - 1];
-  return last ? [last] : [];
+  const own = Object.prototype.hasOwnProperty.call(upgradeFrom, codeVersion) ? upgradeFrom[codeVersion] : undefined;
+  return [...assertUpgradeFromList(codeVersion, own, previous)];
+}
+
+/**
+ * Twenty TWENTY_CROSS_UPGRADE_SUPPORTED_VERSIONS: the versions an upgrade to `codeVersion` is supported from, plus the code
+ * version itself (a resumed or repeated start). Pure; throws as upgradeFromVersions.
+ */
+export function crossUpgradeSupportedVersions(
+  codeVersion: string,
+  previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS,
+  upgradeFrom: UpgradeFromVersions = CREWFLOW_UPGRADE_FROM_VERSIONS,
+): string[] {
+  return [...upgradeFromVersions(codeVersion, previous, upgradeFrom), codeVersion];
 }
 
 /** The workspace root package.json (the one with `workspaces`), walking up from `start`. */
