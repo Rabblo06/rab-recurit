@@ -59,3 +59,39 @@ it('Phase C1: the month walks every page of shifts (limit 200), so a busy month 
  await waitFor(() => expect(get.mock.calls.some(([url]) => url === '/offers')).toBe(true));
  for (const [url, config] of get.mock.calls) if (url !== '/job-roles') expect(Number(config?.params?.limit)).toBeLessThanOrEqual(200);
 });
+
+it('week view shows the selected week as a time grid, places the shift in its day column, and steps a week at a time', async () => {
+ mount();
+ await screen.findByRole('group', { name: 'Month calendar' });
+ fireEvent.click(await screen.findByRole('button', { name: workday.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) + ', 1 shifts' }));
+ fireEvent.click(within(screen.getByRole('group', { name: 'Calendar view' })).getByRole('button', { name: 'Week' }));
+ const week = await screen.findByRole('group', { name: 'Week calendar' });
+ const column = within(week).getByRole('list', { name: `Shifts on ${workday.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}` });
+ expect(within(column).getByText('Example hall')).toBeInTheDocument();
+ const monday = new Date(workday.getFullYear(), workday.getMonth(), workday.getDate() - ((workday.getDay() + 6) % 7));
+ const lastShiftsCall = () => get.mock.calls.filter(([url]) => url === '/shifts').at(-1)![1].params;
+ await waitFor(() => expect(new Date(lastShiftsCall().from).getTime()).toBe(monday.getTime()));
+ expect(new Date(lastShiftsCall().to).getTime()).toBe(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7).getTime());
+ fireEvent.click(screen.getByRole('button', { name: 'Next week' }));
+ await waitFor(() => expect(new Date(lastShiftsCall().from).getTime()).toBe(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 7).getTime()));
+});
+
+it('day view fetches one day and the list view groups the month’s shifts by day', async () => {
+ mount();
+ await screen.findByRole('group', { name: 'Month calendar' });
+ fireEvent.click(await screen.findByRole('button', { name: workday.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) + ', 1 shifts' }));
+ const views = within(screen.getByRole('group', { name: 'Calendar view' }));
+ fireEvent.click(views.getByRole('button', { name: 'Day' }));
+ const dayGrid = await screen.findByRole('group', { name: 'Day calendar' });
+ expect(within(dayGrid).getByText('Example hall')).toBeInTheDocument();
+ expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent(workday.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
+ const lastShiftsCall = () => get.mock.calls.filter(([url]) => url === '/shifts').at(-1)![1].params;
+ const midnight = new Date(workday.getFullYear(), workday.getMonth(), workday.getDate());
+ await waitFor(() => expect(new Date(lastShiftsCall().from).getTime()).toBe(midnight.getTime()));
+ fireEvent.click(views.getByRole('button', { name: 'List' }));
+ const list = await screen.findByRole('group', { name: 'Shift list' });
+ expect(within(list).getByRole('button', { name: new RegExp(workday.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })) })).toBeInTheDocument();
+ expect(within(list).getByRole('cell', { name: 'Example hall' })).toBeInTheDocument();
+ expect(within(list).getByRole('cell', { name: 'Waiting staff' })).toBeInTheDocument();
+ expect(views.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true');
+});
