@@ -441,13 +441,14 @@ describeIfDb('payroll approval (integration)', () => {
     expect(await recordFor(w.attendanceId)).toMatchObject({ status: 'draft', rejected_by: a.userId, rejection_reason: REASON, approved_by: null });
     const actions = await adminDataSource.query(`SELECT action FROM core.audit_log WHERE organisation_id = $1 AND entity_id::text = $2`, [orgId, id]);
     expect(actions.map((r: { action: string }) => r.action).sort()).toEqual(['payroll_record.rejected', 'payroll_record.returned_to_draft']);
-    // The manager who approved the hours: in-app AND email, with the reason.
+    // The manager who approved the hours: in-app with the reason; an email that only says something needs re-checking.
     const vmNotes = await adminDataSource.query(`SELECT title, message FROM core.notification WHERE user_id = $1 AND type = 'payroll_record_rejected'`, [vm.userId]);
     expect(vmNotes).toHaveLength(1);
     expect(vmNotes[0]).toMatchObject({ title: 'Payroll record rejected', message: expect.stringContaining(REASON) });
     const vmMail = await adminDataSource.query(`SELECT rendered_text FROM core.email_outbox WHERE target_user_id = $1 AND rendered_subject = 'Payroll record rejected'`, [vm.userId]);
     expect(vmMail).toHaveLength(1);
-    expect(vmMail[0].rendered_text).toContain(REASON);
+    expect(vmMail[0].rendered_text).toContain('needs re-checking');
+    for (const leak of [REASON, 'Break', 'Ann', extra.email.split('@')[0]!]) expect(vmMail[0].rendered_text).not.toContain(leak);
     // The staff member: a neutral in-app notice, never the reason, and no email by default.
     const staffNotes = await adminDataSource.query(`SELECT title, message FROM core.notification WHERE user_id = $1 AND type = 'payroll_hours_rechecked'`, [extra.userId]);
     expect(staffNotes).toHaveLength(1);

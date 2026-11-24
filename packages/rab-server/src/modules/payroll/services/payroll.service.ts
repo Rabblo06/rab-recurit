@@ -708,7 +708,10 @@ export class PayrollService {
         title: 'Payroll record rejected',
         message: `${what} were rejected for payroll: "${reason}". They are back in draft to be re-checked.`,
         relatedEntityType: 'payroll_record', relatedEntityId: record.id,
+        // The email never carries the free-text reason, the staff name or the hours (it may reach a Venue Manager, who
+        // must never see payroll data, and mailboxes keep copies): it only says something needs re-checking.
         forceEmail: true,
+        emailMessage: 'A payroll record for hours you approved needs re-checking.\n\nSign in to Crewflow to see the details.',
       });
     }
     await this.notifications.notify(manager, {

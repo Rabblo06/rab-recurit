@@ -10489,9 +10489,11 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   view until it is re-checked. A draft can only move to pending_approval: it can never be approved, put in a run or paid as
   it is (tested through the API and the DB guard).
 - **Notices (same transaction as the decision):**
-  - the manager who finalised (approved) those hours, `shift_report.finalised_by`: in-app + email
-    (`payroll_record_rejected`), with the staff member's name, venue, date and the reason. Not sent when that is the
-    rejecting manager. Recipient comes from the record's own report row, never from the request.
+  - the manager who finalised (approved) those hours, `shift_report.finalised_by` (`payroll_record_rejected`): in-app with
+    the staff member's name, venue, date and the reason; by email only "a payroll record for hours you approved needs
+    re-checking, sign in" (never the reason, name or hours: the finaliser can be a Venue Manager, who must never see pay
+    data, and mailboxes keep copies). Not sent when that is the rejecting manager. Recipient comes from the record's own
+    report row, never from the request.
   - the staff member: in-app only by default (`payroll_hours_rechecked`), venue and date, "being re-checked", never the
     reason (it may mention other people).
 - **SQL:** `PayrollRejectionNotificationTypes1786723010000` widens `notification_preference_notification_type_check` by the
@@ -10501,6 +10503,6 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   minutes / amount). Today the runtime role cannot update `worked_minutes` / `pay_rate_pence` / `amount_pence` (immutable
   money snapshot) and `approved` attendance is terminal in ATTENDANCE_TRANSITIONS. Until then the draft is a safe dead end
   (never payable) and corrections go through adjustments (decision 3).
-- **Tests:** payroll-approval (12): draft + reason kept, both audit rows, finaliser (Venue Manager) notified in-app and by
-  email with the reason, staff notice neutral and not emailed, rejecter not notified, re-reject 409, DB guard refuses
+- **Tests:** payroll-approval (12): draft + reason kept, both audit rows, finaliser (Venue Manager) notified in-app with the
+  reason and by an email without it, staff notice neutral and not emailed, rejecter not notified, re-reject 409, DB guard refuses
   draft → approved, staff History shows draft, period view stage "rejected"; (4) and (8) follow the new status.
