@@ -1,3 +1,4 @@
+import './staff-stepper.css';
 import { useState, useEffect, useMemo, useRef, useId, isValidElement, cloneElement } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconAlertCircle } from '@tabler/icons-react';
@@ -7,6 +8,9 @@ import AccordionSection from '../../shared/components/AccordionSection';
 import DateInput, { todayIso } from '../../shared/components/DateInput';
 import { toast } from '../../shared/lib/toast';
 import PhoneInput from './PhoneInput';
+import NameInput from './NameInput';
+import AddressInput from './AddressInput';
+import StaffSelect from './StaffSelect';
 import AvatarUploadButton from './AvatarUploadButton';
 import { isValidEmail } from './validateEmail';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -43,11 +47,16 @@ const empty = {
   jobRoleId: '',
   customJobRole: '',
   emergencyContactName: '',
+  emergencyFirstName: '',
+  emergencyLastName: '',
   emergencyContactRelationship: '',
   emergencyContactPhone: '',
   preferredName: '',
   employmentType: '',
   address: '',
+  address2: '',
+  state: '',
+  country: '',
   city: '',
   postcode: '',
   availableDays: [] as string[],
@@ -62,27 +71,10 @@ const empty = {
 type FormState = typeof empty;
 type FieldKey = keyof FormState;
 
-// Staff creation only — Manager creation stays a single page (it's already
-// just 3 short fields, a wizard would be pure overhead). One step per
-// existing section, same order/keys the old accordion used, so REQUIRED's
-// `section` values below still line up unchanged.
-//
-// Personal Details and Employment are merged into a single first step
-// ('personal' is the sole key — the former 'employment' fields render as an
-// in-page subsection beneath it, see the JSX below). Work Information,
-// Right to Work and Additional (Languages/Notes) were removed from this
-// wizard entirely — not hidden — per a deliberate scope cut: none of their
-// fields (`otherSkills`, `yearsExperience`, `rightToWorkStatus`,
-// `documentType`, `expiryDate`, `languages`, `notes`) are required by
-// `CreateStaffDto` (all `@IsOptional()`), so simply no longer collecting
-// them is a safe, backend-compatible change — no DTO or schema change
-// needed. Those `StaffProfile` columns are untouched and stay editable from
-// the Staff Detail panel for anyone who still needs them.
+// Staff creation has two pages; General includes emergency contact and availability.
 const STAFF_STEPS = [
   { key: 'personal', title: 'Personal Details' },
   { key: 'general', title: 'General' },
-  { key: 'emergency', title: 'Emergency Contact' },
-  { key: 'availability', title: 'Availability' },
 ] as const;
 
 /**
@@ -338,7 +330,7 @@ export default function CreateUserModal() {
           emergencyContactPhone: form.emergencyContactPhone || undefined,
           preferredName: form.preferredName || undefined,
           employmentType: form.employmentType || undefined,
-          address: form.address || undefined,
+          address: [form.address, form.address2, form.state, form.country].map(line => (line ?? '').trim()).filter(Boolean).join('\n') || undefined,
           city: form.city || undefined,
           postcode: form.postcode || undefined,
           availableDays: form.availableDays.length > 0 ? form.availableDays : undefined,
@@ -383,10 +375,12 @@ export default function CreateUserModal() {
       const queued = data.invite?.queued ?? data.emailQueued ?? false;
       setCreatedInvite({ sendNumber: data.invite?.sendNumber ?? 1, queued });
       // The panel below is replaced by the new record's detail panel at once, so the outcome is ALSO a toast, which
-      // survives that hand-off: success, or a persistent warning when the invitation email could not be queued.
+      // survives that hand-off. Creation succeeds independently of email delivery; keep any delivery failure explicit.
       const noun = role === 'staff' ? 'Staff member' : scope === 'workspace' ? 'Venue manager' : 'Manager';
-      if (queued) toast.success(`${noun} created. An invitation email has been queued.`);
-      else toast.warning(`${noun} created, but the invitation email could not be queued. Use "Resend Invitation" from their details.`, { persistent: true });
+      toast.success(queued
+        ? `${noun} created. An invitation email has been queued.`
+        : `${noun} created. The invitation email could not be queued. Use "Resend Invitation" from their details.`,
+        { duration: 5000 });
       // Best-effort follow-up — the Staff record is already successfully
       // created at this point regardless of how this turns out, so a
       // failure here must never surface as a creation failure (unlike the
@@ -501,7 +495,7 @@ export default function CreateUserModal() {
     // Let the step switch (state update + re-render) happen before focusing.
     setTimeout(() => {
       const el = fieldRefs.current[key];
-      el?.querySelector<HTMLElement>('input, select')?.focus();
+      el?.querySelector<HTMLElement>('input, select, button[aria-haspopup="listbox"]')?.focus();
       el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }, 50);
   };
@@ -510,7 +504,7 @@ export default function CreateUserModal() {
   // required-ness is unchanged, only how it's surfaced is).
   const validateStep = (stepIndex: number): { key: FieldKey; message: string } | null => {
     const sectionKey = STAFF_STEPS[stepIndex].key;
-    for (const req of REQUIRED.filter((r) => r.section === sectionKey)) {
+    for (const req of REQUIRED.filter((r) => sectionKey === 'general' ? ['general', 'emergency'].includes(r.section) : r.section === sectionKey)) {
       if (!String(form[req.key] ?? '').trim()) return { key: req.key, message: `${req.label} is required.` };
     }
     if (sectionKey === 'personal' && form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && !form.customJobRole.trim()) {
@@ -567,7 +561,7 @@ export default function CreateUserModal() {
         // Let the accordion open (state update + re-render) before focusing.
         setTimeout(() => {
           const el = fieldRefs.current[req.key];
-          el?.querySelector<HTMLElement>('input, select')?.focus();
+          el?.querySelector<HTMLElement>('input, select, button[aria-haspopup="listbox"]')?.focus();
           el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
         }, 50);
         return;
@@ -578,7 +572,7 @@ export default function CreateUserModal() {
       setEmailTouched(true);
       setError('Please enter a valid email address.');
       setTimeout(() => {
-        fieldRefs.current.email?.querySelector<HTMLElement>('input, select')?.focus();
+        fieldRefs.current.email?.querySelector<HTMLElement>('input, select, button[aria-haspopup="listbox"]')?.focus();
         fieldRefs.current.email?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       }, 50);
       return;
@@ -643,12 +637,15 @@ export default function CreateUserModal() {
         </div>
       ) : isWizard ? (
         <div>
-          <div className="wizard-progress">
-            <span className="wizard-progress-label">Step {step + 1} of {STAFF_STEPS.length}</span>
-          </div>
-          <div className="wizard-progress-track">
-            <div className="wizard-progress-fill" style={{ width: `${((step + 1) / STAFF_STEPS.length) * 100}%` }} />
-          </div>
+          <span className="staff-stepper-status" role="status">Step {step + 1} of {STAFF_STEPS.length}</span>
+          <ol className="staff-stepper" aria-label="Staff creation progress">
+            {STAFF_STEPS.map((item, index) => (
+              <li key={item.key} className={index < step ? 'is-complete' : index === step ? 'is-current' : 'is-upcoming'} aria-current={index === step ? 'step' : undefined}>
+                <span className="staff-stepper-marker" aria-hidden="true">{index < step ? <IconCheck size={15} stroke={1.8}/> : index + 1}</span>
+                <span className="staff-stepper-label">Step {index + 1}<span className="staff-stepper-status">: {item.title}{index < step ? ', completed' : ''}</span></span>
+              </li>
+            ))}
+          </ol>
           {/* Entrance-only step slide (from the right going forward, from the left going back). The previous step
               unmounts at once: overlapping two steps delayed the next fields and could drop keystrokes, so there is
               deliberately no exit animation here. */}
@@ -664,29 +661,19 @@ export default function CreateUserModal() {
                   onFileSelected={setAvatarFile}
                 />
               </div>
-              <div className="form-grid">
-                <FormField label="First name" required fieldRef={(el) => { fieldRefs.current.firstName = el; }}>
-                  <input value={form.firstName} onChange={f('firstName')} />
-                </FormField>
-                <FormField label="Last name" required fieldRef={(el) => { fieldRefs.current.lastName = el; }}>
-                  <input value={form.lastName} onChange={f('lastName')} />
-                </FormField>
-              </div>
-              <FormField label="Preferred name">
-                <input value={form.preferredName} onChange={f('preferredName')} />
-              </FormField>
+              <NameInput firstName={form.firstName} lastName={form.lastName}
+                fieldRef={(el) => { fieldRefs.current.firstName = el; fieldRefs.current.lastName = el; }}
+                onChange={(name) => { setError(''); setForm(previous => ({ ...previous, ...name })); }} />
               <FormField label="Date of birth">
-                <DateInput value={form.dateOfBirth} onChange={(v) => { setError(''); setForm(p => ({ ...p, dateOfBirth: v })); }} max={todayIso()} />
+                <DateInput autoFormat value={form.dateOfBirth} onChange={(v) => { setError(''); setForm(p => ({ ...p, dateOfBirth: v })); }} max={todayIso()} />
               </FormField>
 
               <div className="detail-group">
                 <div className="detail-group-title">Employment</div>
                 <FormField label="Job role">
-                  <select value={form.jobRoleId} onChange={f('jobRoleId')}>
-                    <option value="">None</option>
-                    {jobRoles.filter((r: any) => !r.archivedAt).map((r: any) => <option key={r.id} value={r.id}>{r.name}</option>)}
-                    <option value={CUSTOM_JOB_ROLE_VALUE}>Custom role</option>
-                  </select>
+                  <StaffSelect label="Job role" value={form.jobRoleId} placeholder="None"
+                    onChange={jobRoleId => { setError(''); setForm(previous => ({ ...previous, jobRoleId })); }}
+                    options={[{ value: '', label: 'None' }, ...jobRoles.filter((r: any) => !r.archivedAt).map((r: any) => ({ value: r.id, label: r.name })), { value: CUSTOM_JOB_ROLE_VALUE, label: 'Custom role' }]} />
                 </FormField>
                 {form.jobRoleId === CUSTOM_JOB_ROLE_VALUE && (
                   <FormField label="Custom job role" required fieldRef={(el) => { fieldRefs.current.customJobRole = el; }}>
@@ -698,10 +685,9 @@ export default function CreateUserModal() {
                   </FormField>
                 )}
                 <FormField label="Employment type">
-                  <select value={form.employmentType} onChange={f('employmentType')}>
-                    <option value="">Select employment type</option>
-                    {EMPLOYMENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
+                  <StaffSelect label="Employment type" value={form.employmentType} placeholder="Select employment type"
+                  onChange={value => { setError(''); setForm(previous => ({ ...previous, employmentType: value })); }}
+                  options={[{ value: '', label: 'Select employment type' }, ...EMPLOYMENT_TYPES.map(value => ({ value, label: value }))]} />
                 </FormField>
                 <div className="form-grid">
                   <FormField label="Start date">
@@ -728,23 +714,19 @@ export default function CreateUserModal() {
               <FormField label="Mobile number" required fieldRef={(el) => { fieldRefs.current.phone = el; }}>
                 <PhoneInput value={form.phone} onChange={(v) => { setError(''); setForm(p => ({ ...p, phone: v })); }} />
               </FormField>
-              <FormField label="Address">
-                <input value={form.address} onChange={f('address')} />
-              </FormField>
-              <FormField label="City">
-                <input value={form.city} onChange={f('city')} />
-              </FormField>
-              <FormField label="Postcode">
-                <input value={form.postcode} onChange={f('postcode')} />
-              </FormField>
+              <AddressInput address={form.address} address2={form.address2} state={form.state} country={form.country} city={form.city} postcode={form.postcode}
+                onChange={address => { setError(''); setForm(previous => ({ ...previous, ...address })); }} />
             </>
           )}
 
-          {STAFF_STEPS[step].key === 'emergency' && (
+          {STAFF_STEPS[step].key === 'general' && (
             <>
-              <FormField label="Full name" required fieldRef={(el) => { fieldRefs.current.emergencyContactName = el; }}>
-                <input value={form.emergencyContactName} onChange={f('emergencyContactName')} placeholder="Jane Doe" />
-              </FormField>
+              <div className="detail-group-title staff-section-title">Emergency Contact</div>
+              <NameInput label="Full name" partsRequired={false}
+                firstName={form.emergencyFirstName}
+                lastName={form.emergencyLastName}
+                fieldRef={(el) => { fieldRefs.current.emergencyContactName = el; }}
+                onChange={({ firstName, lastName }) => { setError(''); setForm(previous => ({ ...previous, emergencyFirstName: firstName, emergencyLastName: lastName, emergencyContactName: [firstName, lastName].filter(Boolean).join(' ') })); }} />
               <div className="form-grid">
                 <FormField label="Relationship" required fieldRef={(el) => { fieldRefs.current.emergencyContactRelationship = el; }}>
                   <input value={form.emergencyContactRelationship} onChange={f('emergencyContactRelationship')} placeholder="Spouse" />
@@ -756,10 +738,11 @@ export default function CreateUserModal() {
             </>
           )}
 
-          {STAFF_STEPS[step].key === 'availability' && (
+          {STAFF_STEPS[step].key === 'general' && (
             <>
+              <div className="detail-group-title staff-section-title">Availability</div>
               <FormField label="Available days">
-                <div className="weekday-picker">
+                <div className="weekday-picker staff-day-picker">
                   {WEEKDAYS.map((day) => (
                     <label key={day} className="weekday-picker-option">
                       <input
@@ -767,16 +750,16 @@ export default function CreateUserModal() {
                         checked={form.availableDays.includes(day)}
                         onChange={() => toggleAvailableDay(day)}
                       />
+                      <IconCheck size={13} aria-hidden="true" className="staff-day-check" />
                       {day.slice(0, 3)}
                     </label>
                   ))}
                 </div>
               </FormField>
               <FormField label="Preferred shift times">
-                <select value={form.preferredShiftTimes} onChange={f('preferredShiftTimes')}>
-                  <option value="">Select preferred shift time</option>
-                  {SHIFT_TIMES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
+                <StaffSelect label="Preferred shift times" value={form.preferredShiftTimes} placeholder="Select preferred shift time"
+                  onChange={value => { setError(''); setForm(previous => ({ ...previous, preferredShiftTimes: value })); }}
+                  options={[{ value: '', label: 'Select preferred shift time' }, ...SHIFT_TIMES.map(value => ({ value, label: value }))]} />
               </FormField>
               <FormField label="Maximum hours per week">
                 <input type="number" min="0" max="168" value={form.maxHoursPerWeek} onChange={f('maxHoursPerWeek')} />
@@ -800,14 +783,9 @@ export default function CreateUserModal() {
                 <AvatarUploadButton previewUrl={avatarPreviewUrl} label={previewInitials || '?'} onFileSelected={setAvatarFile} />
               </div>
             )}
-            <div className="form-grid">
-              <FormField label="First name" required fieldRef={(el) => { fieldRefs.current.firstName = el; }}>
-                <input value={form.firstName} onChange={f('firstName')} />
-              </FormField>
-              <FormField label="Last name" required fieldRef={(el) => { fieldRefs.current.lastName = el; }}>
-                <input value={form.lastName} onChange={f('lastName')} />
-              </FormField>
-            </div>
+            <NameInput firstName={form.firstName} lastName={form.lastName}
+                fieldRef={(el) => { fieldRefs.current.firstName = el; fieldRefs.current.lastName = el; }}
+                onChange={(name) => { setError(''); setForm(previous => ({ ...previous, ...name })); }} />
           </AccordionSection>
 
           <AccordionSection title="Role" sectionKey="employment" open={openSections.has('employment')} onToggle={toggleSection}>
@@ -819,15 +797,12 @@ export default function CreateUserModal() {
                 </select>
               </FormField>
             )}
-            <FormField label="Job title">
-              <input value={form.jobTitle} onChange={f('jobTitle')} placeholder="Operations Manager" />
-            </FormField>
             {form.managerType === 'venue' && (
               <FormField label="Select Venue" required fieldRef={(el) => { fieldRefs.current.venueId = el; }}>
-                <select value={form.venueId} onChange={f('venueId') as any}>
-                  <option value="">Select a venue…</option>
-                  {venues.data?.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-                </select>
+                <StaffSelect label="Select Venue" value={form.venueId} placeholder="Select a venue…"
+                  onChange={venueId => { setError(''); setForm(previous => ({ ...previous, venueId })); }}
+                  options={(venues.data ?? []).map(venue => ({ value: venue.id, label: venue.name }))}
+                  emptyMessage={venues.isLoading ? 'Loading venues…' : venues.isError ? 'Unable to load venues. Try again shortly.' : !venues.data?.length ? 'No active venues available.' : 'No matching venues.'} />
               </FormField>
             )}
           </AccordionSection>
@@ -844,10 +819,6 @@ export default function CreateUserModal() {
             <FormField label="Mobile number" required fieldRef={(el) => { fieldRefs.current.phone = el; }}>
               <PhoneInput value={form.phone} onChange={(v) => { setError(''); setForm(p => ({ ...p, phone: v })); }} />
             </FormField>
-            <p className="field-hint">
-              An invitation email will be sent to this address — they&apos;ll set their own
-              password to activate the account.
-            </p>
           </AccordionSection>
 
           {error && <p className="error" style={{ margin: '10px 4px 0' }}>{error}</p>}

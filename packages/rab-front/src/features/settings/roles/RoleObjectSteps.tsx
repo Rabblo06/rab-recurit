@@ -1,3 +1,4 @@
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -29,8 +30,7 @@ export function SelectObjectStep() {
     <section className="role-section role-step">
       <h3 className="role-step-title">1. Select an object</h3>
       <div className="role-search">
-        <IconSearch size={13} aria-hidden="true" />
-        <input aria-label="Search an object" placeholder="Search an object" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <SearchField label="Search an object" type="text" aria-label="Search an object" placeholder="Search an object" value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       <h4 className="role-subheading">Standard</h4>
       <p className="role-section-description">All the standard objects</p>
@@ -175,8 +175,7 @@ function FieldsTable({ object, rule, onChange }: { object: ObjectMeta; rule: Obj
   return (
     <>
       <div className="role-search">
-        <IconSearch size={13} aria-hidden="true" />
-        <input aria-label="Search a field" placeholder="Search a field..." value={search} onChange={(e) => setSearch(e.target.value)} />
+        <SearchField label="Search a field" type="text" aria-label="Search a field" placeholder="Search a field..." value={search} onChange={(e) => setSearch(e.target.value)} />
       </div>
       <div className="members-table-wrap">
         <table className="table role-fields-table">

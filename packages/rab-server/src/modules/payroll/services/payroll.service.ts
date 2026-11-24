@@ -179,7 +179,7 @@ const VIEW_SELECT = `
   JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
   JOIN shift s ON s.id = pr.shift_id
   JOIN venue v ON v.id = s.venue_id
-  JOIN job_role jr ON jr.id = s.job_role_id
+  JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
   JOIN staff_profile sp ON sp.id = pr.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
   WHERE pr.organisation_id = $1 AND pr.workspace_id = $2`;
@@ -373,7 +373,7 @@ export class PayrollService {
            JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
            JOIN shift s ON s.id = a.shift_id
            JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
+           JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
            JOIN staff_profile sp ON sp.id = a.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
            LEFT JOIN payroll_record pr ON pr.attendance_id = a.id AND pr.organisation_id = $1 AND pr.workspace_id = $2
@@ -443,7 +443,7 @@ export class PayrollService {
            JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
            JOIN shift s ON s.id = pr.shift_id
            JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
+           JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
           WHERE ${where}
           ORDER BY pr.approved_at DESC, pr.id
           LIMIT $5 OFFSET $6`,

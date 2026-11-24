@@ -1,4 +1,4 @@
-import { IsEmail, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 
 /**
  * P2.9 gap review, item 2 (owner-approved, corrected, non-destructive design) — replaces a
@@ -23,13 +23,15 @@ export class ReplaceInitialManagerDto {
   @IsEmail()
   email!: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(100)
-  firstName!: string;
+  firstName?: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(100)
-  lastName!: string;
+  lastName?: string;
 }

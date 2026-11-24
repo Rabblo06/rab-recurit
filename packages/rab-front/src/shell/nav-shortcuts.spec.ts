@@ -65,3 +65,9 @@ describe('Help Center search', () => {
     expect(searchTopics('zzz-no-such-topic')).toEqual([]);
   });
 });
+
+test('stored icon colors are validated without losing legacy shortcuts', () => {
+ const items=parseShortcuts(JSON.stringify([{id:'one',kind:'folder',label:'Team',icon:'heart',color:'#e54666'},{id:'two',kind:'folder',label:'Other',icon:'folder',color:'url(unsafe)'}]));
+ expect(items[0]).toMatchObject({icon:'heart',color:'#e54666'});
+ expect(items[1].color).toBeUndefined();
+});

@@ -1,3 +1,6 @@
+import { motion as arcMotion } from 'framer-motion';
+import { recordAvatarStyle } from '../../shared/lib/recordAvatarColor';
+import RecordOpenAction from '../../shared/components/RecordOpenAction';
 import { useRecordSelection } from '../../shared/table-toolbar/useRecordSelection';
 import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-toolbar/ListPresentation';
 import { useQuery } from '@tanstack/react-query';
@@ -81,12 +84,13 @@ function openCreateVenue() {
   document.dispatchEvent(new CustomEvent('open-create-venue'));
 }
 
-export default function Venues() {
-  const config = VENUES_TABLE_CONFIG;
+export default function Venues({ fixedStatus, title = "Venues" }: { fixedStatus?: "archived"; title?: string } = {}) {
+  const config = fixedStatus ? { ...VENUES_TABLE_CONFIG, storageKey: 'venues-archived', filters: VENUES_TABLE_CONFIG.filters.filter(field => field.key !== 'status') } : VENUES_TABLE_CONFIG;
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const { status: view, ...otherFilters } = filters;
+  const { status, ...otherFilters } = filters;
+  const view = fixedStatus ?? status;
   const params = {
     page,
     q: search || undefined,
@@ -120,16 +124,16 @@ export default function Venues() {
 
   return (
     <div className="page">
-      <PageHeader title="Venues" action={<button className="btn btn-dark" onClick={openCreateVenue}>
+      <PageHeader title={title} action={<button className="btn btn-dark" onClick={openCreateVenue}>
             <IconPlus size={14}/> New venue
           </button>}
-        tabs={<>
+        tabs={!fixedStatus && <>
         {VENUE_VIEWS.map(view => <button key={view.value} className={`tab-link ${(filters.status ?? '') === view.value ? 'active' : ''}`} onClick={() => setFilters({...filters, status:view.value})}>{view.label}{(filters.status ?? '') === view.value && <span className="tab-count"> · {total}</span>}</button>)}
         </>}
       />
 
       <div className="list-toolbar-row">
-        <ListViewSelect label="Venues view" value={filters.status ?? ''} options={VENUE_VIEWS} onChange={status => setFilters({...filters, status})} />
+        <ListViewSelect label="Venues view" value={view ?? ''} options={fixedStatus ? [{value:fixedStatus,label:title}] : VENUE_VIEWS} onChange={status => setFilters({...filters, status})} />
         <TableSearchInput value={search} onChange={setSearch} />
         <div className="list-toolbar-actions">
           {selection.summary}
@@ -162,14 +166,15 @@ export default function Venues() {
             </thead>
             <tbody>
               {venues.map((v) => (
-                <tr key={v.id} className={selection.isSelected(v.id) ? "row-selected" : undefined}>
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={v.id} className={selection.isSelected(v.id) ? "row-selected" : undefined}>
                   <td className="checkbox-col" onClick={e=>e.stopPropagation()}>{selection.checkbox(v.id,v.name)}</td>
                   {isVisible('venue') && (
                     <td style={{ width: 'auto' }}>
-                      <span className="record-chip">
-                        <span className="mini-avatar" style={{ background: '#fdded9', color: '#d93025' }}>{v.name?.[0]}</span>
+                      <button type="button" onClick={event => { event.stopPropagation(); editVenue(v); }} className="record-chip object-name-chip">
+                        <span className="mini-avatar" style={recordAvatarStyle(v.name)}>{v.name?.[0]}</span>
                         {v.name}
-                      </span>
+                      </button>
+                      <RecordOpenAction label={`Open venue ${v.name}`} onOpen={() => editVenue(v)}/>
                       {(v.status === 'archived' || v.archivedAt) && <span className="badge badge-inactive" style={{ marginLeft: 8 }}>Archived</span>}
                     </td>
                   )}
@@ -186,7 +191,7 @@ export default function Venues() {
                       )}
                     </div>
                   </td>
-                </tr>
+                </arcMotion.tr>
               ))}
               {venues.length === 0 && (
                 <tr><td colSpan={6}>

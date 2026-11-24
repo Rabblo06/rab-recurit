@@ -1,0 +1,305 @@
+diff --git a/dist/index.d.mts b/dist/index.d.mts
+index 4cf7fa59c0d7d7ac08783b5145058def705008ee..2634f766e51206d5af1033cd0a36cf08f4cad03d 100644
+--- a/dist/index.d.mts
++++ b/dist/index.d.mts
+@@ -15,6 +15,9 @@ interface SileoButton {
+ declare const SILEO_POSITIONS: readonly ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"];
+ type SileoPosition = (typeof SILEO_POSITIONS)[number];
+ interface SileoOptions {
++    /** Stable identity already supported by the runtime. */
++    id?: string;
++    onDismiss?: () => void;
+     title?: string;
+     description?: ReactNode | string;
+     type?: SileoState;
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 0c52a3a33f124bfaf35b18dc37777f4c9a314ecb..36d8574025d153c8d3d3924b7b5e93b479d577a9 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -15,6 +15,9 @@ interface SileoButton {
+ declare const SILEO_POSITIONS: readonly ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"];
+ type SileoPosition = (typeof SILEO_POSITIONS)[number];
+ interface SileoOptions {
++    /** Stable identity already supported by the runtime. */
++    id?: string;
++    onDismiss?: () => void;
+     title?: string;
+     description?: ReactNode | string;
+     type?: SileoState;
+diff --git a/dist/index.js b/dist/index.js
+index 79aa792998ed2f8917d4b46725af2b0bbab692e0..ed183e95b0dfe73446e4b8af12d4ff164ab279ca 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -192,6 +192,8 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+ /* ------------------------------- Component -------------------------------- */ const Sileo = /*#__PURE__*/ react.memo(function Sileo({ id, fill = "#FFFFFF", state = "success", title = state, description, position = "left", expand = "bottom", className, icon, styles, button, roundness, exiting = false, autoExpandDelayMs, autoCollapseDelayMs, canExpand, interruptKey, refreshKey, onMouseEnter, onMouseLeave, onDismiss }) {
+     var _headerLayer_current_view_icon, _headerLayer_prev_view_icon;
+     var _headerLayer_current_view_styles, _headerLayer_current_view_styles1, _headerLayer_prev_view_styles, _headerLayer_prev_view_styles1, _view_styles, _view_styles1;
++    const [toastWidth, setToastWidth] = react.useState(WIDTH);
++    const reducedMotion = react$1.useReducedMotion();
+     const next = react.useMemo(()=>({
+             title,
+             description,
+@@ -452,7 +454,7 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+     const expandedContent = Math.max(0, expanded - HEIGHT);
+     const resolvedPillWidth = Math.max(pillWidth || HEIGHT, HEIGHT);
+     const pillHeight = HEIGHT + blur * 3;
+-    const pillX = position === "right" ? WIDTH - resolvedPillWidth : position === "center" ? (WIDTH - resolvedPillWidth) / 2 : 0;
++    const pillX = position === "right" ? toastWidth - resolvedPillWidth : position === "center" ? (toastWidth - resolvedPillWidth) / 2 : 0;
+     /* ------------------------------- Memoised animate targets ----------------- */ const pillAnimate = react.useMemo(()=>({
+             x: pillX,
+             width: resolvedPillWidth,
+@@ -480,7 +482,7 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+         }, [
+         ready
+     ]);
+-    const viewBox = `0 0 ${WIDTH} ${svgHeight}`;
++    const viewBox = `0 0 ${toastWidth} ${svgHeight}`;
+     /* ------------------------------- Inline styles ---------------------------- */ const rootStyle = react.useMemo(()=>({
+             "--_h": `${open ? expanded : HEIGHT}px`,
+             "--_pw": `${resolvedPillWidth}px`,
+@@ -503,7 +505,6 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+     ]);
+     const handleLeave = react.useCallback((e)=>{
+         onMouseLeave == null ? void 0 : onMouseLeave(e);
+-        setIsExpanded(false);
+     }, [
+         onMouseLeave
+     ]);
+@@ -525,6 +526,15 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+     /* -------------------------------- Swipe ----------------------------------- */ const SWIPE_DISMISS = 30;
+     const SWIPE_MAX = 20;
+     const buttonRef = react.useRef(null);
++    react.useLayoutEffect(()=>{
++        const node = buttonRef.current;
++        if (!node) return;
++        const measure = ()=>{ if (node.clientWidth > 0) setToastWidth(node.clientWidth); };
++        measure();
++        const observer = new ResizeObserver(measure);
++        observer.observe(node);
++        return ()=>observer.disconnect();
++    }, []);
+     const pointerStartRef = react.useRef(null);
+     const onDismissRef = react.useRef(onDismiss);
+     onDismissRef.current = onDismiss;
+@@ -582,7 +592,7 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+         exiting,
+         onDismiss
+     ]);
+-    /* --------------------------------- Render --------------------------------- */ return /*#__PURE__*/ jsxRuntime.jsxs("button", {
++    /* --------------------------------- Render --------------------------------- */ return /*#__PURE__*/ jsxRuntime.jsxs("div", {
+         ref: buttonRef,
+         type: "button",
+         "data-sileo-toast": true,
+@@ -604,7 +614,7 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+                 "data-edge": expand,
+                 children: /*#__PURE__*/ jsxRuntime.jsxs("svg", {
+                     "data-sileo-svg": true,
+-                    width: WIDTH,
++                    width: toastWidth,
+                     height: svgHeight,
+                     viewBox: viewBox,
+                     children: [
+@@ -614,7 +624,7 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+                         /*#__PURE__*/ jsxRuntime.jsx(GooeyDefs, {
+                             filterId: filterId,
+                             blur: blur,
+-                            width: WIDTH,
++                            width: toastWidth,
+                             height: svgHeight
+                         }),
+                         /*#__PURE__*/ jsxRuntime.jsxs("g", {
+@@ -627,18 +637,18 @@ const GooeyDefs = /*#__PURE__*/ react.memo(function GooeyDefs({ filterId, blur,
+                                     fill: view.fill,
+                                     initial: false,
+                                     animate: pillAnimate,
+-                                    transition: pillTransition
++                                    transition: reducedMotion ? { duration: 0 } : pillTransition
+                                 }),
+                                 /*#__PURE__*/ jsxRuntime.jsx(react$1.motion.rect, {
+                                     "data-sileo-body": true,
+                                     y: HEIGHT,
+-                                    width: WIDTH,
++                                    width: toastWidth,
+                                     rx: resolvedRoundness,
+                                     ry: resolvedRoundness,
+                                     fill: view.fill,
+                                     initial: false,
+                                     animate: bodyAnimate,
+-                                    transition: bodyTransition
++                                    transition: reducedMotion ? { duration: 0 } : bodyTransition
+                                 })
+                             ]
+                         })
+@@ -765,7 +775,7 @@ const mergeOptions = (options)=>{
+ const buildSileoItem = (merged, id, fallbackPosition)=>{
+     var _merged_duration, _ref, _merged_position;
+     const duration = (_merged_duration = merged.duration) != null ? _merged_duration : DEFAULT_TOAST_DURATION;
+-    const auto = resolveAutopilot(merged, duration);
++    const auto = resolveAutopilot(merged, merged.duration === null ? Infinity : duration);
+     return cc._extends({}, merged, {
+         id,
+         instanceId: generateId(),
+@@ -992,7 +1002,10 @@ function Toaster({ children, position = "top-right", offset, options, theme }) {
+                 setActiveId((prev)=>prev === latestRef.current ? prev : latestRef.current);
+                 handleMouseLeaveRef.current == null ? void 0 : handleMouseLeaveRef.current.call(handleMouseLeaveRef, e);
+             },
+-            dismiss: ()=>dismissToast(toastId)
++            dismiss: ()=>{
++                listRef.current.find((item)=>item.id === toastId)?.onDismiss?.();
++                dismissToast(toastId);
++            }
+         };
+         handlersCache.current.set(toastId, cached);
+         return cached;
+@@ -1065,7 +1078,7 @@ function Toaster({ children, position = "top-right", offset, options, theme }) {
+                             autoExpandDelayMs: item.autoExpandDelayMs,
+                             autoCollapseDelayMs: item.autoCollapseDelayMs,
+                             refreshKey: item.instanceId,
+-                            canExpand: activeId === undefined || activeId === item.id,
++                            canExpand: true,
+                             onMouseEnter: h.enter,
+                             onMouseLeave: h.leave,
+                             onDismiss: h.dismiss
+diff --git a/dist/index.mjs b/dist/index.mjs
+index f687f84725d587b4c539fccb2f86568a9c18294d..676724796ac09aaf8781bcc762eaccf7337af86a 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -11,7 +11,7 @@ function __insertCSS(code) {
+ import { _ as _extends, a as _object_without_properties_loose } from './cc-jcBWjyOA.mjs';
+ import { jsxs, jsx, Fragment } from 'react/jsx-runtime';
+ import { memo, useMemo, useState, useRef, useLayoutEffect, useEffect, useCallback } from 'react';
+-import { motion } from 'motion/react';
++import { motion, useReducedMotion } from 'motion/react';
+ 
+ __insertCSS(":root{--sileo-spring-easing:linear(\n    0,\n    0.002 0.6%,\n    0.007 1.2%,\n    0.015 1.8%,\n    0.026 2.4%,\n    0.041 3.1%,\n    0.06 3.8%,\n    0.108 5.3%,\n    0.157 6.6%,\n    0.214 8%,\n    0.467 13.7%,\n    0.577 16.3%,\n    0.631 17.7%,\n    0.682 19.1%,\n    0.73 20.5%,\n    0.771 21.8%,\n    0.808 23.1%,\n    0.844 24.5%,\n    0.874 25.8%,\n    0.903 27.2%,\n    0.928 28.6%,\n    0.952 30.1%,\n    0.972 31.6%,\n    0.988 33.1%,\n    1.01 35.7%,\n    1.025 38.5%,\n    1.034 41.6%,\n    1.038 45%,\n    1.035 50.1%,\n    1.012 64.2%,\n    1.003 73%,\n    0.999 83.7%,\n    1\n  );--sileo-duration:600ms;--sileo-height:40px;--sileo-width:350px;--sileo-state-success:oklch(0.723 0.219 142.136);--sileo-state-loading:oklch(0.556 0 0);--sileo-state-error:oklch(0.637 0.237 25.331);--sileo-state-warning:oklch(0.795 0.184 86.047);--sileo-state-info:oklch(0.685 0.169 237.323);--sileo-state-action:oklch(0.623 0.214 259.815)}[data-sileo-toast]{position:relative;cursor:pointer;pointer-events:auto;touch-action:none;border:0;background:0 0;padding:0;width:var(--sileo-width);height:var(--_h,var(--sileo-height));opacity:0;transform:translateZ(0) scale(.95);transform-origin:center;contain:layout style;overflow:visible}[data-sileo-toast][data-state=loading]{cursor:default}[data-sileo-toast][data-ready=true]{opacity:1;transform:translateZ(0) scale(1);transition:transform calc(var(--sileo-duration) * .66) var(--sileo-spring-easing),opacity calc(var(--sileo-duration) * .66) var(--sileo-spring-easing),margin-bottom calc(var(--sileo-duration) * .66) var(--sileo-spring-easing),margin-top calc(var(--sileo-duration) * .66) var(--sileo-spring-easing),height var(--sileo-duration) var(--sileo-spring-easing)}[data-sileo-viewport][data-position^=top] [data-sileo-toast]:not([data-ready=true]){transform:translateY(-6px) scale(.95)}[data-sileo-viewport][data-position^=bottom] [data-sileo-toast]:not([data-ready=true]){transform:translateY(6px) scale(.95)}[data-sileo-toast][data-ready=true][data-exiting=true]{opacity:0;pointer-events:none}[data-sileo-viewport][data-position^=top] [data-sileo-toast][data-ready=true][data-exiting=true]{transform:translateY(-6px) scale(.95)}[data-sileo-viewport][data-position^=bottom] [data-sileo-toast][data-ready=true][data-exiting=true]{transform:translateY(6px) scale(.95)}[data-sileo-canvas]{position:absolute;left:0;right:0;pointer-events:none;transform:translateZ(0);contain:layout style;overflow:visible}[data-sileo-canvas][data-edge=top]{bottom:0;transform:scaleY(-1) translateZ(0)}[data-sileo-canvas][data-edge=bottom]{top:0}[data-sileo-svg]{overflow:visible}[data-sileo-header]{position:absolute;z-index:20;display:flex;align-items:center;padding:.5rem;height:var(--sileo-height);overflow:hidden;left:var(--_px,0);transform:var(--_ht);max-width:var(--_pw)}[data-sileo-toast][data-ready=true] [data-sileo-header]{transition:transform var(--sileo-duration) var(--sileo-spring-easing),left var(--sileo-duration) var(--sileo-spring-easing),max-width var(--sileo-duration) var(--sileo-spring-easing)}[data-sileo-header][data-edge=top]{bottom:0}[data-sileo-header][data-edge=bottom]{top:0}[data-sileo-header-stack]{position:relative;display:inline-flex;align-items:center;height:100%}[data-sileo-header-inner]{display:flex;align-items:center;gap:.5rem;white-space:nowrap;opacity:1;filter:blur(0px);transform:translateZ(0)}[data-sileo-header-inner][data-layer=current]{position:relative;z-index:1;animation:sileo-header-enter var(--sileo-duration) var(--sileo-spring-easing) both}[data-sileo-header-inner][data-exiting=true],[data-sileo-header-inner][data-layer=current]:not(:only-child){will-change:opacity,filter}[data-sileo-header-inner][data-layer=prev]{position:absolute;left:0;top:0;z-index:0;pointer-events:none}[data-sileo-header-inner][data-exiting=true]{animation:sileo-header-exit calc(var(--sileo-duration) * .7) ease forwards}[data-sileo-badge]{display:flex;height:24px;width:24px;flex-shrink:0;align-items:center;justify-content:center;padding:2px;box-sizing:border-box;border-radius:9999px;color:var(--sileo-tone,currentColor);background-color:var(--sileo-tone-bg,transparent)}[data-sileo-title]{font-size:.825rem;line-height:1rem;font-weight:500;text-transform:capitalize;color:var(--sileo-tone,currentColor)}:is([data-sileo-badge],[data-sileo-title],[data-sileo-button])[data-state]{--_c:var(--sileo-state-success)}:is([data-sileo-badge],[data-sileo-title],[data-sileo-button])[data-state=loading]{--_c:var(--sileo-state-loading)}:is([data-sileo-badge],[data-sileo-title],[data-sileo-button])[data-state=error]{--_c:var(--sileo-state-error)}:is([data-sileo-badge],[data-sileo-title],[data-sileo-button])[data-state=warning]{--_c:var(--sileo-state-warning)}:is([data-sileo-badge],[data-sileo-title],[data-sileo-button])[data-state=info]{--_c:var(--sileo-state-info)}:is([data-sileo-badge],[data-sileo-title],[data-sileo-button])[data-state=action]{--_c:var(--sileo-state-action)}:is([data-sileo-badge],[data-sileo-title])[data-state]{--sileo-tone:var(--_c);--sileo-tone-bg:color-mix(in oklch, var(--_c) 20%, transparent)}[data-sileo-content]{position:absolute;left:0;z-index:10;width:100%;pointer-events:none;opacity:var(--_co, 0)}[data-sileo-content]:not([data-visible=true]){content-visibility:hidden}[data-sileo-toast][data-ready=true] [data-sileo-content]{transition:opacity calc(var(--sileo-duration) * .08) ease calc(var(--sileo-duration) * .04)}[data-sileo-content][data-edge=top]{top:0}[data-sileo-content][data-edge=bottom]{top:var(--sileo-height)}[data-sileo-content][data-visible=true]{pointer-events:auto}[data-sileo-toast][data-ready=true] [data-sileo-content][data-visible=true]{transition:opacity calc(var(--sileo-duration) * .6) ease calc(var(--sileo-duration) * .3)}[data-sileo-description]{width:100%;text-align:left;padding:1rem;font-size:.875rem;line-height:1.25rem;contain:layout style paint;content-visibility:auto}[data-sileo-button]{display:flex;align-items:center;justify-content:center;height:1.75rem;padding:0 .625rem;margin-top:.75rem;border-radius:9999px;border:0;font-size:.75rem;font-weight:500;cursor:pointer;color:var(--sileo-btn-color,currentColor);background-color:var(--sileo-btn-bg,transparent);transition:background-color 150ms ease}[data-sileo-button]:hover{background-color:var(--sileo-btn-bg-hover,transparent)}[data-sileo-button][data-state]{--sileo-btn-color:var(--_c);--sileo-btn-bg:color-mix(in oklch, var(--_c) 15%, transparent);--sileo-btn-bg-hover:color-mix(in oklch, var(--_c) 25%, transparent)}[data-sileo-icon=spin]{animation:sileo-spin 1s linear infinite}@keyframes sileo-spin{to{transform:rotate(360deg)}}@keyframes sileo-header-enter{from{opacity:0;filter:blur(6px)}to{opacity:1;filter:blur(0px)}}@keyframes sileo-header-exit{from{opacity:1;filter:blur(0px)}to{opacity:0;filter:blur(6px)}}[data-sileo-viewport]{position:fixed;z-index:50;display:flex;gap:.75rem;padding:.75rem;pointer-events:none;max-width:calc(100vw - 1.5rem);contain:layout style}[data-sileo-viewport][data-position^=top] [data-sileo-toast]:not([data-ready=true]){margin-bottom:calc(-1 * (var(--sileo-height) + .75rem))}[data-sileo-viewport][data-position^=bottom] [data-sileo-toast]:not([data-ready=true]){margin-top:calc(-1 * (var(--sileo-height) + .75rem))}[data-sileo-viewport][data-position^=top]{top:0;flex-direction:column-reverse}[data-sileo-viewport][data-position^=bottom]{bottom:0;flex-direction:column}[data-sileo-viewport][data-position$=left]{left:0;align-items:flex-start}[data-sileo-viewport][data-position$=right]{right:0;align-items:flex-end}[data-sileo-viewport][data-position$=center]{left:50%;transform:translateX(-50%);align-items:center}@media (prefers-reduced-motion:no-preference){[data-sileo-toast][data-ready=true]:hover,[data-sileo-toast][data-ready=true][data-exiting=true]{will-change:transform,opacity,height}}@media (prefers-reduced-motion:reduce){[data-sileo-viewport],[data-sileo-viewport] *,[data-sileo-viewport] ::after,[data-sileo-viewport] ::before{animation-duration:0s;animation-iteration-count:1;transition-duration:0s}}[data-sileo-viewport][data-theme=dark] [data-sileo-description]{color:rgba(0,0,0,.5)}[data-sileo-viewport][data-theme=light] [data-sileo-description]{color:rgba(255,255,255,.5)}");
+ 
+@@ -190,6 +190,8 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+ /* ------------------------------- Component -------------------------------- */ const Sileo = /*#__PURE__*/ memo(function Sileo({ id, fill = "#FFFFFF", state = "success", title = state, description, position = "left", expand = "bottom", className, icon, styles, button, roundness, exiting = false, autoExpandDelayMs, autoCollapseDelayMs, canExpand, interruptKey, refreshKey, onMouseEnter, onMouseLeave, onDismiss }) {
+     var _headerLayer_current_view_icon, _headerLayer_prev_view_icon;
+     var _headerLayer_current_view_styles, _headerLayer_current_view_styles1, _headerLayer_prev_view_styles, _headerLayer_prev_view_styles1, _view_styles, _view_styles1;
++    const [toastWidth, setToastWidth] = useState(WIDTH);
++    const reducedMotion = useReducedMotion();
+     const next = useMemo(()=>({
+             title,
+             description,
+@@ -450,7 +452,7 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+     const expandedContent = Math.max(0, expanded - HEIGHT);
+     const resolvedPillWidth = Math.max(pillWidth || HEIGHT, HEIGHT);
+     const pillHeight = HEIGHT + blur * 3;
+-    const pillX = position === "right" ? WIDTH - resolvedPillWidth : position === "center" ? (WIDTH - resolvedPillWidth) / 2 : 0;
++    const pillX = position === "right" ? toastWidth - resolvedPillWidth : position === "center" ? (toastWidth - resolvedPillWidth) / 2 : 0;
+     /* ------------------------------- Memoised animate targets ----------------- */ const pillAnimate = useMemo(()=>({
+             x: pillX,
+             width: resolvedPillWidth,
+@@ -478,7 +480,7 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+         }, [
+         ready
+     ]);
+-    const viewBox = `0 0 ${WIDTH} ${svgHeight}`;
++    const viewBox = `0 0 ${toastWidth} ${svgHeight}`;
+     /* ------------------------------- Inline styles ---------------------------- */ const rootStyle = useMemo(()=>({
+             "--_h": `${open ? expanded : HEIGHT}px`,
+             "--_pw": `${resolvedPillWidth}px`,
+@@ -501,7 +503,6 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+     ]);
+     const handleLeave = useCallback((e)=>{
+         onMouseLeave == null ? void 0 : onMouseLeave(e);
+-        setIsExpanded(false);
+     }, [
+         onMouseLeave
+     ]);
+@@ -523,6 +524,15 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+     /* -------------------------------- Swipe ----------------------------------- */ const SWIPE_DISMISS = 30;
+     const SWIPE_MAX = 20;
+     const buttonRef = useRef(null);
++    useLayoutEffect(()=>{
++        const node = buttonRef.current;
++        if (!node) return;
++        const measure = ()=>{ if (node.clientWidth > 0) setToastWidth(node.clientWidth); };
++        measure();
++        const observer = new ResizeObserver(measure);
++        observer.observe(node);
++        return ()=>observer.disconnect();
++    }, []);
+     const pointerStartRef = useRef(null);
+     const onDismissRef = useRef(onDismiss);
+     onDismissRef.current = onDismiss;
+@@ -580,7 +590,7 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+         exiting,
+         onDismiss
+     ]);
+-    /* --------------------------------- Render --------------------------------- */ return /*#__PURE__*/ jsxs("button", {
++    /* --------------------------------- Render --------------------------------- */ return /*#__PURE__*/ jsxs("div", {
+         ref: buttonRef,
+         type: "button",
+         "data-sileo-toast": true,
+@@ -602,7 +612,7 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+                 "data-edge": expand,
+                 children: /*#__PURE__*/ jsxs("svg", {
+                     "data-sileo-svg": true,
+-                    width: WIDTH,
++                    width: toastWidth,
+                     height: svgHeight,
+                     viewBox: viewBox,
+                     children: [
+@@ -612,7 +622,7 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+                         /*#__PURE__*/ jsx(GooeyDefs, {
+                             filterId: filterId,
+                             blur: blur,
+-                            width: WIDTH,
++                            width: toastWidth,
+                             height: svgHeight
+                         }),
+                         /*#__PURE__*/ jsxs("g", {
+@@ -625,18 +635,18 @@ const GooeyDefs = /*#__PURE__*/ memo(function GooeyDefs({ filterId, blur, width,
+                                     fill: view.fill,
+                                     initial: false,
+                                     animate: pillAnimate,
+-                                    transition: pillTransition
++                                    transition: reducedMotion ? { duration: 0 } : pillTransition
+                                 }),
+                                 /*#__PURE__*/ jsx(motion.rect, {
+                                     "data-sileo-body": true,
+                                     y: HEIGHT,
+-                                    width: WIDTH,
++                                    width: toastWidth,
+                                     rx: resolvedRoundness,
+                                     ry: resolvedRoundness,
+                                     fill: view.fill,
+                                     initial: false,
+                                     animate: bodyAnimate,
+-                                    transition: bodyTransition
++                                    transition: reducedMotion ? { duration: 0 } : bodyTransition
+                                 })
+                             ]
+                         })
+@@ -763,7 +773,7 @@ const mergeOptions = (options)=>{
+ const buildSileoItem = (merged, id, fallbackPosition)=>{
+     var _merged_duration, _ref, _merged_position;
+     const duration = (_merged_duration = merged.duration) != null ? _merged_duration : DEFAULT_TOAST_DURATION;
+-    const auto = resolveAutopilot(merged, duration);
++    const auto = resolveAutopilot(merged, merged.duration === null ? Infinity : duration);
+     return _extends({}, merged, {
+         id,
+         instanceId: generateId(),
+@@ -990,7 +1000,10 @@ function Toaster({ children, position = "top-right", offset, options, theme }) {
+                 setActiveId((prev)=>prev === latestRef.current ? prev : latestRef.current);
+                 handleMouseLeaveRef.current == null ? void 0 : handleMouseLeaveRef.current.call(handleMouseLeaveRef, e);
+             },
+-            dismiss: ()=>dismissToast(toastId)
++            dismiss: ()=>{
++                listRef.current.find((item)=>item.id === toastId)?.onDismiss?.();
++                dismissToast(toastId);
++            }
+         };
+         handlersCache.current.set(toastId, cached);
+         return cached;
+@@ -1063,7 +1076,7 @@ function Toaster({ children, position = "top-right", offset, options, theme }) {
+                             autoExpandDelayMs: item.autoExpandDelayMs,
+                             autoCollapseDelayMs: item.autoCollapseDelayMs,
+                             refreshKey: item.instanceId,
+-                            canExpand: activeId === undefined || activeId === item.id,
++                            canExpand: true,
+                             onMouseEnter: h.enter,
+                             onMouseLeave: h.leave,
+                             onDismiss: h.dismiss

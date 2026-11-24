@@ -6,11 +6,12 @@ import type { RequestedStaff } from './StaffSelectionPage';
  * in `StaffSelectionPage` (draft mode); this only shows and trims the result. Nothing is sent until the drawer's own
  * Send action.
  */
-export default function SelectedStaffField({ staff, onOpenPicker, onChange, error }: {
+export default function SelectedStaffField({ staff, onOpenPicker, onChange, error, renderSettings }: {
   staff: RequestedStaff[];
   onOpenPicker: () => void;
   onChange: (staff: RequestedStaff[]) => void;
   error?: React.ReactNode;
+  renderSettings?: (staff: RequestedStaff) => React.ReactNode;
 }) {
   return (
     <div className="field field-full selected-staff-field">
@@ -25,7 +26,8 @@ export default function SelectedStaffField({ staff, onOpenPicker, onChange, erro
       {staff.length > 0 && (
         <ul className="selected-staff-list" aria-label="Selected staff">
           {staff.map((s) => (
-            <li key={s.staffProfileId}>
+            <li key={s.staffProfileId} className={renderSettings ? 'selected-staff-card' : undefined}>
+              <div className="selected-staff-identity">
               <span className="mini-avatar" aria-hidden="true">{s.firstName[0]}</span>
               <span className="selected-staff-text">
                 <span className="selected-staff-name">{s.firstName} {s.lastName}</span>
@@ -35,6 +37,8 @@ export default function SelectedStaffField({ staff, onOpenPicker, onChange, erro
                 onClick={() => onChange(staff.filter((x) => x.staffProfileId !== s.staffProfileId))}>
                 <IconX size={13} />
               </button>
+              </div>
+              {renderSettings?.(s)}
             </li>
           ))}
         </ul>

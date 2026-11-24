@@ -52,6 +52,7 @@ function tree(qc: QueryClient) {
         <Routes>
           <Route path="/onboarding/preparing" element={<WorkspacePreparationScreen />} />
           <Route path="/" element={<div>DASHBOARD</div>} />
+          <Route path="/onboarding/profile" element={<div>PROFILE SETUP</div>} />
           <Route path="/login" element={<div>LOGIN</div>} />
         </Routes>
       </MemoryRouter>
@@ -124,7 +125,7 @@ describe('server-reported setup stages (no timer ever moves a stage)', () => {
     markPendingManagerWelcome('ws-1');
     mockServer('READY');
     await mount();
-    expect(stageLabels()).toEqual(['Validating', 'Creating workspace', 'Preparing database', 'Applying FORCE RLS', 'Verifying workspace', 'Ready']);
+    expect(stageLabels()).toEqual(['Validating', 'Creating workspace', 'Preparing your workspace', 'Securing your workspace', 'Checking everything', 'Ready']);
     expect(stepStates()).toEqual(['complete', 'complete', 'complete', 'complete', 'complete', 'complete']);
   });
 
@@ -433,4 +434,18 @@ it('consumes the self-service flag on mount so it never leaks into a later attem
   mockServer('CREATING');
   await mount();
   expect(sessionStorage.getItem(SELF_SERVICE_WORKSPACE_KEY)).toBeNull();
+});
+
+describe('workspace creation before profile setup', () => {
+  it('waits for READY, then opens the profile form without consuming a welcome', async () => {
+    mockServer('CREATING');
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/profile' ? { firstName: 'Jamie' } : { ...workspaceResponse(currentStatus), onboardingCompletedAt: null } }));
+    await mount();
+    await advance(MIN_ANIMATION_MS);
+    expect(screen.queryByText('PROFILE SETUP')).toBeNull();
+    currentStatus = 'READY';
+    await advance(2500 + READY_BEAT_MS);
+    expect(screen.getByText('PROFILE SETUP')).toBeInTheDocument();
+    expect(document.querySelector('.welcome-overlay')).toBeNull();
+  });
 });

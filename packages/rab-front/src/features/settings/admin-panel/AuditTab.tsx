@@ -1,3 +1,5 @@
+import { motion as arcMotion } from 'framer-motion';
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 
@@ -67,7 +69,7 @@ export default function AuditTab() {
             <option key={value} value={value}>{label}</option>
           ))}
         </select>
-        <input className="ap-input ap-grow" type="search" placeholder="Filter by admin or target (email or name)" aria-label="Filter audit log" value={who} onChange={(e) => setWho(e.target.value)} />
+        <SearchField label="Filter audit log" className="ap-input ap-grow" type="search" placeholder="Filter by admin or target (email or name)" aria-label="Filter audit log" value={who} onChange={(e) => setWho(e.target.value)} />
         <button type="submit" className="ap-btn">Filter</button>
         {user && (
           <button type="button" className="ap-btn ap-sm" onClick={() => { setUser(null); setWho(''); }} aria-label={`Clear filter ${user.label}`}>
@@ -87,13 +89,13 @@ export default function AuditTab() {
               <tr><td colSpan={5} className="ap-empty">No admin activity matches these filters.</td></tr>
             ) : (
               items.map((i) => (
-                <tr key={i.id}>
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={i.id}>
                   <td>{formatDateTime(i.createdAt)}</td>
                   <td>{i.actor ? i.actor.name || shortId(i.actor.userId) : 'System'}</td>
                   <td>{AUDIT_ACTION_LABELS[i.action] ?? i.action}</td>
                   <td>{targetText(i)}</td>
                   <td className="ap-muted">{i.reason ?? ''}</td>
-                </tr>
+                </arcMotion.tr>
               ))
             )}
           </tbody>

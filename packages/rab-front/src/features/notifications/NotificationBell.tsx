@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconBell, IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { EmptyState } from '../../shared/components/LoadingState';
+import './notifications.css';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import { notifyApiError } from '../../shared/lib/mutationFeedback';
 
@@ -91,7 +92,7 @@ export default function NotificationBell() {
       </button>
 
       {open && (
-        <div className="dropdown-menu" style={{ top: 'calc(100% + 6px)', left: 'auto', right: 0, minWidth: 320, padding: 0 }}>
+        <div className="dropdown-menu notifications-panel" style={{ top: 'calc(100% + 6px)', left: 'auto', right: 0, width: 320, maxWidth: 'calc(100vw - 24px)', padding: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', padding: '8px 10px', borderBottom: '1px solid var(--border-light)' }}>
             <span style={{ fontSize: 13, fontWeight: 600 }}>Notifications</span>
             <div style={{ flex: 1 }} />
@@ -102,14 +103,14 @@ export default function NotificationBell() {
               </button>
             )}
           </div>
-          <div style={{ maxHeight: 360, overflowY: 'auto' }}>
+          <div className="notification-list">
             {notifications.length === 0 && (
               <EmptyState compact variant="inbox" title="No notifications yet" />
             )}
             {notifications.map((n) => (
               <button
                 key={n.id}
-                className="dropdown-item"
+                className="notification-row"
                 style={{
                   flexDirection: 'column', alignItems: 'flex-start', gap: 2, whiteSpace: 'normal', textAlign: 'left',
                   background: n.readAt ? undefined : 'var(--bg-transparent-light)',

@@ -1,11 +1,20 @@
+import HoldToConfirm from '../../shared/components/arc/hold-to-confirm/hold-to-confirm';
+import Popover from '../../shared/components/Popover';
+import CompoundDetailField from './CompoundDetailField';
+import EmailComposerFields from './EmailComposerFields';
+import StaffSelect from './StaffSelect';
+import './name-input.css';
+import './user-records.css';
+import './user-field-panel.css';
 import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   IconUserOff, IconUserCheck, IconKey, IconSend, IconMail, IconBan, IconTrash, IconDotsVertical,
   IconPencil, IconHome2, IconHistory, IconNotes, IconPhone, IconChevronDown, IconPlus,
-  IconUsersGroup, IconStar,
+  IconChevronLeft, IconCheck, IconUsersGroup, IconStar, IconHash, IconBriefcase, IconCalendarEvent, IconCurrencyPound, IconCircleCheck, IconUser, IconMapPin, IconBuilding, IconClock, IconTag, IconAlignLeft,
 } from '@tabler/icons-react';
 import DetailTabs from './DetailTabs';
+import UserTimeline from './UserTimeline';
 import { AnimatePresence, motion } from 'framer-motion';
 import { contentSwap } from '../../shared/motion';
 import StaffReviewsTab from './StaffReviewsTab';
@@ -33,6 +42,22 @@ const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Satur
 
 type FieldControlType = 'text' | 'date' | 'tel' | 'email' | 'phone' | 'number' | 'select' | 'multiselect' | 'tags' | 'textarea';
 type SelectOption = string | { value: string; label: string };
+
+const FIELD_ICONS: Record<string, typeof IconUser> = {
+  'Email': IconMail, 'Phone': IconPhone, 'Phone number': IconPhone,
+  'Staff reference': IconHash, 'Job role': IconBriefcase, 'Job title': IconBriefcase,
+  'Employment type': IconBriefcase, 'Manager type': IconUsersGroup,
+  'Start date': IconCalendarEvent, 'Date of birth': IconCalendarEvent,
+  'Default rate': IconCurrencyPound, 'Status': IconCircleCheck,
+  'First name': IconUser, 'Last name': IconUser, 'Full name': IconUser,
+  'Address': IconMapPin, 'City': IconBuilding, 'Postcode': IconHash, 'Venue': IconBuilding,
+  'Relationship': IconUsersGroup, 'Available days': IconCalendarEvent,
+  'Preferred shift times': IconClock, 'Maximum hours per week': IconClock, 'Skills': IconTag,
+};
+function FieldLabel({label,required=false}:{label:string;required?:boolean}) {
+  const Icon=FIELD_ICONS[label]??IconAlignLeft;
+  return <span className="detail-info-label"><Icon size={15} stroke={1.5} aria-hidden="true"/><span>{label}{required?' *':''}</span></span>;
+}
 
 /**
  * A single label/value row, CRM-style: read-only by default, a pencil
@@ -102,6 +127,13 @@ function EditableField({
     if (!editing || !(type === 'select' || type === 'multiselect' || type === 'date' || type === 'phone')) return;
     const onMouseDown = (e: MouseEvent) => {
       if (!rowRef.current || rowRef.current.contains(e.target as Node)) return;
+      // A select menu is portaled outside the row; its options/search still belong to this editor.
+      const controlledId = rowRef.current.querySelector('[aria-controls]')?.getAttribute('aria-controls');
+      const ownedPortal = controlledId ? document.getElementById(controlledId)?.closest('[data-rab-portal]') : null;
+      if (ownedPortal?.contains(e.target as Node)) return;
+      // Let another field's click switch editors atomically. Collapsing a tall day picker
+      // on mousedown would move that target before its click can fire.
+      if (type !== 'phone' && (e.target as Element).closest('.detail-info-value-box-hover, .detail-info-edit-btn')) return;
       if (type === 'phone') commitValue(draft);
       else onEditEnd();
     };
@@ -141,22 +173,16 @@ function EditableField({
     if (type === 'select') {
       const opts = (options ?? []).map((o) => (typeof o === 'string' ? { value: o, label: o } : o));
       control = (
-        <select
-          autoFocus
-          value={draft as string}
-          disabled={saving}
-          onChange={(e) => { if (e.target.value) commitValue(e.target.value); }}
-          onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onEditEnd(); } }}
-        >
-          <option value="">— Select —</option>
-          {opts.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
+        <div onKeyDown={event=>{if(event.key==='Escape' && !(event.target as Element).closest('.staff-select-card')){event.stopPropagation();onEditEnd();}}}>
+          <StaffSelect value={draft as string} label={label} placeholder="Select…" options={opts} compact defaultOpen disabled={saving}
+            onChange={next=>{if(next)commitValue(next);}}/>
+        </div>
       );
     } else if (type === 'multiselect') {
       const selected = Array.isArray(draft) ? draft : [];
       const opts = (options ?? []).map((o) => (typeof o === 'string' ? { value: o, label: o } : o));
       control = (
-        <div className="weekday-picker" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onEditEnd(); } }}>
+        <div className="weekday-picker staff-day-picker" onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onEditEnd(); } }}>
           {opts.map((o) => (
             <label key={o.value} className="weekday-picker-option">
               <input
@@ -169,6 +195,7 @@ function EditableField({
                   commitValue(next, true);
                 }}
               />
+              <IconCheck size={13} aria-hidden="true" className="staff-day-check"/>
               {o.label}
             </label>
           ))}
@@ -192,6 +219,7 @@ function EditableField({
     } else if (type === 'textarea') {
       control = (
         <textarea
+          aria-label={label}
           autoFocus
           rows={3}
           value={draft as string}
@@ -224,6 +252,7 @@ function EditableField({
     } else {
       control = (
         <input
+          aria-label={label}
           autoFocus
           type={type === 'tags' ? 'text' : type}
           value={draft as string}
@@ -246,7 +275,7 @@ function EditableField({
     }
     return (
       <div className="detail-info-row detail-info-row-editing" ref={rowRef}>
-        <span className="detail-info-label">{label}</span>
+        <FieldLabel label={label}/>
         <div className="detail-info-edit">{control}</div>
         {error && <span className="detail-info-error">{error}</span>}
       </div>
@@ -254,17 +283,21 @@ function EditableField({
   }
 
   const isEmpty = Array.isArray(value) ? value.length === 0 : !value;
-  const display = isEmpty ? null : (format ? format(value!) : (Array.isArray(value) ? value.join(', ') : value));
+  const display = isEmpty ? null : (format ? format(value!) : (Array.isArray(value) ? <span className="detail-field-chips">{value.map((item,index)=><span className="detail-field-chip" key={item+index}>{item}</span>)}</span> : value));
   return (
     <div className={`detail-info-row${editable ? ' detail-info-row-hover' : ''}`}>
-      <span className="detail-info-label">{label}{required && editable ? ' *' : ''}</span>
+      <FieldLabel label={label} required={required && editable}/>
       <span className="detail-info-value-group">
         <span
           className={`detail-info-value-box${editable ? ' detail-info-value-box-hover' : ''}`}
+          role={editable ? 'button' : undefined}
+          tabIndex={editable ? 0 : undefined}
+          aria-label={editable ? `Edit ${label} value` : undefined}
+          onKeyDown={event=>{if(editable && (event.key==='Enter'||event.key===' ')){event.preventDefault();onEditStart();}}}
           onClick={() => editable && onEditStart()}
         >
-          <span className={`detail-info-value${isEmpty ? ' detail-info-value-empty' : ''}${wrap ? ' detail-info-value-wrap' : ''}`}>
-            {display ?? '—'}
+          <span className={`detail-info-value${isEmpty ? ' detail-info-value-empty' : ''}${wrap ? ' detail-info-value-wrap' : ''}${['email','phone','tel'].includes(type) && !isEmpty ? ' detail-field-contact-chip' : ''}${Array.isArray(value) ? ' detail-field-array' : ''}`}>
+            {display ?? 'Empty'}
           </span>
         </span>
         {editable && (
@@ -280,7 +313,7 @@ function EditableField({
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="detail-info-row">
-      <span className="detail-info-label">{label}</span>
+      <FieldLabel label={label}/>
       <span className="detail-info-value">{value ?? '—'}</span>
     </div>
   );
@@ -400,14 +433,13 @@ export default function UserDetailPanel() {
   const [editingField, setEditingField] = useState<string | null>(null);
   const [showMore, setShowMore] = useState(false);
   const [emailComposerOpen, setEmailComposerOpen] = useState(false);
+  const [emailAccountsOpen, setEmailAccountsOpen] = useState(false);
+  const emailAccountsAnchor = useRef<HTMLButtonElement>(null);
   const [notesComposerOpen, setNotesComposerOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [error, setError] = useState('');
   const [resetConfirm, setResetConfirm] = useState(false);
   const [cancelConfirm, setCancelConfirm] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(false);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
-  const [deletePassword, setDeletePassword] = useState('');
   const [emailSubject, setEmailSubject] = useState('');
   const [emailMessage, setEmailMessage] = useState('');
   const [noteDraft, setNoteDraft] = useState('');
@@ -430,8 +462,6 @@ export default function UserDetailPanel() {
       setError('');
       setResetConfirm(false);
       setCancelConfirm(false);
-      setDeleteConfirm(false);
-      setDeleteConfirmText('');
       setEmailSubject('');
       setEmailMessage('');
       setNoteDraft('');
@@ -476,6 +506,17 @@ export default function UserDetailPanel() {
   });
   // A workspace Venue Manager opened by their own Manager (reference layout: More tabs, Assigned staff tab, photo tile).
   const vmScope = userType === 'manager' && scope === 'workspace' && record?.type === 'venue';
+  // Same cache entry as the Users page. `manager.manage` is the caller's effective permission (overrides honoured).
+  const { data: capabilities } = useQuery({
+    queryKey: ['auth', 'capabilities'],
+    queryFn: async () => (await api.get<Record<string, boolean>>('/auth/capabilities')).data,
+    enabled: open && userType === 'manager' && scope === 'org',
+    staleTime: 300_000,
+  });
+  // A Venue Manager opened from the organisation Managers list by an organisation administrator (CEO, or a platform admin
+  // in their own organisation): the same Assigned staff tab and picker, served by the org-admin routes.
+  const orgAdminTeam = userType === 'manager' && scope === 'org' && record?.type === 'venue' && capabilities?.['manager.manage'] === true;
+  const teamApiBase = vmScope ? '/venue-managers' : orgAdminTeam ? '/org-admin/venue-managers' : null;
 
   const { data: timeline, isLoading: timelineLoading } = useQuery({
     queryKey: [endpoint, id, 'timeline'],
@@ -579,21 +620,19 @@ export default function UserDetailPanel() {
     CANNOT_DELETE_PLATFORM_ADMIN: 'This account holds the platform administrator claim and cannot be deleted.',
   };
 
+  const currentDeleteTarget = '/' + endpoint + '/' + id;
+  const activeDeleteTarget = useRef(currentDeleteTarget);
+  activeDeleteTarget.current = currentDeleteTarget;
   const deleteUser = useMutation({
-    // DELETE is a step-up action: the server re-verifies the ACTOR's own current password (StepUpReauthDto). Sending no
-    // body made every delete a 400 validation failure.
-    mutationFn: (currentPassword: string) => api.delete(`/${endpoint}/${id}`, { data: { currentPassword } }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: [endpoint] }); toast.success('User deleted.'); close(); },
+    mutationFn: (target: string) => api.delete(target),
+    onSuccess: (_result, target) => {
+      qc.invalidateQueries({ queryKey: [target.split('/')[1]] });
+      toast.success('User deleted.');
+      if (activeDeleteTarget.current === target) close();
+    },
     onError: (e: unknown) => {
       const code = getApiErrorCode(e);
       toast.error((code && DELETE_BLOCK_MESSAGES[code]) ?? getApiErrorMessage(e, 'Failed to delete this user.'));
-      // A blocking rule (the code map) cannot be fixed by retrying: close the confirmation. Anything else (a wrong
-      // password, a dropped connection) keeps it open with the typed confirmation; only the password is cleared.
-      if (code && DELETE_BLOCK_MESSAGES[code]) {
-        setDeleteConfirm(false);
-        setDeleteConfirmText('');
-      }
-      setDeletePassword('');
     },
   });
 
@@ -701,7 +740,7 @@ export default function UserDetailPanel() {
           type="email"
           required
           editable
-          format={(v) => <span className="detail-contact-value"><IconMail size={12} /> {v as string}</span>}
+          format={(v) => <span className="detail-contact-value">{v as string}</span>}
           onSave={async (v) => { await saveEmail(v as string); }}
           editing={editingField === 'email'}
           onEditStart={() => setEditingField('email')}
@@ -729,7 +768,7 @@ export default function UserDetailPanel() {
           value={record.phone}
           type="phone"
           editable
-          format={(v) => <span className="detail-contact-value"><IconPhone size={12} /> {v as string}</span>}
+          format={(v) => <span className="detail-contact-value">{v as string}</span>}
           onSave={fieldPatch('phone')}
           editing={editingField === 'phone'}
           onEditStart={() => setEditingField('phone')}
@@ -745,7 +784,7 @@ export default function UserDetailPanel() {
       title={record ? name : userType === 'staff' ? 'Staff member' : 'Manager'}
       description={record ? (userType === 'staff' ? `Staff • ${record.staffRef}` : scope === 'workspace' && Array.isArray(record.venues) ? `Venue manager • ${record.venues.map((v: { name: string }) => v.name).join(', ') || 'No venue'}` : `Manager • ${managerTypeLabel(record).replace(/ manager$/, '')}`) : undefined}
       avatar={record && <Avatar imageKey={record.avatarKey} label={name} variant="panel" />}
-      icon={record && <span className={`badge badge-${statusClass}`}>{statusLabel}</span>}
+      icon={record && <span className={`badge badge-${statusClass} user-account-status`}>{statusLabel}</span>}
       loading={isLoading}
       compactHeader
       contentKey={id ? `${userType}:${id}` : undefined}
@@ -755,7 +794,7 @@ export default function UserDetailPanel() {
       ) : (
         <div className="detail-panel-shell">
           {/* Compact tabs + overflow menu. VM: Notes and Assigned staff (owner-assigned team only); Staff: Notes and Staff reviews. */}
-          <DetailTabs<DetailTab>
+          {!(tab === 'email' && emailComposerOpen) && <DetailTabs<DetailTab>
             primary={[
               { id: 'home', label: 'Overview', icon: <IconHome2 size={14} /> },
               { id: 'timeline', label: 'Timeline', icon: <IconHistory size={14} /> },
@@ -763,54 +802,37 @@ export default function UserDetailPanel() {
             ]}
             overflow={[
               { id: 'note', label: 'Notes', icon: <IconNotes size={14} /> },
-              ...(vmScope ? [{ id: 'staff' as const, label: 'Assigned staff', icon: <IconUsersGroup size={14} /> }] : []),
+              ...(teamApiBase ? [{ id: 'staff' as const, label: 'Assigned staff', icon: <IconUsersGroup size={14} /> }] : []),
               ...(userType === 'staff' ? [{ id: 'reviews' as const, label: 'Staff reviews', icon: <IconStar size={14} /> }] : []),
             ]}
             value={tab}
-            onChange={setTab}
-          />
+            onChange={next=>{setEmailComposerOpen(false);setEmailAccountsOpen(false);setTab(next);}}
+          />}
 
           <AnimatePresence mode="wait" initial={false}>
           {/* Tab content cross-fades (each tab already renders its own content; no extra remount). */}
           <motion.div className="detail-panel-body" key={tab} variants={contentSwap} initial="hidden" animate="visible" exit="exit">
             {tab === 'home' && (
-              <div>
+              <div className="crewflow-field-panel">
                 <div className="detail-profile-summary">
-                  {userType === 'staff' || vmScope ? (
+                  {userType === 'staff' || vmScope ? <>
                     <AvatarUploadButton
                       imageKey={record.avatarKey}
                       label={name}
                       onFileSelected={(file) => uploadAvatar.mutate(file)}
-                      disabled={uploadAvatar.isPending}
+                      disabled={uploadAvatar.isPending || removeAvatar.isPending}
+                      showUploadAction
                     />
-                  ) : (
-                    <Avatar imageKey={record.avatarKey} label={name} variant="panel" />
-                  )}
-                  <div className="detail-profile-summary-text">
-                    <div className="detail-profile-summary-name">{name}</div>
-                    {!(vmScope && !record.jobTitle) && (
-                      <div className="detail-profile-summary-role">
-                        {userType === 'staff' ? (jobRoleName(record.jobRoleId) ?? '—') : (record.jobTitle || '—')}
-                      </div>
-                    )}
-                    {(userType === 'staff' || vmScope) && record.avatarKey && (
-                      <button
-                        type="button"
-                        className="btn-link-muted"
-                        onClick={() => removeAvatar.mutate()}
-                        disabled={removeAvatar.isPending}
-                      >
-                        Remove photo
-                      </button>
-                    )}
-                  </div>
-                  {!vmScope && (
-                    <button type="button" className="btn btn-outline" onClick={() => setEditingField('firstName')}>
-                      <IconPencil size={13} /> Edit
+                    <button type="button" className="btn-icon detail-photo-remove" aria-label="Remove photo" title="Remove photo"
+                      onClick={() => removeAvatar.mutate()} disabled={!record.avatarKey || removeAvatar.isPending || uploadAvatar.isPending}>
+                      <IconTrash size={16}/>
                     </button>
-                  )}
+                  </> : <>
+                    <Avatar imageKey={record.avatarKey} label={name} variant="panel" />
+                    <div className="detail-profile-summary-text"><div className="detail-profile-summary-name">{name}</div><div className="detail-profile-summary-role">{record.jobTitle || '—'}</div></div>
+                    <button type="button" className="btn btn-outline" onClick={() => setEditingField('firstName')}><IconPencil size={13}/> Edit</button>
+                  </>}
                 </div>
-                {!vmScope && <div className="detail-contact-pills">{contactFields}</div>}
 
                 <DetailGroup title="Key Information">
                   {userType === 'staff' ? (
@@ -862,7 +884,7 @@ export default function UserDetailPanel() {
                         onEditStart={() => setEditingField('defaultPayRatePence')}
                         onEditEnd={() => setEditingField(null)}
                       />
-                      <InfoRow label="Status" value={<span className={`badge badge-${statusClass}`}>{statusLabel}</span>} />
+                      <InfoRow label="Status" value={<span className={`badge badge-${statusClass} user-account-status`}>{statusLabel}</span>} />
                     </>
                   ) : (
                     <>
@@ -871,19 +893,17 @@ export default function UserDetailPanel() {
                         <InfoRow label="Venue" value={record.venues.length ? record.venues.map((v: { name: string }) => v.name).join(', ') : 'No venue assigned'} />
                       )}
                       <EditableField label="Job title" value={record.jobTitle} editable onSave={fieldPatch('jobTitle')} editing={editingField === 'jobTitle'} onEditStart={() => setEditingField('jobTitle')} onEditEnd={() => setEditingField(null)} />
-                      <InfoRow label="Status" value={<span className={`badge badge-${statusClass}`}>{statusLabel}</span>} />
+                      <InfoRow label="Status" value={<span className={`badge badge-${statusClass} user-account-status`}>{statusLabel}</span>} />
                     </>
                   )}
                 </DetailGroup>
 
                 <DetailGroup title="Personal Details">
-                  <EditableField label="First name" value={record.firstName} required editable onSave={fieldPatch('firstName')} editing={editingField === 'firstName'} onEditStart={() => setEditingField('firstName')} onEditEnd={() => setEditingField(null)} />
-                  <EditableField label="Last name" value={record.lastName} required editable onSave={fieldPatch('lastName')} editing={editingField === 'lastName'} onEditStart={() => setEditingField('lastName')} onEditEnd={() => setEditingField(null)} />
-                  {vmScope && contactFields}
+                  <CompoundDetailField key={id + '-name'} kind="name" record={record} onSave={patch => updateField.mutateAsync(patch)} />
+                  {contactFields}
 
                   {userType === 'staff' && (
                     <>
-                      <EditableField label="Preferred name" value={record.preferredName} editable onSave={fieldPatch('preferredName')} editing={editingField === 'preferredName'} onEditStart={() => setEditingField('preferredName')} onEditEnd={() => setEditingField(null)} />
                       <EditableField
                         label="Date of birth"
                         value={record.dateOfBirth}
@@ -895,6 +915,7 @@ export default function UserDetailPanel() {
                         onEditStart={() => setEditingField('dateOfBirth')}
                         onEditEnd={() => setEditingField(null)}
                       />
+                      <CompoundDetailField key={id + '-address'} kind="address" record={record} onSave={patch => updateField.mutateAsync(patch)} />
                     </>
                   )}
                 </DetailGroup>
@@ -902,11 +923,7 @@ export default function UserDetailPanel() {
 
                 {userType === 'staff' && (
                   <>
-                    <DetailGroup title="Additional Information">
-                      <EditableField label="Address" value={record.address} editable onSave={fieldPatch('address')} editing={editingField === 'address'} onEditStart={() => setEditingField('address')} onEditEnd={() => setEditingField(null)} />
-                      <EditableField label="City" value={record.city} editable onSave={fieldPatch('city')} editing={editingField === 'city'} onEditStart={() => setEditingField('city')} onEditEnd={() => setEditingField(null)} />
-                      <EditableField label="Postcode" value={record.postcode} editable onSave={fieldPatch('postcode')} editing={editingField === 'postcode'} onEditStart={() => setEditingField('postcode')} onEditEnd={() => setEditingField(null)} />
-                    </DetailGroup>
+
 
                     <button type="button" className="detail-show-more-toggle" onClick={() => setShowMore((v) => !v)}>
                       {showMore ? 'Show less details' : 'Show more details'}
@@ -966,92 +983,62 @@ export default function UserDetailPanel() {
             )}
 
             {tab === 'reviews' && userType === 'staff' && id && <StaffReviewsTab staffId={id} staffName={name} />}
-            {tab === 'staff' && vmScope && id && (
-              <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
+            {tab === 'staff' && teamApiBase && id && (
+              <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} apiBase={teamApiBase} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
             )}
 
             {tab === 'timeline' && (
-              <div className="detail-timeline">
-                {timelineLoading ? (
-                  <p className="cell-muted" style={{ padding: 8 }}>Loading…</p>
-                ) : !timeline?.length ? (
-                  <p className="cell-muted" style={{ padding: 8 }}>No activity recorded yet.</p>
-                ) : (
-                  timeline.map((item: any) => (
-                    <div key={item.id} className="detail-timeline-item">
-                      <div className="detail-timeline-dot" />
-                      <div className="detail-timeline-content">
-                        <span className="detail-timeline-action">{describeAuditAction(item.action)}</span>
-                        <span className="detail-timeline-meta">
-                          {item.actor?.fullName ? `${item.actor.fullName} · ` : ''}{timeAgo(item.createdAt)}
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
+              <UserTimeline items={timeline ?? []} loading={timelineLoading} describeAction={describeAuditAction} />
             )}
 
             {tab === 'email' && (
               <div className="detail-panel-tab-list">
                 <div className="detail-panel-tab-header">
-                  <span>Emails {emailsLoading ? '' : (emails?.length ?? 0)}</span>
-                  <button type="button" className="btn-icon" aria-label="Send email" onClick={() => { setError(''); setEmailComposerOpen(true); }}>
+                  <span className="crewflow-email-heading">{emailComposerOpen ? <><button type="button" className="btn-icon" aria-label="Back to emails" onClick={()=>setEmailComposerOpen(false)}><IconChevronLeft size={15}/></button>New email</> : <>Messages {emailsLoading ? '' : (emails?.length ?? 0)}</>}</span>
+                  <button hidden={emailComposerOpen} style={emailComposerOpen ? {display: 'none'} : undefined} type="button" className="btn-icon" ref={emailAccountsAnchor} aria-label="Choose email account" aria-expanded={emailAccountsOpen} onClick={() => setEmailAccountsOpen(!emailAccountsOpen)}>
                     <IconPlus size={16} />
                   </button>
                 </div>
 
+                <Popover open={emailAccountsOpen} anchorRef={emailAccountsAnchor} onClose={()=>setEmailAccountsOpen(false)} align="end" className="email-account-menu" minWidth={240}>
+                  <p>No connected email accounts.</p><button type="button" className="btn btn-outline" onClick={()=>{setEmailAccountsOpen(false);setEmailComposerOpen(true);}}>Open UI preview</button>
+                </Popover>
                 {emailComposerOpen ? (
-                  <div className="detail-email-compose">
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>To</label>
-                      <input readOnly value={record.email} style={{ background: 'var(--bg-secondary)', cursor: 'not-allowed' }} />
-                    </div>
-                    <div className="field">
-                      <label>Subject</label>
-                      <input value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} placeholder="Subject" autoFocus />
-                    </div>
-                    <div className="field" style={{ marginBottom: 0 }}>
-                      <label>Message</label>
-                      <textarea value={emailMessage} onChange={(e) => setEmailMessage(e.target.value)} placeholder="Write your message…" rows={8} />
-                    </div>
+                  <div className="crewflow-email-compose">
+                    <EmailComposerFields onBack={()=>setEmailComposerOpen(false)} recipients={[name+' <'+record.email+'>']} subject={emailSubject} message={emailMessage} onSubjectChange={setEmailSubject} onMessageChange={setEmailMessage} disabled={sendEmail.isPending}/>
                     {error && <p className="error" style={{ margin: '8px 0 0' }}>{error}</p>}
-                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                      <button type="button" className="btn btn-outline" onClick={() => setEmailComposerOpen(false)}>Cancel</button>
+                    <div className="crewflow-email-actions">
+                      <button type="button" className="btn-icon" aria-label="Discard email draft" title="Discard draft" disabled={sendEmail.isPending} onClick={() => {setEmailSubject('');setEmailMessage('');setEmailComposerOpen(false);}}><IconTrash size={16}/></button>
                       <button
                         type="button"
                         className="btn btn-dark"
-                        disabled={!emailSubject.trim() || !emailMessage.trim() || sendEmail.isPending}
+                        disabled={true} title="Sending is disabled in this UI preview"
                         onClick={() => {
                           setError('');
                           sendEmail.mutate(undefined, { onSuccess: ({ data }) => { if (data.queued > 0) { setEmailSubject(''); setEmailMessage(''); setEmailComposerOpen(false); } } });
                         }}
                       >
-                        {sendEmail.isPending ? 'Sending…' : 'Send Email'}
+                        <IconSend size={14}/>{sendEmail.isPending ? 'Sending…' : 'Send Email'}
                       </button>
                     </div>
                   </div>
                 ) : emailsLoading ? (
                   <p className="cell-muted" style={{ padding: 8 }}>Loading…</p>
                 ) : !emails?.length ? (
-                  <div className="detail-empty-state">
+                  <div className="detail-empty-state email-empty-state">
                     <MailboxIllustration />
-                    <p className="detail-empty-state-title">Empty Inbox</p>
-                    <p className="detail-empty-state-subtitle">No email exchange has occurred with this staff yet.</p>
+                    <p className="detail-empty-state-title">No messages yet</p>
+                    <p className="detail-empty-state-subtitle">Your conversations with {name} will show up here.</p>
                     <button type="button" className="btn btn-dark" onClick={() => setEmailComposerOpen(true)}>Send Email</button>
                   </div>
                 ) : (
-                  <>
-                    {emails.map((e: any) => (
-                      <div key={e.id} className="detail-note-item">
-                        <div className="detail-note-meta">
-                          <span>{e.subject}</span>
-                          <span className={`badge badge-${e.status === 'SENT' ? 'active' : e.status === 'FAILED' || e.status === 'CANCELLED' ? 'cancelled' : 'pending'}`}>{e.status}</span>
-                        </div>
-                        <p className="cell-muted" style={{ margin: '2px 0 0', fontSize: 11 }}>{timeAgo(e.createdAt)}</p>
-                      </div>
-                    ))}
-                  </>
+                  <ul className="crewflow-email-history">
+                    {emails.map((e: any) => <li key={e.id}>
+                      <span className="email-row-icon"><IconMail size={14}/></span>
+                      <div><strong title={e.subject}>{e.subject}</strong><small>{name}</small><span className={`badge badge-${e.status === 'SENT' ? 'active' : e.status === 'FAILED' || e.status === 'CANCELLED' ? 'cancelled' : 'pending'}`}>{e.status}</span></div>
+                      <time dateTime={e.createdAt} title={new Date(e.createdAt).toLocaleString('en-GB',{timeZone:'Europe/London'})}>{timeAgo(e.createdAt)}</time>
+                    </li>)}
+                  </ul>
                 )}
               </div>
             )}
@@ -1109,7 +1096,7 @@ export default function UserDetailPanel() {
           </motion.div>
           </AnimatePresence>
 
-          {(tab === 'home' || (tab === 'staff' && vmScope)) && (
+          {(tab === 'home' || (tab === 'staff' && teamApiBase)) && (
             <div className="detail-bottom-bar">
               <div className="detail-more-menu" ref={menuRef}>
                 <button type="button" className="btn-icon" title="More actions" aria-label="More actions" onClick={() => setMenuOpen((o) => !o)}>
@@ -1140,10 +1127,7 @@ export default function UserDetailPanel() {
                           </button>
                         )}
                         <div className="detail-more-menu-divider" />
-                        <button type="button" className="danger" onClick={() => { setMenuOpen(false); setDeleteConfirm(true); }}>
-                          <IconTrash size={14} />
-                          Delete user
-                        </button>
+                        <HoldToConfirm key={currentDeleteTarget} label="Hold to delete user" title="Permanently delete this user. This cannot be undone." tone="danger" duration={1800} confirmed={deleteUser.variables === currentDeleteTarget && deleteUser.isSuccess} disabled={deleteUser.variables === currentDeleteTarget && deleteUser.isPending} onConfirm={() => deleteUser.mutate(currentDeleteTarget)} />
                       </>
                     ) : (
                       <>
@@ -1160,16 +1144,13 @@ export default function UserDetailPanel() {
                           </button>
                         )}
                         <div className="detail-more-menu-divider" />
-                        <button type="button" className="danger" onClick={() => { setMenuOpen(false); setDeleteConfirm(true); }}>
-                          <IconTrash size={14} />
-                          Delete user
-                        </button>
+                        <HoldToConfirm key={currentDeleteTarget} label="Hold to delete user" title="Permanently delete this user. This cannot be undone." tone="danger" duration={1800} confirmed={deleteUser.variables === currentDeleteTarget && deleteUser.isSuccess} disabled={deleteUser.variables === currentDeleteTarget && deleteUser.isPending} onConfirm={() => deleteUser.mutate(currentDeleteTarget)} />
                       </>
                     )}
                   </div>
                 )}
               </div>
-              {tab === 'staff' && vmScope ? (
+              {tab === 'staff' && teamApiBase ? (
                 <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => setTeamPickerOpen(true)}>
                   <IconPlus size={14} />
                   Add Staff
@@ -1213,25 +1194,7 @@ export default function UserDetailPanel() {
             </div>
           )}
 
-          {deleteConfirm && (
-            <div className="drawer-discard-confirm">
-              <p>Delete {record.firstName} {record.lastName}? This permanently removes this account where deletion is permitted. This cannot be undone.</p>
-              <div className="field" style={{ marginBottom: 0 }}>
-                <label htmlFor="delete-user-confirm">Type DELETE to confirm</label>
-                <input id="delete-user-confirm" value={deleteConfirmText} onChange={(e) => setDeleteConfirmText(e.target.value)} placeholder="DELETE" autoFocus />
-              </div>
-              <div className="field" style={{ marginBottom: 0 }}>
-                <label htmlFor="delete-user-password">Your current password</label>
-                <input id="delete-user-password" type="password" autoComplete="current-password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} />
-              </div>
-              <div className="modal-actions" style={{ marginTop: 8, borderTop: 'none', paddingTop: 0 }}>
-                <button type="button" className="btn btn-outline" onClick={() => { setDeleteConfirm(false); setDeleteConfirmText(''); setDeletePassword(''); }}>Cancel</button>
-                <button type="button" className="btn btn-danger" disabled={deleteConfirmText !== 'DELETE' || !deletePassword || deleteUser.isPending} onClick={() => deleteUser.mutate(deletePassword)}>
-                  {deleteUser.isPending ? 'Deleting…' : 'Delete user'}
-                </button>
-              </div>
-            </div>
-          )}
+
         </div>
       )}
     </Drawer>

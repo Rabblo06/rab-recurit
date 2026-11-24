@@ -1,4 +1,5 @@
-import { assignmentTimeSql, validateAssignmentTime, ScheduledWindow, effectiveAssignmentBreakMinutes, defaultAssignmentTime, assignmentEnvelope } from '../../scheduling/utils/assignment-time';
+import { assignmentTimeSql, validateAssignmentTime, ScheduledWindow, effectiveAssignmentBreakMinutes, defaultAssignmentTime, assignmentEnvelope, effectiveAssignmentTime } from '../../scheduling/utils/assignment-time';
+import { resolveAssignmentPayRate } from '../../scheduling/utils/assignment-pay-rate';
 import { UserNoteService } from '../../identity/services/user-note.service';
 import { canCancelVenueOffer } from './venue-offer-presentation';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
@@ -181,7 +182,7 @@ const OFFER_SUMMARY_SELECT = `
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
-    s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, s.pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
+    s.id AS shift_id, ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at, sa.pay_rate_snapshot_pence AS pay_rate_pence, s.address AS shift_address, s.notes AS shift_notes,
     o.offer_kind, COALESCE(s.default_starts_at, s.starts_at) AS original_starts_at, COALESCE(s.default_ends_at, s.ends_at) AS original_ends_at,
     v.name AS venue_name, v.photo_file_id AS venue_photo_file_id, jr.name AS role_name,
     sp.id AS staff_profile_id, u.first_name, u.last_name,
@@ -193,7 +194,7 @@ const OFFER_SUMMARY_SELECT = `
   JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
   JOIN shift s ON s.id = sa.shift_id
   JOIN venue v ON v.id = s.venue_id
-  JOIN job_role jr ON jr.id = s.job_role_id
+  JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
   JOIN staff_profile sp ON sp.id = o.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
   JOIN core.organisation org ON org.id = o.organisation_id
@@ -302,7 +303,7 @@ export class OfferService {
       if (dto.status) conditions.push(`o.status = ${nextParam(dto.status)}`);
       if (dto.staffProfileId) conditions.push(`o.staff_profile_id = ${nextParam(dto.staffProfileId)}`);
       if (dto.venueId) conditions.push(`s.venue_id = ${nextParam(dto.venueId)}`);
-      if (dto.jobRoleId) conditions.push(`s.job_role_id = ${nextParam(dto.jobRoleId)}`);
+      if (dto.jobRoleId) conditions.push(`COALESCE(sa.job_role_id, s.job_role_id) = ${nextParam(dto.jobRoleId)}`);
       if (dto.shiftDateFrom) conditions.push(`${assignmentTimeSql().start} >= ${nextParam(new Date(dto.shiftDateFrom))}`);
       if (dto.shiftDateTo) {
         const exclusive = new Date(dto.shiftDateTo);
@@ -325,7 +326,7 @@ export class OfferService {
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
            JOIN shift s ON s.id = sa.shift_id
            JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
+           JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
            JOIN staff_profile sp ON sp.id = o.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
          ${where}`,
@@ -438,12 +439,17 @@ export class OfferService {
     expiresInHours: number | undefined,
     batchId: string,
     availabilityAcknowledgements: readonly AvailabilityAcknowledgement[],
-    proposedTime?: ScheduledWindow & { breakMinutes?: number | null },
+    proposedTime?: ScheduledWindow & { breakMinutes?: number | null; jobRoleId?: string; payRateOverridePence?: number },
     offerKind: OfferKindType = OfferKind.STANDARD,
   ): Promise<JobOffer> {
     await assertShiftActionWindowOpen(manager, shift.id, 'send');
     const scheduledBreak = effectiveAssignmentBreakMinutes(proposedTime ?? null, shift);
     const time = validateAssignmentTime(shift, proposedTime ?? defaultAssignmentTime(shift), scheduledBreak);
+    const assignmentRoleId = proposedTime?.jobRoleId && proposedTime.jobRoleId !== shift.jobRoleId ? proposedTime.jobRoleId : null;
+    if (assignmentRoleId) {
+      const targets = await this.schedulingService.resolveDraftTargetsTx(manager, ctx, shift.venueId, assignmentRoleId);
+      shiftLabel = `${targets.venue.name} · ${targets.jobRole.name}`;
+    }
     await assertVenueTeamSelection(manager, ctx, [staffProfileId], shift.workspaceId);
     // DOM-01 — the single canonical eligibility check (active employment,
     // active account, no duplicate offer, no overlapping confirmed shift),
@@ -464,11 +470,14 @@ export class OfferService {
       shiftId: shift.id,
       staffProfileId,
       status: ShiftAssignmentStatus.OFFERED,
+      jobRoleId: assignmentRoleId,
+      payRateOverridePence: assignmentRoleId ? proposedTime?.payRateOverridePence ?? null : null,
       payRateSnapshotPence: shift.payRatePence,
       assignedBy: ctx.userId,
       period: toTstzRange(time.startsAt, time.endsAt),
       breakMinutes: proposedTime?.breakMinutes ?? null,
     });
+    assignment.payRateSnapshotPence = await resolveAssignmentPayRate(manager, shift, assignment);
     await manager.save(assignment);
     // Caller holds the shift lock. Expand only after a valid assignment exists.
     const envelope = assignmentEnvelope(shift, [time]);
@@ -481,7 +490,7 @@ export class OfferService {
       clockOutAt: time.endsAt,
       scheduledBreakMinutes: scheduledBreak,
     });
-    const estimatedPayPence = payForMinutes(shift.payRatePence, workedMinutes);
+    const estimatedPayPence = payForMinutes(assignment.payRateSnapshotPence, workedMinutes);
     const expiresAt = new Date(Date.now() + (expiresInHours ?? 48) * 60 * 60 * 1000);
 
     const offer = manager.create(JobOffer, {
@@ -587,10 +596,13 @@ export class OfferService {
     staffProfileId: string,
     availabilityAcknowledgements: readonly AvailabilityAcknowledgement[] = [],
     expiresInHours?: number,
+    sourceAssignment?: ShiftAssignment,
   ): Promise<JobOffer> {
     const shiftLabel = await this.getShiftLabel(manager, shift.id);
     const batchId = randomUUID();
-    const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, expiresInHours, batchId, availabilityAcknowledgements);
+    const source = sourceAssignment ? { ...effectiveAssignmentTime(sourceAssignment, shift), breakMinutes: sourceAssignment.breakMinutes,
+      jobRoleId: sourceAssignment.jobRoleId ?? undefined, payRateOverridePence: sourceAssignment.payRateOverridePence ?? undefined } : undefined;
+    const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, expiresInHours, batchId, availabilityAcknowledgements, source);
     if (shift.status === ShiftStatus.OPEN) {
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
       await manager.update(Shift, shift.id, { status: ShiftStatus.OFFERED });
@@ -629,8 +641,23 @@ export class OfferService {
    * recipient can't poison a batch-mate's successful insert.
    */
   async sendBulk(ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<BulkOfferResult> {
+    const resizing = dto.requiredCount !== undefined || dto.expectedRequiredCount !== undefined;
+    if (resizing && dto.mode === 'replacement') throw new BadRequestException('Headcount changes cannot be combined with replacement offers.');
     if (dto.mode === 'replacement') return this.sendReplacementBulk(ctx, shiftId, dto);
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (resizing) {
+        if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND)) || !(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE))) throw new ForbiddenException('Permission required.');
+        const current = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
+        if (!current || current.organisationId !== ctx.organisationId || !ctx.workspaceId || current.workspaceId !== ctx.workspaceId || current.createdBy !== ctx.userId) throw new NotFoundException('Shift not found.');
+        if (!Number.isInteger(dto.requiredCount) || !Number.isInteger(dto.expectedRequiredCount) || dto.requiredCount! < 1 || dto.requiredCount! > 1000 || dto.requiredCount! <= current.requiredCount) throw new BadRequestException('The new headcount must be greater than the current headcount.');
+        if (current.requiredCount !== dto.expectedRequiredCount) throw new ConflictException('Headcount changed. Reload the shift before adding staff.');
+        const [{ now }] = await manager.query('SELECT clock_timestamp() AS now');
+        if (current.archivedAt || new Date(current.endsAt).getTime() <= new Date(now).getTime() || !['open', 'offered', 'partially_filled', 'fully_filled', 'confirmed'].includes(current.status)) throw new ConflictException('Only an active, published shift can accept additional places.');
+        const nextStatus = ['fully_filled', 'confirmed'].includes(current.status) ? ShiftStatus.PARTIALLY_FILLED : current.status;
+        if (nextStatus !== current.status) assertTransition(SHIFT_TRANSITIONS, current.status, nextStatus);
+        await manager.update(Shift, shiftId, { requiredCount: dto.requiredCount, status: nextStatus });
+        await this.auditService.record(manager, ctx, AuditAction.SHIFT_HEADCOUNT_INCREASED, { entityType: 'shift', entityId: shiftId, metadata: { previousRequiredCount: current.requiredCount, requiredCount: dto.requiredCount } });
+      }
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
@@ -659,6 +686,9 @@ export class OfferService {
           results.push({ staffProfileId, ok: false, message: errorMessage(error) });
         }
       }
+
+      // Throwing rolls back headcount and audit as well when no offers were sent.
+      if (resizing && !results.some(result => result.ok)) throw new ConflictException('No offers were sent; headcount was not changed. Check staff eligibility and try again.');
 
       if (shift.status === ShiftStatus.OPEN && results.some((r) => r.ok)) {
         assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
@@ -829,11 +859,12 @@ export class OfferService {
     dto: CreateShiftAndSendDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND))) throw new ForbiddenException('Sending offers is not permitted.');
       // Also closes the same IDOR SchedulingService.create() already
       // closes: without this, a Manager could create a shift against
       // another Manager's private venue by reusing a known venue id, even
       // though they can no longer see it in a list.
-      const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
+      const { venue } = await this.schedulingService.resolveDraftTargetsTx(manager, ctx, dto.venueId, dto.jobRoleId);
       const payRatePence = await this.schedulingService.resolvePayRate(manager, dto);
 
       const shift = manager.create(Shift, {
@@ -861,16 +892,22 @@ export class OfferService {
 
       // Same whole-batch pre-check as sendBulk; a 409 here also rolls back the just-inserted shift row.
       const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
+      const individual = new Map<string, ScheduledWindow & { jobRoleId?: string; breakMinutes?: number | null; payRateOverridePence?: number }>();
+      for (const row of dto.staffAssignments ?? []) {
+        if (!dto.staffProfileIds.includes(row.staffProfileId) || individual.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
+        if (row.jobRoleId) await this.schedulingService.resolveDraftTargetsTx(manager, ctx, dto.venueId, row.jobRoleId);
+        individual.set(row.staffProfileId, { ...validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift)), jobRoleId: row.jobRoleId, breakMinutes: row.breakMinutes, payRateOverridePence: dto.payRatePence });
+      }
       await assertStaffAvailabilityAcknowledged(
         manager,
-        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...defaultAssignmentTime(shift) })),
+        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...(individual.get(staffProfileId) ?? defaultAssignmentTime(shift)) })),
         acknowledgements,
       );
       const results: BulkOfferResult['results'] = [];
       for (const staffProfileId of dto.staffProfileIds) {
         await manager.query('SAVEPOINT sp_create_and_send');
         try {
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements);
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements, individual.get(staffProfileId));
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_create_and_send');

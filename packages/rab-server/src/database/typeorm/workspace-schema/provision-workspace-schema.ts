@@ -143,7 +143,7 @@ export async function provisionWorkspaceSchema(
       // Waves 4+5 lane DB5: an existing READY schema is verified against the index count of ITS recorded module version
       // (a v15 schema awaiting the migrator must not be declared broken — and FAILED — by a newer image).
       const recorded = Number(reg.rows[0]!.module_version ?? 0);
-      await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? expectedWorkspaceIndexCount(recorded) : undefined);
+      await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? expectedWorkspaceIndexCount(recorded) : undefined, recorded);
       await client.query('COMMIT');
       return { workspaceId, schemaName, outcome: 'ALREADY_READY', schemaVersion: WORKSPACE_SCHEMA_VERSION };
     }
@@ -161,7 +161,7 @@ export async function provisionWorkspaceSchema(
     await applyTemplate(client, schemaName);
     await bindWorkspace(client, schemaName, workspaceId);
     if (options.afterApply) await options.afterApply(schemaName);
-    await verifyStructure(client, schemaName, workspaceId, expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION));
+    await verifyStructure(client, schemaName, workspaceId, expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION), LATEST_WORKSPACE_MODULE_VERSION);
 
     // One call moves the registry and manager_workspace to READY together.
     await client.query('SELECT core.mark_workspace_schema_ready($1, $2)', [workspaceId, WORKSPACE_SCHEMA_VERSION]);
@@ -216,7 +216,7 @@ async function bindWorkspace(client: Client, schemaName: string, workspaceId: st
  * see v1/server-path-template-archive-search.ts). Undefined (a READY schema with no recorded version yet) = any known
  * count; the ledger/fingerprint step then proves the exact structure.
  */
-async function verifyStructure(client: Client, schemaName: string, workspaceId: string, expectedIndexes?: number): Promise<void> {
+async function verifyStructure(client: Client, schemaName: string, workspaceId: string, expectedIndexes?: number, moduleVersion = 17): Promise<void> {
   const count = async (sql: string): Promise<number> => (await client.query<{ n: number }>(sql, [schemaName])).rows[0]!.n;
   const fail = (what: string): never => {
     throw new WorkspaceSchemaProvisioningError(`verification failed: ${what}`, 'verify');
@@ -235,7 +235,7 @@ async function verifyStructure(client: Client, schemaName: string, workspaceId: 
   }
   if (await count(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`) !== V1_EXPECTED.policies) fail('policy count');
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
-                    WHERE ns.nspname = $1 AND k.contype = 'f'`) !== V1_EXPECTED.foreignKeys) fail('foreign key count');
+                    WHERE ns.nspname = $1 AND k.contype = 'f'`) !== (moduleVersion >= 18 ? 129 : V1_EXPECTED.foreignKeys)) fail('foreign key count');
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
                     WHERE ns.nspname = $1 AND k.contype = 'c' AND k.conname LIKE '%\\_workspace\\_bound'`) !== WORKSPACE_TABLES.length) fail('workspace CHECK count');
   const bound = await client.query<{ def: string }>(

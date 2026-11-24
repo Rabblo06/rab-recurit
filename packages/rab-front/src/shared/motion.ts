@@ -1,3 +1,4 @@
+import { motionTokens } from './components/arc/motion-tokens';
 import { useReducedMotion } from 'framer-motion';
 import type { Transition, Variants } from 'framer-motion';
 
@@ -110,7 +111,7 @@ export const step: Variants = {
 /** Calendar period change: content slides in the direction of navigation. `custom` = +1 next / -1 previous. */
 export const period: Variants = {
   enter: (dir = 1) => ({ opacity: 0, x: dir > 0 ? 16 : -16 }),
-  center: { opacity: 1, x: 0, transition: { duration: 0.26, ease: ease.out } },
+  center: { opacity: 1, x: 0, transition: { x: motionTokens.spring.smooth, opacity: { duration: motionTokens.duration.standard } } },
   exit: (dir = 1) => ({ opacity: 0, x: dir > 0 ? -16 : 16, transition: { duration: 0.16, ease: ease.in } }),
 };
 

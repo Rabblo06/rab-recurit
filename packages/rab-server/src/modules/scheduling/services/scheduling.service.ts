@@ -1,3 +1,4 @@
+import { resolveRolePayRate } from '../utils/assignment-pay-rate';
 import { sentShiftPresentation } from './sent-shift-presentation';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
@@ -651,20 +652,7 @@ export class SchedulingService {
     manager: EntityManager,
     params: { venueId: string; jobRoleId: string; startsAt: string; payRatePence?: number },
   ): Promise<number> {
-    if (params.payRatePence !== undefined) return params.payRatePence;
-
-    const rate = await manager
-      .createQueryBuilder(VenueRoleRate, 'r')
-      .where('r.venue_id = :venueId', { venueId: params.venueId })
-      .andWhere('r.job_role_id = :jobRoleId', { jobRoleId: params.jobRoleId })
-      .andWhere('r.effective_from <= :start', { start: params.startsAt })
-      .andWhere('(r.effective_to IS NULL OR r.effective_to >= :start)', { start: params.startsAt })
-      .orderBy('r.effective_from', 'DESC')
-      .getOne();
-    if (rate) return rate.payRatePence;
-
-    const jobRole = await manager.findOne(JobRole, { where: { id: params.jobRoleId } });
-    return jobRole?.defaultRatePence ?? 0;
+    return resolveRolePayRate(manager, params);
   }
 
   /**

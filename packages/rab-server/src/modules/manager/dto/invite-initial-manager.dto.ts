@@ -1,4 +1,4 @@
-import { IsEmail, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
 /**
  * P2.9C, reversed by the universal-self-service-onboarding checkpoint (docs/HANDOFF.md): the
@@ -13,13 +13,15 @@ export class InviteInitialManagerDto {
   @IsEmail()
   email!: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(100)
-  firstName!: string;
+  firstName?: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(100)
-  lastName!: string;
+  lastName?: string;
 }

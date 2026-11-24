@@ -1,5 +1,6 @@
+import { motionTokens } from '../../shared/components/arc/motion-tokens';
 import { useEffect, useId, useRef, useState } from 'react';
-import { AnimatePresence, LayoutGroup, motion } from 'framer-motion';
+import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from 'framer-motion';
 import { dropdown, spring } from '../../shared/motion';
 import type { KeyboardEvent, ReactNode } from 'react';
 import { IconCheck, IconChevronDown } from '@tabler/icons-react';
@@ -28,6 +29,7 @@ export default function DetailTabs<T extends string>({
   value: T;
   onChange: (tab: T) => void;
 }) {
+  const reduced = useReducedMotion();
   const [open, setOpen] = useState(false);
   const groupId = useId(); // one underline per tab strip (two panels never share a layoutId)
   const wrap = useRef<HTMLDivElement>(null);
@@ -97,7 +99,7 @@ export default function DetailTabs<T extends string>({
       onClick={() => onChange(t.id)}
     >
       {/* The active underline slides from tab to tab (also onto an overflow tab shown in the strip). */}
-      {value === t.id && <motion.span layoutId="detail-tab-underline" className="tab-underline" transition={spring} aria-hidden="true" />}
+      {value === t.id && <motion.span layoutId="detail-tab-underline" className="tab-underline" transition={reduced ? {duration:0} : motionTokens.spring.morph} aria-hidden="true" />}
       {t.icon} {t.label}
     </button>
   );

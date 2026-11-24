@@ -542,7 +542,7 @@ export class OrganisationOnboardingService {
       const created = await this.managerService.createWithin(
         manager,
         ctx,
-        { email: dto.email, firstName: dto.firstName, lastName: dto.lastName, type: ManagerType.INTERNAL },
+        { email: dto.email, firstName: dto.firstName ?? '', lastName: dto.lastName ?? '', type: ManagerType.INTERNAL },
         { templateRenderer: renderInitialManagerInvitationEmail },
       );
       // Never a client-settable field — `CreateManagerDto` has no such property at all, so this
@@ -684,7 +684,7 @@ export class OrganisationOnboardingService {
       const created = await this.managerService.createWithin(
         manager,
         ctx,
-        { email: dto.email, firstName: dto.firstName, lastName: dto.lastName, type: ManagerType.INTERNAL },
+        { email: dto.email, firstName: dto.firstName ?? '', lastName: dto.lastName ?? '', type: ManagerType.INTERNAL },
         { templateRenderer: renderInitialManagerInvitationEmail },
       );
       await this.markInitialManager(manager, created.id);

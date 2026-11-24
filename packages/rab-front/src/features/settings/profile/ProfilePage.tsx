@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { IconLock } from '@tabler/icons-react';
+import SecurityPage from '../security/SecurityPage';
+import SettingsHeaderActions from '../layout/SettingsHeaderActions';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { getApiFieldErrors } from '../../../shared/lib/apiError';
@@ -128,24 +129,24 @@ export default function ProfilePage() {
 
   return (
     <div className="settings-page profile-settings">
-      <div className="settings-page-heading"><h2>Profile</h2><p>Your personal details and how you appear to others.</p></div>
+      <SettingsHeaderActions><button type="button" className="btn btn-dark" disabled={!dirty || save.busy} onClick={submitProfile}>{save.busy ? 'Saving…' : 'Save changes'}</button></SettingsHeaderActions>
       <div className="profile-settings-grid">
         <div>
           <section className="settings-section profile-picture-card"><AvatarUpload avatarKey={profile?.avatarKey ?? null} firstName={profile?.firstName} /></section>
-          <section className="settings-section personal-details-card"><h3>Personal details</h3>
+          <section className="settings-section personal-details-card"><h3>Name</h3><p>Your name as it will be displayed.</p>
             <form noValidate onSubmit={(e) => { e.preventDefault(); if (dirty) submitProfile(); }}>
             <div className="form-grid"><div className="field"><label htmlFor="profile-first">First name</label><input ref={firstRef} id="profile-first" value={firstName} onChange={e => setFirstName(e.target.value)} {...fieldA11y('firstName', fieldErrors)} /><FieldError field="firstName" errors={fieldErrors} /></div>
               <div className="field"><label htmlFor="profile-last">Last name</label><input ref={lastRef} id="profile-last" value={lastName} onChange={e => setLastName(e.target.value)} {...fieldA11y('lastName', fieldErrors)} /><FieldError field="lastName" errors={fieldErrors} /></div></div>
             <div className="field"><label htmlFor="profile-job">Job title</label><input ref={jobRef} id="profile-job" value={jobTitle} onChange={e => setJobTitle(e.target.value)} placeholder="e.g. Operations manager" {...fieldA11y('jobTitle', fieldErrors)} /><FieldError field="jobTitle" errors={fieldErrors} /></div>
-            <div className="settings-save-row"><button type="submit" className="btn btn-dark" disabled={!dirty || save.busy} aria-busy={save.busy || undefined}>{save.busy ? 'Saving…' : 'Save changes'}</button></div>
+
             </form>
           </section>
           <section className="settings-section"><h3>Email address</h3><p>The email associated with your account.</p><div className="field"><input aria-label="Email address" id="profile-email" value={profile?.email ?? ''} disabled /></div></section>
         </div>
         <div>
-          <section className="settings-section password-access-card"><IconLock aria-hidden="true" className="settings-security-icon" size={22} stroke={1.5} /><h3>Password &amp; access</h3><p>Receive an email with a secure link to set your account password.</p><button type="button" className="btn btn-outline" onClick={() => { if (profile) setPassword.submit(profile.email); }} disabled={!profile || setPassword.busy} aria-busy={setPassword.busy || undefined}>{setPassword.busy ? 'Sending…' : 'Set password'}</button></section>
+          <SecurityPage embedded /><section className="settings-section password-access-card"><h3>Set password</h3><p>Receive an email with a secure link to set your account password.</p><button type="button" className="btn btn-outline" onClick={() => { if (profile) setPassword.submit(profile.email); }} disabled={!profile || setPassword.busy} aria-busy={setPassword.busy || undefined}>{setPassword.busy ? 'Sending…' : 'Set password'}</button></section>
           <section className="settings-section devices-card"><h3>Devices</h3><p>Devices with an active session on your account.</p><DevicesList /></section>
-          <aside className="profile-sharing-note">Your profile is shared with your workspace. Keep your details up to date so your team can reach you.</aside>
+          <section className="settings-section"><h3>Danger zone</h3><p>Account deletion is not available in Crewflow settings.</p><button className="btn btn-outline settings-danger" disabled>Delete account</button></section>
         </div>
       </div>
     </div>

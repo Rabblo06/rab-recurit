@@ -1,69 +1,39 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
+import { IconSend } from '@tabler/icons-react';
 
-export interface InitialManagerFormValues {
-  email: string;
-  firstName: string;
-  lastName: string;
-}
+export interface InitialManagerFormValues { email: string }
 
-const empty: InitialManagerFormValues = { email: '', firstName: '', lastName: '' };
-
-/**
- * The shared email/name fields for the Initial Manager invite AND replace flows — used by both
- * `InitialManagerPage.tsx` (CEO) and `OrganisationDetailDrawer.tsx` (Super Admin), each of which
- * has two call sites of its own (invite + replace).
- *
- * Gap-review finding (universal self-service onboarding checkpoint, docs/HANDOFF.md): this used
- * to also collect workspace name/subdomain here, submitted by the INVITER. Reversed — the
- * recipient now chooses their own workspace after activating, through the same
- * `CreateWorkspaceScreen` every other Manager already uses. The subdomain-availability-check UI
- * that lived here moved with it; this component is now just the person's identity.
- *
- * Fully self-contained (owns its own field state) — the caller only supplies what differs: the
- * submit action, its label/pending state, and any server error to display.
- */
-export default function InitialManagerFormFields({
-  idPrefix,
-  onSubmit,
-  submitting,
-  submitLabel,
-  error,
-}: {
+/** Shared email-only invitation/replacement form. Recipients enter their names during profile setup. */
+export default function InitialManagerFormFields({ idPrefix, onSubmit, submitting, submitLabel, error, disabled = false, roleControl, draftEmail, onDraftEmailChange }: {
   idPrefix: string;
   onSubmit: (values: InitialManagerFormValues) => void;
   submitting: boolean;
   submitLabel: string;
   error?: string;
+  disabled?: boolean;
+  roleControl?: ReactNode;
+  draftEmail?: string;
+  onDraftEmailChange?: (email: string) => void;
 }) {
-  const [form, setForm] = useState<InitialManagerFormValues>(empty);
-
-  const canSubmit = form.email.trim().length > 0 && form.firstName.trim().length > 0 && form.lastName.trim().length > 0 && !submitting;
-
-  return (
-    <form className="initial-manager-form" onSubmit={(event) => {
-      event.preventDefault();
-      if (canSubmit) onSubmit({ email: form.email.trim(), firstName: form.firstName.trim(), lastName: form.lastName.trim() });
-    }}>
-      <div className="field">
-        <label htmlFor={`${idPrefix}-email`}>Email</label>
-        <input required disabled={submitting} id={`${idPrefix}-email`} type="email" value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} autoFocus />
+  const [localEmail, setLocalEmail] = useState('');
+  const email = draftEmail ?? localEmail;
+  const setEmail = onDraftEmailChange ?? setLocalEmail;
+  const canSubmit = email.trim().length > 0 && !submitting && !disabled;
+  return <form className="initial-manager-form compact-invite-form inline-invite-form leadership-invite-form" onSubmit={event => {
+    event.preventDefault();
+    if (canSubmit) onSubmit({ email: email.trim() });
+  }}>
+    <div className="invite-field">
+      <label htmlFor={`${idPrefix}-email`}>Email</label>
+      <div className="invite-email-group">
+      <input required disabled={submitting || disabled} id={`${idPrefix}-email`} type="email" value={email}
+        placeholder="name@company.com" onChange={event => setEmail(event.target.value)} autoFocus={draftEmail === undefined} />
       </div>
-      <div className="field">
-        <label htmlFor={`${idPrefix}-first`}>First name</label>
-        <input required disabled={submitting} id={`${idPrefix}-first`} value={form.firstName} onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))} />
-      </div>
-      <div className="field">
-        <label htmlFor={`${idPrefix}-last`}>Last name</label>
-        <input required disabled={submitting} id={`${idPrefix}-last`} value={form.lastName} onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))} />
-      </div>
-
-      {error && <p role="alert" className="error">{error}</p>}
-
-      <div className="modal-actions" style={{ marginTop: 16, borderTop: 'none', paddingTop: 0, justifyContent: 'flex-end' }}>
-        <button type="submit" className="btn btn-dark" disabled={!canSubmit}>
-          {submitting ? `${submitLabel}…` : submitLabel}
-        </button>
-      </div>
-    </form>
-  );
+    </div>
+    <div className="invite-field">{roleControl}</div>
+    <button type="submit" className="btn btn-dark invite-submit" aria-label={submitLabel} disabled={!canSubmit}>
+      <IconSend size={14} aria-hidden="true" />{submitting ? 'Sending…' : 'Invite'}
+    </button>
+    {error && <p role="alert" className="error">{error}</p>}
+  </form>;
 }

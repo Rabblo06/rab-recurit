@@ -1,3 +1,5 @@
+import { motion as arcMotion } from 'framer-motion';
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -18,14 +20,17 @@ const ASSIGNABLE_EMPLOYMENT = new Set(['active', 'pending_compliance']);
 const ASSIGNABLE_ACCOUNT = new Set(['active', 'invited']);
 
 /**
- * Full-page "Select Staff" for a Venue Manager's team (same pattern as the shift staff picker). Lists the caller's own
- * workspace staff (GET /staff); people already on the team are shown checked and locked. Confirm assigns only the newly
- * ticked staff (POST /venue-managers/:id/staff, owner-only and re-validated on the server). Cancel changes nothing.
+ * Full-page "Select Staff" for a Venue Manager's team (same pattern as the shift staff picker). The workspace owner sees
+ * their own workspace staff (GET /staff); an organisation administrator sees the assignable staff of the Venue Manager's
+ * workspace (GET /org-admin/venue-managers/:id/assignable-staff, same row shape). People already on the team are shown
+ * checked and locked. Confirm assigns only the newly ticked staff (POST `${apiBase}/:id/staff`, re-validated on the
+ * server). Cancel changes nothing.
  */
-export default function VenueManagerStaffPicker({ venueManagerId, venueManagerName, assignedIds, onCancel, onConfirmed }: {
-  venueManagerId: string; venueManagerName: string; assignedIds: Set<string>;
+export default function VenueManagerStaffPicker({ venueManagerId, venueManagerName, apiBase = '/venue-managers', assignedIds, onCancel, onConfirmed }: {
+  venueManagerId: string; venueManagerName: string; apiBase?: string; assignedIds: Set<string>;
   onCancel: () => void; onConfirmed: (added: number) => void;
 }) {
+  const ownerFlow = apiBase === '/venue-managers';
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -46,13 +51,16 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
   }, [search]);
 
   const staff = useQuery({
-    queryKey: ['staff', 'vm-team-picker', query, page],
-    queryFn: async () => (await api.get<{ data: StaffRow[]; total: number }>('/staff', { params: { q: query || undefined, page, limit: PAGE_SIZE } })).data,
+    queryKey: ['staff', 'vm-team-picker', ownerFlow ? 'own' : venueManagerId, query, page],
+    queryFn: async () => (await api.get<{ data: StaffRow[]; total: number }>(
+      ownerFlow ? '/staff' : `${apiBase}/${venueManagerId}/assignable-staff`,
+      { params: { q: query || undefined, page, limit: PAGE_SIZE } },
+    )).data,
   });
   const rows = (staff.data?.data ?? []).filter((s) => ASSIGNABLE_EMPLOYMENT.has(s.employmentStatus) && ASSIGNABLE_ACCOUNT.has(s.accountStatus));
   const total = staff.data?.total ?? 0;
   const assign = useMutation({
-    mutationFn: async () => (await api.post<{ added: string[] }>(`/venue-managers/${venueManagerId}/staff`, { staffProfileIds: [...selected] })).data,
+    mutationFn: async () => (await api.post<{ added: string[] }>(`${apiBase}/${venueManagerId}/staff`, { staffProfileIds: [...selected] })).data,
     onSuccess: (r) => onConfirmed(r.added.length),
     // Was silent: a refused or failed assignment now says so, and the selection stays for another try.
     onError: (e) => { notifyApiError(e, { fallback: 'Could not add these staff members. Please try again.' }); },
@@ -69,16 +77,16 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
       onKeyDown={(e) => { if (e.key === 'Escape' && !assign.isPending) { e.preventDefault(); onCancel(); } }}>
       <div className="vm-staff-picker-topbar">
         <button className="btn btn-outline" disabled={assign.isPending} onClick={onCancel}>Cancel</button>
-        <button className="btn btn-accent-outline" disabled={selected.size === 0 || assign.isPending} onClick={() => assign.mutate()}>
+        <button className="btn btn-accent-outline flow-button flow-button-light" aria-busy={assign.isPending || undefined} disabled={selected.size === 0 || assign.isPending} onClick={() => assign.mutate()}>
           {assign.isPending ? 'Saving...' : 'Confirm'}
         </button>
       </div>
       <div ref={title} tabIndex={-1}>
         <PageHeader inline title="Select Staff" subtitle={<><span>Choose the staff {venueManagerName} can see and select</span><span className="vm-staff-picker-count" role="status">{selected.size} selected · {assignedIds.size} already assigned</span></>} />
       </div>
-      <div className="vm-staff-picker-tab">Staff <span>Your workspace</span></div>
+      <div className="vm-staff-picker-tab">Staff <span>{ownerFlow ? 'Your workspace' : `${venueManagerName}’s workspace`}</span></div>
       <div className="list-toolbar vm-staff-picker-toolbar">
-        <div className="toolbar-search"><IconSearch size={14} /><input aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={assign.isPending} /></div>
+        <div className="toolbar-search"><SearchField label="Search staff" type="text" aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={assign.isPending} /></div>
       </div>
       {assign.isError && <p className="vm-staff-picker-notice error" role="alert">Could not assign the selected staff. Their status may have changed — Cancel and try again.</p>}
       <div className="vm-staff-picker-table-wrap">
@@ -93,14 +101,14 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
               const already = assignedIds.has(row.id);
               const checked = already || selected.has(row.id);
               return (
-                <tr key={row.id} className={checked ? 'vm-staff-picker-selected' : ''} onClick={() => toggle(row.id)}>
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={row.id} className={checked ? 'vm-staff-picker-selected' : ''} onClick={() => toggle(row.id)}>
                   <td><input type="checkbox" aria-label={`Select ${row.firstName} ${row.lastName}`} checked={checked} disabled={already || assign.isPending}
                     onClick={(e) => e.stopPropagation()} onChange={() => toggle(row.id)} /></td>
                   <td><span className="vm-staff-picker-name"><span className="mini-avatar" aria-hidden="true">{row.firstName[0]}</span>{row.firstName} {row.lastName}</span></td>
                   <td>{row.staffRef || '—'}</td><td>{row.email}</td><td>{row.phone || '—'}</td>
                   <td>{already ? <span className="badge badge-active">Assigned</span> : <span className={`badge ${row.accountStatus === 'active' ? 'badge-active' : 'badge-pending'}`}>{row.accountStatus === 'active' ? 'active' : 'invited'}</span>}</td>
                   <td>{timeAgo(row.createdAt)}</td>
-                </tr>
+                </arcMotion.tr>
               );
             })}</tbody>
           </table>

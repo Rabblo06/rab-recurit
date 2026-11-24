@@ -15,7 +15,7 @@ export default function OnboardingPulsingLogo({ active, tone = 'default' }: { ac
         width: 48,
         height: 48,
         borderRadius: 12,
-        background: tone === 'failed' ? 'var(--color-red, #d93025)' : '#1c1c26',
+        background: tone === 'failed' ? 'var(--feedback-error-bg)' : 'transparent',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -23,9 +23,7 @@ export default function OnboardingPulsingLogo({ active, tone = 'default' }: { ac
         animationDuration: `${LOGO_PULSE_SECONDS}s`,
       }}
     >
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path d="M12 3L21 19.5H3L12 3Z" fill="white" />
-      </svg>
+      <img src="/images/crewflow-mark.svg" width="48" height="48" alt="Crewflow" />
     </div>
   );
 }

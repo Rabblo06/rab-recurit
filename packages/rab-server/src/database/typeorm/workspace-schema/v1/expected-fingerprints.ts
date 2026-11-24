@@ -16,4 +16,6 @@ export const EXPECTED_WORKSPACE_FINGERPRINTS: Readonly<Record<number, string>> =
   // Waves 4+5 lane DB5 (ArchiveAndSearchSchema1786719920000): generated on the disposable crewflow-lane-db5 database.
   16: '3295a8a39f96b887edae863d67cef4441be6e58e3356ab781833264d28d3c394',
   17: '6a8c1dcc77c0f40819a6de484142b36fa2ec29e5aa96e4c61fa7398ea8723fb7',
+  // AssignmentRole1786721120000: PostgreSQL 16 disposable test rehearsal.
+  18: 'e20953fce27713b2baba4d3e049df2c8545cb1427a6d76aa4047c407b2f63ae9',
 };

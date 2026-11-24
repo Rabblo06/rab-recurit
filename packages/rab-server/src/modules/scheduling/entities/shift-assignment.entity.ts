@@ -17,6 +17,16 @@ export class ShiftAssignment {
   @Column({ name: 'staff_profile_id' })
   staffProfileId!: string;
 
+  /** Null preserves the original parent-role semantics for historical assignments. */
+  @Column({ name: 'job_role_id', type: 'uuid', nullable: true })
+  jobRoleId?: string | null;
+
+  @Column({ name: 'pay_rate_override_pence', type: 'bigint', nullable: true, transformer: {
+    to: bigintAsNumber.to,
+    from: (value: string | null) => value === null ? null : bigintAsNumber.from(value),
+  } })
+  payRateOverridePence?: number | null;
+
   @Column({ type: 'text', default: ShiftAssignmentStatus.OFFERED })
   status!: ShiftAssignmentStatusType;
 

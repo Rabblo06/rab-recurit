@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import SettingsHeaderActions from '../layout/SettingsHeaderActions';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
@@ -46,7 +47,10 @@ export const NOTIFICATION_PREFERENCES_KEY = ['profile', 'notification-preference
  *  - success is a short confirmation after the server's answer; a failure is one red toast with the reason and, when a
  *    retry can help, "Try again". The checkbox stays where the server has it.
  */
-export default function NotificationsCard() {
+export default function NotificationsCard({deferred=false}:{deferred?:boolean}) {
+  const [drafts,setDrafts]=useState<Record<string,PreferencePatch>>({});
+  const [batchBusy,setBatchBusy]=useState(false);
+  const batchLock=useRef(false);
   const qc = useQueryClient();
   const { data: prefs, isLoading } = useQuery({
     queryKey: NOTIFICATION_PREFERENCES_KEY,
@@ -78,12 +82,12 @@ export default function NotificationsCard() {
         );
       }
       void qc.invalidateQueries({ queryKey: NOTIFICATION_PREFERENCES_KEY });
-      toast.success('Notification preference saved.');
+      if (!deferred) toast.success('Notification preference saved.');
     },
     onError: (error, patch) => {
       notifyApiError(error, {
         fallback: 'Could not save that preference. Please try again.',
-        retry: () => save(patch),
+        retry: deferred ? undefined : () => save(patch),
       });
     },
     onSettled: (_data, _error, patch) => markSaving(patch, false),
@@ -95,11 +99,25 @@ export default function NotificationsCard() {
     update.mutate(patch);
   }
 
+  async function saveAll() {
+    if(batchLock.current) return;
+    batchLock.current=true; setBatchBusy(true);
+    try {
+      for(const [key,patch] of Object.entries(drafts)) {
+        markSaving(patch,true);
+        await update.mutateAsync(patch);
+        setDrafts(current=>{const next={...current};delete next[key];return next;});
+      }
+      toast.success('Notification preferences saved.');
+    } catch { /* Existing mutation feedback reports the error; unsaved drafts stay available. */ }
+    finally {batchLock.current=false;setBatchBusy(false);}
+  }
   if (isLoading) return <ListSkeleton rows={6} />;
   if (!prefs?.length) return <EmptyState compact variant="inbox" title="No notification preferences" />;
 
   return (
     <div>
+      {deferred && <SettingsHeaderActions><button type="button" className="btn btn-outline" disabled={batchBusy || !Object.keys(drafts).length} onClick={()=>setDrafts({})}>Cancel</button><button type="button" className="btn btn-dark" disabled={batchBusy || !Object.keys(drafts).length} onClick={()=>void saveAll()} aria-busy={batchBusy}>{batchBusy?'Saving…':'Save'}</button></SettingsHeaderActions>}
       {(prefs ?? []).map((p) => {
         const label = LABELS[p.notificationType] ?? p.notificationType;
         const rowSaving = saving.get(p.notificationType);
@@ -113,11 +131,15 @@ export default function NotificationsCard() {
                   <label key={field} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
                     <input
                       type="checkbox"
-                      checked={p[field]}
-                      disabled={rowSaving !== undefined}
+                      checked={drafts[p.notificationType+':'+field]?.value ?? p[field]}
+                      disabled={batchBusy || rowSaving !== undefined}
                       aria-busy={busy || undefined}
                       aria-label={`${CHANNEL_LABEL[field]}: ${label}`}
-                      onChange={(e) => save({ notificationType: p.notificationType, field, value: e.target.checked })}
+                      onChange={(e) => {
+                        const patch={notificationType:p.notificationType,field,value:e.target.checked};
+                        if(!deferred) {save(patch);return;}
+                        setDrafts(current=>{const next={...current};const key=p.notificationType+':'+field;if(patch.value===p[field])delete next[key];else next[key]=patch;return next;});
+                      }}
                     />
                     {busy ? 'Saving…' : CHANNEL_LABEL[field]}
                   </label>

@@ -1,3 +1,4 @@
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useId, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
@@ -116,7 +117,7 @@ export default function AiSkillsTab() {
         <div className="ai-set-search">
           <IconSearch size={14} aria-hidden="true" />
           <label htmlFor={searchId} className="visually-hidden">Search skills</label>
-          <input id={searchId} type="search" placeholder="Search a skill…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <SearchField label="Search a skill…" id={searchId} type="search" placeholder="Search a skill…" value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
         <div className="table-container">
           <table className="table ai-set-table ai-set-table--links">

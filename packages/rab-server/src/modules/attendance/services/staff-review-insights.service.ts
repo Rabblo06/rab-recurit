@@ -162,7 +162,7 @@ export class StaffReviewInsightsService {
          JOIN shift s ON s.id = r.shift_id
          JOIN shift_assignment sa ON sa.shift_id = r.shift_id AND sa.staff_profile_id = r.staff_profile_id
          JOIN venue v ON v.id = s.venue_id
-         JOIN job_role jr ON jr.id = s.job_role_id
+         JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
          JOIN core."user" ru ON ru.id = r.reviewer_user_id
         WHERE r.organisation_id = $1 AND r.staff_profile_id = $2 AND s.created_by = $3
           AND ($4::uuid IS NULL OR r.id = $4)

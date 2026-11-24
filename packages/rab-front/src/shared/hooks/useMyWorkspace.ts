@@ -68,6 +68,8 @@ export function useMyWorkspace(opts: { pollWhileCreating?: boolean; pollInterval
     // instead of firing a request guaranteed to 404. UX-only: the real enforcement is still the
     // backend's own ownership-only `/manager-workspaces/me` lookup.
     enabled: opts.enabled ?? true,
+    // Preparation must not route from a cached pre-profile snapshot on a fresh visit.
+    refetchOnMount: opts.pollWhileCreating ? 'always' : undefined,
     refetchInterval: opts.pollWhileCreating
       ? (query) => (query.state.data?.schemaStatus === 'CREATING' ? opts.pollIntervalMs ?? 2500 : false)
       : undefined,

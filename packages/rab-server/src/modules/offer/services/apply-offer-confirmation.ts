@@ -1,3 +1,4 @@
+import { resolveAssignmentPayRate } from '../../scheduling/utils/assignment-pay-rate';
 import { assertTransition, OFFER_TRANSITIONS, OfferStatus, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, SHIFT_TRANSITIONS, ShiftStatus } from '@rab/shared';
 import { ConflictException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
@@ -198,7 +199,7 @@ export async function applyOfferConfirmation(
       // Snapshotted at confirmation, not at send or staff-accept (§1 A6) —
       // re-read from the shift row just locked by the UPDATE above, in
       // case the rate changed since the offer was sent.
-      payRateSnapshotPence: Number(row.pay_rate_pence),
+      payRateSnapshotPence: await resolveAssignmentPayRate(manager, { ...shift, payRatePence: Number(row.pay_rate_pence) }, assignment),
     });
   } catch (error) {
     if (isExclusionViolation(error)) {

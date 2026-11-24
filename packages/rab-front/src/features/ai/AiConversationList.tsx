@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { IconMessageCircle, IconTrash } from '@tabler/icons-react';
 
+import NavigationIndicator from '../../shared/components/NavigationIndicator';
 import ConfirmDialog from '../../shared/components/ConfirmDialog';
 import { useFeedbackMutation } from '../../shared/hooks/useFeedbackMutation';
 import { timeAgo } from '../../shared/lib/timeAgo';
@@ -76,6 +77,7 @@ export default function AiConversationList({ enabled, onSelect, compact = false 
                     onSelect?.(c.id);
                   }}
                 >
+                  <NavigationIndicator active={current} priority={1} />
                   <IconMessageCircle size={16} aria-hidden="true" />
                   <span>{title}</span>
                 </button>

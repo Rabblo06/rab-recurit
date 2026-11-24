@@ -64,8 +64,7 @@ export class VenueOfferPipelineService {
       shift.organisationId !== ctx.organisationId ||
       !ctx.workspaceId ||
       shift.workspaceId !== ctx.workspaceId ||
-      shift.createdBy !== ctx.userId ||
-      !shift.requestedBy
+      shift.createdBy !== ctx.userId
     )
       throw new NotFoundException('Shift not found.');
     if (['pending_manager_approval', 'declined'].includes(shift.status))

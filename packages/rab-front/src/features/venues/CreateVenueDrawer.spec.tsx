@@ -355,7 +355,7 @@ describe('Venue profile photo', () => {
     mount();
     openEdit({ ...savedVenue, photoFileId: 'file-1' });
     await screen.findByText('Edit venue');
-    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/files/file-1', { responseType: 'blob' }));
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/files/file-1', expect.objectContaining({ responseType: 'blob', signal: expect.any(AbortSignal) })));
     expect(await screen.findByAltText('Venue profile photo')).toBeTruthy();
 
     await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
@@ -427,4 +427,26 @@ describe('venueGeofence helpers', () => {
     expect(parseCoordinatePair('51.5074')).toBeNull();
     expect(parseCoordinatePair('hello, world')).toBeNull();
   });
+});
+
+it('hides client name and saves address fields with the existing custom category', async () => {
+  mount();
+  openCreate();
+  await screen.findByText('Location & Geofence');
+  expect(screen.queryByText('Save the venue first to add role pay rates.')).toBeNull();
+  expect(screen.queryByText('Pay Details')).toBeNull();
+  await typeInto(nameInput(), 'Test venue');
+  expect(screen.queryByLabelText('Client name')).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: 'Type' }));
+  await userEvent.click(screen.getByRole('option', { name: 'Custom type' }));
+  await userEvent.type(screen.getByLabelText('Address', { exact: true }), '12 Test Street');
+  await userEvent.type(screen.getByLabelText('Address 2'), 'Floor 2');
+  await userEvent.type(screen.getByLabelText('City'), 'London');
+  await userEvent.type(screen.getByLabelText('State'), 'Greater London');
+  await userEvent.type(screen.getByLabelText('Postcode'), 'N1 1AA');
+  await userEvent.click(screen.getByRole('button', { name: 'Create venue' }));
+  await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/venues', expect.objectContaining({
+    type: 'other', address: { line1: '12 Test Street', line2: 'Floor 2', city: 'London', state: 'Greater London', postcode: 'N1 1AA' },
+  })));
+  expect(await screen.findByText('Pay Details')).toBeTruthy();
 });

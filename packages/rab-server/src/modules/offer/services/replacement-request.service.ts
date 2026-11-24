@@ -8,6 +8,7 @@ import { ResourceScopeService } from '../../../engine/core-modules/resource-scop
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
+import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { ApproveReplacementRequestDto } from '../dto/approve-replacement-request.dto';
 import { ReplacementRequest } from '../entities/replacement-request.entity';
 import { OfferService } from './offer.service';
@@ -215,7 +216,8 @@ export class ReplacementRequestService {
       // Reuses OfferService's canonical offer-creation path verbatim, in
       // THIS transaction — no duplicated business logic, no second
       // connection.
-      const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, dto.staffProfileId, dto.acknowledgedAvailabilityConflicts ?? []);
+      const source = await manager.findOneByOrFail(ShiftAssignment, { id: request.declinedShiftAssignmentId, shiftId: shift.id });
+      const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, dto.staffProfileId, dto.acknowledgedAvailabilityConflicts ?? [], undefined, source);
 
       await manager.update(ReplacementRequest, id, {
         status: ReplacementRequestStatus.OFFER_SENT,
@@ -294,7 +296,8 @@ export class ReplacementRequestService {
   async sendSelectedWithManager(manager: EntityManager, ctx: AuthContext, shift: Shift, staffProfileId: string, availabilityAcknowledgements: readonly AvailabilityAcknowledgement[] = []) {
     const request = await manager.createQueryBuilder(ReplacementRequest, 'r').where('r.shiftId = :id', { id: shift.id })
       .andWhere('r.status IN (:...states)', { states: [ReplacementRequestStatus.AWAITING_APPROVAL, ReplacementRequestStatus.NO_CANDIDATES] }).orderBy('r.createdAt', 'ASC').setLock('pessimistic_write').getOne();
-    const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, staffProfileId, availabilityAcknowledgements);
+    const source = request ? await manager.findOneByOrFail(ShiftAssignment, { id: request.declinedShiftAssignmentId, shiftId: shift.id }) : undefined;
+    const offer = await this.offerService.sendOneWithManager(manager, ctx, shift, staffProfileId, availabilityAcknowledgements, undefined, source);
     if (request) {
       await manager.update(ReplacementRequest, request.id, { status: ReplacementRequestStatus.OFFER_SENT, selectedStaffProfileId: staffProfileId, resultingOfferId: offer.id, approvedBy: ctx.userId, approvedAt: new Date() });
       await this.auditService.record(manager, ctx, AuditAction.REPLACEMENT_REQUEST_APPROVED, { entityType: 'replacement_request', entityId: request.id, metadata: { staffProfileId, offerId: offer.id, source: 'pipeline_selection' } });

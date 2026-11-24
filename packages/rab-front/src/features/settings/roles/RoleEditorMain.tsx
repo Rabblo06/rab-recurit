@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { IconChevronRight, IconPlus } from '@tabler/icons-react';
+import { IconChevronRight, IconPlus, IconAdjustments, IconDatabase } from '@tabler/icons-react';
 import { toast } from '../../../shared/lib/toast';
 import { ROLES_LIST_PATH, RoleIcon, useRoleEditor } from './RoleEditorLayout';
 import { apiError, countConditions, effectiveRead, isFieldVisible, ObjectMeta, roleApi } from './roleEditorModel';
+
+import RoleAccessSelect from './RoleAccessSelect';
+import './role-v2.css';
 
 type Tab = 'permissions' | 'settings';
 
@@ -72,24 +75,16 @@ function PermissionsTab() {
       <section className="role-section">
         <h3>Objects</h3>
         <p className="role-section-description">Objects and fields permissions settings</p>
-        <PermissionRow label="All Objects">
-          <input type="checkbox" aria-label="All Objects" checked={draft.readAllObjects} disabled={allDisabled} title={allTitle} onChange={(e) => setAll(e.target.checked)} />
-        </PermissionRow>
-        <div className="role-rows">
-          <PermissionRow label="See Records on All Objects">
-            <input type="checkbox" aria-label="See Records on All Objects" checked={draft.readAllObjects} disabled={allDisabled} title={allTitle} onChange={(e) => setAll(e.target.checked)} />
-          </PermissionRow>
-          {(['Edit', 'Delete', 'Destroy'] as const).map((action) => (
-            <PermissionRow key={action} label={`${action} Records on All Objects`}>
-              <input type="checkbox" aria-label={`${action} Records on All Objects (not available)`} checked={false} disabled readOnly title={reason} />
-            </PermissionRow>
-          ))}
+        <div className="role-baseline-card">
+          <IconDatabase size={22} aria-hidden="true" />
+          <span><strong>All objects</strong><small>Applies to all objects before overrides</small></span>
+          <RoleAccessSelect label="All objects access" value={draft.readAllObjects ? 'grant' : 'deny'} disabled={allDisabled} canGrant={anyGrantable} onChange={(value) => setAll(value === 'grant')} />
         </div>
         <p className="role-footnote">{reason}</p>
       </section>
 
       <section className="role-section">
-        <h3>Object-Level</h3>
+        <h3>Overrides</h3>
         {draft.objects.length === 0 ? (
           <p className="role-section-description">No permissions have been set for individual objects.</p>
         ) : (
@@ -98,14 +93,16 @@ function PermissionsTab() {
               const object = metadata.objects.find((o) => o.key === rule.object)!;
               return (
                 <li key={rule.object}>
-                  <Link className="role-rule" to={`${basePath}/objects/${rule.object}`}>
+                  <div className="role-rule role-v2-rule">
                     <RoleIcon name={object.icon} size={16} />
-                    <span className="role-rule-main">
+                    <Link className="role-rule-main" to={`${basePath}/objects/${rule.object}`}>
                       <span className="role-rule-name">{object.labelPlural}</span>
                       <span className="role-rule-summary">{ruleSummary(rule, object, effectiveRead(draft, rule.object))}</span>
-                    </span>
-                    <IconChevronRight size={14} aria-hidden="true" />
-                  </Link>
+                    </Link>
+                    <RoleAccessSelect label={`${object.labelPlural} access`} value={rule.read} canGrant={object.grantable} disabled={readOnly}
+                      onChange={(read) => setDraft(d => ({ ...d, objects: d.objects.map(item => item.object === rule.object ? { ...item, read } : item) }))} />
+                    <Link className="role-advanced-link" aria-label={`Advanced ${object.labelPlural} permissions`} to={`${basePath}/objects/${rule.object}`}><IconAdjustments size={15} /></Link>
+                  </div>
                 </li>
               );
             })}
@@ -117,19 +114,25 @@ function PermissionsTab() {
       </section>
 
       <section className="role-section">
-        <h3>Layout</h3>
-        <p className="role-section-description">Layout permissions</p>
-        <PermissionRow label="Layout All Access" hint="Workspace members can’t change page layouts. This is fixed by the platform.">
-          <span className="role-switch" role="switch" aria-checked="false" aria-disabled="true" aria-label="Layout All Access (not available)" />
+        <h3>Settings</h3>
+        <p className="role-section-description">Settings permissions</p>
+        <PermissionRow label="Settings All Access" hint="Workspace settings permissions are not configurable for member roles.">
+          <span className="role-switch" role="switch" aria-checked="false" aria-disabled="true" aria-label="Settings All Access (not available)" />
         </PermissionRow>
+        <div className="role-preview-list" aria-label="Unavailable settings permissions">
+          {['Accounts', 'Workspace', 'Users', 'Roles', 'Security settings'].map(label => <label key={label}><span>{label}</span><span>Unavailable</span><input type="checkbox" disabled aria-label={`${label} settings access unavailable`} /></label>)}
+        </div>
       </section>
 
       <section className="role-section">
-        <h3>Logic</h3>
-        <p className="role-section-description">Logic permissions</p>
-        <PermissionRow label="Logic All Access" hint="Workspace members can’t change workflows or automations. This is fixed by the platform.">
-          <span className="role-switch" role="switch" aria-checked="false" aria-disabled="true" aria-label="Logic All Access (not available)" />
+        <h3>Actions</h3>
+        <p className="role-section-description">Actions available to workspace members</p>
+        <PermissionRow label="General All Access" hint="Additional actions are unavailable for member roles.">
+          <span className="role-switch" role="switch" aria-checked="false" aria-disabled="true" aria-label="General All Access (not available)" />
         </PermissionRow>
+        <div className="role-preview-list" aria-label="Unavailable actions">
+          {['Create views', 'Export records'].map(label => <label key={label}><span>{label}</span><span>Unavailable</span><input type="checkbox" disabled aria-label={`${label} unavailable`} /></label>)}
+        </div>
       </section>
     </>
   );

@@ -21,7 +21,7 @@ function mountAt(path = '/onboarding/profile', cached: Record<string, unknown> =
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/onboarding/profile" element={<CreateProfileScreen />} />
-          <Route path="/onboarding/preparing" element={<div>PREPARING</div>} />
+          <Route path="/onboarding/welcome" element={<div>PREPARING</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,

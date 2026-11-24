@@ -1,3 +1,4 @@
+import { useReducedMotion } from 'framer-motion';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 import { metricsSummary, type MetricsRange, type QueueMetrics } from './adminPanelApi';
@@ -25,6 +26,7 @@ const TICK_EVERY: Record<MetricsRange, number> = { '1H': 10, '4H': 1, '12H': 2, 
  * Loaded lazily by HealthTab (recharts stays out of the Admin panel's first chunk).
  */
 export default function QueueMetricsChart({ metrics }: { metrics: QueueMetrics }) {
+  const reduced = useReducedMotion();
   const every = TICK_EVERY[metrics.range];
   const data = metrics.buckets.map((b, i) => ({ ...b, label: bucketLabel(b.at, metrics.range), i }));
   return (
@@ -47,8 +49,8 @@ export default function QueueMetricsChart({ metrics }: { metrics: QueueMetrics }
             formatter={(value: number, name: string) => [value.toLocaleString('en-GB'), name === 'completed' ? 'Completed' : 'Failed']}
             contentStyle={{ background: 'var(--bg-primary)', border: '1px solid var(--border-light)', borderRadius: 6, font: 'var(--text-small)' }}
           />
-          <Bar dataKey="completed" stackId="jobs" fill="var(--chart-3)" isAnimationActive={false} />
-          <Bar dataKey="failed" stackId="jobs" fill="var(--feedback-error)" radius={[1, 1, 0, 0]} isAnimationActive={false} />
+          <Bar dataKey="completed" stackId="jobs" fill="var(--chart-3)" isAnimationActive={!reduced} animationDuration={300} animationEasing="ease-out" />
+          <Bar dataKey="failed" stackId="jobs" fill="var(--feedback-error)" radius={[1, 1, 0, 0]} isAnimationActive={!reduced} animationDuration={300} animationEasing="ease-out" />
         </BarChart>
       </ResponsiveContainer>
     </div>

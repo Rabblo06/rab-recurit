@@ -1,0 +1,21 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import NotificationBell from './NotificationBell';
+import { api } from '../../shared/api';
+jest.mock('../../shared/api',()=>({api:{get:jest.fn().mockResolvedValue({data:[]}),post:jest.fn().mockResolvedValue({})}}));
+jest.mock('../../shared/lib/mutationFeedback',()=>({notifyApiError:jest.fn()}));
+jest.mock('../../shared/components/LoadingState',()=>({EmptyState:()=> <p>No notifications yet</p>}));
+test('multiline notifications use independent rows and retain the existing read action',async()=>{
+ const client=new QueryClient({defaultOptions:{queries:{retry:false,staleTime:Infinity}}});
+ client.setQueryData(['notifications','unread-count'],{count:2});
+ const message='A team member has not clocked out from a shift that ended at 2026-11-08T14:00:00.000Z.';
+ client.setQueryData(['notifications','list'],[{id:'n1',type:'missing',title:'Missing clock-out',message,readAt:null,createdAt:'2026-11-08T14:00:00.000Z'},{id:'n2',type:'offer',title:'Offer accepted',message:'A team member accepted a shift offer.',readAt:null,createdAt:'2026-11-08T14:01:00.000Z'}]);
+ render(<QueryClientProvider client={client}><NotificationBell/></QueryClientProvider>);
+ fireEvent.click(screen.getByRole('button',{name:'Notifications'}));
+ const row=screen.getByRole('button',{name:/Missing clock-out/});
+ expect(row).toHaveClass('notification-row'); expect(row).not.toHaveClass('dropdown-item');
+ expect(screen.getByText(message)).toBeInTheDocument();
+ expect(screen.getByRole('button',{name:/Offer accepted/})).toHaveClass('notification-row');
+ fireEvent.click(row); await waitFor(()=>expect(api.post).toHaveBeenCalledWith('/notifications/n1/read'));
+ client.clear();
+});

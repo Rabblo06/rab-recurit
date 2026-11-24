@@ -1,3 +1,6 @@
+import PasswordStrength, { type PasswordRule } from '../../shared/components/arc/password-strength/password-strength';
+import './password-guidance.css';
+import './activation-account.css';
 import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
 import { loginDestination, safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
@@ -5,7 +8,7 @@ import { useRef, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
-import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
+import { checkPasswordStrength, MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH, generateSecurePassword } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markPendingWelcome } from '../onboarding/onboardingMotion';
@@ -29,6 +32,13 @@ import { getApiErrorMessage } from '../../shared/lib/apiError';
  * (token present, not yet submitted), a single non-leaky failure message
  * covering all four reasons, and success.
  */
+const activationPasswordRules: PasswordRule[] = [
+  { id: 'length', label: `At least ${MIN_PASSWORD_LENGTH} characters`, test: value => value.length >= MIN_PASSWORD_LENGTH && value.length <= MAX_PASSWORD_LENGTH, remaining: value => Math.max(0, MIN_PASSWORD_LENGTH - value.length) },
+  { id: 'case', label: 'Upper and lowercase letters', test: value => /[a-z]/.test(value) && /[A-Z]/.test(value) },
+  { id: 'number', label: 'At least one number', test: value => /[0-9]/.test(value) },
+  { id: 'symbol', label: 'A symbol (recommended)', test: value => /[^a-zA-Z0-9\s]/.test(value) },
+];
+
 export default function ActivateAccount() {
   const reduceMotion = useReducedMotion();
   const container = reduceMotion ? staggerContainerReduced : staggerContainer;
@@ -37,6 +47,7 @@ export default function ActivateAccount() {
   const [managerLoginUrl, setManagerLoginUrl] = useState<string | undefined>(undefined);
   const [params] = useSearchParams();
   const token = params.get('token') ?? '';
+  const [passwordFocused, setPasswordFocused] = useState(false);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -75,7 +86,7 @@ export default function ActivateAccount() {
   }
 
   return (
-    <AuthLayout>
+    <AuthLayout variant="onboarding">
 
         {!token ? (
           <div>
@@ -96,34 +107,18 @@ export default function ActivateAccount() {
                 <h1 style={s.title}>Set your password</h1>
                 <p style={s.subtitle}>Finish setting up your invited account.</p>
 
-                <motion.form onSubmit={handleSubmit} variants={container} initial="initial" animate="animate">
-                  <motion.div variants={item}>
-                    <label style={s.label} htmlFor="password">New password</label>
-                    <div style={{ position: 'relative' }}>
-                      <input
-                        id="password"
-                        style={{ ...s.input, paddingRight: 38 }}
-                        type={showPassword ? 'text' : 'password'}
-                        placeholder="Create a password"
-                        value={password}
-                        onChange={e => setPassword(e.target.value)}
-                        autoComplete="new-password"
-                        autoFocus
-                        required
-                        aria-invalid={weak || undefined}
-                        aria-describedby={weak ? 'activate-strength' : undefined}
-                      />
-                      <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
-                        {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
-                      </button>
-                    </div>
+                <motion.form className="activation-password-form" onSubmit={handleSubmit} variants={container} initial="initial" animate="animate">
+                  <motion.div variants={item} onFocusCapture={() => setPasswordFocused(true)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPasswordFocused(false); }}>
+                    <PasswordStrength id="password" label="New password" value={password} onValueChange={value => setPassword(value)}
+                      rules={activationPasswordRules} shortLength={MIN_PASSWORD_LENGTH} countCharacters={value => value.length}
+                      showDetails={passwordFocused} revealed={showPassword} onRevealedChange={setShowPassword}
+                      placeholder="Create a password" required disabled={loading} aria-invalid={weak || undefined} />
+                    {passwordFocused && <>
+                      {strength?.reasons.filter(reason => /too common|at most|email address/.test(reason)).map(reason => <p key={reason} style={s.error}>{reason}</p>)}
+                      <button type="button" className="password-guidance-suggest" style={{ marginBottom: 20 }} disabled={loading}
+                        onClick={() => { const value = generateSecurePassword(); setPassword(value); setConfirm(value); setShowPassword(false); }}>Suggest one</button>
+                    </>}
                   </motion.div>
-
-                  {password && strength && !strength.valid && (
-                    <ul id="activate-strength" aria-label="Password requirements" style={s.strengthList}>
-                      {strength.reasons.map(r => <li key={r}>{r}</li>)}
-                    </ul>
-                  )}
 
                   <motion.div variants={item}>
                     <label style={s.label} htmlFor="confirm">Confirm password</label>

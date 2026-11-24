@@ -130,7 +130,7 @@
 .ai-md-link { color: var(--walnut); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
 .ai-history { display: flex; flex-direction: column; min-height: 0; }
 .ai-history-row { position: relative; display: flex; align-items: center; border-radius: 6px; }
-.ai-history-row.active { background: var(--bg-tertiary); }
+.ai-history-row.active { background: transparent; }
 .ai-history-row.active > .nav-item { color: var(--font-primary); font-weight: 500; }
 .ai-history-row > .nav-item { flex: 1; min-width: 0; padding-right: 30px; }
 .ai-history-row > .nav-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

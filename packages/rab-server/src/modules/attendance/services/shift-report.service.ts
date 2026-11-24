@@ -248,6 +248,7 @@ export class ShiftReportService {
     const report = await manager.findOne(ShiftReport, { where: { shiftId } });
     const rows = await manager.query(`SELECT sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS "staffName", u.avatar_file_id AS "avatarFileId",
       ${assignmentTimeSql().start} AS "scheduledStart", ${assignmentTimeSql().end} AS "scheduledEnd", sa.status AS "assignmentStatus", a.id AS "attendanceId", a.status AS "attendanceStatus", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
+      (SELECT jr.name FROM job_role jr WHERE jr.id = COALESCE(sa.job_role_id, s.job_role_id)) AS "roleName",
       sa.break_minutes AS "assignmentBreakMinutes", a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.earned_pence AS "earnedPence", a.location_verified AS "locationVerified", a.clock_out_method AS "clockOutMethod",
       EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id) AS corrected,
       EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id AND ac.field='clockInAt' AND ac.old_value='') AS "manuallyEntered",
@@ -264,7 +265,7 @@ export class ShiftReportService {
       LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
       WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show') ORDER BY u.first_name,u.last_name,sa.id`, [shiftId]);
     const seatFields = await this.fieldPolicy.resolveTx(manager, ctx, 'attendance');
-    const staff: ShiftReportStaffRow[] = rows.map((r: any) => this.fieldPolicy.omit(seatFields, { ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
+    const staff: ShiftReportStaffRow[] = rows.map((r: any) => this.fieldPolicy.omit(seatFields, { ...r, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
       clockInAt: r.clockInAt ? new Date(r.clockInAt).toISOString() : null, clockOutAt: r.clockOutAt ? new Date(r.clockOutAt).toISOString() : null,
       earnedPence: r.earnedPence == null ? null : Number(r.earnedPence), locationVerified: !!r.locationVerified, performanceReviewed: !!r.performanceReviewed,
       attendanceReviewed: !!r.attendanceReviewedAt, attendanceReviewedAt: r.attendanceReviewedAt ? new Date(r.attendanceReviewedAt).toISOString() : null,

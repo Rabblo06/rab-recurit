@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { assignmentRoleSql } from './v1/assignment-role';
 
 import { approvedShiftStatementSql } from './v1/approved-shift-statement';
 import { archiveColumnsSql } from './v1/archive-columns';
@@ -75,6 +76,7 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
   },
   { id: 'v1.016-archive-columns', version: 16, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: archiveColumnsSql },
   { id: 'v1.017-search-vectors', version: 17, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: searchVectorsSql },
+  { id: 'v1.018-assignment-role', version: 18, introducedBy: 'AssignmentRole1786721120000', sql: assignmentRoleSql },
 ];
 
 /** The newest module version this code knows. A workspace is "current" only at exactly this module_version. */

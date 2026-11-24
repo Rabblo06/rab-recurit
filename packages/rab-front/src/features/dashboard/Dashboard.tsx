@@ -1,3 +1,5 @@
+import { motion as arcMotion } from 'framer-motion';
+import { motionTokens } from '../../shared/components/arc/motion-tokens';
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -102,7 +104,7 @@ function useRevealWindow(ready: boolean): boolean {
 
 function barTransition(reduce: boolean, revealing: boolean, index = 0) {
   if (reduce) return { duration: 0 };
-  return revealing ? { duration: 1.05, ease: COUNT_EASE, delay: Math.min(index, 8) * 0.035 } : { duration: 0.5, ease: COUNT_EASE };
+  return { ...motionTokens.spring.smooth, delay: revealing ? Math.min(index, 8) * motionTokens.stagger.item : 0 };
 }
 
 const pctFormat = (n: number) => `${Math.round(n)}%`;
@@ -257,8 +259,8 @@ function ProfileCard({ index }: { index: number }) {
     <Reveal index={index} className="dash-card dash-profile">
       {/* The authenticated manager's own image, or initials — never a stock portrait. */}
       {profile?.avatarKey
-        ? <div className="dash-profile-photo"><Avatar imageKey={profile.avatarKey} label={full || 'Account'} variant="xl" alt={full || 'Your profile photo'} /></div>
-        : <div className="dash-profile-initials" aria-hidden="true">{initials || '·'}</div>}
+        ? <div className="dash-profile-photo"><Avatar imageKey={profile.avatarKey} label={full || 'Account'} variant="xl" loading="eager" alt={full || 'Your profile photo'} /></div>
+        : <div className="dash-profile-initials" aria-hidden="true">{profile ? initials : ''}</div>}
       <div className="dash-profile-foot">
         <div>
           <p className="dash-profile-name">{full || 'Your profile'}</p>
@@ -638,13 +640,13 @@ function RecentOffers({ index }: { index: number }) {
           <thead><tr><th>Staff</th><th>Venue</th><th>Shift date</th><th>Status</th><th>Sent</th></tr></thead>
           <tbody>
             {(q.data ?? []).map((o) => (
-              <tr key={o.id}>
+              <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={o.id}>
                 <td className="cell-primary">{o.staffName ?? '–'}</td>
                 <td>{o.venueName ?? '–'}</td>
                 <td>{o.startsAt ? new Date(o.startsAt).toLocaleDateString('en-GB') : '–'}</td>
                 <td><span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span></td>
                 <td>{timeAgo(o.sentAt)}</td>
-              </tr>
+              </arcMotion.tr>
             ))}
           </tbody>
         </table>

@@ -1,3 +1,4 @@
+import { effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
 import { EmploymentStatus, NotificationType, ReplacementCandidateSnapshot, ReplacementRequestStatus, ShiftStatus, UserStatus, getLondonDateParts } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
@@ -185,7 +186,8 @@ export async function runReplacementStaffCycle(
         return { created: false, noCandidates: false };
       }
 
-      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
+      const requestedShift = { ...shift, ...effectiveAssignmentTime(declinedAssignment, shift), jobRoleId: declinedAssignment.jobRoleId ?? shift.jobRoleId };
+      const roleRows = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [requestedShift.jobRoleId]);
       const venueRows = await manager.query(`SELECT name FROM venue WHERE id = $1`, [shift.venueId]);
       const jobRoleName: string | null = roleRows[0]?.name ?? null;
       const venueName: string = venueRows[0]?.name ?? 'the venue';
@@ -219,14 +221,14 @@ export async function runReplacementStaffCycle(
           AND u.status = $6
           AND sp.id != $7
         `,
-        [candidate.shift_id, shift.venueId, toTstzRange(shift.startsAt, shift.endsAt), candidate.organisation_id, EmploymentStatus.ACTIVE, UserStatus.ACTIVE, declinedAssignment.staffProfileId],
+        [candidate.shift_id, shift.venueId, toTstzRange(requestedShift.startsAt, requestedShift.endsAt), candidate.organisation_id, EmploymentStatus.ACTIVE, UserStatus.ACTIVE, declinedAssignment.staffProfileId],
       );
 
       const eligible = eligibilityRows.filter((r) => r.no_overlap && r.not_already_offered);
       const shortlist: ReplacementCandidateSnapshot[] = eligible
-        .filter((r) => isAvailableOnDay(r.available_days, shift.startsAt))
+        .filter((r) => isAvailableOnDay(r.available_days, requestedShift.startsAt))
         .map((r) => {
-          const { score, reasons } = scoreCandidate(r, shift, jobRoleName);
+          const { score, reasons } = scoreCandidate(r, requestedShift, jobRoleName);
           return { staffProfileId: r.staff_profile_id, firstName: r.first_name, lastName: r.last_name, score, reasons };
         })
         // Deterministic tie-break: score DESC, then staffProfileId ASC — two

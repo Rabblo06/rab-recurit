@@ -135,6 +135,7 @@ export const AuditAction = {
   SHIFT_RESTORED: 'shift.restored',
   /** Wave 5: the shift lifecycle's first two steps, recorded by SchedulingService.create / publish (timeline read model). */
   SHIFT_CREATED: 'shift.created',
+  SHIFT_HEADCOUNT_INCREASED: 'shift.headcount_increased',
   SHIFT_PUBLISHED: 'shift.published',
   VENUE_GEOFENCE_UPDATED: 'venue.geofence_updated',
   VENUE_PHOTO_UPDATED: 'venue.photo_updated',

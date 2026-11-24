@@ -28,3 +28,20 @@ it('keeps portaled date/popover clicks inside the existing drawer guard boundary
   fireEvent.mouseDown(document.body);
   expect(close).toHaveBeenCalledTimes(1);
 });
+
+it('adapts an open drawer when the viewport changes without losing form state', () => {
+  const original = window.innerWidth;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+  const { container } = render(<RightSidePanel open onClose={jest.fn()} width={408}><input aria-label="Draft" defaultValue="Keep this" /></RightSidePanel>);
+  expect(container.querySelector('.side-panel-dock')).toHaveAttribute('data-layout', 'docked');
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+  fireEvent(window, new Event('resize'));
+  expect(container.querySelector('.side-panel-dock')).toHaveAttribute('data-layout', 'overlay');
+  expect(container.querySelector('.side-panel')).toHaveStyle({ width: '390px' });
+  expect(screen.getByLabelText('Draft')).toHaveValue('Keep this');
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+  fireEvent(window, new Event('resize'));
+  expect(container.querySelector('.side-panel-dock')).toHaveAttribute('data-layout', 'docked');
+  expect(container.querySelector('.side-panel')).toHaveStyle({ width: '408px' });
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: original });
+});

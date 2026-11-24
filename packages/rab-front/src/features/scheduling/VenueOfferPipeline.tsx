@@ -1,3 +1,4 @@
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
@@ -19,6 +20,8 @@ import {
 import { api } from '../../shared/api';
 import Avatar from '../../shared/components/Avatar';
 import Drawer from '../../shared/components/Drawer';
+import StaffSelect from '../users/StaffSelect';
+import ConnectedPipelineBoard from './ConnectedPipelineBoard';
 import { toast } from '../../shared/lib/toast';
 import { PageSlot } from '../../shared/page-slots';
 import { layoutSpring, listItem } from '../../shared/motion';
@@ -250,6 +253,7 @@ export default function VenueOfferPipeline() {
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<Sort>('name');
   const [opening, setOpening] = useState(false);
+  const [scrollRequest, setScrollRequest] = useState(0);
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   // Set when the manager asked for the timesheet before it was ready: once the board then reports it ready, they
   // get the "ready" toast once. Never on page load or on a poll that merely confirms the same state.
@@ -513,6 +517,7 @@ export default function VenueOfferPipeline() {
     if (next == null) return;
     e.preventDefault();
     const key = PIPELINE_TABS[next]!.key;
+    setScrollRequest(value => value + 1);
     setParam('tab', key);
     tabRefs.current[key]?.focus();
   };
@@ -754,7 +759,7 @@ export default function VenueOfferPipeline() {
                   aria-selected={tab === t.key}
                   aria-controls={`pipeline-panel-${t.key}`}
                   tabIndex={tab === t.key ? 0 : -1}
-                  onClick={() => setParam('tab', t.key)}
+                  onClick={() => { setScrollRequest(value => value + 1); setParam('tab', t.key); }}
                   onKeyDown={(e) => onTabKey(e, index)}
                 >
                   {t.label}
@@ -764,8 +769,7 @@ export default function VenueOfferPipeline() {
             </div>
             <div className="pipeline-tools">
               <label className="pipeline-search">
-                <IconSearch size={14} aria-hidden />
-                <input
+                <SearchField label="Search staff"
                   type="search"
                   placeholder="Search staff..."
                   aria-label="Search staff"
@@ -773,41 +777,22 @@ export default function VenueOfferPipeline() {
                   onChange={(e) => setSearch(e.target.value)}
                 />
               </label>
-              <select
-                className="pipeline-select"
-                aria-label="Filter staff"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value as Filter)}
-              >
-                {FILTERS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="pipeline-select"
-                aria-label="Sort staff"
-                value={sort}
-                onChange={(e) => setSort(e.target.value as Sort)}
-              >
-                {SORTS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+              <div className="pipeline-dropdown" aria-label="Filter staff">
+                <StaffSelect compact label="Filter staff" placeholder="Filter: All staff" value={filter}
+                  onChange={value => setFilter(value as Filter)} options={FILTERS.map(([value, label]) => ({ value, label }))} />
+              </div>
+              <div className="pipeline-dropdown" aria-label="Sort staff">
+                <StaffSelect compact label="Sort staff" placeholder="Sort: Name" value={sort}
+                  onChange={value => setSort(value as Sort)} options={SORTS.map(([value, label]) => ({ value, label }))} />
+              </div>
             </div>
           </div>
-          <div
-            className="pipeline-board"
-            role="tabpanel"
-            id={`pipeline-panel-${tab}`}
-            aria-labelledby={`pipeline-tab-${tab}`}
-            tabIndex={0}
-          >
+          <ConnectedPipelineBoard tab={tab} scrollRequest={scrollRequest} onTabChange={next => setParam('tab', next)}>
+            {PIPELINE_TABS.map(group => <div key={group.key} className="pipeline-stage-group"
+              data-pipeline-section={group.key} role="tabpanel" id={`pipeline-panel-${group.key}`}
+              aria-labelledby={`pipeline-tab-${group.key}`}>
             {lanes
-              .filter((lane) => lane.tab === tab)
+              .filter((lane) => lane.tab === group.key)
               .map((lane) => {
                 const cards = cardsFor(lane);
                 const total = counts[lane.key] ?? 0;
@@ -846,7 +831,8 @@ export default function VenueOfferPipeline() {
                   </section>
                 );
               })}
-          </div>
+            </div>)}
+          </ConnectedPipelineBoard>
           <div className="pipeline-footer">
             <span>{lanes.length} stages across Staffing, Attendance and Closed</span>
             <span>Current shift · {staff.length} staff</span>

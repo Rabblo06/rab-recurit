@@ -1,3 +1,4 @@
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useId, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
@@ -71,7 +72,7 @@ export default function AiToolsTab() {
         <div className="ai-set-search">
           <IconSearch size={14} aria-hidden="true" />
           <label htmlFor={searchId} className="visually-hidden">Search tools</label>
-          <input id={searchId} type="search" placeholder="Search a tool…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <SearchField label="Search a tool…" id={searchId} type="search" placeholder="Search a tool…" value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
         <div className="table-container">
           <table className="table ai-set-table ai-set-table--links">
@@ -161,8 +162,7 @@ export function AiToolDetail({ tool, onBack }: { tool: AiToolCatalogueEntryView;
           <>
             {params.length > 6 && (
               <div className="ai-set-search">
-                <IconSearch size={14} aria-hidden="true" />
-                <input type="search" aria-label="Search parameters" placeholder="Search parameters…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+                <SearchField label="Search parameters" type="search" aria-label="Search parameters" placeholder="Search parameters…" value={filter} onChange={(e) => setFilter(e.target.value)} />
               </div>
             )}
             <div className="table-container">

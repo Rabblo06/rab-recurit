@@ -12,7 +12,7 @@
 .invite-field > label { display: block; color: var(--font-secondary); font-size: 12px; margin-bottom: 10px; }
 .invite-row .invite-email-group { display: flex; gap: 6px; min-width: 0; }
 .invite-row input, .invite-row .invite-role-select { height: 38px; border: 1px solid var(--border-medium); border-radius: 6px; background: var(--bg-primary); color: var(--font-primary); font: inherit; font-size: 12px; padding: 0 12px; width: 100%; min-width: 0; }
-.invite-row input:focus-visible, .invite-row .invite-role-select:focus-visible { outline: 2px solid var(--walnut); outline-offset: 2px; }
+.invite-row input:focus-visible, .invite-row .invite-role-select:focus-visible { outline: 2px solid #6478ff; outline-offset: 2px; }
 .invite-by-email form > .invite-submit { height: 32px; min-width: 156px; justify-content: center; margin: 22px 0 0 auto; font-size: 12px; }
 .invite-by-email .invite-help { font-size: 11px; color: var(--font-tertiary); margin: 14px 0 0; }
 .invite-by-email .invite-invalid { font-size: 11px; margin: 8px 0 0; }
@@ -27,8 +27,8 @@
 .leadership-add .settings-section { padding: 0; border: 0; }
 .leadership-add .settings-section > h3 { font-size: 14px; }
 .leadership-add .settings-section > p { font-size: 12px; }
-.leadership-add .organisation-create-fields, .leadership-add .initial-manager-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 22px; }
-.leadership-add .initial-manager-form > .field:first-child { grid-column: 1 / -1; }
+.leadership-add .organisation-create-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 22px; }
+
 .leadership-add .initial-manager-form > .modal-actions, .leadership-add .initial-manager-form > .error, .leadership-add .organisation-create-fields > .error { grid-column: 1 / -1; }
 .leadership-add .field label { font-size: 12px; }
 .leadership-add .modal-actions .btn { min-height: 32px; height: auto; white-space: normal; }
@@ -42,5 +42,5 @@
   .invite-by-email form > .invite-submit { width: 100%; }
   .leadership-controls { flex-wrap: wrap; gap: 12px; }
   .leadership-controls .field { flex-basis: calc(100% - 100px); }
-  .leadership-add .organisation-create-fields, .leadership-add .initial-manager-form { grid-template-columns: minmax(0, 1fr); }
+  .leadership-add .organisation-create-fields { grid-template-columns: minmax(0, 1fr); }
 }

@@ -1,5 +1,6 @@
 import { WithAvailabilityAcknowledgementsDto } from '../../staff/dto/availability-acknowledgement.dto';
 import { Type } from 'class-transformer';
+import { StaffOfferAssignmentDto } from './staff-offer-assignment.dto';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -11,6 +12,9 @@ import {
   Max,
   MaxLength,
   Min,
+  IsArray,
+  ArrayUnique,
+  ValidateNested,
 } from 'class-validator';
 
 export class CreateShiftAndSendDto extends WithAvailabilityAcknowledgementsDto {
@@ -53,10 +57,18 @@ export class CreateShiftAndSendDto extends WithAvailabilityAcknowledgementsDto {
   @IsString()
   notes?: string;
 
+  @ArrayUnique()
   @IsUUID('4', { each: true })
   @ArrayMinSize(1)
   @ArrayMaxSize(100)
   staffProfileIds!: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => StaffOfferAssignmentDto)
+  staffAssignments?: StaffOfferAssignmentDto[];
 
   @IsOptional()
   @Type(() => Number)

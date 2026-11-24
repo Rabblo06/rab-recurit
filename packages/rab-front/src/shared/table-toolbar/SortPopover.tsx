@@ -1,3 +1,4 @@
+import ToggleGroup from '../components/arc/toggle-group/toggle-group';
 import { IconCheck } from '@tabler/icons-react';
 import type { SortOptionConfig, SortState } from './types';
 
@@ -30,18 +31,11 @@ export default function SortPopover({
         );
       })}
       {activeOption && activeOption.directions.length > 1 && (
-        <div className="sort-direction-toggle">
+        <ToggleGroup label="Sort direction" value={active.direction} onValueChange={direction => onChange({sort:active.sort, direction:direction as SortState["direction"]})}>
           {activeOption.directions.map((dir) => (
-            <button
-              key={dir}
-              type="button"
-              className={active.direction === dir ? 'active' : ''}
-              onClick={() => onChange({ sort: active.sort, direction: dir })}
-            >
-              {activeOption.directionLabels?.[dir] ?? (dir === 'asc' ? 'Ascending' : 'Descending')}
-            </button>
+            <ToggleGroup.Item key={dir} value={dir}>{activeOption.directionLabels?.[dir] ?? (dir === 'asc' ? 'Ascending' : 'Descending')}</ToggleGroup.Item>
           ))}
-        </div>
+        </ToggleGroup>
       )}
     </div>
   );

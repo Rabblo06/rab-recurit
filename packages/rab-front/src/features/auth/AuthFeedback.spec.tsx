@@ -34,6 +34,7 @@ let toasts: ToastDetail[] = [];
 const onToast = (e: Event) => toasts.push((e as CustomEvent<ToastDetail>).detail);
 beforeEach(() => {
   toasts = [];
+  localStorage.removeItem('crewflow:last-sign-in-method:v1');
   document.addEventListener(TOAST_EVENT, onToast);
   get.mockReset().mockResolvedValue({ data: { authProviders: { password: true, google: false, microsoft: false } } });
   post.mockReset();
@@ -51,13 +52,29 @@ function renderAt(path: string, ui: ReactElement) {
 
 async function toPasswordStep(email = 'ada@example.test') {
   renderAt('/login', <Login />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Continue with email' }));
   fireEvent.change(await screen.findByLabelText('Work email'), { target: { value: email } });
   fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
   return screen.findByLabelText('Password');
 }
 
 describe('Login (item 1 + 2)', () => {
+  it('shows Last used on the email action only when a prior successful method was remembered', async () => {
+    localStorage.setItem('crewflow:last-sign-in-method:v1', 'email');
+    renderAt('/login', <Login />);
+    const action = await screen.findByRole('button', { name: 'Continue' });
+    expect(action.parentElement).toHaveTextContent('Last used');
+    expect((await screen.findByRole('button', { name: 'Continue' })).parentElement).toHaveTextContent('Last used');
+    expect(screen.getByLabelText('Work email')).toHaveValue('');
+  });
+
+  it('does not remember a failed login as a last-used method', async () => {
+    post.mockRejectedValueOnce(httpError(401));
+    fireEvent.change(await toPasswordStep(), { target: { value: 'wrong-password' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByRole('alert');
+    expect(localStorage.getItem('crewflow:last-sign-in-method:v1')).toBeNull();
+  });
+
   it('a wrong email and a wrong password render the IDENTICAL screen; both fields are invalid and described by the one alert; input kept; no toast', async () => {
     const uniform = httpError(401, { statusCode: 401, message: 'Invalid email or password.', error: 'Unauthorized' });
     const screens: string[] = [];
@@ -152,6 +169,7 @@ describe('Password forms (item 4)', () => {
   it.each(forms)('%s: a weak password is linked to its requirement list; a mismatch is linked to the confirm field and announced once (polite)', async (_name, path, ui, pwLabel, confirmLabel) => {
     renderAt(path, ui);
     const pw = screen.getByLabelText(pwLabel);
+    fireEvent.focus(pw);
     fireEvent.change(pw, { target: { value: 'short' } });
     expect(pw).toHaveAttribute('aria-invalid', 'true');
     const list = document.getElementById(pw.getAttribute('aria-describedby')!)!;

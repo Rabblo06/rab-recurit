@@ -1,6 +1,9 @@
+import { motion as arcMotion } from 'framer-motion';
+import { recordAvatarStyle } from '../../shared/lib/recordAvatarColor';
+import RecordOpenAction from '../../shared/components/RecordOpenAction';
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import { ListViewSelect, RecordFooter } from '../../shared/table-toolbar/ListPresentation';
-import { NavLink, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { IconClock } from '@tabler/icons-react';
 import { api } from '../../shared/api';
@@ -129,12 +132,7 @@ export default function VenueOffers() {
 
   return (
     <div className="page">
-      <PageHeader title="Offers"
-        tabs={<>
-        <NavLink className="tab-link" to="/offers">Staff Offers</NavLink>
-        <NavLink className="tab-link active" to="/venue-offers">Venue Offers <span className="tab-count">· {total}</span></NavLink>
-        </>}
-      />
+      <PageHeader title="Venue Offers" />
 
       <div className="list-toolbar-row">
         <ListViewSelect label="Venue offer status" value={activeStatus} options={STATUS_TABS.map(t => ({value:t.key,label:t.key ? t.label : 'All requests'}))} onChange={status => setFilters(status ? {status} : {})} />
@@ -171,18 +169,19 @@ export default function VenueOffers() {
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.id} onClick={() => ['pending_manager_approval','declined'].includes(r.status) ? openShiftApproval(r.id) : navigate(`/venue-offers/${r.id}`)} style={{ cursor: 'pointer' }}>
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={r.id} onClick={() => ['pending_manager_approval','declined'].includes(r.status) ? openShiftApproval(r.id) : navigate(`/venue-offers/${r.id}`)} style={{ cursor: 'pointer' }}>
                   {isVisible('venue') && <td>
-                    <span className="record-chip">
-                      <span className="mini-avatar" style={{ background: '#d9f0de', color: '#2a8e44' }}>{r.venueName?.[0]}</span>
+                    <button type="button" onClick={event => { event.stopPropagation(); ['pending_manager_approval','declined'].includes(r.status) ? openShiftApproval(r.id) : navigate(`/venue-offers/${r.id}`); }} className="record-chip object-name-chip">
+                      <span className="mini-avatar" style={recordAvatarStyle(r.venueName)}>{r.venueName?.[0]}</span>
                       {r.venueName}
-                    </span>
+                    </button>
+                    <RecordOpenAction label={`Open venue offer for ${r.venueName}`} onOpen={() => ['pending_manager_approval','declined'].includes(r.status) ? openShiftApproval(r.id) : navigate(`/venue-offers/${r.id}`)}/>
                   </td>}
                   {isVisible('note') && <td className="cell-muted" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {r.notes ?? '–'}
                   </td>}
                   {isVisible('role') && <td className="cell-muted">{r.roleName}</td>}
-                  {isVisible('venueManager') && <td className="cell-muted">{r.venueManagerName}</td>}
+                  {isVisible('venueManager') && <td><span className="record-chip object-name-chip"><span className="mini-avatar" style={recordAvatarStyle(r.venueManagerName)} aria-hidden="true">{r.venueManagerName?.[0]}</span>{r.venueManagerName}</span></td>}
                   {isVisible('date') && <td className="cell-muted">{fmtDate(r.startsAt)}</td>}
                   {isVisible('time') && <td><span className="cell-icon-text"><IconClock size={13} />{fmtTime(r.startsAt)}–{fmtTime(r.endsAt)}</span></td>}
                   {isVisible('staffing') && <td className="cell-muted">{r.selectedCount} / {r.requiredCount}</td>}
@@ -193,7 +192,7 @@ export default function VenueOffers() {
                     </span>
                   </td>}
                   {isVisible('submitted') && <td className="cell-muted">{timeAgo(r.submittedAt)}</td>}
-                </tr>
+                </arcMotion.tr>
               ))}
               {rows.length === 0 && (
                 <tr><td colSpan={10}>

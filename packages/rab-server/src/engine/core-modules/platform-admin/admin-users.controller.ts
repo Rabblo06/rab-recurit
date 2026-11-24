@@ -8,7 +8,7 @@ import { ManagerApplication } from '../auth/guards/manager-application.decorator
 import { AuthContext } from '../tenant/auth-context.interface';
 import { RateLimitRequired } from '../throttler/rab-throttler.guard';
 import { AdminUsersService } from './admin-users.service';
-import { AdminOrganisationSearchQueryDto, AdminReasonDto, AdminUserSearchQueryDto } from './dto/admin-panel.dto';
+import { AdminMemberDirectoryQueryDto, AdminOrganisationSearchQueryDto, AdminReasonDto, AdminUserSearchQueryDto } from './dto/admin-panel.dto';
 
 /**
  * Crewflow Platform Admin Panel — General tab: user / organisation lookup, user summary, "Sign out everywhere", platform
@@ -27,6 +27,13 @@ import { AdminOrganisationSearchQueryDto, AdminReasonDto, AdminUserSearchQueryDt
 @Throttle({ default: { limit: 120, ttl: 60_000 } })
 export class AdminUsersController {
   constructor(private readonly users: AdminUsersService) {}
+
+  @Get('users/directory')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @RateLimitRequired()
+  directory(@AuthUser() ctx: AuthContext, @Query() query: AdminMemberDirectoryQueryDto) {
+    return this.users.memberDirectory(ctx, query.search, query.page ?? 1, query.limit ?? 25);
+  }
 
   @Get('users/search')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })

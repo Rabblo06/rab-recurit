@@ -4,7 +4,7 @@ import axios from 'axios';
 import { Link, Outlet, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  IconBriefcase, IconBuilding, IconCalendar, IconClipboard, IconEye, IconKey, IconShield, IconStar, IconUser, IconUsers,
+  IconDeviceFloppy, IconBriefcase, IconBuilding, IconCalendar, IconClipboard, IconEye, IconKey, IconShield, IconStar, IconUser, IconUsers,
 } from '@tabler/icons-react';
 import { toast } from '../../../shared/lib/toast';
 import { DetailSkeleton } from '../../../shared/components/LoadingState';
@@ -285,7 +285,7 @@ export default function RoleEditorLayout() {
                 disabled={save.isPending || nameMissing || (!!roleId && !dirty)}
                 onClick={() => save.mutate({ id: roleId, changes: draft })}
               >
-                {save.isPending ? 'Saving…' : 'Save'}
+                <IconDeviceFloppy size={14} aria-hidden="true" /> {save.isPending ? 'Saving…' : 'Save'}
               </button>
             )}
           </div>

@@ -183,7 +183,7 @@ async function loadStatementData(m: EntityManager, recordId: string): Promise<{ 
        JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
        JOIN shift s ON s.id = pr.shift_id
        JOIN venue v ON v.id = s.venue_id
-       JOIN job_role jr ON jr.id = s.job_role_id
+       JOIN job_role jr ON jr.id = COALESCE(sa.job_role_id, s.job_role_id)
        JOIN staff_profile sp ON sp.id = pr.staff_profile_id
        JOIN core."user" u ON u.id = sp.user_id
        JOIN core.organisation o ON o.id = pr.organisation_id

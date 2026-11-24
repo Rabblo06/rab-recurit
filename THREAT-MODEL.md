@@ -3980,3 +3980,19 @@ credential, migration or RLS policy.
     EACCES) and, behind that, migrated as the rab_owner login, which the role split refuses. Both now start PostgreSQL
     after checkout (`.github/actions/disposable-postgres`) and build their database through the restricted-migrator fresh
     install; the server suite runs as crewflow_app, the RLS gate as crewflow_app. No check removed or downgraded.
+
+## 2026-11-09 — Assignment-specific role and rate (pending rollout)
+- Threat: a crafted staffAssignments payload selects another workspace/manager role, duplicate recipient, invalid time, or silently prices a role at zero/at the parent role rate.
+- Controls: existing OFFER_SEND guard plus service check, tenant/workspace transaction and FORCE RLS, owned/active venue and job-role validation before dispatch, recipient uniqueness and membership validation, canonical time/availability/eligibility checks, same-parent assignment FK, nullable role FK and nonnegative explicit rate override constraint. Historical NULL role falls back to the parent; new nullable money transformer preserves NULL rather than converting it to zero.
+- Confirmation retains existing state transitions/seat lock/double-booking protection; assignment-specific rate is resolved at confirmation and persisted for downstream attendance/payroll. Automated source-assignment replacements preserve source role/time; no new auto-send path.
+- Verification: restricted-runtime disposable PostgreSQL integration tests cover individual schedule/rate/report projection, foreign role rejection and duplicate recipients; existing scheduling abuse, payroll approval, and fresh-workspace provisioning/RLS suites passed (98 tests). Production/live migration is not approved or run. Corrupt schema fixtures remain fail-closed.
+
+## 2026-11-10 — Existing-shift capacity expansion (pending rollout)
+- Threat: cross-workspace/foreign-owner headcount changes, lost updates or retry/concurrent overexpansion, failed dispatch leaving inflated capacity, bypass of replacement/confirmation gates.
+- Controls: paired absolute requiredCount/expectedRequiredCount bounded to 1000; OFFER_SEND + SCHEDULE_CREATE service permissions; workspace transaction/RLS, organisation/workspace/owner checks, pessimistic parent lock and stale guard; active/non-archived/unended published shifts only; no resize with replacement mode. Existing transition guard allows reopening a filled shift. Capacity/audit/offers share one transaction; zero successful offers rolls everything back. Existing staff acceptance and manager confirmation remain mandatory.
+- Direct shifts may open the staffing pipeline under unchanged ownership/permission/RLS checks. Selecting the venue never implicitly merges different events: the user chooses the existing shift ID.
+- Tests: 23 targeted disposable/core-schema integration checks passed, including concurrent resize, rollback, foreign access, confirmation and availability. HWS schema rollout verification remains pending because copied test fixtures include corrupt/missing workspace schemas; migration refusal was preserved. No live migration/deployment.
+
+
+### Team directory - 2026-11-10
+Threat: a workspace member enumerates users from another organisation or reads privileged profile fields. The global endpoint requires platform-admin guard, service assertion and secure-definer identity check. The workspace directory checks active membership, pins organisation/workspace context and projects only identifier, name and email; no client-supplied tenant identity is accepted. Functions have pinned search paths, PUBLIC execute revoked and runtime-only execute grants. No tokens, invitation secrets or credentials are returned. Existing detail endpoints retain their admin guards. Regression SQL covers missing context, nonadmin global access, foreign workspace, safe fields and pagination; UI tests deny nonadmin detail navigation. Tests run on disposable database only.

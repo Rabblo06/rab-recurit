@@ -292,7 +292,115 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     PermissionFlag.OFFER_CONFIRM,
   ];
 
+
+  describe('existing shift headcount increase', () => {
+    it('serializes concurrent capacity changes without adding twice', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token);
+      const staff = await seedStaff(own.organisation);
+      const send = () => request(app.getHttpServer())
+        .post('/rest/v1/shifts/' + shift.id + '/offers/bulk')
+        .set('Authorization', 'Bearer ' + token)
+        .send({ staffProfileIds: [staff.staffProfileId], requiredCount: 2, expectedRequiredCount: 1 });
+      const results = await Promise.all([send(), send()]);
+      expect(results.filter(result => result.status === 201)).toHaveLength(1);
+      expect(results.filter(result => [400, 409].includes(result.status))).toHaveLength(1);
+      const [saved] = await adminDataSource.query('SELECT required_count FROM core.shift WHERE id=$1', [shift.id]);
+      expect(saved.required_count).toBe(2);
+      const [offers] = await adminDataSource.query('SELECT count(*)::int AS n FROM core.job_offer o JOIN core.shift_assignment a ON a.id=o.shift_assignment_id WHERE a.shift_id=$1', [shift.id]);
+      expect(offers.n).toBe(1);
+    });
+    it('adds places to a filled shift, preserves its staff and rejects stale retries', async () => {
+      const own = await seedOrg(MANAGER_PERMS); const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token);
+      const first = await seedStaff(own.organisation); const second = await seedStaff(own.organisation);
+      const offer = await request(app.getHttpServer()).post('/rest/v1/shifts/' + shift.id + '/offers').set('Authorization', 'Bearer ' + token).send({staffProfileId:first.staffProfileId});
+      expect(offer.status).toBe(201);
+      expect((await request(app.getHttpServer()).post('/rest/v1/offers/' + offer.body.id + '/accept').set('Authorization','Bearer ' + await login(first.email))).status).toBe(201);
+      expect((await request(app.getHttpServer()).post('/rest/v1/offers/' + offer.body.id + '/confirm').set('Authorization','Bearer ' + token)).status).toBe(201);
+      const body={staffProfileIds:[second.staffProfileId],requiredCount:2,expectedRequiredCount:1};
+      const send=()=>request(app.getHttpServer()).post('/rest/v1/shifts/'+shift.id+'/offers/bulk').set('Authorization','Bearer '+token).send(body);
+      expect((await send()).status).toBe(201);
+      expect([400,409]).toContain((await send()).status);
+      const after=await request(app.getHttpServer()).get('/rest/v1/shifts/'+shift.id).set('Authorization','Bearer '+token);
+      expect(after.body.requiredCount).toBe(2);expect(after.body.filledCount).toBe(1);expect(after.body.status).toBe('partially_filled');
+      const [count]=await adminDataSource.query('SELECT count(*)::int AS n FROM core.shift_assignment WHERE shift_id=$1',[shift.id]);expect(count.n).toBe(2);
+      const pipeline=await request(app.getHttpServer()).get('/rest/v1/shifts/'+shift.id+'/pipeline').set('Authorization','Bearer '+token);
+      expect(pipeline.status).toBe(200);expect(pipeline.body.staff).toHaveLength(2);
+    });
+    it('rolls headcount back if no staff can receive an offer', async()=>{
+      const own=await seedOrg(MANAGER_PERMS);const token=await login(own.adminEmail);const shift=await makeAndPublishShift(own.organisation,own.venue,token);
+      const result=await request(app.getHttpServer()).post('/rest/v1/shifts/'+shift.id+'/offers/bulk').set('Authorization','Bearer '+token).send({staffProfileIds:[randomUUID()],requiredCount:2,expectedRequiredCount:1});
+      expect(result.status).toBe(409);
+      const after=await request(app.getHttpServer()).get('/rest/v1/shifts/'+shift.id).set('Authorization','Bearer '+token);expect(after.body.requiredCount).toBe(1);
+    });
+    it('rejects a foreign shift and disallows replacement/headcount combinations', async()=>{
+      const own=await seedOrg(MANAGER_PERMS),other=await seedOrg(MANAGER_PERMS);const token=await login(own.adminEmail),otherToken=await login(other.adminEmail);
+      const shift=await makeAndPublishShift(own.organisation,own.venue,token);const staff=await seedStaff(other.organisation);
+      const body={staffProfileIds:[staff.staffProfileId],requiredCount:2,expectedRequiredCount:1};
+      expect((await request(app.getHttpServer()).post('/rest/v1/shifts/'+shift.id+'/offers/bulk').set('Authorization','Bearer '+otherToken).send(body)).status).toBe(404);
+      expect((await request(app.getHttpServer()).post('/rest/v1/shifts/'+shift.id+'/offers/bulk').set('Authorization','Bearer '+token).send({...body,mode:'replacement'})).status).toBe(400);
+    });
+  });
+
   describe('two-step acceptance — staff accepting never confirms the shift', () => {
+    it('individual staff settings stay on one parent and confirmation snapshots the individual role rate', async () => {
+      const { organisation, adminEmail, venue } = await seedOrg([...MANAGER_PERMS, PermissionFlag.REPORT_VIEW]);
+      const token = await login(adminEmail);
+      const staffA = await seedStaff(organisation);
+      const staffB = await seedStaff(organisation);
+      const roleA = await seedJobRole(organisation, venue.createdBy!, 1200);
+      const roleB = await seedJobRole(organisation, venue.createdBy!, 1800);
+      const start = new Date(Date.now() + 72 * 3600000);
+      const end = new Date(start.getTime() + 8 * 3600000);
+      const later = new Date(start.getTime() + 2 * 3600000);
+      const laterEnd = new Date(end.getTime() + 2 * 3600000);
+      const response = await request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${token}`).send({
+        venueId: venue.id, jobRoleId: roleA.id, startsAt: start.toISOString(), endsAt: end.toISOString(), staffProfileIds: [staffA.staffProfileId, staffB.staffProfileId],
+        staffAssignments: [{ staffProfileId: staffA.staffProfileId, jobRoleId: roleA.id, startsAt: start.toISOString(), endsAt: end.toISOString() },
+          { staffProfileId: staffB.staffProfileId, jobRoleId: roleB.id, startsAt: later.toISOString(), endsAt: laterEnd.toISOString() }],
+      });
+      expect(response.status).toBe(201);
+      expect(response.body.results).toHaveLength(2);
+      expect(response.body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
+      const rows = await adminDataSource.manager.query('SELECT shift_id, job_role_id, lower(period) AS start, upper(period) AS finish, pay_rate_snapshot_pence AS rate FROM core.shift_assignment WHERE shift_id=$1 ORDER BY lower(period)', [response.body.shiftId]);
+      expect(rows).toHaveLength(2);
+      expect(new Set(rows.map((r: { shift_id: string }) => r.shift_id)).size).toBe(1);
+      expect(rows[1].job_role_id).toBe(roleB.id);
+      expect(new Date(rows[1].start).toISOString()).toBe(later.toISOString());
+      expect(new Date(rows[1].finish).toISOString()).toBe(laterEnd.toISOString());
+      expect(Number(rows[1].rate)).toBe(1800);
+      // Rate changes before confirmation use the same confirmation-time rule as ordinary shifts.
+      await adminDataSource.manager.update(JobRole, roleB.id, { defaultRatePence: 1900 });
+      const offerId = response.body.results.find((r: { staffProfileId: string }) => r.staffProfileId === staffB.staffProfileId).offerId;
+      const staffToken = await login(staffB.email);
+      expect((await request(app.getHttpServer()).post(`/rest/v1/offers/${offerId}/accept`).set('Authorization', `Bearer ${staffToken}`)).status).toBe(201);
+      expect((await request(app.getHttpServer()).post(`/rest/v1/offers/${offerId}/confirm`).set('Authorization', `Bearer ${token}`)).status).toBe(201);
+      const [confirmed] = await adminDataSource.manager.query('SELECT pay_rate_snapshot_pence AS rate FROM core.shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2', [response.body.shiftId, staffB.staffProfileId]);
+      expect(Number(confirmed.rate)).toBe(1900);
+      const report = await request(app.getHttpServer()).get(`/rest/v1/attendance/report/shift/${response.body.shiftId}`).set('Authorization', `Bearer ${token}`);
+      expect(report.status).toBe(200);
+      expect(report.body.staff.find((row: { staffProfileId: string }) => row.staffProfileId === staffB.staffProfileId)).toMatchObject({ roleName: roleB.name, scheduledStart: later.toISOString(), scheduledEnd: laterEnd.toISOString() });
+    });
+
+    it('individual staff settings reject a foreign role and duplicate recipients without creating a shift', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const other = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const staff = await seedStaff(own.organisation);
+      const role = await seedJobRole(own.organisation, own.venue.createdBy!);
+      const foreignRole = await seedJobRole(other.organisation, other.venue.createdBy!);
+      const startsAt = new Date(Date.now() + 72 * 3600000).toISOString();
+      const endsAt = new Date(Date.now() + 80 * 3600000).toISOString();
+      const body = { venueId: own.venue.id, jobRoleId: role.id, startsAt, endsAt, staffProfileIds: [staff.staffProfileId], staffAssignments: [{ staffProfileId: staff.staffProfileId, jobRoleId: foreignRole.id, startsAt, endsAt }] };
+      const send = (payload: object) => request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${token}`).send(payload);
+      expect((await send(body)).status).toBe(404);
+      expect((await send({ ...body, staffProfileIds: [staff.staffProfileId, staff.staffProfileId] })).status).toBe(400);
+      const [count] = await adminDataSource.manager.query('SELECT count(*)::int AS n FROM core.shift WHERE venue_id=$1', [own.venue.id]);
+      expect(count.n).toBe(0);
+    });
+
     it('staff accepting an offer moves it to staff_accepted, not manager_confirmed, and does not claim a seat', async () => {
       const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
       const adminToken = await login(adminEmail);

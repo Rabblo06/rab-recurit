@@ -1,3 +1,4 @@
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -256,8 +257,7 @@ function ReviewerPicker({ reviewers, total, value, onChange }: {
       {open && (
         <motion.div className="sr-popover" onKeyDown={onKey} variants={dropdown} initial="hidden" animate="visible" exit="exit">
           <label className="sr-search">
-            <IconSearch size={13} />
-            <input
+            <SearchField label="Search venue manager" type="text"
               ref={search}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
