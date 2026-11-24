@@ -4,13 +4,16 @@ import { AuthModule } from '../../engine/core-modules/auth/auth.module';
 import { EntityCacheModule } from '../../engine/core-modules/entity-cache/entity-cache.module';
 import { IdentityModule } from '../identity/identity.module';
 import { SchedulingModule } from '../scheduling/scheduling.module';
+import { MyTimeOffController } from './controllers/my-time-off.controller';
+import { StaffTimeOffController } from './controllers/staff-time-off.controller';
 import { StaffController } from './controllers/staff.controller';
+import { StaffTimeOffService } from './services/staff-time-off.service';
 import { StaffService } from './services/staff.service';
 
 @Module({
   imports: [AuthModule, EntityCacheModule, IdentityModule, SchedulingModule],
-  controllers: [StaffController],
-  providers: [StaffService],
+  controllers: [StaffController, StaffTimeOffController, MyTimeOffController],
+  providers: [StaffService, StaffTimeOffService],
   // Reused by MembershipModule (email-first invitations) so identity creation stays in one place.
   exports: [StaffService],
 })

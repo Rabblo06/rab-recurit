@@ -24,7 +24,8 @@ import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.enti
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { JobOffer } from '../entities/job-offer.entity';
 import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
-import { confirmationDeadlineSql } from '../../scheduling/utils/assignment-time';
+import { confirmationDeadlineSql, effectiveAssignmentTime } from '../../scheduling/utils/assignment-time';
+import { assertNoApprovedTimeOff } from '../../staff/services/staff-time-off-check';
 import { NO_VACANCY_MESSAGE, OfferKind } from '../constants/offer-kind';
 import { occupiedSeatSql } from './shift-vacancy';
 
@@ -108,6 +109,12 @@ export async function applyOfferConfirmation(
   }
   assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CONFIRMED);
+
+  // Owner decision 42: time off APPROVED after the offer was sent stops the confirmation (409 STAFF_TIME_OFF), checked on the
+  // seat's own window, before any claim; a refusal anywhere later still rolls this whole transaction back.
+  const seatStaff = await manager.findOne(StaffProfile, { where: { id: offer.staffProfileId } });
+  if (!seatStaff) throw new ConflictException('This staff member can no longer be confirmed.');
+  await assertNoApprovedTimeOff(manager, { staffProfileId: seatStaff.id, staffUserId: seatStaff.userId }, effectiveAssignmentTime(assignment, shift));
 
   // The deadline authority: claim the offer row only while still staff_accepted, in this organisation, and strictly
   // before its deadline by the database clock. (A replacement/standby's deadline is its window end, so this also
