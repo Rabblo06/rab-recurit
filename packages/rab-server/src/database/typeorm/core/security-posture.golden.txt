@@ -423,6 +423,8 @@ execute|owner_login_grant_parity_guard()|crewflow_app|false
 execute|owner_login_grant_parity_guard()|crewflow|true
 execute|payroll_adjustment_guard()|crewflow_app|true
 execute|payroll_adjustment_guard()|crewflow|true
+execute|payroll_adjustment_insert_guard()|crewflow_app|true
+execute|payroll_adjustment_insert_guard()|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
 execute|provision_workspace(uuid)|PUBLIC|false
@@ -685,6 +687,7 @@ owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|sea
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|owner_login_grant_parity_guard()|crewflow|definer=false
 owner|function|payroll_adjustment_guard()|crewflow|definer=false
+owner|function|payroll_adjustment_insert_guard()|crewflow|definer=false
 owner|function|payroll_record_guard()|crewflow|definer=false
 owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -795,6 +798,7 @@ owner|table|payroll_adjustment|crewflow
 owner|table|payroll_calendar_period|crewflow
 owner|table|payroll_calendar|crewflow
 owner|table|payroll_record|crewflow
+owner|table|payroll_run_event|crewflow
 owner|table|payroll_run_line|crewflow
 owner|table|payroll_run|crewflow
 owner|table|payslip_document|crewflow
@@ -893,6 +897,7 @@ rls|payroll_adjustment|enable=true|force=true
 rls|payroll_calendar_period|enable=true|force=true
 rls|payroll_calendar|enable=true|force=true
 rls|payroll_record|enable=true|force=true
+rls|payroll_run_event|enable=true|force=true
 rls|payroll_run_line|enable=true|force=true
 rls|payroll_run|enable=true|force=true
 rls|payslip_document|enable=true|force=true
@@ -1053,6 +1058,8 @@ table|payroll_calendar|crewflow_app|S,I
 table|payroll_calendar|crewflow|S,I,U,D,T,R,G
 table|payroll_record|crewflow_app|S,I
 table|payroll_record|crewflow|S,I,U,D,T,R,G
+table|payroll_run_event|crewflow_app|S,I
+table|payroll_run_event|crewflow|S,I,U,D,T,R,G
 table|payroll_run_line|crewflow_app|S,I
 table|payroll_run_line|crewflow|S,I,U,D,T,R,G
 table|payroll_run|crewflow_app|S,I

@@ -64,7 +64,8 @@ export const FIELD_POLICY_OBJECTS: Record<FieldPolicyObjectKey, FieldPolicyObjec
       {
         key: 'amount',
         label: 'Gross amount',
-        properties: ['amountPence', 'grossPence', 'approvedPence', 'netPence'],
+        // + the run / payslip money of owner decision 3 (adjustment totals; nested adjustment lines carry amountPence).
+        properties: ['amountPence', 'grossPence', 'approvedPence', 'netPence', 'correctionsPence', 'bonusesPence', 'expensesPence', 'adjustmentsPence', 'totalPence'],
         sensitiveAuthority: PermissionFlag.PAYROLL_VIEW,
         memberDefaultVisible: false,
       },
