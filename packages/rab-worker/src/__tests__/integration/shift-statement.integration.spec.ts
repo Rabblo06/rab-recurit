@@ -28,7 +28,7 @@ import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Approved Shift Statement on payroll approval (PayStatement1786719000000 + ApprovedShiftStatement1786719100000).
- * Real HTTP + real Postgres/RLS + the real dispatcher/consumer functions and the renderer PDF_RENDERER selects. The BullMQ hop is
+ * Real HTTP + real Postgres/RLS + the real dispatcher/consumer functions and the native renderer. The BullMQ hop is
  * represented by the `publish` callback (the production one is `queue.add`), so "Redis down" is a publish that throws.
  */
 const RUN = integrationTestDatabaseReady();
@@ -167,7 +167,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
   const dispatch = (pub: (d: ShiftStatementJobData) => Promise<void> = publish) =>
     runShiftStatementDispatchCycle(adminDataSource, tenantContext, pub, { organisationId: orgId });
   // The seam receives the data-in document (D1). `lastHtml` is the Chromium template for that document, printed from the
-  // SAME view-model builder the native layout uses, so the content assertions below hold in both PDF_RENDERER modes.
+  // SAME view-model builder the native layout uses, so the content assertions below hold for the native layout.
   const deps = (render?: (doc: ReportDocument) => Promise<Buffer>) => ({ tenantContext, files, notifications, audit,
     render: render ?? (async (doc: ReportDocument) => { lastHtml = reportHtmlFor(doc); return renderReportPdf(doc); }) });
   const expireLease = (id: string) => adminDataSource.query(

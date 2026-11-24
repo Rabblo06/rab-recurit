@@ -6,7 +6,7 @@ import type { ApprovedShiftStatementViewModel, StatementRowView } from '@rab/ser
 import { COLOR, DocumentHeader, h, mm, pageStyle, px, Text } from './document-components';
 
 /**
- * APPROVED SHIFT STATEMENT, native layout (PDF_RENDERER=native). Prints the shared view-model
+ * APPROVED SHIFT STATEMENT, native layout. Prints the shared view-model
  * (`buildApprovedShiftStatementViewModel`, rab-server) and nothing else: no date, money or minute is formatted or computed
  * here; every value is a plain string child of `<Text>` (never markup). Styles follow the Chromium template's CSS
  * (`approved-shift-statement.html.ts` + `DOCUMENT_CSS`), converted with `px()`.
