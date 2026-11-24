@@ -61,6 +61,7 @@ import { withdrawUnconfirmedOffer } from './withdraw-unconfirmed-offer';
 import { completeShiftIfSettled, lockShiftRow } from '../../scheduling/utils/complete-shift-if-settled';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
+import { assertPayRateSet } from '../../scheduling/utils/pay-rate-rules';
 import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
 import { TimerTriggerQueueService } from '../../../engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -1109,6 +1110,8 @@ export class OfferService {
       if (shift.status !== ShiftStatus.PENDING_MANAGER_APPROVAL) {
         throw new NotFoundException('Shift not found.');
       }
+      // Owner decision 39: approving opens the shift (publishes it); a request priced at £0 is refused, never opened.
+      assertPayRateSet(shift.payRatePence);
 
       // The recipient list is re-derived from `shift_request_staff` here,
       // never taken from `dto.staffProfileIds` — the Venue Offers detail
