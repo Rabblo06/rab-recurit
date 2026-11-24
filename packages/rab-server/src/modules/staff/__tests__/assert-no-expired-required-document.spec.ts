@@ -8,17 +8,17 @@ import {
   londonDate,
 } from '../services/staff-document-rules';
 
-/** A fake EntityManager answering the two queries the check makes (requirement overrides, then held documents). */
+/** A fake EntityManager answering the requirement overrides and the offer-block definer. */
 function fakeManager(
   overrides: Array<{ document_type: string; required: boolean }>,
-  docs: Array<{ document_type: string; valid: boolean; latest: string | null }>,
+  blocked: Array<{ document_type: string; expired_on: string }>,
 ) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   return {
     calls,
     query: async (sql: string, params: unknown[]) => {
       calls.push({ sql, params });
-      return sql.includes('staff_document_requirement') ? overrides : docs;
+      return sql.includes('staff_document_requirement') ? overrides : blocked;
     },
   };
 }
@@ -27,10 +27,26 @@ const staff = { userId: 'u1', organisationId: 'o1', workspaceId: 'w1' };
 const inTwoDays = new Date(Date.now() + 48 * 3600 * 1000);
 
 describe('assertNoExpiredRequiredDocument', () => {
-  it('default requirement (Right to Work): an expired held document blocks with the reason code', async () => {
+  it('reads through the tenant-pinned definer (review H1), never the caller-RLS table directly', async () => {
+    const m = fakeManager([], []);
+    await assertNoExpiredRequiredDocument(m as never, staff, inTwoDays);
+    expect(m.calls[1]!.sql).toContain(
+      'core.staff_document_offer_block($1, $2::text[], $3::date)',
+    );
+    expect(m.calls[1]!.sql).not.toMatch(
+      /FROM core\.staff_document\b(?!_offer_block)/,
+    );
+    expect(m.calls[1]!.params).toEqual([
+      'u1',
+      ['right_to_work'],
+      londonDate(inTwoDays),
+    ]);
+  });
+
+  it('a blocked type is a 409 with the reason code and the expiry date', async () => {
     const m = fakeManager(
       [],
-      [{ document_type: 'right_to_work', valid: false, latest: '2020-01-31' }],
+      [{ document_type: 'right_to_work', expired_on: '2020-01-31' }],
     );
     const err = await assertNoExpiredRequiredDocument(
       m as never,
@@ -42,42 +58,15 @@ describe('assertNoExpiredRequiredDocument', () => {
       code: 'STAFF_REQUIRED_DOCUMENT_EXPIRED',
       documentTypes: ['right_to_work'],
     });
-    const docsQuery = m.calls[1]!;
-    expect(docsQuery.params[5]).toEqual(['right_to_work']);
-    expect(docsQuery.params[4]).toEqual(['pending', 'verified']);
-    expect(docsQuery.params[3]).toBe(londonDate(inTwoDays));
+    expect(
+      ((err as ConflictException).getResponse() as { message: string }).message,
+    ).toContain('Right to work (expired 2020-01-31)');
   });
 
-  it('a current document, or no document at all, does not block', async () => {
-    await expect(
-      assertNoExpiredRequiredDocument(
-        fakeManager(
-          [],
-          [
-            {
-              document_type: 'right_to_work',
-              valid: true,
-              latest: '2099-01-01',
-            },
-          ],
-        ) as never,
-        staff,
-        inTwoDays,
-      ),
-    ).resolves.toBeUndefined();
-    await expect(
-      assertNoExpiredRequiredDocument(
-        fakeManager([], []) as never,
-        staff,
-        inTwoDays,
-      ),
-    ).resolves.toBeUndefined();
-  });
-
-  it('an organisation that requires nothing never queries documents', async () => {
+  it('an organisation that requires nothing never asks the definer', async () => {
     const m = fakeManager(
       [{ document_type: 'right_to_work', required: false }],
-      [{ document_type: 'right_to_work', valid: false, latest: '2020-01-01' }],
+      [{ document_type: 'right_to_work', expired_on: '2020-01-01' }],
     );
     await expect(
       assertNoExpiredRequiredDocument(m as never, staff, inTwoDays),
@@ -92,7 +81,7 @@ describe('assertNoExpiredRequiredDocument', () => {
       staff,
       new Date('2020-01-01T10:00:00Z'),
     );
-    expect(m.calls[1]!.params[3]).toBe(londonDate(new Date()));
+    expect(m.calls[1]!.params[2]).toBe(londonDate(new Date()));
   });
 });
 
@@ -107,7 +96,7 @@ describe('staff document date rules', () => {
     expect(isCalendarDate('2026-02-28')).toBe(true);
     expect(isCalendarDate('2026-02-30')).toBe(false);
     expect(isCalendarDate('26-02-01')).toBe(false);
-    expect(daysBetween('2026-03-28', '2026-03-30')).toBe(2); // across the BST change
+    expect(daysBetween('2026-03-28', '2026-03-30')).toBe(2);
     expect(daysBetween('2026-11-21', '2026-11-21')).toBe(0);
     expect(londonDate(new Date('2026-06-30T23:30:00Z'))).toBe('2026-07-01');
   });

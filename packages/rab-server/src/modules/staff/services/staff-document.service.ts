@@ -9,6 +9,7 @@ import {
   StaffDocumentStatusType,
   StaffDocumentTypeType,
 } from '@rab/shared';
+import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -29,10 +30,7 @@ import {
   FileService,
   UploadedObject,
 } from '../../../engine/core-modules/storage/file.service';
-import {
-  VirusScanner,
-  VirusScanVerdict,
-} from '../../../engine/core-modules/storage/virus-scan/virus-scanner';
+import { VirusScanner } from '../../../engine/core-modules/storage/virus-scan/virus-scanner';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -92,6 +90,9 @@ interface DocumentRow {
 
 const DOCUMENT_COLUMNS = `id, staff_user_id, document_type, file_id, to_char(issued_on, 'YYYY-MM-DD') AS issued_on, to_char(expires_on, 'YYYY-MM-DD') AS expires_on,
   status, scan_status, uploaded_by, created_at, verified_at, rejection_reason, revoked_at, revocation_reason`;
+
+/** Review L1: held (pending + verified) documents per staff member and type; ASSUMPTION (flagged). */
+const MAX_HELD_DOCUMENTS_PER_TYPE = 5;
 
 type UploadTarget =
   { kind: 'staff'; staffProfileId: string } | { kind: 'self' };
@@ -251,14 +252,17 @@ export class StaffDocumentService {
         ctx,
         PermissionFlag.STAFF_DOCUMENT_CONFIGURE,
       );
-      // Organisation-level setting: any non-venue manager of the organisation (RLS insert/update predicate is the same).
-      const [isManager] = await m.query(
-        `SELECT 1 FROM core.manager_profile WHERE user_id = $1 AND organisation_id = $2 AND type <> 'venue' AND archived_at IS NULL LIMIT 1`,
+      // Review M2 (owner decision 90): an organisation-wide compliance switch — only the CEO or the current Initial
+      // Manager (the RLS insert / update / delete predicate is the same).
+      const [isWriter] = await m.query(
+        `SELECT 1 FROM core.manager_profile
+          WHERE user_id = $1 AND organisation_id = $2 AND archived_at IS NULL
+            AND (type = 'ceo' OR (type = 'internal' AND is_initial_manager AND superseded_at IS NULL)) LIMIT 1`,
         [ctx.userId, ctx.organisationId],
       );
-      if (!isManager)
+      if (!isWriter)
         throw new ForbiddenException(
-          'Only a manager can change required documents.',
+          'Only the CEO or the Initial Manager can change required documents.',
         );
       const before = await effectiveRequiredTypes(m, ctx.organisationId!);
       for (const r of before) {
@@ -343,118 +347,156 @@ export class StaffDocumentService {
     input: { documentType: string; issuedOn?: string; expiresOn?: string },
     buffer: Buffer,
   ): Promise<StaffDocumentView> {
-    const outcome = await this.tenantContext.runInWorkspaceContext(
-      ctx,
-      async (m) => {
-        let staffUserId: string;
-        if (target.kind === 'self') {
-          await this.permissions.assertPermissionTx(
-            m,
-            ctx,
-            PermissionFlag.STAFF_DOCUMENT_OWN,
-          );
-          await this.resolveOwnStaff(m, ctx);
-          staffUserId = ctx.userId;
-        } else {
-          await this.permissions.assertPermissionTx(
-            m,
-            ctx,
-            PermissionFlag.STAFF_DOCUMENT_MANAGE,
-          );
-          staffUserId = await this.resolveManagedStaff(
-            m,
-            ctx,
-            target.staffProfileId,
-          );
-        }
-        const documentType = this.assertDocumentInput(input);
-        // Bytes decide the type (magic bytes), then the size ceiling — before the scanner or the object store sees anything.
-        const { ext } = this.files.validateContent(
-          FileKind.STAFF_DOCUMENT,
-          buffer,
+    // 1. Short transaction: flag, scope and per-type cap. Nothing slow happens while a pool connection is held (review L2).
+    const documentType = this.assertDocumentInput(input);
+    await this.tenantContext.runInWorkspaceContext(ctx, (m) =>
+      this.authorizeUpload(m, ctx, target, documentType),
+    );
+    // 2. No transaction: bytes decide the type (magic bytes) and the size, then the scanner, then the object store.
+    const { ext } = this.files.validateContent(FileKind.STAFF_DOCUMENT, buffer);
+    const verdict = await this.scanner.scan(buffer);
+    if (verdict.status === 'infected') {
+      await this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
+        const staffUserId = await this.authorizeUpload(
+          m,
+          ctx,
+          target,
+          documentType,
         );
-        const verdict = await this.scanner.scan(buffer);
-        if (verdict.status === 'infected') {
-          // Committed (the audit row), then answered 400 after the transaction; nothing was stored.
-          await this.audit.record(
-            m,
-            ctx,
-            AuditAction.STAFF_DOCUMENT_UPLOAD_REJECTED,
-            {
-              targetUserId: staffUserId,
-              entityType: 'staff_document',
-              metadata: {
-                documentType,
-                reason: 'virus_detected',
-                engine: verdict.engine,
-              },
-            },
-          );
-          return {
-            rejected: 'The file was rejected by the virus scanner.',
-          } as const;
-        }
-        const documentId = (await m.query(`SELECT gen_random_uuid() AS id`))[0]
-          .id as string;
-        let uploaded: UploadedObject | null = null;
-        try {
-          uploaded = await this.files.putObject({
-            kind: FileKind.STAFF_DOCUMENT,
-            organisationId: ctx.organisationId!,
-            workspaceId: ctx.workspaceId!,
-            resourceType: 'staff_document',
-            resourceId: documentId,
-            buffer,
-            filename: `${documentType}.${ext}`,
-            createdBy: ctx.userId,
-          });
-          const file = await this.files.registerAvailable(m, uploaded);
-          const scan = scanColumns(verdict);
-          await m.query(
-            `INSERT INTO core.staff_document (id, organisation_id, workspace_id, staff_user_id, document_type, file_id, issued_on, expires_on, uploaded_by, scan_status, scan_engine, scanned_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-            [
-              documentId,
-              ctx.organisationId,
-              ctx.workspaceId,
-              staffUserId,
-              documentType,
-              file.id,
-              input.issuedOn ?? null,
-              input.expiresOn ?? null,
-              ctx.userId,
-              scan.status,
-              scan.engine,
-              scan.at,
-            ],
-          );
-          await this.audit.record(m, ctx, AuditAction.STAFF_DOCUMENT_UPLOADED, {
+        await this.audit.record(
+          m,
+          ctx,
+          AuditAction.STAFF_DOCUMENT_UPLOAD_REJECTED,
+          {
             targetUserId: staffUserId,
             entityType: 'staff_document',
-            entityId: documentId,
             metadata: {
               documentType,
-              issuedOn: input.issuedOn ?? null,
-              expiresOn: input.expiresOn ?? null,
-              fileId: file.id,
-              sizeBytes: file.sizeBytes,
-              scanStatus: scan.status,
-              self: target.kind === 'self',
+              reason: 'virus_detected',
+              engine: verdict.engine,
             },
-          });
-          return {
-            view: this.toView(
-              await this.loadDocument(m, ctx, documentId, staffUserId),
-            ),
-          } as const;
-        } catch (error) {
-          if (uploaded) await this.files.discardUnregistered(uploaded);
-          throw error;
+          },
+        );
+      });
+      throw new BadRequestException(
+        'The file was rejected by the virus scanner.',
+      );
+    }
+    const documentId = randomUUID();
+    const uploaded: UploadedObject = await this.files.putObject({
+      kind: FileKind.STAFF_DOCUMENT,
+      organisationId: ctx.organisationId!,
+      workspaceId: ctx.workspaceId!,
+      resourceType: 'staff_document',
+      resourceId: documentId,
+      buffer,
+      filename: `${documentType}.${ext}`,
+      createdBy: ctx.userId,
+    });
+    // 3. Short transaction: re-authorize (state may have changed meanwhile), then write. Any failure removes the object.
+    try {
+      return await this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
+        const staffUserId = await this.authorizeUpload(
+          m,
+          ctx,
+          target,
+          documentType,
+        );
+        const file = await this.files.registerAvailable(m, uploaded);
+        await m.query(
+          `INSERT INTO core.staff_document (id, organisation_id, workspace_id, staff_user_id, document_type, file_id, issued_on, expires_on, uploaded_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            documentId,
+            ctx.organisationId,
+            ctx.workspaceId,
+            staffUserId,
+            documentType,
+            file.id,
+            input.issuedOn ?? null,
+            input.expiresOn ?? null,
+            ctx.userId,
+          ],
+        );
+        // Only a real scanner's `clean` is recorded, and only through the database's scanner path (review M1); anything else
+        // (no scanner, daemon down, timeout) leaves the document not_scanned and hidden.
+        let scanStatus: string = StaffDocumentScanStatus.NOT_SCANNED;
+        if (verdict.status === 'clean') {
+          const [recorded] = await m.query(
+            `SELECT core.staff_document_record_scan($1, $2) AS ok`,
+            [documentId, verdict.engine],
+          );
+          if (recorded?.ok !== true)
+            throw new ConflictException(
+              'The virus scan result could not be recorded. Please upload again.',
+            );
+          scanStatus = StaffDocumentScanStatus.CLEAN;
         }
-      },
+        await this.audit.record(m, ctx, AuditAction.STAFF_DOCUMENT_UPLOADED, {
+          targetUserId: staffUserId,
+          entityType: 'staff_document',
+          entityId: documentId,
+          metadata: {
+            documentType,
+            issuedOn: input.issuedOn ?? null,
+            expiresOn: input.expiresOn ?? null,
+            fileId: file.id,
+            sizeBytes: file.sizeBytes,
+            scanStatus,
+            self: target.kind === 'self',
+          },
+        });
+        return this.toView(
+          await this.loadDocument(m, ctx, documentId, staffUserId),
+        );
+      });
+    } catch (error) {
+      await this.files.discardUnregistered(uploaded);
+      throw error;
+    }
+  }
+
+  /** Layer 2 of an upload, run in each transaction of it: flag, scope (404 outside it) and the per-type cap (review L1). */
+  private async authorizeUpload(
+    m: EntityManager,
+    ctx: AuthContext,
+    target: UploadTarget,
+    documentType: string,
+  ): Promise<string> {
+    let staffUserId: string;
+    if (target.kind === 'self') {
+      await this.permissions.assertPermissionTx(
+        m,
+        ctx,
+        PermissionFlag.STAFF_DOCUMENT_OWN,
+      );
+      await this.resolveOwnStaff(m, ctx);
+      staffUserId = ctx.userId;
+    } else {
+      await this.permissions.assertPermissionTx(
+        m,
+        ctx,
+        PermissionFlag.STAFF_DOCUMENT_MANAGE,
+      );
+      staffUserId = await this.resolveManagedStaff(
+        m,
+        ctx,
+        target.staffProfileId,
+      );
+    }
+    const [held] = await m.query(
+      `SELECT count(*)::int AS n FROM core.staff_document
+        WHERE organisation_id = $1 AND workspace_id = $2 AND staff_user_id = $3 AND document_type = $4 AND status IN ('pending', 'verified')`,
+      [ctx.organisationId, ctx.workspaceId, staffUserId, documentType],
     );
-    if ('rejected' in outcome) throw new BadRequestException(outcome.rejected);
-    return outcome.view;
+    if (Number(held?.n ?? 0) >= MAX_HELD_DOCUMENTS_PER_TYPE) {
+      throw new ConflictException({
+        statusCode: 409,
+        code: 'STAFF_DOCUMENT_LIMIT',
+        message: `This staff member already holds ${MAX_HELD_DOCUMENTS_PER_TYPE} documents of this type. Revoke one before uploading another.`,
+      });
+    }
+    return staffUserId;
   }
 
   private async decide(
@@ -492,6 +534,18 @@ export class StaffDocumentService {
         doc.status as StaffDocumentStatusType,
         to,
       );
+      if (
+        to === StaffDocumentStatus.VERIFIED &&
+        doc.uploaded_by === ctx.userId
+      ) {
+        // Review M3: maker-checker — whoever uploaded a document never verifies it (the guard trigger says the same).
+        throw new ConflictException({
+          statusCode: 409,
+          code: 'STAFF_DOCUMENT_MAKER_CHECKER',
+          message:
+            'You uploaded this document, so another manager must verify it.',
+        });
+      }
       if (
         to === StaffDocumentStatus.VERIFIED &&
         doc.scan_status !== StaffDocumentScanStatus.CLEAN
@@ -681,23 +735,4 @@ export class StaffDocumentService {
       daysUntilExpiry: r.expires_on ? daysBetween(today, r.expires_on) : null,
     };
   }
-}
-
-function scanColumns(verdict: VirusScanVerdict): {
-  status: string;
-  engine: string | null;
-  at: Date | null;
-} {
-  // Only a real scanner's `clean` is recorded as clean; `unavailable` (no scanner, daemon down, timeout) stays not_scanned.
-  if (verdict.status === 'clean')
-    return {
-      status: StaffDocumentScanStatus.CLEAN,
-      engine: verdict.engine,
-      at: new Date(),
-    };
-  return {
-    status: StaffDocumentScanStatus.NOT_SCANNED,
-    engine: null,
-    at: null,
-  };
 }

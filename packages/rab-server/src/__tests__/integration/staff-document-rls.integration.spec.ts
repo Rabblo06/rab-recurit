@@ -91,6 +91,8 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
       1,
       { workspace: true },
     );
+    // a is the organisation's current Initial Manager (review M2: only the CEO or the Initial Manager writes requirements).
+    await adminDataSource.query(`UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`, [a.userId]);
     return { orgId: organisation.id, a, b, s1, s2, other: others[0]! };
   }
 
@@ -113,7 +115,7 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
   async function insertDoc(
     who: TestIdentity,
     staffUserId: string,
-    extra: { expiresOn?: string; scanStatus?: string } = {},
+    extra: { expiresOn?: string; scanStatus?: string; clean?: boolean } = {},
   ): Promise<string> {
     return as(who, async (m) => {
       const fileId = await fileRow(m, who);
@@ -130,6 +132,11 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
           extra.scanStatus ?? 'not_scanned',
         ],
       );
+      if (extra.clean) {
+        // The only scanner path: the crewflow-owned definer, in the uploading transaction.
+        const [scan] = await m.query(`SELECT core.staff_document_record_scan($1, 'test-engine') AS ok`, [row.id]);
+        expect(scan.ok).toBe(true);
+      }
       return row.id as string;
     });
   }
@@ -250,10 +257,10 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
     expect(res[1]).toBe(0);
   });
 
-  it('a manager can never verify their own document (WITH CHECK)', async () => {
+  it('a manager can never verify their own document (guard / WITH CHECK)', async () => {
     const w = await world();
-    const own = await insertDoc(w.a, w.a.userId);
-    expect(
+    const own = await insertDoc(w.a, w.a.userId, { clean: true });
+    expect(['23514', '42501']).toContain(
       await sqlState(
         as(w.a, (m) =>
           m.query(
@@ -262,7 +269,47 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
           ),
         ),
       ),
+    );
+  });
+
+  it('review M1 / M3: verify needs a clean scan, the decider is the current user, and never the uploader', async () => {
+    const w = await world();
+    const verify = (doc: string, by: string) =>
+      as(w.a, (m) => m.query(`UPDATE core.staff_document SET status = 'verified', verified_by = $2, verified_at = now() WHERE id = $1`, [doc, by]));
+    // Not scanned clean -> refused in the database.
+    const unscanned = await insertDoc(w.s1, w.s1.userId);
+    expect(await sqlState(verify(unscanned, w.a.userId))).toBe('23514');
+    // verified_by must be the current user.
+    const own = await insertDoc(w.s1, w.s1.userId, { clean: true });
+    expect(await sqlState(verify(own, w.b.userId))).toBe('42501');
+    // Maker-checker: the manager who uploaded it cannot verify it.
+    const managerUpload = await insertDoc(w.a, w.s1.userId, { clean: true });
+    expect(await sqlState(verify(managerUpload, w.a.userId))).toBe('23514');
+    // The legitimate path: uploaded by the staff member, scanned clean, verified by a manager.
+    await verify(own, w.a.userId);
+    const [row] = await as(w.a, (m) => m.query(`SELECT status, verified_by FROM core.staff_document WHERE id = $1`, [own]));
+    expect(row).toEqual({ status: 'verified', verified_by: w.a.userId });
+    // rejected_by must be the current user too.
+    const other = await insertDoc(w.s1, w.s1.userId);
+    expect(
+      await sqlState(as(w.a, (m) => m.query(`UPDATE core.staff_document SET status = 'rejected', rejected_by = $2, rejected_at = now(), rejection_reason = 'spoofed' WHERE id = $1`, [other, w.b.userId]))),
     ).toBe('42501');
+  });
+
+  it('review M1: scan columns are written only by core.staff_document_record_scan(), only in the uploading transaction', async () => {
+    const w = await world();
+    const d = await insertDoc(w.a, w.s1.userId);
+    expect(
+      await sqlState(as(w.a, (m) => m.query(`UPDATE core.staff_document SET scan_status = 'clean', scan_engine = 'x', scanned_at = now() WHERE id = $1`, [d]))),
+    ).toBe('42501');
+    // A later transaction cannot claim a verdict for an earlier upload.
+    const [later] = await as(w.a, (m) => m.query(`SELECT core.staff_document_record_scan($1, 'test-engine') AS ok`, [d]));
+    expect(later.ok).toBe(false);
+    // Somebody else cannot claim a verdict for my upload, even in my transaction's lifetime (uploaded_by = current uid).
+    const [byOther] = await as(w.s1, (m) => m.query(`SELECT core.staff_document_record_scan($1, 'test-engine') AS ok`, [d]));
+    expect(byOther.ok).toBe(false);
+    const [row] = await adminDataSource.query(`SELECT scan_status FROM core.staff_document WHERE id = $1`, [d]);
+    expect(row.scan_status).toBe('not_scanned');
   });
 
   it('the guard: identity, file and dates never change; the status machine holds in the database', async () => {
@@ -323,15 +370,24 @@ describeIfDb('staff documents: RLS and database guard (integration)', () => {
     ).toBe('42501');
   });
 
-  it('a "clean" verdict without scanner evidence is refused by the CHECK', async () => {
+  it('a document cannot be inserted already "clean" (only the scanner path records a verdict)', async () => {
     const w = await world();
-    expect(
-      await sqlState(insertDoc(w.a, w.s1.userId, { scanStatus: 'clean' })),
-    ).toBe('23514');
+    expect(await sqlState(insertDoc(w.a, w.s1.userId, { scanStatus: 'clean' }))).toBe('42501');
   });
 
-  it('requirements: everyone in the organisation reads them; only a non-venue manager writes them; other organisations see none', async () => {
+  it('requirements: everyone in the organisation reads them; only the CEO / Initial Manager writes them; other organisations see none', async () => {
     const w = await world();
+    // Review M2: an ordinary internal manager (b) cannot switch the organisation's requirements.
+    expect(
+      await sqlState(
+        as(w.b, (m) =>
+          m.query(`INSERT INTO core.staff_document_requirement (organisation_id, document_type, required, updated_by) VALUES ($1, 'right_to_work', false, $2)`, [
+            w.orgId,
+            w.b.userId,
+          ]),
+        ),
+      ),
+    ).toBe('42501');
     await as(w.a, (m) =>
       m.query(
         `INSERT INTO core.staff_document_requirement (organisation_id, document_type, required, updated_by) VALUES ($1, 'dbs_check', true, $2)`,

@@ -99,6 +99,8 @@ describeIfDb('staff documents over HTTP (integration)', () => {
       { workspace: true },
     );
     const other = others[0]!;
+    // a is the current Initial Manager (review M2: only the CEO or the Initial Manager changes required types).
+    await adminDataSource.query(`UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`, [a.userId]);
     const [tokenA, tokenB, tokenS1, tokenS2, tokenOther] = await Promise.all(
       [a, b, s1, s2, other].map((i) => factory.login(i)),
     );
@@ -211,14 +213,17 @@ describeIfDb('staff documents over HTTP (integration)', () => {
     });
     const fileId = await fileIdOf(res.body.id);
     expect((await download(w.tokenA, fileId)).status).toBe(404);
-    const verify = await action(
-      w.tokenA,
-      w.s1.profileId!,
-      res.body.id,
-      'verify',
-    );
+    const mine = await uploadMine(w.tokenS1, pdf());
+    expect(mine.status).toBe(201);
+    const verify = await action(w.tokenA, w.s1.profileId!, mine.body.id, 'verify');
     expect(verify.status).toBe(409);
     expect(verify.body.code).toBe('STAFF_DOCUMENT_NOT_SCANNED');
+    // ... and the manager who uploaded a document can never verify it (maker-checker), even once it is clean.
+    verdict = { status: 'clean', engine: 'test-engine' };
+    const managerUpload = await uploadFor(w.tokenA, w.s1.profileId!, pdf());
+    const own = await action(w.tokenA, w.s1.profileId!, managerUpload.body.id, 'verify');
+    expect(own.status).toBe(409);
+    expect(own.body.code).toBe('STAFF_DOCUMENT_MAKER_CHECKER');
     const [file] = await adminDataSource.query(
       `SELECT kind, resource_type, resource_id, workspace_id, object_key FROM core.stored_file WHERE id = $1`,
       [fileId],
@@ -281,7 +286,9 @@ describeIfDb('staff documents over HTTP (integration)', () => {
   it('verify after a clean scan; verifying twice is an invalid transition (409); rejecting needs a reason (400)', async () => {
     const w = await world();
     verdict = { status: 'clean', engine: 'test-engine' };
-    const res = await uploadFor(w.tokenA, w.s1.profileId!, pdf());
+    // Uploaded by the staff member, verified by a manager (maker-checker).
+    const res = await uploadMine(w.tokenS1, pdf());
+    expect(res.status).toBe(201);
     expect(
       (await action(w.tokenA, w.s1.profileId!, res.body.id, 'reject', {}))
         .status,
@@ -512,8 +519,11 @@ describeIfDb('staff documents over HTTP (integration)', () => {
     expect(audit).toHaveLength(1);
   });
 
-  it('requirements: default Right to Work; a manager replaces the list; a staff token cannot change it', async () => {
+  it('requirements: default Right to Work; only the CEO / Initial Manager replaces the list; another manager and a staff token cannot', async () => {
     const w = await world();
+    // Review M2: an ordinary internal manager cannot switch the organisation's requirements off.
+    const byB = await http().put('/rest/v1/staff-documents/requirements').set(auth(w.tokenB)).send({ requiredTypes: [] });
+    expect(byB.status).toBe(403);
     const before = await http()
       .get('/rest/v1/staff-documents/requirements')
       .set(auth(w.tokenA));
@@ -566,5 +576,13 @@ describeIfDb('staff documents over HTTP (integration)', () => {
         (r: { documentType: string }) => r.documentType === 'right_to_work',
       ),
     ).toMatchObject({ required: true, source: 'default' });
+  });
+
+  it('review L1: a staff member holds at most 5 documents of one type (409 STAFF_DOCUMENT_LIMIT)', async () => {
+    const w = await world();
+    for (let i = 0; i < 5; i++) expect((await uploadMine(w.tokenS1, pdf())).status).toBe(201);
+    const sixth = await uploadMine(w.tokenS1, pdf());
+    expect(sixth.status).toBe(409);
+    expect(sixth.body.code).toBe('STAFF_DOCUMENT_LIMIT');
   });
 });

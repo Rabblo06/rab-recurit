@@ -10347,3 +10347,16 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** the expiry and offer rules use calendar dates in Europe/London; a manager with the flag inside the
   workspace can upload a document for any user id the service resolves from a staff profile (RLS cannot see the
   workspace-schema profile table); a scanner verdict is only as good as the scanner's signatures.
+- **Security review fixes (2026-11-24, same draft migration):** H1 the offer block reads through
+  core.staff_document_offer_block() (crewflow-owned SECURITY DEFINER pinned to core.current_org()/current_workspace(),
+  returns only blocked types and the latest expiry; no tenant bound = error), so a caller whose own RLS sees no documents
+  (a CEO, a custom-role Venue Manager) can no longer send past an expired document. H2 once a required document has
+  expired, only a VERIFIED valid replacement lifts the block; a pending upload never does (owner decision 83 updated).
+  M1 the guard trigger enforces at the database what the service enforces: verify needs a clean scan, the decider columns
+  must equal the current user, inserts start pending and not scanned, scan columns change only through
+  core.staff_document_record_scan() in the uploading transaction. M2 only the CEO or the current Initial Manager changes the
+  required types (service + RLS; owner decision 90). M3 maker-checker: the uploader cannot verify (service + guard).
+  Trade-off (veto point): the two definers are owned by crewflow, not rab_secure_owner: a rab_secure_owner definer naming a
+  crewflow table would grow the frozen Phase 0b R4 list, and the runtime login already inherits crewflow, so
+  rab_secure_owner ownership would add no protection against it. clamd must listen on a private network only (it has no
+  authentication).
