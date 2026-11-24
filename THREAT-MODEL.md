@@ -10312,7 +10312,10 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   fails CI until it is classified there. Each role signs in for real (production role defaults, its own application)
   and every route is requested as every role. The probe never lets a mutation reach its handler: a record route gets
   a malformed id (UuidPathParamsInterceptor 404 after the guards); a validated body or query gets an undeclared
-  property (ValidationPipe 400); the 14 mutations with neither are listed with a decision. Static checks on the
+  property (ValidationPipe 400); the 14 mutations with neither are listed with a decision. Whether a request got past
+  the guards is observed (a marker set by the global UuidPathParamsInterceptor, which runs only after every guard), and a
+  boundary probe that got past them must get exactly its boundary answer: a probe that reached a handler fails the
+  suite instead of reading as `ok`. Static checks on the
   matrix data pin §7 invariants: `/admin/**` is platform-admin only; Venue Managers and Staff never reach the payroll
   console (Staff only `/payroll/me/*`); clock-in/out is Staff-only; Staff never reach audit, roles or manager admin.
   A guard class the probe does not model fails the suite.

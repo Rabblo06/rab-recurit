@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { PermissionFlag } from '@rab/shared';
-import { INestApplication, Type } from '@nestjs/common';
+import { CallHandler, ExecutionContext, INestApplication, Type } from '@nestjs/common';
 import { DiscoveryModule, DiscoveryService } from '@nestjs/core';
 import { Test, TestingModule } from '@nestjs/testing';
 import { request as httpRequest } from 'node:http';
@@ -12,6 +12,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { UuidPathParamsInterceptor } from '../../engine/interceptors/uuid-path-params.interceptor';
 import { CONSUMER_QUEUES } from '../../engine/worker-shared/queue-registry';
 import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { STAFF_ROLE_PERMISSIONS } from '../../modules/staff/services/staff.service';
@@ -20,13 +21,13 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import {
   MATRIX_CELLS,
   MATRIX_ROLES,
-  MatrixCell,
   MatrixRole,
   PATH_PARAM_SAMPLES,
   PERMISSION_MATRIX,
   PROBE_EXECUTES_HANDLER,
   READ_PROBED_BY_QUERY,
 } from './permission-matrix/permission-matrix.data';
+import { cellOf, handlerProbeProblems, Observation, probeOf } from './permission-matrix/probe';
 import { AI_OFF_GUARDS, MatrixRoleProfile, MatrixRoute, PASS_THROUGH_GUARDS, discoverMatrixRoutes, suggestCell } from './permission-matrix/route-discovery';
 
 /**
@@ -47,6 +48,9 @@ import { AI_OFF_GUARDS, MatrixRoleProfile, MatrixRoute, PASS_THROUGH_GUARDS, dis
  *   - a GET without a record id runs for real (reads only), except the few listed in READ_PROBED_BY_QUERY, which get
  *     an undeclared query parameter (400 from the ValidationPipe once the guards pass);
  *   - the few mutations that have neither are listed, each with a decision, in PROBE_EXECUTES_HANDLER.
+ * Whether a request got past the guards is observed, not inferred: UuidPathParamsInterceptor (a global interceptor, so it
+ * runs only after every guard has passed) is wrapped to mark its response with GUARDS_PASSED_HEADER. A side-effect-free
+ * probe that passed the guards must then get exactly its boundary answer (probe.ts, cellOf); anything else fails.
  * So `ok` means "every guard layer let this identity through". Per-record scope (404 for another tenant's, venue's or
  * person's record) is proved by the abuse-case suites; this suite proves layer 1 for every route at once.
  */
@@ -54,37 +58,9 @@ const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const MALFORMED_RECORD_ID = 'matrix-probe-not-a-uuid';
+/** Set on every response that reached the global interceptors, i.e. got past every guard (see probe.ts). */
+const GUARDS_PASSED_HEADER = 'x-matrix-guards-passed';
 const UNDECLARED_BODY = { matrixProbeUndeclaredProperty: true };
-
-type Probe = 'record' | 'body' | 'query' | 'read' | 'handler';
-
-interface Observation {
-  status: number;
-  code?: string;
-  message?: string;
-}
-
-function probeOf(route: MatrixRoute): Probe {
-  if (route.recordParams.length > 0) return 'record';
-  if (route.method === 'GET') return route.key in READ_PROBED_BY_QUERY ? 'query' : 'read';
-  if (route.validatedBody) return 'body';
-  return 'handler';
-}
-
-/** The cell a response stands for under the given probe (see the header): null = never acceptable (401, 429, 5xx). */
-function cellOf(probe: Probe, observed: Observation): MatrixCell | null {
-  const { status } = observed;
-  if (status === 403) return '403';
-  if (status === 401 || status === 429 || status >= 500 || status === 0) return null;
-  if (status === 404) {
-    // A record probe that passes the guards is answered by UuidPathParamsInterceptor: a plain NotFoundException without a
-    // `code`; a handler the probe really runs answers "nothing to act on" the same way. A guard that hides a route (AI
-    // off) answers 404 WITH a code, before the interceptor or handler ever runs.
-    if ((probe === 'record' || probe === 'handler') && observed.code === undefined) return 'ok';
-    return '404';
-  }
-  return 'ok';
-}
 
 function parseRow(key: string, row: string): Record<MatrixRole, string> {
   const cells = row.trim().split(/\s+/);
@@ -146,7 +122,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
           if (route.sse && status === 200) {
             res.destroy(); // an open event stream: the head is the answer
             req.destroy();
-            resolve({ status });
+            resolve({ status, guardsPassed: res.headers[GUARDS_PASSED_HEADER] === '1' });
             return;
           }
           const chunks: Buffer[] = [];
@@ -161,6 +137,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
             }
             resolve({
               status,
+              guardsPassed: res.headers[GUARDS_PASSED_HEADER] === '1',
               code: typeof body.code === 'string' ? body.code : undefined,
               message: typeof body.message === 'string' ? body.message : Array.isArray(body.message) ? body.message.join('; ') : undefined,
             });
@@ -175,7 +152,15 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
     });
   }
 
+  let interceptorSpy: jest.SpyInstance | undefined;
+
   beforeAll(async () => {
+    // The guards-passed marker (see the header): set before the real interceptor runs, so its own 404 carries it too.
+    const realIntercept = UuidPathParamsInterceptor.prototype.intercept;
+    interceptorSpy = jest.spyOn(UuidPathParamsInterceptor.prototype, 'intercept').mockImplementation(function (this: UuidPathParamsInterceptor, context: ExecutionContext, next: CallHandler) {
+      context.switchToHttp().getResponse<{ setHeader(name: string, value: string): void }>().setHeader(GUARDS_PASSED_HEADER, '1');
+      return realIntercept.call(this, context, next);
+    });
     moduleRef = await Test.createTestingModule({ imports: [AppModule, DiscoveryModule] }).compile();
     app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
@@ -213,6 +198,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
   }, 300_000);
 
   afterAll(async () => {
+    interceptorSpy?.mockRestore();
     await owner?.destroy();
     await app?.close();
   });
@@ -263,8 +249,14 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
   });
 
   it('the mutations a probe cannot stop before their handler are exactly the ones listed with a decision', () => {
-    const actual = authenticated.filter((r) => probeOf(r) === 'handler').map((r) => r.key).sort();
-    expect(actual).toEqual(Object.keys(PROBE_EXECUTES_HANDLER).sort());
+    expect(handlerProbeProblems(authenticated)).toEqual({ unlisted: [], stale: [] });
+  });
+
+  it('the guards-passed marker tells a guard refusal from the boundary answer (sanity: the observation is real)', async () => {
+    const staffDetail = routes.find((r) => r.key === 'GET /rest/v1/staff/:id')!;
+    const asManager = await send(staffDetail, 'manager');
+    const asStaff = await send(staffDetail, 'staff');
+    expect({ manager: [asManager.status, asManager.guardsPassed], staff: [asStaff.status, asStaff.guardsPassed] }).toEqual({ manager: [404, true], staff: [403, false] });
   });
 
   it('every guard on an authenticated route is one the matrix probe models (a new guard needs a decision here)', () => {
@@ -323,7 +315,7 @@ describeIfDb('permission matrix (§7): every authenticated route x every role', 
           const actual = cellOf(probeOf(route), observed);
           if (actual !== expected) {
             mismatches.push(
-              `${route.key} | ${role} | expected ${expected} | got ${observed.status} (${probeOf(route)}) ${observed.code ?? ''} ${(observed.message ?? '').slice(0, 120)}`.trimEnd(),
+              `${route.key} | ${role} | expected ${expected} | got ${observed.status} (${probeOf(route)}, ${observed.guardsPassed ? 'past the guards' : 'refused by a guard'}) ${observed.code ?? ''} ${(observed.message ?? '').slice(0, 120)}`.trimEnd(),
             );
           }
         }

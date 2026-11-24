@@ -13,8 +13,10 @@
  *   staff  a Staff member, staff_app
  *
  * Cells:
- *   ok    passes every guard layer (session, application, permission, platform admin): the request reaches the handler, or
- *         the boundary checks that run after the guards (record-id interceptor, ValidationPipe)
+ *   ok    passes every guard layer (session, application, permission, platform admin), observed: the response reached
+ *         the global interceptors. For a record route (`:id`, ...) and a validated body/query the probe stops at the
+ *         boundary (record-id interceptor 404 / ValidationPipe 400), so `ok` there pins the guard chain only; for a read
+ *         without a record id the handler runs and the cell is what it answers this role
  *   403   the route exists and this role categorically lacks it (permission flag, application, platform admin)
  *   404   hidden from this role: the route answers Not found (AI routes while the organisation's AI switch is off, as on a
  *         new organisation; a GET whose scope is empty for this role)
@@ -450,8 +452,8 @@ export const PERMISSION_MATRIX: Readonly<Record<string, string>> = {
   'GET /rest/v1/staff/:staffProfileId/reviews/:reviewId':                                     'ok   ok   ok   403  403',
   'POST /rest/v1/staff/bulk-email':                                                           'ok   ok   ok   403  403',
   'GET /rest/v1/staff/venue-directory':                                                       '404  404  404  ok   403', // StaffService: the venue directory exists only for a Venue Manager, 404 "Directory not found."
-  'GET /rest/v1/staff/venue-directory/:staffId':                                              'ok   ok   ok   ok   403',
-  'PATCH /rest/v1/staff/venue-directory/:staffId/tags':                                       'ok   ok   ok   ok   403',
+  'GET /rest/v1/staff/venue-directory/:staffId':                                              'ok   ok   ok   ok   403', // guard chain only (staff.view); StaffService joins on the caller's OWN venue manager profile, so any non-Venue-Manager gets 404 for every id
+  'PATCH /rest/v1/staff/venue-directory/:staffId/tags':                                       'ok   ok   ok   ok   403', // guard chain only; the UPDATE is scoped to the caller's OWN venue manager profile (404 for anyone else)
 
   // /rest/v1/timeline
   'GET /rest/v1/timeline/attendance/:id':                                                     'ok   ok   ok   403  403',
