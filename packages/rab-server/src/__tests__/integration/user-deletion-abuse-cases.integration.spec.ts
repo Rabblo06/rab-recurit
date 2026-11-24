@@ -110,7 +110,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     return factory.loginTokens({ kind: 'internal_manager', email, password: passwordFor(email) });
   }
 
-  /** P2.8 — step-up reauth: every DELETE /managers|staff/:id call below now needs the ACTOR's real password in the body, not just a bearer token. */
+  /** Hold-to-delete (2026-11-24): DELETE /managers|staff/:id no longer needs the actor's password; the body below is ignored. */
   function passwordFor(email: string): string {
     return managerPasswordsByEmail.get(email) ?? password;
   }
@@ -634,49 +634,43 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     });
   });
 
-  describe('P2.8 — step-up reauth (currentPassword) gates deletion before anything else runs', () => {
-    it('a valid session with the WRONG current password is rejected (403) and the target is never touched', async () => {
-      const { organisation, email } = await seedOrgWithManager('stepup-wrong');
+  describe('hold-to-delete (owner request 2026-11-24): no current-password step-up; session authorization still required', () => {
+    it('ABUSE: no session is 401 and the target is never touched', async () => {
+      const { organisation, email } = await seedOrgWithManager('hold-nosession');
       const token = (await login(email)).accessToken;
 
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `stepupwrong-${randomUUID()}@example.test`, firstName: 'Step', lastName: 'Up' });
+        .send({ email: `holdnosession-${randomUUID()}@example.test`, firstName: 'Hold', lastName: 'Delete' });
       expect(create.status).toBe(201);
 
-      const del = await request(app.getHttpServer())
-        .delete(`/rest/v1/staff/${create.body.id}`)
-        .set('Authorization', `Bearer ${token}`)
-        .send({ currentPassword: 'definitely-not-the-real-password' });
-      expect(del.status).toBe(403);
+      expect((await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`)).status).toBe(401);
+      expect((await request(app.getHttpServer()).delete(`/rest/v1/managers/${randomUUID()}`)).status).toBe(401);
+      expect((await request(app.getHttpServer()).delete(`/rest/v1/venue-managers/${randomUUID()}`)).status).toBe(401);
 
       const stillThere = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));
       expect(stillThere).not.toBeNull();
     });
 
-    it('a valid session with NO currentPassword in the body is rejected (400, DTO validation) before the service is even reached', async () => {
-      const { email } = await seedOrgWithManager('stepup-missing');
+    it('ABUSE: an unknown or foreign id is still 404 without a password', async () => {
+      const { email } = await seedOrgWithManager('hold-unknown');
       const token = (await login(email)).accessToken;
-
       const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${randomUUID()}`).set('Authorization', `Bearer ${token}`);
-      expect(del.status).toBe(400);
+      expect(del.status).toBe(404);
     });
 
-    it('the SAME action with the correct current password succeeds — step-up reauth is not merely a permanent block', async () => {
-      const { organisation, email } = await seedOrgWithManager('stepup-right');
+    it('an authorized session deletes without a password body', async () => {
+      const { organisation, email } = await seedOrgWithManager('hold-ok');
       const token = (await login(email)).accessToken;
 
       const create = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${token}`)
-        .send({ email: `stepupright-${randomUUID()}@example.test`, firstName: 'Step', lastName: 'Up' });
+        .send({ email: `holdok-${randomUUID()}@example.test`, firstName: 'Hold', lastName: 'Delete' });
       expect(create.status).toBe(201);
 
-      const del = await request(app.getHttpServer())
-        .delete(`/rest/v1/staff/${create.body.id}`)
-        .set('Authorization', `Bearer ${token}`)
-        .send({ currentPassword: passwordFor(email) });
+      const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${create.body.id}`).set('Authorization', `Bearer ${token}`);
       expect(del.status).toBe(204);
 
       const gone = await withTenant(organisation.id, (m) => m.findOne(User, { where: { email: create.body.email } }));

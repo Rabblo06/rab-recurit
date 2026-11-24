@@ -1162,14 +1162,13 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect(detail.body).toMatchObject({ accountStatus: 'active', invitationStatus: null });
     });
 
-    it('DELETE requires the actor\'s current password: none → 400, wrong → 403, and the account is untouched', async () => {
+    it('DELETE uses authorized session without a password and still requires authentication', async () => {
       const s = await acceptedVenueManager();
-      const auth = { Authorization: `Bearer ${s.ownerToken}` };
-      const noBody = await request(app.getHttpServer()).delete(`/rest/v1/managers/${s.profileId}`).set(auth);
-      expect(noBody.status).toBe(400);
-      const wrong = await request(app.getHttpServer()).delete(`/rest/v1/managers/${s.profileId}`).set(auth).send({ currentPassword: 'not-the-owner-password' });
-      expect(wrong.status).toBe(403);
-      expect(await adminDataSource.manager.findOneBy(User, { email: s.email })).not.toBeNull();
+      const url = `/rest/v1/managers/${s.profileId}`;
+      expect((await request(app.getHttpServer()).delete(url)).status).toBe(401);
+      expect(await adminDataSource.manager.findOneBy(User, {email:s.email})).not.toBeNull();
+      expect((await request(app.getHttpServer()).delete(url).set({Authorization:`Bearer ${s.ownerToken}`})).status).toBe(204);
+      expect(await adminDataSource.manager.findOneBy(User, {email:s.email})).toBeNull();
     });
   });
 

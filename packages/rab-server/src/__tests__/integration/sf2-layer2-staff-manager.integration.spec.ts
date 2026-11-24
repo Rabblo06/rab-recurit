@@ -282,7 +282,7 @@ describeIfDb('SF-2 layer-2 re-checks: staff, manager, venue manager (integration
 
     it('ManagerService.deleteVenueManagerUser re-checks venue_manager.create itself (no implicit call-order rule) → 403, the Venue Manager stays', async () => {
       await withRevoked(a, PermissionFlag.VENUE_MANAGER_CREATE, () =>
-        expectRefusedAndInert(() => managers.deleteVenueManagerUser(ctxOf(a), vm.profileId!, a.password)),
+        expectRefusedAndInert(() => managers.deleteVenueManagerUser(ctxOf(a), vm.profileId!)),
       );
     });
 

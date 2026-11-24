@@ -185,12 +185,12 @@ export class StaffController {
     return this.staffService.cancelInvite(ctx, id);
   }
 
-  /** P2.8 — step-up reauth: `currentPassword` is required and verified before anything else runs. */
+  /** Deletion uses session authorization and protected-account checks. */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(PermissionGuard(PermissionFlag.STAFF_DEACTIVATE))
-  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: StepUpReauthDto) {
-    return this.staffService.deleteUser(ctx, id, dto.currentPassword);
+  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
+    return this.staffService.deleteUser(ctx, id);
   }
 
   /**

@@ -496,7 +496,7 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       const c = await factory.createInternalManager({ id: orgId }, { permissions: PERMS, label: 'udel-m1-staff' });
       const s = await factory.createStaff({ id: orgId }, { owner: c, label: 'udel-m1-staff-target' });
       await revoke(c.userId, PermissionFlag.STAFF_DEACTIVATE);
-      await expect(staffService.deleteUser(ctxOf(c), s.profileId!, c.password)).rejects.toMatchObject({ status: 403 });
+      await expect(staffService.deleteUser(ctxOf(c), s.profileId!)).rejects.toMatchObject({ status: 403 });
       expect((await userRow(s.userId))!.is_deleted).toBe(false);
     });
 
@@ -504,7 +504,7 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       const c = await factory.createInternalManager({ id: orgId }, { permissions: PERMS, label: 'udel-m1-mgr' });
       const vm = await factory.createVenueManager({ id: orgId }, { owner: c, label: 'udel-m1-vm' });
       await revoke(c.userId, PermissionFlag.MANAGER_MANAGE);
-      await expect(managerService.deleteUser(ctxOf(c), vm.profileId!, c.password)).rejects.toMatchObject({ status: 403 });
+      await expect(managerService.deleteUser(ctxOf(c), vm.profileId!)).rejects.toMatchObject({ status: 403 });
       expect((await userRow(vm.userId))!.is_deleted).toBe(false);
       // VENUE_MANAGER_CREATE + own workspace is that route's own rule (a workspace owner may lack MANAGER_MANAGE).
       const token = await factory.login(c);
