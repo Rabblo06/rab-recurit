@@ -37,7 +37,10 @@ import { withCrewflowCoreCreate } from '../core-schema-create-scope';
  *        database sets the 60-second lifetime;
  *      - report_export_file_take(export, token_hash): the requester only; burns the link and returns the content in ONE
  *        statement, only for an unused, unexpired link of an unexpired file;
- *      - report_export_file_purge(export): Worker only; clears the file content once it has expired (tombstone kept).
+ *      - report_export_file_purge(export): Worker only; clears the file content once it has expired (tombstone kept);
+ *      - report_export_file_sweep_expired(limit): Worker only; the same clearing for EVERY file of the bound workspace
+ *        whose own file_expires_at has passed (at most `limit`, 1..1000 rows per call), whatever its export's status —
+ *        so a file stored for a failed or expired export (a Worker bug) never keeps its content at rest.
  *    None names a crewflow-owned table (secure-owner invariant R4 unchanged).
  * 3. `core.notification_preference.notification_type` CHECK += 'report_export_ready'.
  *
@@ -72,6 +75,7 @@ export const REPORT_EXPORT_FILE_FUNCTIONS_1786723200000 = [
   'core.report_export_file_issue_link(uuid, text)',
   'core.report_export_file_take(uuid, text)',
   'core.report_export_file_purge(uuid)',
+  'core.report_export_file_sweep_expired(integer)',
 ] as const;
 /** Frozen copy of @rab/shared REPORT_KEYS at this migration. */
 export const REPORT_KEYS_1786723200000 = ['hours_and_pay_by_venue', 'attendance_exceptions', 'weekly_hours_per_staff', 'fill_rate_by_venue', 'payroll_run_summary'] as const;
@@ -308,6 +312,33 @@ BEGIN
    WHERE f.export_id = p_export_id AND f.organisation_id = core.current_org() AND f.workspace_id = core.current_workspace()
      AND f.purged_at IS NULL AND f.file_expires_at <= pg_catalog.clock_timestamp();
   RETURN FOUND;
+END;
+$f$`,
+  `CREATE FUNCTION core.report_export_file_sweep_expired(p_limit integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $f$
+DECLARE
+  v_n integer;
+BEGIN
+  IF pg_catalog.current_setting('rab.actor_type', true) IS DISTINCT FROM 'worker' THEN
+    RAISE EXCEPTION 'report_export_file_sweep_expired: the Worker only' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  -- Keyed on the file's own expiry, never on the export's status: every expired file of the bound workspace is cleared.
+  UPDATE core.report_export_file f
+     SET csv_content = NULL, purged_at = pg_catalog.clock_timestamp(), download_token_hash = NULL, download_token_issued_at = NULL,
+         download_token_expires_at = NULL, download_token_used_at = NULL
+   WHERE f.organisation_id = core.current_org() AND f.workspace_id = core.current_workspace()
+     AND f.export_id IN (
+       SELECT g.export_id FROM core.report_export_file g
+        WHERE g.organisation_id = core.current_org() AND g.workspace_id = core.current_workspace()
+          AND g.purged_at IS NULL AND g.file_expires_at <= pg_catalog.clock_timestamp()
+        ORDER BY g.file_expires_at, g.export_id
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 500), 1), 1000));
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  RETURN v_n;
 END;
 $f$`,
 ];

@@ -10471,3 +10471,15 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   → 23505; take with another organisation bound → NULL and the link still usable); Worker spec (a failing audit write leaves
   the export pending, logs `AuditDown` without the message, the next export still builds, and it builds next cycle; the
   expired file leaves a content-less tombstone).
+
+## Reports export — expired-file sweep (final review, branch feat/reports-async-export, 2026-11-24; ADDED SQL, DRAFT)
+- **Finding (Low):** the Worker's purge was driven by the export's status (`ready` and past expiry), so a file stored for an
+  export that ended `failed` or `expired` (a Worker bug) would keep its content at rest forever.
+- **Control:** `core.report_export_file_sweep_expired(limit)` (SECURITY DEFINER, owner rab_secure_owner, pinned search_path,
+  EXECUTE for crewflow_app only, Worker only) clears the content and sets `purged_at` for every file of the bound workspace
+  whose own `file_expires_at` has passed, whatever the export's status (at most 1..1000 rows per call). The report-export
+  cycle runs it over every routable workspace at most once an hour per Worker process (a write transaction per workspace);
+  a failure is logged by error name and the cycle moves on.
+- **Tests:** Worker spec (a file stored for a failed export survives the status-based cycle, is left alone before expiry,
+  and is cleared by the sweep after 24 h, the export staying failed); `report-exports.integration.spec.ts` (a person calling
+  the sweep → 42501); adapter parity (the processor passes the hourly sweep switch).

@@ -164,12 +164,12 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     expect((finalTs.runFinalTimesheetCycle as jest.Mock).mock.calls[0]).toEqual([d.directDataSource, d.tenantContext, d.emailOutboxService, d.fileService, { audit: d.auditService }]);
     expect((payroll.runPayrollPeriodAttentionCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.tenantContext, d.notificationService]);
     // Owner decision 29: the report export scan runs on the pooled runtime DataSource, with the live late-clock-in grace.
-    (reportExport.runReportExportCycle as jest.Mock).mockResolvedValue({ built: 0, failed: 0, retried: 0, deleted: 0, errors: 0 });
+    (reportExport.runReportExportCycle as jest.Mock).mockResolvedValue({ built: 0, failed: 0, retried: 0, deleted: 0, errors: 0, swept: 0 });
     await expect(p.reportExport()).resolves.toBe(false);
     expect((reportExport.runReportExportCycle as jest.Mock).mock.calls[0]).toEqual([
-      d.runtimeDataSource, d.tenantContext, d.notificationService, d.auditService, { lateGraceMinutes: ENV.LATE_CLOCK_IN_GRACE_MINUTES, log: expect.any(Function) },
+      d.runtimeDataSource, d.tenantContext, d.notificationService, d.auditService, { lateGraceMinutes: ENV.LATE_CLOCK_IN_GRACE_MINUTES, log: expect.any(Function), sweepExpiredFiles: expect.any(Boolean) },
     ]);
-    (reportExport.runReportExportCycle as jest.Mock).mockResolvedValue({ built: 1, failed: 0, retried: 0, deleted: 0, errors: 0 });
+    (reportExport.runReportExportCycle as jest.Mock).mockResolvedValue({ built: 1, failed: 0, retried: 0, deleted: 0, errors: 0, swept: 0 });
     await expect(p.reportExport()).resolves.toBe(true);
     const publish = (statement.runShiftStatementDispatchCycle as jest.Mock).mock.calls[0][2];
     // D-Q1: organisation ids are UUIDs (the declared tenant scope is validated); the add() itself is unchanged.

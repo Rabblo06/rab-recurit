@@ -47,6 +47,8 @@ export interface ReportExportCycleResult {
   deleted: number;
   /** Exports whose transaction failed unexpectedly this cycle (logged; retried next cycle, never blocking the others). */
   errors: number;
+  /** Expired files cleared by the sweep (keyed on the file's own expiry, whatever the export's status). */
+  swept: number;
 }
 
 export interface ReportExportCycleOptions {
@@ -54,7 +56,15 @@ export interface ReportExportCycleOptions {
   organisationId?: string;
   /** Where per-export failures are reported (error name only, never row data). */
   log?: (line: string) => void;
+  /**
+   * Also run the expired-file sweep over every workspace this cycle (a write transaction per workspace, so the processor
+   * runs it at most hourly). Catches a file stored for a failed or expired export that the status-based purge never sees.
+   */
+  sweepExpiredFiles?: boolean;
 }
+
+/** Files cleared per workspace per sweep call (the definer clamps to 1..1000). */
+const SWEEP_LIMIT = 500;
 
 /**
  * Owner decision 29: the Worker half of the reports export.
@@ -97,13 +107,13 @@ export async function runReportExportCycle(
     options.organisationId,
   );
 
-  const result: ReportExportCycleResult = { built: 0, failed: 0, retried: 0, deleted: 0, errors: 0 };
+  const result: ReportExportCycleResult = { built: 0, failed: 0, retried: 0, deleted: 0, errors: 0, swept: 0 };
   for (const row of due) {
     try {
       const outcome = await runScopedForOrg(tenantContext, row.organisation_id, row.workspace_id, (m) =>
         row.due === 'build' ? buildOne(m, row.id, notifications, audit, options) : deleteOne(m, row.id, audit, options),
       );
-      if (outcome && outcome !== 'errors') result[outcome] += 1;
+      if (outcome && outcome !== 'errors' && outcome !== 'swept') result[outcome] += 1;
     } catch (error) {
       // A workspace blocked by a failed upgrade step pauses; its exports are handled once it is routable again.
       if (isNotYetRoutableWorkspace(error)) continue;
@@ -111,6 +121,28 @@ export async function runReportExportCycle(
       // transaction rolled back), so it is picked up again next cycle and the attempt limit still applies.
       result.errors += 1;
       options.log?.(`report export ${row.id}: ${(error as Error)?.name ?? 'Error'} (skipped this cycle)`);
+    }
+  }
+
+  if (options.sweepExpiredFiles) {
+    // One row per routable workspace (the discovery binding itself), then one Worker-only write transaction each.
+    const workspaces = await discoverInWorkspaces(
+      runtimeDataSource,
+      tenantContext,
+      (m) => m.query<Array<{ organisation_id: string; workspace_id: string }>>(`SELECT core.current_org() AS organisation_id, core.current_workspace() AS workspace_id`),
+      options.organisationId,
+    );
+    for (const ws of workspaces) {
+      try {
+        const [{ n }] = await runScopedForOrg(tenantContext, ws.organisation_id, ws.workspace_id, (m) =>
+          m.query<Array<{ n: number }>>(`SELECT core.report_export_file_sweep_expired($1::integer) AS n`, [SWEEP_LIMIT]),
+        );
+        result.swept += Number(n);
+      } catch (error) {
+        if (isNotYetRoutableWorkspace(error)) continue;
+        result.errors += 1;
+        options.log?.(`report export file sweep: ${(error as Error)?.name ?? 'Error'} (skipped this cycle)`);
+      }
     }
   }
   return result;
