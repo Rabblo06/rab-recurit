@@ -166,7 +166,7 @@ describe('omitDeep (review fix: hidden money absent at every depth)', () => {
       id: 'run', status: 'finalised', period: null, preparedAt: '', preparedByName: null, finalisedAt: null, finalisedByName: null,
       totals: { records: 1, staff: 1, minutes: 240, grossPence: 4800, lateCount: 0, correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 7884 },
       staff: [{
-        staffProfileId: 's', staffName: 'A', staffRef: null, records: 1, minutes: 240, grossPence: 4800, lateCount: 0,
+        staffProfileId: 's', staffName: 'A', staffRef: null, records: 1, minutes: 240, grossPence: 4800, lateCount: 0, holidayPayPence: 579,
         correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 7884,
         adjustments: [{ id: 'a1', kind: 'bonus', amountPence: 2000, correctsPayrollRecordId: null }],
         payslip: { id: 'p', status: 'paid', version: 1, document: null, netPence: 4000, netSource: 'provider_document', paidAt: null, paymentReference: null },

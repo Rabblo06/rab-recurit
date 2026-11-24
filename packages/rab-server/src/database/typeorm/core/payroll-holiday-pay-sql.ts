@@ -8,15 +8,16 @@
  * the shift statement, the staff payslip timeline and the provider export; or, per organisation, "our payroll provider
  * handles holiday pay" (no line). Two core tables:
  *
- * 1. core.organisation_payroll_setting: one row per organisation (no row = the A3 default: rolled-up at 1207 basis
- *    points). Read by the organisation's non-venue managers; written only by the organisation's CURRENT Initial Manager
+ * 1. core.organisation_payroll_setting: one row per organisation. No row = "provider handles it" (FAIL-SAFE, review fix 3
+ *    and owner decision 78's recommendation): rolled-up holiday pay appears only after the Initial Manager explicitly
+ *    chooses it (rate default 1207 basis points = 12.07% offered in the UI/API). Read by the organisation's non-venue managers; written only by the organisation's CURRENT Initial Manager
  *    (the same authority as the agency payment calendar, ManagerMarkPaidInitialManagerCalendar1786719300000), naming
  *    themselves in updated_by. No DELETE.
  *
  * 2. core.payroll_record_holiday_pay: the holiday pay of ONE payroll record, snapshotted when the record is approved (the
  *    moment its gross becomes approved and its statement is requested) and never recalculated: INSERT-only for the runtime
  *    login (no UPDATE, no DELETE grant; the owner login is held to the same by the reviewed grant-parity guard), one row
- *    per record (UNIQUE). It keeps the mode and rate in force at that moment, the base (the record's approved gross) and
+ *    per record (UNIQUE per organisation + workspace + record; review fix 4b). It keeps the mode and rate in force at that moment, the base (the record's approved gross) and
  *    the result, and a CHECK re-derives the result from base x rate with the repo's rounding rule (nearest penny, half up:
  *    (base * rate + 5000) / 10000 on non-negative integers), so a stored figure that does not follow the rule cannot exist.
  *    Read by the workspace's non-venue managers, by the staff member it pays (their own rows), and by the Worker (the
@@ -77,7 +78,7 @@ CREATE TABLE core.payroll_record_holiday_pay (
   created_by        uuid        NOT NULL,
   created_at        timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT payroll_record_holiday_pay_pkey PRIMARY KEY (id),
-  CONSTRAINT payroll_record_holiday_pay_record_key UNIQUE (payroll_record_id),
+  CONSTRAINT payroll_record_holiday_pay_record_key UNIQUE (organisation_id, workspace_id, payroll_record_id),
   CONSTRAINT payroll_record_holiday_pay_mode_check CHECK (mode IN ('rolled_up', 'provider')),
   CONSTRAINT payroll_record_holiday_pay_rate_check CHECK (((mode = 'rolled_up') = (rate_bps IS NOT NULL)) AND (rate_bps IS NULL OR rate_bps BETWEEN 1 AND 10000)),
   CONSTRAINT payroll_record_holiday_pay_figures_check CHECK (base_pence >= 0 AND base_pence <= 100000000000 AND holiday_pay_pence >= 0),
@@ -89,6 +90,26 @@ CREATE TABLE core.payroll_record_holiday_pay (
   CONSTRAINT payroll_record_holiday_pay_created_by_fkey FOREIGN KEY (created_by) REFERENCES core."user"(id)
 );
 CREATE INDEX payroll_record_holiday_pay_staff_idx ON core.payroll_record_holiday_pay (workspace_id, staff_profile_id)`;
+
+export const HOLIDAY_PAY_INSERT_GUARD_FUNCTION = 'core.payroll_record_holiday_pay_insert_guard()';
+
+/**
+ * Review fix (independent review of #339): BEFORE INSERT on core.payroll_record_holiday_pay. A holiday-pay line of a
+ * payroll record that a FINALISED run already holds (core.payroll_run_event `finalised` fact of the same organisation and
+ * workspace, PayrollAdjustmentSchema1786723100000) is refused (42501): a locked run's totals can never change through a
+ * late snapshot. created_at is the database clock (the run view also ignores lines created after the run's finalisation).
+ */
+export const HOLIDAY_PAY_INSERT_GUARD_FUNCTION_SQL = `CREATE FUNCTION core.payroll_record_holiday_pay_insert_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, core AS $fn$
+BEGIN
+  NEW.created_at := pg_catalog.now();
+  IF EXISTS (SELECT 1 FROM core.payroll_run_event e
+              WHERE e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = 'finalised'
+                AND NEW.payroll_record_id = ANY (e.payroll_record_ids)) THEN
+    RAISE EXCEPTION 'holiday pay of payroll record % cannot be added: its payroll run is finalised', NEW.payroll_record_id USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$fn$`;
 
 export const HOLIDAY_PAY_PARITY_TRIGGERS: readonly string[] = Object.freeze([
   '_organisation_payroll_setting_grant_parity_delete',
@@ -127,6 +148,10 @@ export const HOLIDAY_PAY_SECURITY_SQL: readonly string[] = Object.freeze([
   `CREATE POLICY payroll_record_holiday_pay_insert ON core.payroll_record_holiday_pay AS PERMISSIVE FOR INSERT TO PUBLIC
   WITH CHECK (${TENANT} AND ${WORKSPACE_MANAGER} AND (created_by = core.current_uid()))`,
   'GRANT SELECT, INSERT ON TABLE core.payroll_record_holiday_pay TO crewflow_app',
+  HOLIDAY_PAY_INSERT_GUARD_FUNCTION_SQL,
+  'REVOKE ALL ON FUNCTION core.payroll_record_holiday_pay_insert_guard() FROM PUBLIC',
+  'GRANT EXECUTE ON FUNCTION core.payroll_record_holiday_pay_insert_guard() TO crewflow, crewflow_app',
+  'CREATE TRIGGER payroll_record_holiday_pay_insert_guard BEFORE INSERT ON core.payroll_record_holiday_pay FOR EACH ROW EXECUTE FUNCTION core.payroll_record_holiday_pay_insert_guard()',
   `CREATE TRIGGER _payroll_record_holiday_pay_grant_parity_update BEFORE UPDATE ON core."payroll_record_holiday_pay" FOR EACH STATEMENT EXECUTE FUNCTION ${PARITY}`,
   `CREATE TRIGGER _payroll_record_holiday_pay_grant_parity_delete BEFORE DELETE ON core."payroll_record_holiday_pay" FOR EACH STATEMENT EXECUTE FUNCTION ${PARITY}`,
   `CREATE TRIGGER _payroll_record_holiday_pay_grant_parity_truncate BEFORE TRUNCATE ON core."payroll_record_holiday_pay" FOR EACH STATEMENT EXECUTE FUNCTION ${PARITY}`,
@@ -135,6 +160,7 @@ export const HOLIDAY_PAY_SECURITY_SQL: readonly string[] = Object.freeze([
 export const HOLIDAY_PAY_OWNERSHIP_SQL: readonly string[] = Object.freeze([
   'ALTER TABLE core.organisation_payroll_setting OWNER TO crewflow',
   'ALTER TABLE core.payroll_record_holiday_pay OWNER TO crewflow',
+  'ALTER FUNCTION core.payroll_record_holiday_pay_insert_guard() OWNER TO crewflow',
 ]);
 
 export const HOLIDAY_PAY_PREFLIGHT_SQL = `
@@ -145,6 +171,8 @@ SELECT pg_catalog.to_regclass('core.organisation_payroll_setting') IS NOT NULL A
          AND pg_catalog.to_regprocedure('core.current_uid()') IS NOT NULL AS tenant_functions,
        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute a WHERE a.attrelid = 'core.manager_profile'::pg_catalog.regclass
           AND a.attname IN ('archived_at', 'is_initial_manager', 'superseded_at') AND NOT a.attisdropped)::int AS manager_columns,
+       pg_catalog.to_regclass('core.payroll_run_event') IS NOT NULL AS run_event,
+       pg_catalog.to_regprocedure('core.payroll_record_holiday_pay_insert_guard()') IS NOT NULL AS guard_present,
        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_roles WHERE rolname IN ('crewflow', 'crewflow_app'))::int AS roles`;
 
 export const HOLIDAY_PAY_DOWN_UNFORCE_SQL: readonly string[] = Object.freeze([
@@ -156,6 +184,7 @@ export const HOLIDAY_PAY_ROWS_SQL = `SELECT (SELECT pg_catalog.count(*) FROM cor
 export const HOLIDAY_PAY_DOWN_SQL: readonly string[] = Object.freeze([
   'DROP TABLE core.payroll_record_holiday_pay',
   'DROP TABLE core.organisation_payroll_setting',
+  'DROP FUNCTION core.payroll_record_holiday_pay_insert_guard()',
 ]);
 
 /** Post-condition per table: owner, RLS, ACL (non-owner grantees), column ACL, policies, triggers. */
@@ -206,7 +235,7 @@ export const EXPECTED_HOLIDAY_PAY_STATE: Readonly<Record<string, Omit<HolidayPay
     acl: 'crewflow_app:INSERT,crewflow_app:SELECT',
     column_acl: '',
     policies: 'payroll_record_holiday_pay_insert:a,payroll_record_holiday_pay_select:r',
-    triggers: parity('payroll_record_holiday_pay'),
+    triggers: `${parity('payroll_record_holiday_pay')},payroll_record_holiday_pay_insert_guard:O:${HOLIDAY_PAY_INSERT_GUARD_FUNCTION}`,
   },
 });
 
@@ -222,3 +251,13 @@ export function holidayPayStateProblems(rows: readonly HolidayPayTableState[]): 
   }
   return problems;
 }
+
+/** Post-condition for the insert guard function: owner, SECURITY INVOKER, EXECUTE grantees. */
+export const HOLIDAY_PAY_FUNCTION_STATE_SQL = `
+SELECT pg_catalog.pg_get_userbyid(p.proowner)::text || ':definer=' || p.prosecdef::text || ':' ||
+       coalesce((SELECT pg_catalog.string_agg(x.v, ',' ORDER BY x.v) FROM (
+          SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END AS v
+            FROM pg_catalog.aclexplode(p.proacl) a WHERE a.privilege_type = 'EXECUTE') x), '') AS state
+  FROM pg_catalog.pg_proc p WHERE p.oid = pg_catalog.to_regprocedure('core.payroll_record_holiday_pay_insert_guard()')`;
+
+export const EXPECTED_HOLIDAY_PAY_FUNCTION_STATE = 'crewflow:definer=false:crewflow,crewflow_app';

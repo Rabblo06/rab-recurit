@@ -588,7 +588,7 @@ export class PayrollService {
     )) as [unknown, number];
     if (updated !== ids.length) throw new ConflictException('Payroll changed while you were approving it. Refresh and try again.');
     // Owner decision 4: freeze each record's holiday pay (organisation setting now, nearest penny half up), same transaction.
-    await this.holidayPay.snapshotRecords(manager, ctx, ids);
+    await this.holidayPay.snapshotRecords(manager, ctx, ids, 'approval');
     // J1b: registered now, published only after the outermost commit (never on rollback); one per transaction.
     this.statementWake?.afterCommit(manager);
     // C1b realtime (review F8): the payroll audience is the same for every record of this workspace — resolved at most

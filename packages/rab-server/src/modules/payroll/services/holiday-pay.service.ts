@@ -1,4 +1,4 @@
-import { assertSafePence, PermissionFlag, rolledUpHolidayPayPence, UK_ROLLED_UP_HOLIDAY_RATE_BPS } from '@rab/shared';
+import { assertSafePence, PermissionFlag, rolledUpHolidayPayPence } from '@rab/shared';
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -24,7 +24,10 @@ export interface HolidayPaySettingView {
   mode: HolidayPayMode;
   /** Basis points (1207 = 12.07%); null when the provider handles holiday pay. */
   rateBps: number | null;
-  /** No row stored yet: the A3 default (rolled-up at 12.07%) applies. */
+  /**
+   * No row stored yet. FAIL-SAFE (review fix 3, owner decision 78's recommendation): behave as "our payroll provider
+   * handles holiday pay" (no line) until the Initial Manager explicitly chooses rolled-up.
+   */
   isDefault: boolean;
   updatedAt: string | null;
   updatedByName: string | null;
@@ -125,7 +128,7 @@ export class HolidayPayService {
          FROM core.organisation_payroll_setting s WHERE s.organisation_id = $1`,
       [ctx.organisationId],
     );
-    if (!row) return { mode: 'rolled_up', rateBps: UK_ROLLED_UP_HOLIDAY_RATE_BPS, isDefault: true, updatedAt: null, updatedByName: null };
+    if (!row) return { mode: 'provider', rateBps: null, isDefault: true, updatedAt: null, updatedByName: null };
     return {
       mode: row.holiday_pay_mode, rateBps: row.holiday_pay_rate_bps === null ? null : Number(row.holiday_pay_rate_bps), isDefault: false,
       updatedAt: new Date(row.updated_at).toISOString(), updatedByName: row.updated_by_name ?? null,
@@ -135,20 +138,27 @@ export class HolidayPayService {
   // ------------------------------------------------------------------------------------- hooks (caller's transaction)
 
   /**
-   * Freezes the holiday pay of payroll records the caller has JUST approved (same transaction, same workspace): the
-   * organisation's setting at this moment, applied to each record's approved gross with rolledUpHolidayPayPence (nearest
-   * penny, half up, per record). Idempotent (one row per record, ON CONFLICT DO NOTHING): a record already snapshotted
-   * keeps its figure forever. Also used by run prepare for records approved before holiday pay existed (flagged).
+   * Freezes the holiday pay of payroll records (same transaction, same workspace): the organisation's setting at this
+   * moment, applied to each record's approved gross with rolledUpHolidayPayPence (nearest penny, half up, per record).
+   *  - `approval`: records the caller has JUST approved. Always frozen: rolled-up only when the organisation has
+   *    explicitly chosen it, otherwise a zero "provider" line (no row = provider, fail-safe), so a later opt-in never
+   *    reprices them.
+   *  - `backfill` (run prepare, records approved before holiday pay shipped): ONLY when the organisation has an explicit
+   *    rolled-up setting; otherwise nothing is written and no line appears (review fix 3).
+   * A record already frozen keeps its figure forever (filtered out first). The insert is plain: any conflict or refusal
+   * (a finalised run's record, review fix 2) throws, never silently skipped (review fix 4b).
    */
-  async snapshotRecords(m: EntityManager, ctx: AuthContext, recordIds: readonly string[]): Promise<number> {
+  async snapshotRecords(m: EntityManager, ctx: AuthContext, recordIds: readonly string[], purpose: 'approval' | 'backfill'): Promise<number> {
     if (!recordIds.length) return 0;
     const t = businessTables(m);
     const setting = await this.view(m, ctx);
+    if (purpose === 'backfill' && !(setting.mode === 'rolled_up' && !setting.isDefault)) return 0;
     const records: Array<{ id: string; staff_profile_id: string; amount_pence: string; staff_user_id: string }> = await m.query(
       `SELECT pr.id, pr.staff_profile_id, pr.amount_pence, sp.user_id AS staff_user_id
          FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
         WHERE pr.id = ANY($1::uuid[]) AND pr.organisation_id = $2 AND pr.workspace_id = $3 AND pr.status IN ('approved', 'processing', 'paid')
-          AND NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h WHERE h.payroll_record_id = pr.id)`,
+          AND NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h
+                           WHERE h.payroll_record_id = pr.id AND h.organisation_id = $2 AND h.workspace_id = $3)`,
       [[...recordIds], ctx.organisationId, ctx.workspaceId],
     );
     for (const r of records) {
@@ -156,7 +166,7 @@ export class HolidayPayService {
       const holiday = setting.mode === 'rolled_up' ? rolledUpHolidayPayPence(base, setting.rateBps!) : 0;
       await m.query(
         `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, rate_bps, base_pence, holiday_pay_pence, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (payroll_record_id) DO NOTHING`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [ctx.organisationId, ctx.workspaceId, r.id, r.staff_profile_id, r.staff_user_id, setting.mode, setting.mode === 'rolled_up' ? setting.rateBps : null, base, holiday, ctx.userId],
       );
     }

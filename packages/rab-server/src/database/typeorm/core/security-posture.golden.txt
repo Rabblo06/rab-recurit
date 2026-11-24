@@ -427,6 +427,8 @@ execute|payroll_adjustment_insert_guard()|crewflow_app|true
 execute|payroll_adjustment_insert_guard()|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
+execute|payroll_record_holiday_pay_insert_guard()|crewflow_app|true
+execute|payroll_record_holiday_pay_insert_guard()|crewflow|true
 execute|provision_workspace(uuid)|PUBLIC|false
 execute|provision_workspace(uuid)|crewflow_app|true
 execute|provision_workspace(uuid)|crewflow|true
@@ -689,6 +691,7 @@ owner|function|owner_login_grant_parity_guard()|crewflow|definer=false
 owner|function|payroll_adjustment_guard()|crewflow|definer=false
 owner|function|payroll_adjustment_insert_guard()|crewflow|definer=false
 owner|function|payroll_record_guard()|crewflow|definer=false
+owner|function|payroll_record_holiday_pay_insert_guard()|crewflow|definer=false
 owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|purge_terminal_email_outbox(interval,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp

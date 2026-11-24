@@ -43,9 +43,9 @@ function harness(opts: { held?: string[]; venue?: boolean; initial?: boolean; se
 }
 
 describe('HolidayPayService: the organisation setting', () => {
-  it('no stored row = the A3 default, rolled-up at 12.07% (1207 basis points)', async () => {
+  it('no stored row = "provider handles it" (fail-safe, review fix 3): rolled-up is an explicit opt-in', async () => {
     const h = harness();
-    await expect(h.svc.getSetting(ctx)).resolves.toMatchObject({ mode: 'rolled_up', rateBps: 1207, isDefault: true, canManage: false });
+    await expect(h.svc.getSetting(ctx)).resolves.toMatchObject({ mode: 'provider', rateBps: null, isDefault: true, canManage: false });
   });
 
   it('reading needs payroll.view and is refused to a Venue Manager', async () => {
@@ -83,7 +83,7 @@ describe('HolidayPayService: the organisation setting', () => {
     expect(upsert.sql).toMatch(/^INSERT INTO core\.organisation_payroll_setting .* ON CONFLICT \(organisation_id\) DO UPDATE/);
     expect(upsert.params).toEqual([ORG, 'provider', null, ME]);
     expect(h.audit.record).toHaveBeenCalledWith(h.manager, ctx, 'payroll_setting.holiday_pay_changed', expect.objectContaining({
-      metadata: { before: { mode: 'rolled_up', rateBps: 1207, isDefault: true }, after: { mode: 'provider', rateBps: null } },
+      metadata: { before: { mode: 'provider', rateBps: null, isDefault: true }, after: { mode: 'provider', rateBps: null } },
     }));
   });
 });
@@ -91,9 +91,9 @@ describe('HolidayPayService: the organisation setting', () => {
 describe('HolidayPayService.snapshotRecords (at approval, same transaction)', () => {
   const rec = (id: string, amount: string) => ({ id, staff_profile_id: 'sp-' + id, amount_pence: amount, staff_user_id: STAFF_USER });
 
-  it('freezes each record at the CURRENT setting: rolled-up 12.07%, nearest penny half up, per record', async () => {
-    const h = harness({ records: [rec('r1', '6000'), rec('r2', '4142'), rec('r3', '0')] });
-    expect(await h.svc.snapshotRecords(h.manager, ctx, ['r1', 'r2', 'r3'])).toBe(3);
+  it('freezes each record at the CURRENT explicit setting: rolled-up 12.07%, nearest penny half up, per record', async () => {
+    const h = harness({ setting: { holiday_pay_mode: 'rolled_up', holiday_pay_rate_bps: 1207, updated_at: new Date(), updated_by_name: 'X' }, records: [rec('r1', '6000'), rec('r2', '4142'), rec('r3', '0')] });
+    expect(await h.svc.snapshotRecords(h.manager, ctx, ['r1', 'r2', 'r3'], 'approval')).toBe(3);
     const inserts = h.writes().map((w) => w.params);
     expect(inserts.map((p) => [p[2], p[5], p[6], p[7], p[8]])).toEqual([
       ['r1', 'rolled_up', 1207, 6000, 724],
@@ -101,32 +101,51 @@ describe('HolidayPayService.snapshotRecords (at approval, same transaction)', ()
       ['r3', 'rolled_up', 1207, 0, 0],
     ]);
     for (const p of inserts) expect([p[0], p[1], p[4], p[9]]).toEqual([ORG, WS, STAFF_USER, ME]);
-    expect(h.writes()[0]!.sql).toMatch(/ON CONFLICT \(payroll_record_id\) DO NOTHING$/);
+    // Review fix 4b: a plain insert (a conflict throws; nothing is silently skipped).
+    expect(h.writes()[0]!.sql).not.toMatch(/ON CONFLICT/);
   });
 
   it('a configured rate is used as stored; "provider handles it" freezes a zero line with no rate', async () => {
     const rate = harness({ setting: { holiday_pay_mode: 'rolled_up', holiday_pay_rate_bps: 1250, updated_at: new Date(), updated_by_name: 'X' }, records: [rec('r1', '4')] });
-    await rate.svc.snapshotRecords(rate.manager, ctx, ['r1']);
+    await rate.svc.snapshotRecords(rate.manager, ctx, ['r1'], 'approval');
     expect(rate.writes()[0]!.params.slice(5, 9)).toEqual(['rolled_up', 1250, 4, 1]);
     const provider = harness({ setting: { holiday_pay_mode: 'provider', holiday_pay_rate_bps: null, updated_at: new Date(), updated_by_name: 'X' }, records: [rec('r1', '6000')] });
-    await provider.svc.snapshotRecords(provider.manager, ctx, ['r1']);
+    await provider.svc.snapshotRecords(provider.manager, ctx, ['r1'], 'approval');
     expect(provider.writes()[0]!.params.slice(5, 9)).toEqual(['provider', null, 6000, 0]);
+  });
+
+  it('approval with NO settings row freezes a zero provider line (a later opt-in never reprices it)', async () => {
+    const h = harness({ records: [rec('r1', '6000')] });
+    await h.svc.snapshotRecords(h.manager, ctx, ['r1'], 'approval');
+    expect(h.writes()[0]!.params.slice(5, 9)).toEqual(['provider', null, 6000, 0]);
+  });
+
+  it('back-fill (review fix 3) writes NOTHING unless the organisation explicitly chose rolled-up', async () => {
+    for (const setting of [null, { holiday_pay_mode: 'provider', holiday_pay_rate_bps: null, updated_at: new Date(), updated_by_name: 'X' }]) {
+      const h = harness({ setting, records: [rec('r1', '6000')] });
+      expect(await h.svc.snapshotRecords(h.manager, ctx, ['r1'], 'backfill')).toBe(0);
+      expect(h.writes()).toEqual([]);
+      expect(h.calls.some((c) => /pr JOIN/.test(c.sql))).toBe(false);
+    }
+    const explicit = harness({ setting: { holiday_pay_mode: 'rolled_up', holiday_pay_rate_bps: 1207, updated_at: new Date(), updated_by_name: 'X' }, records: [rec('r1', '6000')] });
+    expect(await explicit.svc.snapshotRecords(explicit.manager, ctx, ['r1'], 'backfill')).toBe(1);
+    expect(explicit.writes()[0]!.params.slice(5, 9)).toEqual(['rolled_up', 1207, 6000, 724]);
   });
 
   it('reads only approved records of the session workspace that have no snapshot yet; nothing to do = no query', async () => {
     const h = harness({ records: [] });
-    expect(await h.svc.snapshotRecords(h.manager, ctx, [])).toBe(0);
+    expect(await h.svc.snapshotRecords(h.manager, ctx, [], 'approval')).toBe(0);
     expect(h.calls).toEqual([]);
-    await h.svc.snapshotRecords(h.manager, ctx, ['r1']);
+    await h.svc.snapshotRecords(h.manager, ctx, ['r1'], 'approval');
     const select = h.calls.find((c) => /pr JOIN/.test(c.sql))!;
     expect(select.sql).toContain("pr.organisation_id = $2 AND pr.workspace_id = $3 AND pr.status IN ('approved', 'processing', 'paid')");
-    expect(select.sql).toContain('NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h WHERE h.payroll_record_id = pr.id)');
+    expect(select.sql).toContain('NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h WHERE h.payroll_record_id = pr.id AND h.organisation_id = $2 AND h.workspace_id = $3)');
     expect(h.writes()).toEqual([]);
   });
 
   it('a corrupt (unsafe) base fails closed instead of freezing a rounded figure', async () => {
-    const h = harness({ records: [rec('r1', '9007199254740993')] });
-    await expect(h.svc.snapshotRecords(h.manager, ctx, ['r1'])).rejects.toThrow(RangeError);
+    const h = harness({ setting: { holiday_pay_mode: 'rolled_up', holiday_pay_rate_bps: 1207, updated_at: new Date(), updated_by_name: 'X' }, records: [rec('r1', '9007199254740993')] });
+    await expect(h.svc.snapshotRecords(h.manager, ctx, ['r1'], 'approval')).rejects.toThrow(RangeError);
     expect(h.writes()).toEqual([]);
   });
 });

@@ -4,6 +4,8 @@ import { withCrewflowCoreCreate } from '../core-schema-create-scope';
 import {
   HOLIDAY_PAY_DOWN_SQL,
   HOLIDAY_PAY_DOWN_UNFORCE_SQL,
+  HOLIDAY_PAY_FUNCTION_STATE_SQL,
+  EXPECTED_HOLIDAY_PAY_FUNCTION_STATE,
   HOLIDAY_PAY_OWNERSHIP_SQL,
   HOLIDAY_PAY_PREFLIGHT_SQL,
   HOLIDAY_PAY_ROWS_SQL,
@@ -39,6 +41,8 @@ export class PayrollHolidayPay1786723110000 implements MigrationInterface {
       for (const sql of HOLIDAY_PAY_OWNERSHIP_SQL) await queryRunner.query(sql);
     });
     const problems = holidayPayStateProblems((await queryRunner.query(HOLIDAY_PAY_STATE_SQL)) as HolidayPayTableState[]);
+    const [fn] = (await queryRunner.query(HOLIDAY_PAY_FUNCTION_STATE_SQL)) as Array<{ state: string }>;
+    if (fn?.state !== EXPECTED_HOLIDAY_PAY_FUNCTION_STATE) problems.push(`core.payroll_record_holiday_pay_insert_guard(): expected ${EXPECTED_HOLIDAY_PAY_FUNCTION_STATE}, found ${fn?.state}`);
     if (problems.length) throw new Error(`${this.name}: unexpected state after create (rolled back):\n  ${problems.join('\n  ')}`);
     const violations = await secureOwnerInvariantViolations((sql) => queryRunner.query(sql));
     if (violations.length) throw new Error(`${this.name}: secure-owner invariants violated (rolled back):\n  ${violations.join('\n  ')}`);
@@ -71,6 +75,8 @@ export class PayrollHolidayPay1786723110000 implements MigrationInterface {
       parity_guard: boolean;
       tenant_functions: boolean;
       manager_columns: number;
+      run_event: boolean;
+      guard_present: boolean;
       roles: number;
     }>;
     const problems: string[] = [];
@@ -80,8 +86,9 @@ export class PayrollHolidayPay1786723110000 implements MigrationInterface {
       if (!f.parity_guard) problems.push('core.owner_login_grant_parity_guard() must exist (OwnerLoginGrantParityGuards1786721420000 first)');
       if (!f.tenant_functions) problems.push('core.current_org(), core.current_workspace() and core.current_uid() must exist');
       if (Number(f.manager_columns) !== 3) problems.push('core.manager_profile must have archived_at, is_initial_manager and superseded_at');
-      if (direction === 'up' && (f.setting_present || f.snapshot_present)) problems.push('a holiday pay table already exists');
-      if (direction === 'down' && !(f.setting_present && f.snapshot_present)) problems.push('a holiday pay table does not exist');
+      if (!f.run_event) problems.push('core.payroll_run_event must exist (PayrollAdjustmentSchema1786723100000 first)');
+      if (direction === 'up' && (f.setting_present || f.snapshot_present || f.guard_present)) problems.push('a holiday pay table or its guard already exists');
+      if (direction === 'down' && !(f.setting_present && f.snapshot_present && f.guard_present)) problems.push('a holiday pay table or its guard does not exist');
     }
     if (problems.length) throw new Error(`${this.name}: refusing to run ${direction}: ${problems.join('; ')}.`);
   }

@@ -26,8 +26,8 @@ import { insertMembership, TestIdentity, TestIdentityFactory } from './helpers/t
 /**
  * Rolled-up holiday pay (owner decision 4, assumption A3; PayrollHolidayPay1786723110000). Real HTTP + PostgreSQL with RLS
  * as the runtime login, no mocks. One world, in order:
- *  - the per-organisation setting: default rolled-up 12.07%; only the CURRENT Initial Manager changes it, with a recent
- *    step-up; Venue Managers, other managers and other organisations are refused; mass assignment is a 400;
+ *  - the per-organisation setting: no row = "provider handles it" (fail-safe, review fix 3); rolled-up (12.07% offered) is
+ *    an explicit choice of the CURRENT Initial Manager, with a recent step-up; Venue Managers, other managers and other organisations are refused; mass assignment is a 400;
  *  - the snapshot at approval: rolled-up pence = @rab/shared rolledUpHolidayPayPence (nearest penny, half up), or a zero
  *    "provider" line; insert-only (no UPDATE / DELETE), the database re-checks the rounding; RLS per role; zero rows
  *    without tenant context;
@@ -154,10 +154,11 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     }
   });
 
-  it('the setting: default rolled-up 12.07%; only the current Initial Manager changes it, with a recent step-up', async () => {
+  it('the setting: default "provider" (fail-safe); only the current Initial Manager changes it, with a recent step-up', async () => {
     const def = await http().get('/rest/v1/payroll/settings/holiday-pay').set(auth(tokenA));
     expect(def.status).toBe(200);
-    expect(def.body).toMatchObject({ mode: 'rolled_up', rateBps: 1207, isDefault: true, canManage: true });
+    // Review fix 3 (fail-safe): no settings row = the payroll provider handles holiday pay; rolled-up is an explicit opt-in.
+    expect(def.body).toMatchObject({ mode: 'provider', rateBps: null, isDefault: true, canManage: true });
     expect((await http().get('/rest/v1/payroll/settings/holiday-pay').set(auth(await fresh(c)))).body.canManage).toBe(false);
     expect((await http().get('/rest/v1/payroll/settings/holiday-pay').set(auth(tokenVm))).status).toBe(403);
 
@@ -172,7 +173,7 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
     for (const body of [{ rateBps: 1207, organisationId: randomUUID() }, { rateBps: 1207, mode: 'provider' }, { rateBps: 0 }, { rateBps: 10001 }, { rateBps: 12.07 }, {}]) {
       expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send(body)).status).toBe(400);
     }
-    // Another organisation's Initial-less manager changes only... nothing here: their own organisation, refused (not Initial).
+    // A manager of another organisation who is not its Initial Manager: refused (and it is never this organisation's setting).
     expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(otherManager)))).status).toBe(403);
     // RLS backstop: a non-Initial manager writing the row directly is refused.
     await expect(asUser(c.userId, `INSERT INTO core.organisation_payroll_setting (organisation_id, holiday_pay_mode, updated_by) VALUES ($1, 'provider', $2)`, [orgId, c.userId]))
@@ -182,82 +183,116 @@ describeIfDb('rolled-up holiday pay (integration, owner decision 4)', () => {
       .rejects.toMatchObject({ code: '42501' });
   });
 
-  it('approval freezes rolled-up holiday pay with the shared rounding rule; insert-only; RLS per role', async () => {
+  let runId: string;
+  const periodRun = async () => (await http().get('/rest/v1/payroll/runs').set(auth(tokenA))).body.periods.find((p: { period: { start: string } }) => p.period.start === periodStart);
+  const prepare = async () => {
+    const res = await http().post('/rest/v1/payroll/runs/prepare').set(auth(tokenA)).send({ periodId: (await periodRun()).period.id });
+    expect(res.status).toBe(200);
+    runId = res.body.id;
+    const [audit] = await adminDataSource.query(
+      `SELECT metadata FROM core.audit_log WHERE action = 'payroll_run.prepared' AND entity_id = $1 ORDER BY created_at DESC LIMIT 1`, [runId]);
+    return { body: res.body, backfilled: Number(audit.metadata.holidayBackfilled) };
+  };
+  /** Simulates a record approved before holiday pay shipped: its frozen row removed (fixture write, superuser). */
+  const unfreeze = (recordId: string) => adminDataSource.query(`DELETE FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recordId]);
+
+  it('FAIL-SAFE (review fix 3): with no settings row an approval freezes a zero "provider" line, and a pre-ship record gets no line at prepare', async () => {
     recs.push(await approvedRecordFor(0));
     const s0 = await snapshot(recs[0]!.id);
-    expect({ mode: s0.mode, rate: s0.rate_bps, base: Number(s0.base_pence), pay: Number(s0.holiday_pay_pence), by: s0.created_by, user: s0.staff_user_id }).toEqual({
-      mode: 'rolled_up', rate: 1207, base: recs[0]!.amountPence, pay: rolledUpHolidayPayPence(recs[0]!.amountPence, 1207), by: c.userId, user: staff[0]!.userId,
+    expect({ mode: s0.mode, rate: s0.rate_bps, pay: Number(s0.holiday_pay_pence), by: s0.created_by }).toEqual({ mode: 'provider', rate: null, pay: 0, by: c.userId });
+    await unfreeze(recs[0]!.id);
+    const first = await prepare();
+    expect(first.backfilled).toBe(0);
+    expect(await snapshot(recs[0]!.id)).toBeUndefined();
+    expect(first.body.staff.find((s: { staffProfileId: string }) => s.staffProfileId === staff[0]!.profileId)).toMatchObject({ holidayPayPence: 0 });
+  });
+
+  it('an explicit "provider" setting chosen after ship: still no back-fill, no line; the change is audited', async () => {
+    const set = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(a)));
+    expect(set.status).toBe(200);
+    expect(set.body).toMatchObject({ mode: 'provider', rateBps: null, isDefault: false });
+    const [audit] = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_setting.holiday_pay_changed' AND organisation_id = $1`, [orgId]);
+    expect(audit.metadata).toMatchObject({ before: { mode: 'provider', rateBps: null, isDefault: true }, after: { mode: 'provider', rateBps: null } });
+    const again = await prepare();
+    expect(again.backfilled).toBe(0);
+    expect(await snapshot(recs[0]!.id)).toBeUndefined();
+  });
+
+  it('explicit rolled-up: approval freezes the shared rounding rule; prepare back-fills the pre-ship record (audited count); insert-only; RLS per role', async () => {
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 1207 })).status).toBe(200);
+    recs.push(await approvedRecordFor(1));
+    const s1 = await snapshot(recs[1]!.id);
+    expect({ mode: s1.mode, rate: s1.rate_bps, base: Number(s1.base_pence), pay: Number(s1.holiday_pay_pence), by: s1.created_by, user: s1.staff_user_id }).toEqual({
+      mode: 'rolled_up', rate: 1207, base: recs[1]!.amountPence, pay: rolledUpHolidayPayPence(recs[1]!.amountPence, 1207), by: c.userId, user: staff[1]!.userId,
     });
-    // Insert-only: no UPDATE / DELETE for the runtime login, even for a payroll manager.
-    await expect(asUser(c.userId, `UPDATE core.payroll_record_holiday_pay SET holiday_pay_pence = 0 WHERE payroll_record_id = $1`, [recs[0]!.id])).rejects.toMatchObject({ code: '42501' });
-    await expect(asUser(c.userId, `DELETE FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recs[0]!.id])).rejects.toMatchObject({ code: '42501' });
+    const third = await prepare();
+    expect(third.backfilled).toBe(1);
+    const s0 = await snapshot(recs[0]!.id);
+    expect({ mode: s0.mode, rate: s0.rate_bps, pay: Number(s0.holiday_pay_pence), by: s0.created_by }).toEqual({
+      mode: 'rolled_up', rate: 1207, pay: rolledUpHolidayPayPence(recs[0]!.amountPence, 1207), by: a.userId,
+    });
+    // Insert-only: no UPDATE / DELETE for the runtime (owner) login; a second line for the same record is a conflict, never skipped.
+    await expect(asUser(c.userId, `UPDATE core.payroll_record_holiday_pay SET holiday_pay_pence = 0 WHERE payroll_record_id = $1`, [recs[1]!.id])).rejects.toMatchObject({ code: '42501' });
+    await expect(asUser(c.userId, `DELETE FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recs[1]!.id])).rejects.toMatchObject({ code: '42501' });
+    await expect(asUser(c.userId,
+      `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, base_pence, holiday_pay_pence, created_by)
+       VALUES ($1, $2, $3, $4, $5, 'provider', 0, 0, $6)`, [orgId, a.workspaceId, recs[1]!.id, staff[1]!.profileId, staff[1]!.userId, c.userId])).rejects.toMatchObject({ code: '23505' });
     // The database re-derives the rounding: a figure that does not follow it cannot be stored, by anyone.
     await expect(adminDataSource.query(
       `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, rate_bps, base_pence, holiday_pay_pence, created_by)
        VALUES ($1, $2, $3, $4, $5, 'rolled_up', 1207, 4142, 499, $6)`, [orgId, a.workspaceId, randomUUID(), staff[0]!.profileId, staff[0]!.userId, c.userId])).rejects.toMatchObject({ code: '23514' });
-    // A Venue Manager or staff member cannot insert a snapshot.
+    // Staff cannot insert a line.
     await expect(asUser(staff[0]!.userId, `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, base_pence, holiday_pay_pence, created_by)
        VALUES ($1, $2, $3, $4, $5, 'provider', 0, 0, $5)`, [orgId, a.workspaceId, randomUUID(), staff[0]!.profileId, staff[0]!.userId])).rejects.toMatchObject({ code: '42501' });
-    // Reads: the staff member sees their own; another staff member and the Venue Manager see none; another organisation none.
-    expect(await asUser<unknown[]>(staff[0]!.userId, `SELECT 1 FROM core.payroll_record_holiday_pay`)).toHaveLength(1);
-    expect(await asUser<unknown[]>(staff[1]!.userId, `SELECT 1 FROM core.payroll_record_holiday_pay`)).toHaveLength(0);
+    // Reads: the staff member sees their own; another staff member and the Venue Manager none; another organisation none.
+    expect(await asUser<unknown[]>(staff[1]!.userId, `SELECT 1 FROM core.payroll_record_holiday_pay`)).toHaveLength(1);
+    expect(await asUser<unknown[]>(staff[2]!.userId, `SELECT 1 FROM core.payroll_record_holiday_pay`)).toHaveLength(0);
     const [vmUser] = await adminDataSource.query(`SELECT user_id FROM core.manager_profile WHERE workspace_id = $1 AND type = 'venue' LIMIT 1`, [a.workspaceId]);
     expect(await asUser<unknown[]>(vmUser.user_id, `SELECT 1 FROM core.payroll_record_holiday_pay`)).toHaveLength(0);
     expect(await tenantContext.runInTenantContext({ organisationId: randomUUID(), workspaceId: a.workspaceId, userId: c.userId, role: '' } as AuthContext,
       (m) => m.query(`SELECT 1 FROM core.payroll_record_holiday_pay`))).toEqual([]);
   });
 
-  it('"payroll provider handles it": later approvals freeze a zero line; earlier records keep their figure (never recalculated)', async () => {
-    const set = await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(a)));
-    expect(set.status).toBe(200);
-    expect(set.body).toMatchObject({ mode: 'provider', rateBps: null, isDefault: false });
-    const audit = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_setting.holiday_pay_changed' AND organisation_id = $1`, [orgId]);
-    expect(audit[0].metadata).toMatchObject({ before: { mode: 'rolled_up', rateBps: 1207, isDefault: true }, after: { mode: 'provider', rateBps: null } });
-    recs.push(await approvedRecordFor(1));
-    const s1 = await snapshot(recs[1]!.id);
-    expect({ mode: s1.mode, rate: s1.rate_bps, pay: Number(s1.holiday_pay_pence) }).toEqual({ mode: 'provider', rate: null, pay: 0 });
-    expect(Number((await snapshot(recs[0]!.id)).holiday_pay_pence)).toBe(rolledUpHolidayPayPence(recs[0]!.amountPence, 1207));
-  });
-
-  it('runs: prepare back-fills a record with no snapshot at the CURRENT setting; view and CSV show each line; a finalised run never changes', async () => {
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 1250 })).status).toBe(200);
+  it('runs: view and CSV show each frozen line; a finalised run never changes (late lines refused by the database, setting changes ignored)', async () => {
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-provider').set(auth(await fresh(a)))).status).toBe(200);
     recs.push(await approvedRecordFor(2));
-    // Simulate a record approved before holiday pay existed: remove its snapshot (fixture write, superuser).
-    await adminDataSource.query(`DELETE FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recs[2]!.id]);
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 1000 })).status).toBe(200);
-
-    const list = (await http().get('/rest/v1/payroll/runs').set(auth(tokenA))).body.periods;
-    const period = list.find((p: { period: { start: string } }) => p.period.start === periodStart).period;
-    const prepared = await http().post('/rest/v1/payroll/runs/prepare').set(auth(tokenA)).send({ periodId: period.id });
-    expect(prepared.status).toBe(200);
-    const expected = [rolledUpHolidayPayPence(recs[0]!.amountPence, 1207), 0, rolledUpHolidayPayPence(recs[2]!.amountPence, 1000)];
-    const s2 = await snapshot(recs[2]!.id);
-    expect({ rate: s2.rate_bps, pay: Number(s2.holiday_pay_pence), by: s2.created_by }).toEqual({ rate: 1000, pay: expected[2], by: a.userId });
+    expect(Number((await snapshot(recs[2]!.id)).holiday_pay_pence)).toBe(0);
+    // Earlier frozen figures never move when the setting changes.
+    expect(Number((await snapshot(recs[1]!.id)).holiday_pay_pence)).toBe(rolledUpHolidayPayPence(recs[1]!.amountPence, 1207));
+    const prepared = await prepare();
+    expect(prepared.backfilled).toBe(0);
+    const expected = [rolledUpHolidayPayPence(recs[0]!.amountPence, 1207), rolledUpHolidayPayPence(recs[1]!.amountPence, 1207), 0];
     const row = (i: number) => prepared.body.staff.find((s: { staffProfileId: string }) => s.staffProfileId === staff[i]!.profileId);
     for (let i = 0; i < 3; i++) {
       expect(row(i)).toMatchObject({ grossPence: recs[i]!.amountPence, holidayPayPence: expected[i], totalPence: recs[i]!.amountPence + expected[i]! });
     }
     expect(prepared.body.totals.holidayPayPence).toBe(expected.reduce((x, y) => x + y, 0));
-    const csv = await http().get(`/rest/v1/payroll/runs/${prepared.body.id}/export`).set(auth(tokenA));
+    const csv = await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenA));
     expect((csv.text as string).split('\n')[0]).toContain('Gross (GBP),Holiday pay (GBP)');
-    expect(csv.text).toContain(`,${(expected[0]! / 100).toFixed(2)},`);
 
-    expect((await http().post(`/rest/v1/payroll/runs/${prepared.body.id}/finalise`).set(auth(await fresh(c)))).status).toBe(200);
-    const before = (await http().get(`/rest/v1/payroll/runs/${prepared.body.id}`).set(auth(tokenA))).body;
-    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 1207 })).status).toBe(200);
-    const after = (await http().get(`/rest/v1/payroll/runs/${prepared.body.id}`).set(auth(tokenA))).body;
+    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await fresh(c)))).status).toBe(200);
+    const before = (await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenA))).body;
+    // Review fix 2: a holiday line for a record of the finalised run is refused by the database (runtime owner login, 42501).
+    await unfreeze(recs[2]!.id);
+    await expect(asUser(c.userId,
+      `INSERT INTO core.payroll_record_holiday_pay (organisation_id, workspace_id, payroll_record_id, staff_profile_id, staff_user_id, mode, rate_bps, base_pence, holiday_pay_pence, created_by)
+       VALUES ($1, $2, $3, $4, $5, 'rolled_up', 10000, $6, $6, $7)`, [orgId, a.workspaceId, recs[2]!.id, staff[2]!.profileId, staff[2]!.userId, recs[2]!.amountPence, c.userId])).rejects.toMatchObject({ code: '42501' });
+    expect((await http().post('/rest/v1/payroll/settings/holiday-pay/use-rolled-up-rate').set(auth(await fresh(a))).send({ rateBps: 10000 })).status).toBe(200);
+    const after = (await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenA))).body;
     expect(after.totals).toEqual(before.totals);
     expect(after.staff.map((s: { holidayPayPence: number }) => s.holidayPayPence)).toEqual(before.staff.map((s: { holidayPayPence: number }) => s.holidayPayPence));
   });
 
   it('staff payslip timeline: their own holiday pay line and total; never another person\'s', async () => {
-    const mine = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[0]!));
+    const mine = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[1]!));
     expect(mine.status).toBe(200);
     const entry = mine.body.data.find((e: { period: { start: string } }) => e.period.start === periodStart);
-    const hp = rolledUpHolidayPayPence(recs[0]!.amountPence, 1207);
-    expect(entry).toMatchObject({ grossPence: recs[0]!.amountPence, holidayPayPence: hp, totalPence: recs[0]!.amountPence + hp });
-    const provider = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[1]!));
+    const hp = rolledUpHolidayPayPence(recs[1]!.amountPence, 1207);
+    expect(entry).toMatchObject({ grossPence: recs[1]!.amountPence, holidayPayPence: hp, totalPence: recs[1]!.amountPence + hp });
+    const provider = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[2]!));
     expect(provider.body.data.find((e: { period: { start: string } }) => e.period.start === periodStart)).toMatchObject({ holidayPayPence: 0 });
-    expect((await dataSource.query(`SELECT count(*)::int AS n FROM core.payroll_record_holiday_pay`))[0].n).toBe(0);
+    for (const t of ['organisation_payroll_setting', 'payroll_record_holiday_pay']) {
+      expect((await dataSource.query(`SELECT count(*)::int AS n FROM core.${t}`))[0].n).toBe(0);
+    }
   });
 });

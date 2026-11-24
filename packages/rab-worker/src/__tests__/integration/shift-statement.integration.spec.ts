@@ -217,12 +217,12 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect(lastHtml).toContain('Adolphus Recruitment');
     expect(lastHtml).toMatch(/Verified payable hours/);
     expect(lastHtml).not.toMatch(/payslip<\/|Net pay/i);
-    // Owner decision 4: the approval froze rolled-up holiday pay at the A3 default (no setting stored = 12.07%); the
-    // Worker reads that frozen row and itemises it as its own line, then the total including it.
-    const [hp] = await adminDataSource.query(`SELECT mode, rate_bps FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recordId]);
-    expect(hp).toEqual({ mode: 'rolled_up', rate_bps: 1207 });
-    expect(lastHtml).toContain('Rolled-up holiday pay (12.07%)');
-    expect(lastHtml).toContain('Approved gross including holiday pay');
+    // Owner decision 4, fail-safe default (review fix 3): with no holiday-pay setting stored the approval froze a zero
+    // "provider" line, so the Worker prints NO holiday line (the itemised line itself is covered by the view-model spec).
+    const [hp] = await adminDataSource.query(`SELECT mode, rate_bps, holiday_pay_pence FROM core.payroll_record_holiday_pay WHERE payroll_record_id = $1`, [recordId]);
+    expect(hp).toEqual({ mode: 'provider', rate_bps: null, holiday_pay_pence: '0' });
+    expect(lastHtml).not.toContain('Rolled-up holiday pay');
+    expect(lastHtml).toContain('Approved gross');
   });
 
   it('retries and duplicate deliveries are idempotent: no second file, notification or audit', async () => {

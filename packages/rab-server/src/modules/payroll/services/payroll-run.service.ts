@@ -265,11 +265,13 @@ export class PayrollRunService {
       const adjustmentsAdded = (await this.adjustments.includeInRun(m, ctx, run.id, periodId)).added;
       // Owner decision 4: every line of this (still prepared) run gets its frozen holiday pay. Records approved after holiday
       // pay shipped already have one (approval); older records get the organisation's CURRENT setting here (flagged).
+      // Review fix 3: back-filled ONLY when the organisation explicitly chose rolled-up; the count is audited.
       const unfrozen: Array<{ payroll_record_id: string }> = await m.query(
         `SELECT l.payroll_record_id FROM ${t.payroll_run_line} l
-          WHERE l.run_id = $1 AND NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h WHERE h.payroll_record_id = l.payroll_record_id)`, [run.id]);
-      await this.holidayPay.snapshotRecords(m, ctx, unfrozen.map((u) => u.payroll_record_id));
-      await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_PREPARED, { entityType: 'payroll_run', entityId: run.id, metadata: { periodId, linesAdded: added, lateLines: late, adjustmentsAdded } });
+          WHERE l.run_id = $1 AND NOT EXISTS (SELECT 1 FROM core.payroll_record_holiday_pay h
+            WHERE h.payroll_record_id = l.payroll_record_id AND h.organisation_id = $2 AND h.workspace_id = $3)`, [run.id, ctx.organisationId, ctx.workspaceId]);
+      const holidayBackfilled = await this.holidayPay.snapshotRecords(m, ctx, unfrozen.map((u) => u.payroll_record_id), 'backfill');
+      await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_PREPARED, { entityType: 'payroll_run', entityId: run.id, metadata: { periodId, linesAdded: added, lateLines: late, adjustmentsAdded, holidayBackfilled } });
       return this.policyView(m, ctx, run.id);
     });
   }
@@ -438,10 +440,12 @@ export class PayrollRunService {
       }
       // Owner decision 4: the frozen holiday pay of the caller's own lines, per run (RLS: their own snapshot rows).
       const holidayRows: Array<{ run_id: string; holiday: string }> = await m.query(
-        `SELECT l.run_id, sum(h.holiday_pay_pence)::text AS holiday FROM ${t.payroll_run_line} l
+        `SELECT l.run_id, (sum(h.holiday_pay_pence) FILTER (WHERE r.finalised_at IS NULL OR h.created_at <= r.finalised_at))::text AS holiday
+           FROM ${t.payroll_run_line} l JOIN ${t.payroll_run} r ON r.id = l.run_id
            JOIN core.payroll_record_holiday_pay h ON h.payroll_record_id = l.payroll_record_id AND h.staff_user_id = $3
+             AND h.organisation_id = l.organisation_id AND h.workspace_id = l.workspace_id
           WHERE l.staff_profile_id = $1 AND l.workspace_id = $2 GROUP BY l.run_id`, [profile.id, ctx.workspaceId, ctx.userId]);
-      const holidayByRun = new Map(holidayRows.map((h) => [h.run_id, assertSafePence(Number(h.holiday), 'payslip holiday pay')]));
+      const holidayByRun = new Map(holidayRows.map((h) => [h.run_id, assertSafePence(Number(h.holiday ?? 0), 'payslip holiday pay')]));
       const slips: Array<Record<string, unknown>> = await m.query(
         `SELECT ps.id, ps.run_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, d.file_id, d.uploaded_at,
                 (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id AND f.status = 'AVAILABLE') AS filename
@@ -564,11 +568,13 @@ export class PayrollRunService {
     const staff: Array<Record<string, unknown>> = await m.query(
       `SELECT l.staff_profile_id, u.first_name, u.last_name, sp.staff_ref, count(*)::int AS records, sum(l.worked_minutes)::int AS minutes,
               sum(l.amount_pence) AS gross, count(*) FILTER (WHERE l.late_approval)::int AS late,
-              COALESCE(sum(h.holiday_pay_pence), 0) AS holiday,
+              -- Review fix 2: a holiday line created after the run was finalised never counts (the DB also refuses it).
+              COALESCE(sum(h.holiday_pay_pence) FILTER (WHERE r.finalised_at IS NULL OR h.created_at <= r.finalised_at), 0) AS holiday,
               ps.id AS payslip_id, ps.version, ps.net_pence, ps.net_source, ps.paid_at, ps.payment_reference, d.file_id, d.uploaded_at,
               (SELECT f.original_filename FROM core.stored_file f WHERE f.id = d.file_id) AS filename
          FROM ${t.payroll_run_line} l JOIN ${t.staff_profile} sp ON sp.id = l.staff_profile_id JOIN core."user" u ON u.id = sp.user_id
-         LEFT JOIN core.payroll_record_holiday_pay h ON h.payroll_record_id = l.payroll_record_id
+         JOIN ${t.payroll_run} r ON r.id = l.run_id
+         LEFT JOIN core.payroll_record_holiday_pay h ON h.payroll_record_id = l.payroll_record_id AND h.organisation_id = l.organisation_id AND h.workspace_id = l.workspace_id
          LEFT JOIN ${t.payslip} ps ON ps.run_id = l.run_id AND ps.staff_profile_id = l.staff_profile_id
          LEFT JOIN ${t.payslip_document} d ON d.payslip_id = ps.id AND d.version = ps.version
         WHERE l.run_id = $1

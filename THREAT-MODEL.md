@@ -10557,7 +10557,7 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   it (rolled-up holiday pay is only lawful when itemised); "provider handles it" prints no line, exactly as before.
 - **Not chosen / trade-off:** a workspace table (owner decision 48's approach); a snapshot at record creation (the
   finaliser may be a Venue Manager, who must never write pay rows). Records approved before this feature have no row;
-  run prepare back-fills them at the CURRENT setting (flagged).
+  run prepare back-fills them at the CURRENT setting only under an explicit rolled-up choice (flagged; review fix 3).
 - **Tests:** `payroll-holiday-pay.integration.spec.ts` (zero rows without tenant context on both tables; default 12.07%;
   non-Initial manager, Venue Manager, other organisation 403; stale session STEP_UP_REQUIRED with nothing written;
   mass assignment 400; RLS WITH CHECK refusals; snapshot equals the shared function; UPDATE / DELETE refused; a figure
@@ -10568,3 +10568,12 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual / flagged for the owner:** decision 4's own caveat (rolled-up pay is lawful only for irregular-hours and
   part-year workers, leave years from 1 April 2024; to confirm with the payroll adviser); holiday pay is not added to
   adjustments; the provider's official payslip must itemise it too (outside Crewflow).
+- **Independent review fixes (24 Nov):** (2) a BEFORE INSERT guard (`core.payroll_record_holiday_pay_insert_guard()`)
+  refuses a holiday line for any payroll record a FINALISED run holds (the `finalised` fact of core.payroll_run_event,
+  same organisation and workspace) and sets created_at to the database clock; the run view and the staff timeline also
+  ignore lines created after the run's finalisation, so runs finalised before the facts existed cannot change either.
+  (3) FAIL-SAFE default: no settings row = "provider handles it"; an approval then freezes a zero provider line, and
+  run prepare back-fills pre-ship records ONLY when the organisation has explicitly chosen rolled-up (count audited as
+  `holidayBackfilled` on `payroll_run.prepared`); this follows owner decision 78's recommendation. (4b) UNIQUE per
+  (organisation, workspace, record) and a plain insert: a conflict throws, nothing is silently skipped. (1) holidayPayPence
+  follows the 'payroll_record' amount field at every depth.
