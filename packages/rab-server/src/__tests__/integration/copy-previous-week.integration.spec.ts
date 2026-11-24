@@ -152,6 +152,21 @@ describeIfDb('Copy previous week (integration)', () => {
     expect(again.rows.every((r) => r.outcome === 'skip' && r.reason === 'already_exists')).toBe(true);
   });
 
+  it('decision 39: a row whose role has no pay rate is skipped as no_pay_rate in preview and confirm; the rest is created', async () => {
+    const weekStart = nextWeek();
+    const unpricedRole = (await scheduling.createJobRole(ctxA, { name: `Unpriced ${randomUUID().slice(0, 6)}`, defaultRatePence: 0 } as never)).id;
+    // The source was priced by hand; its copy re-resolves the rate for the new date, and this role has none.
+    const unpriced = await scheduling.create(ctxA, { venueId, jobRoleId: unpricedRole, ...sourceWindow(weekStart, 1), requiredCount: 1, payRatePence: 1500 } as never);
+    const priced = await scheduling.create(ctxA, { venueId, jobRoleId, ...sourceWindow(weekStart, 2), requiredCount: 1 } as never);
+    const preview = await batch.previewCopyPreviousWeek(ctxA, { weekStart });
+    expect(preview.rows.find((r) => r.key === unpriced.id)).toMatchObject({ outcome: 'skip', reason: 'no_pay_rate' });
+    expect(preview.rows.find((r) => r.key === priced.id)).toMatchObject({ outcome: 'create' });
+    const result = await batch.copyPreviousWeek(ctxA, { weekStart });
+    expect(result.created.map((c) => c.key)).toEqual([priced.id]);
+    expect(result.rows.find((r) => r.key === unpriced.id)).toMatchObject({ outcome: 'skip', reason: 'no_pay_rate' });
+    expect(await shiftCount(ctxA, weekStart, addDays(weekStart, 7))).toBe(1);
+  });
+
   it('confirm with sourceShiftIds copies only those; others are reported not_selected', async () => {
     const weekStart = nextWeek();
     const keep = await scheduling.create(ctxA, { venueId, jobRoleId, ...sourceWindow(weekStart, 1), requiredCount: 1 } as never);

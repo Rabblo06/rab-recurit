@@ -143,6 +143,18 @@ describeIfDb('Recurring shift pattern (integration)', () => {
     expect(again.rows.every((r) => r.reason === 'already_exists')).toBe(true);
   });
 
+  it('decision 39: a pattern for a role with no pay rate previews every row as no_pay_rate and creates nothing, without failing', async () => {
+    const unpricedRole = (await scheduling.createJobRole(ctxA, { name: `Unpriced ${randomUUID().slice(0, 6)}`, defaultRatePence: 0 } as never)).id;
+    const def = pattern({ jobRoleId: unpricedRole });
+    const preview = await batch.previewShiftPattern(ctxA, def);
+    expect(preview.rows.length).toBeGreaterThan(0);
+    expect(preview.rows.every((r) => r.outcome === 'skip' && r.reason === 'no_pay_rate')).toBe(true);
+    const result = await batch.generateShiftPattern(ctxA, def);
+    expect(result.created).toEqual([]);
+    expect(result.recurrenceGroupId).toBeNull();
+    expect(await shiftCount(ctxA, def.startDate, addDays(def.endDate, 1))).toBe(0);
+  });
+
   it('confirm with dates creates only those occurrences', async () => {
     const def = pattern({ weekdays: ['Tuesday'] });
     const preview = await batch.previewShiftPattern(ctxA, def);

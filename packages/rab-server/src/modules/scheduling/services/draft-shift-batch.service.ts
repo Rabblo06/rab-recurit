@@ -165,7 +165,7 @@ export class DraftShiftBatchService {
       now: new Date(),
       selectedKeys,
     });
-    return { plan, timezone, window: { from: window.from, to: zonedInstant(addDays(def.endDate, 1), '00:00', timezone) } };
+    return { plan: await this.skipUnpricedTx(manager, plan), timezone, window: { from: window.from, to: zonedInstant(addDays(def.endDate, 1), '00:00', timezone) } };
   }
 
   private async planWeekCopyTx(
@@ -203,7 +203,32 @@ export class DraftShiftBatchService {
       now: new Date(),
       selectedKeys,
     });
-    return { plan, timezone, window: target };
+    return { plan: await this.skipUnpricedTx(manager, plan), timezone, window: target };
+  }
+
+  /**
+   * Owner decision 39 (no shift at £0): a row whose pay rate would resolve to £0 at its new date (no venue role rate in
+   * force and no job role default) is SKIPPED with `no_pay_rate`, so the preview says so and a confirm creates every
+   * other row instead of failing the whole batch on the one unpriced row. The rate is resolved with the same
+   * `resolvePayRate` the insert uses, so the plan and the write never disagree. Works whether `resolvePayRate` reports an
+   * unpriced role by returning 0 or by throwing PAY_RATE_REQUIRED (#349); any other error propagates.
+   */
+  private async skipUnpricedTx(manager: EntityManager, plan: PlannedDraft[]): Promise<PlannedDraft[]> {
+    const out: PlannedDraft[] = [];
+    for (const row of plan) {
+      if (row.outcome !== 'create') {
+        out.push(row);
+        continue;
+      }
+      let rate = 0;
+      try {
+        rate = await this.scheduling.resolvePayRate(manager, { venueId: row.venueId, jobRoleId: row.jobRoleId, startsAt: row.startsAt.toISOString() });
+      } catch (error) {
+        if (!isPayRateRequired(error)) throw error;
+      }
+      out.push(rate > 0 ? row : { ...row, outcome: 'skip', reason: 'no_pay_rate' });
+    }
+    return out;
   }
 
   /**
@@ -357,4 +382,9 @@ function targetFailure(error: unknown): TargetCheck {
     if (code === 'JOB_ROLE_ARCHIVED') return 'job_role_archived';
   }
   throw error;
+}
+
+/** The decision-39 refusal (`PAY_RATE_REQUIRED`, 409) as `resolvePayRate` throws it once #349 is in. */
+function isPayRateRequired(error: unknown): boolean {
+  return error instanceof ConflictException && (error.getResponse() as { code?: string })?.code === 'PAY_RATE_REQUIRED';
 }

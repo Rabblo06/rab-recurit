@@ -31,6 +31,7 @@ export const SKIP_REASON_TEXT: Record<string, string> = {
   starts_in_past: 'Would start in the past',
   invalid_local_time: 'That time doesn’t exist on this day (clock change)',
   break_too_long: 'Break is not shorter than the shift that day',
+  no_pay_rate: 'No pay rate for this role: set one first',
   venue_unavailable: 'Venue not available',
   venue_archived: 'Venue archived',
   job_role_unavailable: 'Job role not available',

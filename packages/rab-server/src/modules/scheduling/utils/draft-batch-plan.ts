@@ -43,6 +43,7 @@ export type DraftBatchSkipReason =
   | 'starts_in_past'
   | 'invalid_local_time'
   | 'break_too_long'
+  | 'no_pay_rate'
   | 'venue_unavailable'
   | 'venue_archived'
   | 'job_role_unavailable'
