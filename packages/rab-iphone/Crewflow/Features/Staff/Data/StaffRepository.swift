@@ -82,19 +82,30 @@ struct StaffRepository {
         try await api.get("/attendance/me/shift/\(StaffPath.segment(shiftId))/check-in", as: StaffCheckInState.self)
     }
 
+    /// `Idempotency-Key` (DESIGN M4 D17) is sent ONLY when the tap may be
+    /// saved offline: the saved copy carries the same key, so the server never
+    /// applies the action twice. Offline mode is off everywhere, so today no
+    /// request carries it and every route behaves exactly as before.
+    static func options(_ base: RequestOptions, idempotencyKey: String?) -> RequestOptions {
+        guard let idempotencyKey else { return base }
+        var options = base
+        options.headers["Idempotency-Key"] = idempotencyKey
+        return options
+    }
+
     /// [TEST-DB] Idempotent: a repeat returns the original state.
-    func checkIn(_ body: StaffCheckInBody) async throws -> StaffCheckInState {
-        try await api.post("/attendance/check-in", body: body, options: .repeatSafeMutation, as: StaffCheckInState.self)
+    func checkIn(_ body: StaffCheckInBody, idempotencyKey: String? = nil) async throws -> StaffCheckInState {
+        try await api.post("/attendance/check-in", body: body, options: Self.options(.repeatSafeMutation, idempotencyKey: idempotencyKey), as: StaffCheckInState.self)
     }
 
     /// NOT replay-safe (a repeat is 409). Never auto-retried.
-    func clockIn(_ body: StaffClockInBody) async throws -> StaffAttendanceSummary {
-        try await api.post("/attendance/clock-in", body: body, options: Self.nonRepeatable, as: StaffAttendanceSummary.self)
+    func clockIn(_ body: StaffClockInBody, idempotencyKey: String? = nil) async throws -> StaffAttendanceSummary {
+        try await api.post("/attendance/clock-in", body: body, options: Self.options(Self.nonRepeatable, idempotencyKey: idempotencyKey), as: StaffAttendanceSummary.self)
     }
 
     /// NOT replay-safe. Never auto-retried.
-    func clockOut(_ body: StaffClockOutBody) async throws -> StaffAttendanceSummary {
-        try await api.post("/attendance/clock-out", body: body, options: Self.nonRepeatable, as: StaffAttendanceSummary.self)
+    func clockOut(_ body: StaffClockOutBody, idempotencyKey: String? = nil) async throws -> StaffAttendanceSummary {
+        try await api.post("/attendance/clock-out", body: body, options: Self.options(Self.nonRepeatable, idempotencyKey: idempotencyKey), as: StaffAttendanceSummary.self)
     }
 
     /// `POST /attendance/me/sync` (docs/plans/m4-offline/DESIGN.md §7): the
