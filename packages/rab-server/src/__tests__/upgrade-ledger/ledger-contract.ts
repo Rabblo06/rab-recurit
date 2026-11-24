@@ -172,6 +172,8 @@ export interface UpgradeStartFactsLike {
   attribution: { kind: 'release'; release: string; beyond: string[]; remaining: number } | { kind: 'older' | 'unknown'; detail: string } | null;
   unrestrictedTarget: boolean;
   previousVersions?: readonly string[];
+  upgradeFrom?: Readonly<Record<string, readonly string[]>>;
+  minorReleaseResumable?: boolean;
 }
 
 /**
