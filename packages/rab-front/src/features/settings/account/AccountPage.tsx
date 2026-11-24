@@ -7,6 +7,7 @@ import {
 } from '@tabler/icons-react';
 import { hasReauthIntent } from '../security/reauthReturn';
 import SettingsHeaderActions from '../layout/SettingsHeaderActions';
+import NotificationsCard from './NotificationsCard';
 
 const unavailable =
   'Preview only — personal mailbox and calendar connections are not available in Crewflow yet.';
@@ -164,6 +165,12 @@ export default function AccountPage() {
     );
   return (
     <div className="settings-page account-settings">
+      {/* Kept from main: notification preferences (GET/PATCH /profile/notification-preferences). */}
+      <section className="settings-section">
+        <h3>Notifications</h3>
+        <p>Manage how and when you receive notifications.</p>
+        <NotificationsCard />
+      </section>
       <section className="settings-section">
         <h3>Connected accounts</h3>
         <p>Manage your email and calendar accounts.</p>

@@ -278,7 +278,7 @@ it('Team lists real workspace members from the paginated endpoint, showing the e
   expect(ada).not.toHaveTextContent('Active');
   expect(screen.getAllByText('new@example.test')).toHaveLength(2);
   expect(screen.queryByText(/Not signed in yet/)).not.toBeInTheDocument();
-  expect(get).toHaveBeenCalledWith('/members/directory?page=1&limit=25');
+  expect(get).toHaveBeenCalledWith('/members?page=1&limit=25'); // directories are a follow-up (SQL); the existing list is used
   expect(screen.getByText(/Page 1 of 3/)).toBeInTheDocument();
 });
 
@@ -367,11 +367,20 @@ describe('owner correction 2026-10-23: organisations start from Members → Add 
     await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/organisation-invitations/oi-1/revoke', {}));
   });
 
-  it('Team shows only the member directory for platform administrators', async () => {
-    mount({ ...PLATFORM_ONLY, tab: 'team' });
-    await screen.findByPlaceholderText('Search a team member...');
-    expect(screen.queryByText('Acme')).toBeNull();
-    expect(get.mock.calls.some(([url]) => String(url) === '/admin/organisations')).toBe(false);
+  it('Team for a platform administrator keeps the organisations panel from main and opens the shell drawer; no creation control', async () => {
+    const opened: string[] = [];
+    const listener = (e: Event) => opened.push((e as CustomEvent<{ id: string }>).detail.id);
+    document.addEventListener('open-admin-organisation', listener);
+    try {
+      mount({ ...PLATFORM_ONLY, tab: 'team' });
+      await screen.findByPlaceholderText('Search a team member...');
+      fireEvent.click(await screen.findByText('Acme'));
+      expect(opened).toEqual(['org-1']);
+      expect(screen.queryByRole('button', { name: /new organisation/i })).toBeNull();
+      expect(get.mock.calls.some(([url]) => String(url).startsWith('/admin/users/directory'))).toBe(false);
+    } finally {
+      document.removeEventListener('open-admin-organisation', listener);
+    }
   });
 
   it('a platform administrator who also owns a workspace lands on Add organisation by default and can switch to member invitations', async () => {
@@ -401,7 +410,7 @@ it('opens member information and linked roles without mutating membership', asyn
   expect(screen.getByLabelText('First name')).toHaveValue('Ada');
   expect(screen.getByLabelText('First name')).toHaveAttribute('readonly');
   fireEvent.click(within(screen.getByRole('navigation', { name: 'Member details' })).getByRole('button', { name: 'Permissions' }));
-  expect(await screen.findByText('Supervisor')).toBeInTheDocument();
+  expect((await screen.findAllByText('Supervisor')).length).toBeGreaterThan(0);
   expect(patch).not.toHaveBeenCalled();
   expect(post).not.toHaveBeenCalled();
 });

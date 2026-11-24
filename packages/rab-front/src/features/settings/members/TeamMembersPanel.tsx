@@ -76,15 +76,9 @@ export default function TeamMembersPanel({ action, onDetailChange, platformAdmin
   }, [search]);
   const members = useQuery<{ data: MemberListItem[]; total: number }>({
     queryKey: ['members', identity, platformAdmin, debounced, page],
-    queryFn: async () => {
-      const query = `?page=${page}&limit=${PAGE_SIZE}${debounced ? `&search=${encodeURIComponent(debounced)}` : ''}`;
-      if (!platformAdmin) {
-        const { data } = await api.get<{ data: Array<Pick<MemberListItem, 'userId' | 'firstName' | 'lastName' | 'email'>>; total: number }>(`/members/directory${query}`);
-        return { ...data, data: data.data.map(row => ({ ...row, roles: [], status: 'active' as const, isOwner: false, isSelf: row.userId === identity.split(':')[0] })) };
-      }
-      const { data } = await api.get<{ data: Array<{ id: string; userId: string | null; kind: string; firstName: string; lastName: string; email: string; status: MemberListItem['status']; organisationName: string | null }>; total: number }>(`/admin/users/directory${query}`);
-      return { total: data.total, data: data.data.map(row => ({ userId: row.id, accountId: row.userId ?? undefined, directoryKind: row.kind, firstName: row.firstName, lastName: row.lastName, email: row.email, status: row.status, organisationName: row.organisationName ?? undefined, roles: [], isOwner: false, isSelf: row.userId === identity.split(':')[0] })) };
-    },
+    // The workspace member list (GET /members, role.view). The new UI's directories (members/directory, admin/users/
+    // directory) need the AdminMemberDirectory SQL, which is a follow-up PR; until then every viewer sees this list.
+    queryFn: async () => (await api.get<{ data: MemberListItem[]; total: number }>(`/members?page=${page}&limit=${PAGE_SIZE}${debounced ? `&search=${encodeURIComponent(debounced)}` : ''}`)).data,
   });
   const totalPages = Math.max(1, Math.ceil((members.data?.total ?? 0) / PAGE_SIZE));
   const qc = useQueryClient();
@@ -167,7 +161,7 @@ export default function TeamMembersPanel({ action, onDetailChange, platformAdmin
 
   return <>
     <MembersBreadcrumb />
-    <div className="member-section-heading"><h3>Members</h3><p>{platformAdmin ? "Users and invitations across all organisations." : "Members of your workspace."}</p></div>
+    <div className="member-section-heading"><h3>Members</h3><p>Members of your workspace.</p></div>
     <div className="members-toolbar"><TableSearchInput value={search} onChange={setSearch} placeholder="Search a team member..." />{action}</div>
     {members.isError ? (
       <p role="alert" className="member-error">Members could not be loaded. <button className="btn btn-outline" onClick={() => members.refetch()}>Retry</button></p>

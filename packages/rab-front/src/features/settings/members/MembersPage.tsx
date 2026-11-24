@@ -10,6 +10,7 @@ import InviteMembersPanel from './InviteMembersPanel';
 import LeadershipAddPanel from './LeadershipAddPanel';
 import MembersBreadcrumb from './MembersBreadcrumb';
 import TeamMembersPanel from './TeamMembersPanel';
+import OrganisationsPanel from './OrganisationsPanel';
 import { useLeadershipCapabilities } from './leadershipCapabilities';
 import StaffSelect from '../../users/StaffSelect';
 import './invite-members.css';
@@ -89,7 +90,12 @@ export default function MembersPage() {
     </section>}
 
     {tab === 'roles' ? <WorkspaceRolesPage embedded /> : tab === 'team' ? (
-      <TeamMembersPanel key={`${me.id}:${me.workspaceId ?? ""}`} identity={`${me.id}:${me.workspaceId ?? ""}`} platformAdmin={me.isPlatformAdmin} action={null} onDetailChange={setMemberOpen} />
+      <>
+        <TeamMembersPanel key={`${me.id}:${me.workspaceId ?? ""}`} identity={`${me.id}:${me.workspaceId ?? ""}`} platformAdmin={me.isPlatformAdmin} action={null} onDetailChange={setMemberOpen} />
+        {/* Kept from main (owner correction 2026-10-23): the organisations a platform administrator manages (settings, CEO
+            invitation, two-factor reset). The new UI's cross-organisation directory replaces it only once that SQL lands. */}
+        {me.isPlatformAdmin && <OrganisationsPanel />}
+      </>
     ) : effectiveMode === 'add' ? (
       <LeadershipAddPanel capabilities={leadership} />
     ) : canInvite ? <InviteMembersPanel workspaceName={workspace?.name} onCreateRole={() => switchTab('roles')} /> : <>
