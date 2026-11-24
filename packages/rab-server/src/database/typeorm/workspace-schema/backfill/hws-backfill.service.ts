@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { SchemaResolverService, WorkspaceRoutingError } from '../../../../engine/core-modules/tenant/schema-resolver.service';
+import { TenantContextService } from '../../../../engine/core-modules/tenant/tenant-context.service';
 import { WORKSPACE_TABLES } from '../provision-workspace-schema';
 import { WORKSPACE_TABLE_COPY_ORDER } from './fk-graph';
 import { PRIVILEGED_COPY_AUDIT_ACTION, PRIVILEGED_COPY_ORDER } from './privileged-copy';
@@ -143,8 +144,9 @@ export class HwsBackfillError extends Error {
 /**
  * HWS backfill engine (Parts 2-19 of the backfill brief). Runs entirely as `crewflow` (the runtime role since the Crewflow single-credential cutover) — no
  * `rab_owner` connection anywhere in this class. Two deliberately-separate transaction helpers,
- * neither of which goes through `TenantContextService`, because this tool's job is explicitly NOT
- * subject to `HWS_RUNTIME_ENABLED`'s current value in whatever environment it runs:
+ * neither of which goes through `TenantContextService`'s transaction entry points (runInTenantContext /
+ * runInWorkspaceContext), because this tool's job is explicitly NOT subject to `HWS_RUNTIME_ENABLED`'s current value in
+ * whatever environment it runs (the read identity GUCs ARE bound through its `bindCoreIdentityGucs`, see `bindReadIdentity`):
  *   - `readCore` always binds `search_path = 'core'` — the backfill SOURCE is categorically the
  *     legacy table, regardless of global routing mode.
  *   - `writePhysical` always resolves and binds the workspace's PHYSICAL schema via
@@ -189,6 +191,8 @@ export class HwsBackfillService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly schemaResolver: SchemaResolverService,
+    /** The trusted GUC binder (bindCoreIdentityGucs): the read identity, worker marker included, is bound only through it. */
+    private readonly tenantContext: TenantContextService,
   ) {}
 
   // ---------------------------------------------------------------- discovery
@@ -246,16 +250,20 @@ export class HwsBackfillService {
    * 0 rows, so 15 rows were silently never copied and the old verify passed. Every policy here is PERMISSIVE (none is
    * RESTRICTIVE — checked), so binding the owner can only ADD visibility, never hide a row. No policy, grant or GUC
    * semantics change. The true count is still cross-checked against the privileged census in `verifyTable`.
+   *
+   * Bound through TenantContextService.bindCoreIdentityGucs (the one binding statement every tenant context uses, with its
+   * RESET ROLE + current_user = session_user check), never a raw set_config of rab.actor_type here
+   * (worker-actor-type-trusted-only.spec.ts). Same values as before: organisation + workspace, no user and no role first
+   * (the owner lookup below), then the same with the owner as rab.user_id; the binder also resets the four optional scope
+   * GUCs (team_shift_id, team_staff_id, admin_scope, upgrade_scope) to '' and sets no search_path (the callers set it).
    */
   private async bindReadIdentity(manager: EntityManager, ctx: WorkspaceCandidate): Promise<void> {
-    await manager.query(
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', '', true), set_config('rab.role', '', true), set_config('rab.actor_type', 'worker', true)`,
-      [ctx.organisationId, ctx.workspaceId],
-    );
+    const readIdentity = (userId: string) => ({ organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId, role: '', actorType: 'worker' as const });
+    await this.tenantContext.bindCoreIdentityGucs(manager, readIdentity(''));
     // Visible through manager_workspace_member (`id = current_workspace()`), bound just above.
     const [owner] = await manager.query<Array<{ owner_user_id: string }>>(`SELECT owner_user_id FROM core.manager_workspace WHERE id = $1`, [ctx.workspaceId]);
     if (!owner) throw new HwsBackfillError(`workspace ${ctx.workspaceId}: no core.manager_workspace row found — cannot determine its owning manager.`);
-    await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [owner.owner_user_id]);
+    await this.tenantContext.bindCoreIdentityGucs(manager, readIdentity(owner.owner_user_id));
   }
 
   /** Source rows (core) for `table` as canonical jsonb text. user_note gets the mapped workspace_id merged in by the caller. */

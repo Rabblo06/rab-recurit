@@ -19,9 +19,8 @@ import { PlatformAdminService } from '../../../engine/core-modules/platform-admi
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { AccountInvite } from '../../identity/entities/account-invite.entity';
 import { ManagerWorkspaceService } from '../../manager-workspace/services/manager-workspace.service';
-import { EmailOutbox, Organisation, User } from '../../identity/entities';
+import { AccountInvite, EmailOutbox, Organisation, User } from '../../identity/entities';
 import { ManagerProfile } from '../entities/manager-profile.entity';
 import { InviteInitialManagerDto } from '../dto/invite-initial-manager.dto';
 import { ReplaceInitialManagerDto } from '../dto/replace-initial-manager.dto';

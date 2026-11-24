@@ -18,6 +18,7 @@ import {
   UnsupportedPostgresVersionError,
   workspaceFingerprintMajor,
   workspaceFingerprintMajorSelected,
+  WorkspaceFingerprintMajorNotSelectedError,
 } from '../../../workspace-schema/v1/expected-fingerprints';
 import { approvalDecision, selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, OWNER_LOGIN, RoleFacts, roleShapeProblems } from './bootstrap';
@@ -267,7 +268,15 @@ describe('D3(b) ROW_COPY shim: exactly three migrations, exact windows, physical
 
 describe('D4: workspace fingerprints selected by server major; PG16 unchanged', () => {
   afterEach(() => resetWorkspaceFingerprintSelectionForTests());
-  it('nothing selected = the unchanged PostgreSQL 16 table', () => {
+  it('nothing selected: every read throws WorkspaceFingerprintMajorNotSelectedError (no silent PostgreSQL 16 default); 16 selected = the unchanged PostgreSQL 16 table', () => {
+    resetWorkspaceFingerprintSelectionForTests();
+    expect(workspaceFingerprintMajorSelected()).toBe(false);
+    expect(() => workspaceFingerprintMajor()).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+    expect(() => workspaceFingerprintMajor()).toThrow(/before this process selected its PostgreSQL major/);
+    expect(() => EXPECTED_WORKSPACE_FINGERPRINTS[19]).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+    expect(() => Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+    expect(new WorkspaceFingerprintMajorNotSelectedError().name).toBe('WorkspaceFingerprintMajorNotSelectedError');
+    selectWorkspaceFingerprintMajor(16);
     expect(workspaceFingerprintMajor()).toBe(16);
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3');
     expect(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toEqual(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS_PG16));
