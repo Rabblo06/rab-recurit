@@ -125,6 +125,10 @@ export const NO_CUSTOM_FIELD_TABLES: readonly string[] = Object.freeze([
   'shift_report',
   'replacement_request',
   'user_note',
+  // Structure level 27 (owner decision 91, pending): breaks and sync receipts are pay evidence; ordinary locked standard
+  // objects (decision 45), never extended with custom fields.
+  'attendance_break',
+  'attendance_sync_receipt',
 ]);
 
 /** SELECT fields whose name says they are a state machine (S13): read-only everywhere. */
