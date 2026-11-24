@@ -23,7 +23,8 @@ import {
   POST_SHIFT_EXPIRED_MS,
   assertSafePence,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, Inject, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { ExpensiveActionRateLimitService } from '../../../engine/core-modules/rate-limit/expensive-action-rate-limit.service';
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
@@ -324,6 +325,11 @@ function throwIfEveryRecipientPastDeadline(results: BulkOfferResult['results']):
 
 @Injectable()
 export class OfferService {
+  /** §5.5 EXPENSIVE limiter for the multi-shift send (property-injected, so the constructor signature is unchanged). */
+  @Inject(ExpensiveActionRateLimitService)
+  private readonly expensiveLimit!: ExpensiveActionRateLimitService;
+  private readonly logger = new Logger(OfferService.name);
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
@@ -876,6 +882,8 @@ export class OfferService {
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND))) {
         throw new ForbiddenException('Sending offers is not permitted.');
       }
+      // §5.5 EXPENSIVE class (bulk scheduling): 10/min per user, 30/min per organisation; 429, or 503 if the limiter is down.
+      await this.expensiveLimit.admit('bulk-offer-send', { userId: ctx.userId, organisationId: ctx.organisationId! });
       const items = Array.isArray(dto?.items) ? dto.items : [];
       const shiftIds = items.map((item) => item?.shiftId);
       const total = items.reduce((sum, item) => sum + (Array.isArray(item?.staffProfileIds) ? item.staffProfileIds.length : 0), 0);
@@ -906,7 +914,7 @@ export class OfferService {
         try {
           shifts.set(shiftId, await this.loadSendableShift(manager, ctx, shiftId));
         } catch (error) {
-          for (const row of rows.filter((r) => r.shiftId === shiftId)) fail(row.shiftId, row.staffProfileId, errorMessage(error));
+          for (const row of rows.filter((r) => r.shiftId === shiftId)) fail(row.shiftId, row.staffProfileId, this.safeRowMessage(error));
         }
       }
       rejectIfAnyFailed();
@@ -936,7 +944,7 @@ export class OfferService {
             report.set(rowKey(shiftId, row.staffProfileId), { ...row, ok: true, offerId: offer.id });
           } catch (error) {
             await manager.query('ROLLBACK TO SAVEPOINT sp_multi_shift_send');
-            fail(shiftId, row.staffProfileId, errorMessage(error));
+            fail(shiftId, row.staffProfileId, this.safeRowMessage(error));
           }
         }
       }
@@ -950,6 +958,23 @@ export class OfferService {
       }
       return { batches, results: rows.map((r) => report.get(rowKey(r.shiftId, r.staffProfileId))!) };
     });
+  }
+
+  /**
+   * A per-row reason that is safe to show: the message of an HttpException this code threw on purpose (all plain,
+   * user-facing text). Anything else (a database error naming a constraint, a driver error) is logged server-side
+   * with a correlation id and shown only as a generic line carrying that id, so no schema detail leaves the server.
+   */
+  private safeRowMessage(error: unknown): string {
+    if (error instanceof HttpException) {
+      const response = error.getResponse();
+      const message = typeof response === 'object' && response !== null ? (response as { message?: unknown }).message : response;
+      if (typeof message === 'string' && message) return message;
+      if (Array.isArray(message) && typeof message[0] === 'string') return message[0];
+    }
+    const reference = randomUUID();
+    this.logger.error(`multi-shift send: unexpected per-row error (reference ${reference}): ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`);
+    return `This offer could not be sent (reference ${reference}).`;
   }
 
   /**

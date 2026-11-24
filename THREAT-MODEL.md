@@ -10533,3 +10533,12 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   unchanged; overlapping shifts for one person → 409, nothing sent; another manager's shift → "Shift not found.", nothing
   sent; OFFER_SEND revoked → service 403; organisationId / status / pay / kind / times in the body → 400; duplicate
   shifts → 400; a repeat send → 409); `MultiShiftOfferDialog.spec.tsx`.
+
+## Multi-shift offer send — security review nits fixed (branch feat/offers-multi-shift-send, 2026-11-24; no SQL)
+- **Fixed (independent review of #294):** (L) raw database errors (constraint names) could reach the per-row 409 report:
+  a row's reason is now only the message of an HttpException the code threw on purpose; anything else is logged with a
+  correlation id and shown as "This offer could not be sent (reference …)". (L) No throttle: the service debits the
+  EXPENSIVE class (`ExpensiveActionRateLimitService`, 10/min per user, 30/min per organisation, fail closed) and the
+  route carries a 10/min per-IP `@Throttle`. (I) The acknowledgement list now accepts up to 200 entries, matching the
+  200-offer batch cap (it inherited 100). New test: another organisation's shift and staff ids read exactly like
+  ids that do not exist, and nothing is sent.

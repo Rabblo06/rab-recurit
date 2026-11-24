@@ -198,6 +198,31 @@ describeIfDb('Multi-shift offer send (integration)', () => {
     expect(await offersOn(foreign)).toEqual([]);
   });
 
+  it('abuse: another organisation’s shift and staff read exactly like ids that do not exist (uniform not-found, nothing sent)', async () => {
+    const other = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'multisend-x' });
+    const x = other.managers[0]!;
+    const xVenue = (await app.get(VenueService).create(ctxOf(x), { name: `X ${randomUUID().slice(0, 6)}`, type: 'hotel' } as never)).id;
+    const xRole = (await scheduling.createJobRole(ctxOf(x), { name: `X ${randomUUID().slice(0, 6)}`, defaultRatePence: 1000 } as never)).id;
+    const xShift = await publishedShift(x, xVenue, xRole);
+    const xStaff = await factory.createStaff(other.organisation, { owner: x });
+    const mine = await publishedShift(a, venueId, jobRoleId);
+    const reasons = async (items: Array<{ shiftId: string; staffProfileIds: string[] }>) => {
+      const error = await offers.sendOffersToShifts(ctxA, { items }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      return ((error as ConflictException).getResponse() as { results: Array<{ shiftId: string; staffProfileId: string; message: string }> }).results;
+    };
+    const crossShift = await reasons([{ shiftId: xShift, staffProfileIds: [staff[0]!.profileId!] }]);
+    const unknownShift = await reasons([{ shiftId: randomUUID(), staffProfileIds: [staff[0]!.profileId!] }]);
+    expect(crossShift[0]!.message).toBe('Shift not found.');
+    expect(crossShift[0]!.message).toBe(unknownShift[0]!.message);
+    const crossStaff = await reasons([{ shiftId: mine, staffProfileIds: [xStaff.profileId!] }]);
+    const unknownStaff = await reasons([{ shiftId: mine, staffProfileIds: [randomUUID()] }]);
+    expect(crossStaff[0]!.message).toBe(unknownStaff[0]!.message);
+    expect(crossStaff[0]!.message).not.toMatch(/constraint|violates|relation|column/i);
+    expect(await offersOn(mine)).toEqual([]);
+    expect(await offersOn(xShift)).toEqual([]);
+  });
+
   it('abuse: OFFER_SEND revoked → the SERVICE refuses with 403 and writes nothing', async () => {
     const s1 = await publishedShift(a, venueId, jobRoleId);
     await withRevoked(a, PermissionFlag.OFFER_SEND, async () => {
