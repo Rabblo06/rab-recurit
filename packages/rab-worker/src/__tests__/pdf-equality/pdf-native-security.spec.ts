@@ -23,7 +23,7 @@ import { chromiumUnavailable, loadNativeRenderer, Renderer } from './renderers';
  * `scratchpad/final/REPORT-agentB.md` (task 5) and in each test's name.
  *
  * Every case renders REAL documents (the harness fixtures, hostile ones included) through the PRODUCTION seam:
- * `renderReportPdf(doc, { PDF_RENDERER: 'native' })` → `renderNativePdf` (view-model built in the jobs process) →
+ * `renderReportPdf(doc)` → `renderNativePdf` (view-model built in the jobs process) →
  * `renderInPool`. That last call is routed (jest.spyOn) to a `NativeRenderPool` of the same class, with the production
  * document registry and the production thread entry, created here with `allowProbe: true` so its thread can report what
  * it saw: its environment, the modules and globals its guard refused, and the network builtins it loaded. Production

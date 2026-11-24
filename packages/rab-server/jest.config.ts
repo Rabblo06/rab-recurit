@@ -2,7 +2,12 @@ export default {
   displayName: 'rab-server',
   preset: '../../jest.preset.js',
   transform: {
-    '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json' }],
+    // CI audit 2026-11-12 (S3): `isolatedModules: true`, i.e. transpile only, exactly as rab-worker's jest.config.ts.
+    // Type-safety is `rab-server:lint`'s job: `tsc --noEmit` over BOTH tsconfig.app.json and tsconfig.spec.json
+    // (project.json), which ci-server runs before the suites. Full ts-jest type-checking re-checked the app while loading
+    // the first test file of every run (about 135 s of a cold first file) and part of every AppModule file after it. The
+    // emitted code is what the server already runs on (`ts-node --transpile-only`), decorator metadata included.
+    '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json', isolatedModules: true }],
   },
   moduleFileExtensions: ['ts', 'js', 'html'],
   // Fails the whole run before any fixture is written unless TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL (or its deprecated

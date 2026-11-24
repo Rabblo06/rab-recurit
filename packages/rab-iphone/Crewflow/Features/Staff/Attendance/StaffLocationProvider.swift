@@ -14,6 +14,8 @@ struct StaffRawFix: Equatable {
     let longitude: Double
     let horizontalAccuracy: Double
     let timestamp: Date
+    /// `CLLocationSourceInformation.isSimulatedBySoftware` (iOS 15+).
+    var simulated: Bool = false
 }
 
 /// One-shot, when-in-use location for Check In / Clock In / Clock Out.
@@ -108,7 +110,8 @@ final class StaffCoreLocationProvider: NSObject, CLLocationManagerDelegate, Staf
             latitude: location.coordinate.latitude,
             longitude: location.coordinate.longitude,
             horizontalAccuracy: location.horizontalAccuracy,
-            timestamp: location.timestamp
+            timestamp: location.timestamp,
+            simulated: location.sourceInformation?.isSimulatedBySoftware ?? false
         ))
     }
 

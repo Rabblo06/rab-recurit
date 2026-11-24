@@ -20,7 +20,11 @@
 #
 # Rate limits are REAL (login/refresh 5 per minute per IP, the per-(email, IP) login limiter) and are never relaxed here.
 # Every spec paces its own calls; before each spec file the runner waits out the throttle window (E2E_LIVE_COOLDOWN_SECONDS,
-# default 65) so the warm-up's or the previous file's calls never count against the next file's budget.
+# default 65) so the previous file's calls never count against the next file's budget. The FIRST spec on a freshly started
+# stack waits E2E_LIVE_FIRST_COOLDOWN_SECONDS (default 0; CI audit S4): nothing has called that stack's API yet (the seed
+# runs before the API starts and uses its own Redis logical database, and live/warm-up.mjs answers every API request
+# in the browser), and each stack's throttle counters live in its own Redis logical database. A local re-run against a
+# Redis that a run used less than a minute ago should set E2E_LIVE_FIRST_COOLDOWN_SECONDS=65.
 #
 # Exits non-zero when any spec fails or any piece of the stack does not start. Prints no secret.
 set -uo pipefail
@@ -52,6 +56,7 @@ export E2E_QA_API_PORT="${E2E_QA_API_PORT:-3999}" E2E_QA_WEB_PORT="${E2E_QA_WEB_
 export E2E_API_ORIGIN="http://127.0.0.1:${E2E_API_PORT}" E2E_WEB_ORIGIN="http://127.0.0.1:${E2E_WEB_PORT}"
 export E2E_QA_API_ORIGIN="http://127.0.0.1:${E2E_QA_API_PORT}" E2E_QA_WEB_ORIGIN="http://127.0.0.1:${E2E_QA_WEB_PORT}"
 COOLDOWN="${E2E_LIVE_COOLDOWN_SECONDS:-65}"
+FIRST_COOLDOWN="${E2E_LIVE_FIRST_COOLDOWN_SECONDS:-0}"
 
 # Loopback databases and Redis only: never a remote host.
 for v in TEST_DATABASE_URL TEST_DATABASE_ADMIN_URL REDIS_URL; do
@@ -121,9 +126,13 @@ stop_stack() {
   PIDS=()
   for p in "$@"; do for _ in $(seq 1 30); do port_free "$p" && break; sleep 1; done; done
 }
-run_spec() { # spec
-  echo "[e2e-live] waiting ${COOLDOWN}s for the auth throttle window before $1"
-  sleep "$COOLDOWN"
+run_spec() { # spec cooldown_seconds
+  if [ "$2" -gt 0 ]; then
+    echo "[e2e-live] waiting ${2}s for the auth throttle window before $1"
+    sleep "$2"
+  else
+    echo "[e2e-live] no cooldown before $1: first spec on a freshly started stack, whose API nothing has called yet"
+  fi
   echo "[e2e-live] ---- $1"
   # The Playwright process gets no database URL, bootstrap password or app secret. One spec does read the database:
   # devices-sessions-live counts a QA user's usable sessions with `docker exec <E2E_DB_CONTAINER> psql -U <E2E_DB_USER>`,
@@ -161,9 +170,11 @@ for stack in console qa; do
   wait_for "$web/" "web-$stack"
   grep -h '\[runtime-db-guard\]' "$WORK/api-$stack.log" | sed -E 's/ cluster=[0-9]+//'
   (cd "$E2E_DIR" && node live/warm-up.mjs "$web") || { echo "[e2e-live] the $stack console never rendered its sign-in screen"; tail -40 "$WORK/web-$stack.log"; exit 1; }
+  wait_s="$FIRST_COOLDOWN"
   for spec in "${specs[@]}"; do
     ran=$((ran + 1))
-    run_spec "$spec" || failed+=("$spec")
+    run_spec "$spec" "$wait_s" || failed+=("$spec")
+    wait_s="$COOLDOWN"
   done
   stop_stack "$api_port" "$web_port"
 done
