@@ -6,10 +6,6 @@
     "rows in the same PR. Never raise a count; import through the owning surface instead."
   ],
   "rules": {
-    "engine-to-modules": {
-      "packages/rab-server/src/engine/core-modules/entity-cache/core-entity-cache.service.ts": 3,
-      "packages/rab-server/src/engine/core-modules/resource-scope/resource-scope.service.ts": 1
-    },
     "worker-deep-import": {
       "packages/rab-worker/src/core/database/scoped-job.ts": 1,
       "packages/rab-worker/src/core/database/workspace-discovery.ts": 1,
