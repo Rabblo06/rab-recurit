@@ -10520,15 +10520,19 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
     (`insertNewShiftTx`: create, the AI draft proposal, create-and-send, the batch builders; and the Venue Manager request
     `submitRequest`) refuses a resolved rate of £0 — an explicit 0, a 0 venue rate and a 0 / missing default included — with
     409 `PAY_RATE_REQUIRED` ("Set a pay rate for this role first."), inside the same transaction (nothing is inserted).
-    `publish` and `approveShiftRequest` refuse a stored £0 rate (drafts and requests created before the rule).
+    `publish` and `approveShiftRequest` refuse a stored £0 rate (drafts and requests created before the rule), and so do
+    `OfferService.sendOne` (every send path, replacement and standby included) and `applyOfferConfirmation` (the refusal
+    rolls the seat / offer claims back), so a shift priced at £0 before the rule is never offered or confirmed at £0.
   - *A rate applied on the wrong day* (decision 40): the period comparison now uses the shift start's calendar date in
     the organisation's time zone (`core.organisation.timezone`, computed by PostgreSQL), both ends inclusive, instead of
     an implicit cast of the UTC instant. A rate ending on day D applies to a shift starting any time on D (organisation-
     local); 23:30 UTC is the next day in a UTC+1 organisation.
   - Inputs: the start instant is bound as a parameter; the time zone comes from the bound organisation's row
     (`core.current_org()`), never from the client.
-- **Residual:** an invalid stored time zone makes the lookup error (fail closed; validation of the column is #251). Existing
-  £0 seats or confirmed snapshots are not changed (never recalculated).
+- **Residual:** an invalid stored time zone makes the lookup error, and so does a missing organisation row (no tenant
+  context): fail closed, never a guessed zone (column validation is #251). Existing £0 confirmed snapshots are not changed
+  (never recalculated). Follow-up (not in this PR): `shift_pay_rate_pence_check` (`>= 0`) becomes `> 0 NOT VALID` with the
+  workspace structure work.
 - **Tests:** `resolve-pay-rate.spec.ts` (every precedence level, the £0 refusal at each level, the organisation-local date
   query), `resolve-pay-rate.integration.spec.ts` (create service + HTTP 409, create-and-send, publish of a £0 draft,
   inclusive end date, UTC+1 organisation, snapshot never recalculated).

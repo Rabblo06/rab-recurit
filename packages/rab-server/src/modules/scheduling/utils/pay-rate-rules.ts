@@ -28,15 +28,16 @@ export function assertPayRateSet(payRatePence: number | null | undefined): numbe
  * in the time zone of the organisation bound to this transaction (core.current_org()), computed by PostgreSQL's time-zone
  * database. Every rate lookup compares `effective_from <= day AND (effective_to IS NULL OR effective_to >= day)`, so a rate
  * ending on day D applies to a shift starting at any time on D (organisation-local).
- * The same fallback as the rest of the codebase ('Europe/London') applies only when no organisation row is visible.
+ * Fail closed: when no organisation row is visible (no tenant context bound, or RLS hides it) this THROWS — a rate is never
+ * judged in a guessed time zone.
  */
 export async function organisationLocalDate(manager: EntityManager, instant: Date | string): Promise<string> {
   const at = new Date(instant);
   if (!Number.isFinite(at.getTime())) throw new Error('organisationLocalDate: invalid instant');
-  const [row] = (await manager.query(
-    `SELECT to_char($1::timestamptz AT TIME ZONE coalesce((SELECT o.timezone FROM core.organisation o WHERE o.id = core.current_org()), 'Europe/London'), 'YYYY-MM-DD') AS day`,
+  const rows = (await manager.query(
+    `SELECT to_char($1::timestamptz AT TIME ZONE o.timezone, 'YYYY-MM-DD') AS day FROM core.organisation o WHERE o.id = core.current_org()`,
     [at.toISOString()],
-  )) as Array<{ day: string }>;
-  if (!row?.day) throw new Error('organisationLocalDate: no date');
-  return row.day;
+  )) as Array<{ day: string | null }>;
+  if (rows.length !== 1 || !rows[0]!.day) throw new Error('organisationLocalDate: no organisation time zone is visible (missing tenant context); refusing to guess');
+  return rows[0]!.day;
 }

@@ -200,6 +200,37 @@ describeIfDb('Rate resolution and the confirmation snapshot (integration)', () =
     expect((await admin.query(`SELECT status FROM ${shiftTable} WHERE id = $1`, [draft.id]))[0].status).toBe('draft');
   });
 
+  it('decision 39 (review): an already-open shift priced at £0 can be neither offered nor confirmed; nothing changes', async () => {
+    // Offer refused: a shift published, then priced at £0 the way a pre-rule row would be.
+    const open = await newShift(await newRole(1400));
+    await scheduling.publish(ctxA, open.id);
+    const table = await businessTableOf(admin, 'shift', open.id);
+    await admin.query(`UPDATE ${table} SET pay_rate_pence = 0 WHERE id = $1`, [open.id]);
+    await expect(offers.send(ctxA, open.id, { staffProfileId: worker.profileId! } as never)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    const seats = siblingTable(table, 'shift_assignment');
+    expect(await admin.query(`SELECT 1 FROM ${seats} WHERE shift_id = $1`, [open.id])).toHaveLength(0);
+
+    // Confirmation refused: the offer was sent and accepted at a real rate, then the shift was priced at £0.
+    const shift = await newShift(await newRole(1400));
+    await scheduling.publish(ctxA, shift.id);
+    const offer = await offers.send(ctxA, shift.id, { staffProfileId: worker.profileId! } as never);
+    await offers.staffAccept(ctxOf(worker), offer.id);
+    await admin.query(`UPDATE ${table} SET pay_rate_pence = 0 WHERE id = $1`, [shift.id]);
+    await expect(offers.managerConfirm(ctxA, offer.id)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    const [seat] = await admin.query(`SELECT status, pay_rate_snapshot_pence FROM ${seats} WHERE shift_id = $1`, [shift.id]);
+    expect(seat).toEqual({ status: 'staff_accepted', pay_rate_snapshot_pence: '1400' }); // rolled back: not confirmed
+    expect((await admin.query(`SELECT filled_count FROM ${table} WHERE id = $1`, [shift.id]))[0].filled_count).toBe(0);
+  });
+
+  it('decision 39 (review): approving a Venue Manager request priced at £0 is refused; the request stays pending', async () => {
+    const request = await newShift(await newRole(1400));
+    const table = await businessTableOf(admin, 'shift', request.id);
+    // A pending request priced at £0, as one submitted before the rule would be.
+    await admin.query(`UPDATE ${table} SET status = 'pending_manager_approval', requested_by = $2, pay_rate_pence = 0 WHERE id = $1`, [request.id, a.userId]);
+    await expect(offers.approveShiftRequest(ctxA, request.id, {} as never)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    expect((await admin.query(`SELECT status FROM ${table} WHERE id = $1`, [request.id]))[0].status).toBe('pending_manager_approval');
+  });
+
   // ---------------------------------------------------------------------------------------------- decision 40 (org-local, inclusive)
 
   /** A UTC instant `daysAhead` days from now at hh:mm UTC, and the UTC calendar date of that day. */
