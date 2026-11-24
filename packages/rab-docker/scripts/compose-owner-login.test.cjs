@@ -420,7 +420,7 @@ test('DENIAL AI switch: committed only as exactly ${AI_ENABLED:-false}; operator
 });
 
 test('BC-07: CREWFLOW_AUDIT_SINK is required in runtime.env, with a production-accepted value only', () => {
-  const ok = 'CREWFLOW_AUDIT_SINK=stdout';
+  const ok = 'CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true'; // decision 2: the platform-admin MFA line is required too
   assert.deepEqual(lintEnvText('runtime', ok), []);
   // missing
   assertRefused(lintEnvText('runtime', 'APP_URL=https://crewflow.example'), /CREWFLOW_AUDIT_SINK: missing \(BC-07/);
@@ -524,6 +524,7 @@ WORKER_SHIFT_MONITOR_INTERVAL_SECONDS=${value}`), /WORKER_SHIFT_MONITOR_INTERVAL
   }
   // The code defaults themselves are accepted (they change nothing).
   assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true
 WORKER_SHIFT_SCAN_MODE=separate
 WORKER_SHIFT_MONITOR_INTERVAL_SECONDS=300`), []);
 });
@@ -884,7 +885,7 @@ test('J2: the push and realtime sweep intervals are never accepted from an env f
     }
   }
   // The switches themselves stay runtime.env values (off by default; turning one on is the owner's decision).
-  assert.deepEqual(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=false\nREALTIME_ENABLED=false'), []);
+  assert.deepEqual(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true\nPUSH_ENABLED=false\nREALTIME_ENABLED=false'), []);
 });
 
 // Review of #97, finding J2-1: switch values are read the way Docker Compose reads them, and anything but true/false fails closed.
@@ -909,7 +910,7 @@ test('J2-1: lintEnvText refuses a switch that is not exactly true or false once 
     assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${line}`), /(PUSH|REALTIME)_ENABLED: must be exactly true or false/);
   }
   for (const line of ['PUSH_ENABLED=false # off for now', 'PUSH_ENABLED="false"', "REALTIME_ENABLED='false'", 'export PUSH_ENABLED=false']) {
-    assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${line}`), [], line);
+    assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true\n${line}`), [], line);
   }
   // parseEnvText now gives every rule the value Compose gives the app.
   const [entry] = gate.parseEnvText('PUSH_ENABLED=true # on');
@@ -1374,4 +1375,96 @@ test('owner decision 2026-11-20: CREWFLOW_ROTATE_APP_PASSWORD is a db-setup-only
     const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
     assert.equal((text.match(/^ {6}CREWFLOW_ROTATE_APP_PASSWORD: \$\{CREWFLOW_ROTATE_APP_PASSWORD:-\}$/gm) ?? []).length, 1, `${file}: once on db-setup`);
   }
+});
+
+// Owner decision 2 (2026-11-21, MFA rollout step 1): platform administrators must use MFA now, so the production templates
+// turn AUTH_MFA_ENFORCE_PLATFORM_ADMIN on. Steps 2-3 (organisation owners, the Initial Manager, other web users) are the
+// owner's scheduled server changes, NOT template defaults: this pins all of them so a later edit is a deliberate one.
+test('decision 2: production enforces MFA for platform admins only; the other enforcement defaults stay off', () => {
+  const prod = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.production.yml'), 'utf8');
+  const expected = {
+    AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'true',
+    AUTH_MFA_ENFORCE_ORGANISATION_OWNER: 'false',
+    AUTH_MFA_ENFORCE_INITIAL_MANAGER: 'false',
+    AUTH_MFA_ENFORCE_OTHER_WEB_USERS: 'false',
+    AUTH_MFA_MOBILE_POLICY: 'exempt',
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    const lines = prod.match(new RegExp(`^\\s*${key}: \\$\\{${key}:-([^}]*)\\}$`, 'gm')) ?? [];
+    assert.equal(lines.length, 1, `${key}: exactly one line in docker-compose.production.yml`);
+    assert.equal(/:-([^}]*)\}$/.exec(lines[0].trim())[1], value, `${key}: production default`);
+  }
+  // The image deployment reads runtime.env: its template sets the platform-admin switch, and only that one.
+  const runtime = fs.readFileSync(gate.TEMPLATES.runtime, 'utf8');
+  const assigned = [...runtime.matchAll(/^(AUTH_MFA_[A-Z_]+)=(.*)$/gm)].map((m) => `${m[1]}=${m[2]}`);
+  assert.deepEqual(assigned, ['AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true']);
+  assert.deepEqual(lintEnvText('runtime', runtime).filter((msg) => /AUTH_MFA/.test(msg)), []);
+});
+
+test('decision 2 gate: the compose text can never commit AUTH_MFA_ENFORCE_PLATFORM_ADMIN off; the production file must carry the on default', () => {
+  const key = gate.PLATFORM_ADMIN_MFA_KEY;
+  assert.equal(gate.PLATFORM_ADMIN_MFA_EXPR, '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}');
+  const refusedMsg = /AUTH_MFA_ENFORCE_PLATFORM_ADMIN must be committed as exactly AUTH_MFA_ENFORCE_PLATFORM_ADMIN: \$\{AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true\}/;
+  for (const value of ['false', '"false"', "'false'", '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-false}', '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-}', '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN}',
+    '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:?set it}', '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN-true}', '', 'True', '1']) {
+    const text = `x-env: &env\n  ${key}: ${value}\n`;
+    assertRefused(gate.platformAdminMfaProblems('docker-compose.production.yml', text), refusedMsg);
+    assertRefused(lintComposeText('docker-compose.image.yml', text), refusedMsg);
+  }
+  // The list form and a quoted key are refused even with an on value.
+  assertRefused(gate.platformAdminMfaProblems('x.yml', `    environment:\n      - ${key}=true\n`), refusedMsg);
+  assertRefused(gate.platformAdminMfaProblems('x.yml', `  "${key}": true\n`), refusedMsg);
+  // Accepted: the committed default-on expression, or a literal true; a commented line is ignored.
+  for (const value of ['${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}', 'true', '"true"', "'true'"]) {
+    assert.deepEqual(gate.platformAdminMfaProblems('x.yml', `  ${key}: ${value}\n`), [], value);
+  }
+  assert.deepEqual(gate.platformAdminMfaProblems('x.yml', `  # ${key}: false\n`), []);
+  // The production file must carry the exact expression (a literal true alone does not count).
+  assertRefused(gate.platformAdminMfaProblems('docker-compose.production.yml', 'services: {}\n', { required: true }), /AUTH_MFA_ENFORCE_PLATFORM_ADMIN is missing/);
+  assertRefused(gate.platformAdminMfaProblems('docker-compose.production.yml', `  ${key}: true\n`, { required: true }), /AUTH_MFA_ENFORCE_PLATFORM_ADMIN is missing/);
+  const prod = fs.readFileSync(gate.PRODUCTION_FILE, 'utf8');
+  assert.deepEqual(gate.platformAdminMfaProblems('docker-compose.production.yml', prod, { required: true }), []);
+  // The committed production file turned off is caught by the static checks.
+  const turnedOff = prod.replace('${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}', '${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-false}');
+  assert.notEqual(turnedOff, prod);
+  assertRefused(gate.platformAdminMfaProblems('docker-compose.production.yml', turnedOff, { required: true }), refusedMsg);
+});
+
+test('decision 2 gate: an env file may only set AUTH_MFA_ENFORCE_PLATFORM_ADMIN to exactly true (names only, never the value)', () => {
+  for (const kind of ['runtime', 'database']) {
+    for (const value of ['false', '"false"', '', 'no']) {
+      const problems = lintEnvText(kind, `CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=${value}`);
+      assertRefused(problems, /AUTH_MFA_ENFORCE_PLATFORM_ADMIN: must be exactly true \(owner decision 2/);
+      for (const msg of problems) assert.ok(!/=false|"false"|\bno\b/.test(msg), msg);
+    }
+    // (database.env refuses the key whatever its value: it is not a database setting; only the decision-2 rule is under test.)
+    assert.deepEqual(lintEnvText(kind, 'CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true').filter((m) => /must be exactly true \(owner decision 2/.test(m)), []);
+  }
+  assert.deepEqual(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=true').filter((m) => /AUTH_MFA_ENFORCE_PLATFORM_ADMIN/.test(m)), []);
+  // The other enforcement switches stay the owner's staged rollout: false is accepted there.
+  for (const key of ['AUTH_MFA_ENFORCE_ORGANISATION_OWNER', 'AUTH_MFA_ENFORCE_INITIAL_MANAGER', 'AUTH_MFA_ENFORCE_OTHER_WEB_USERS']) {
+    assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${key}=false`).filter((m) => m.includes(key)), [], key);
+  }
+});
+
+test('decision 2 gate (review of #327, fail closed): runtime.env must set platform-admin MFA, or carry the audited override with a reason', () => {
+  const REASON = 'INC-42: only platform admin lost the authenticator';
+  // Missing: refused (the image deployment has no compose default; the app would otherwise boot on the code default).
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout'), /AUTH_MFA_ENFORCE_PLATFORM_ADMIN: missing \(set AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true; owner decision 2/);
+  // The committed template sets it: no problem.
+  assert.deepEqual(lintEnvText('runtime', fs.readFileSync(gate.TEMPLATES.runtime, 'utf8'), { template: true }).filter((m) => /AUTH_MFA/.test(m)), []);
+  // Off (or missing) WITH the override and a reason: accepted, the break-glass path.
+  assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=false\n${gate.PLATFORM_ADMIN_MFA_OVERRIDE_KEY}=${REASON}`).filter((m) => /AUTH_MFA/.test(m)), []);
+  assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${gate.PLATFORM_ADMIN_MFA_OVERRIDE_KEY}=${REASON}`).filter((m) => /AUTH_MFA/.test(m)), []);
+  // The override with no reason, or one shorter than the minimum: refused, and the switch off is refused too.
+  for (const reason of ['', 'because', 'x'.repeat(gate.PLATFORM_ADMIN_MFA_OVERRIDE_MIN_REASON - 1)]) {
+    const problems = lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=false\n${gate.PLATFORM_ADMIN_MFA_OVERRIDE_KEY}=${reason}`);
+    assertRefused(problems, /AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE: must be a reason of at least 20 characters/);
+    assertRefused(problems, /AUTH_MFA_ENFORCE_PLATFORM_ADMIN: must be exactly true/);
+    for (const msg of problems) assert.ok(!msg.includes('because'), msg); // never the reason
+  }
+  // The override is a runtime.env setting only.
+  assertRefused(lintEnvText('database', `${gate.PLATFORM_ADMIN_MFA_OVERRIDE_KEY}=${REASON}`), /AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE: belongs in runtime\.env only/);
+  // A valid reason never appears in any message.
+  for (const msg of lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\nAUTH_MFA_ENFORCE_PLATFORM_ADMIN=nope\n${gate.PLATFORM_ADMIN_MFA_OVERRIDE_KEY}=${REASON}`)) assert.ok(!msg.includes('INC-42'), msg);
 });

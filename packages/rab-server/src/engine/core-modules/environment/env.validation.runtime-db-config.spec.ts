@@ -78,7 +78,10 @@ describe('env validation: owner-login database start-up settings', () => {
   it('DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS: accepted by env validation (one-off CLI commands such as bootstrap-admin need them per invocation; database-target.ts decides) but refused by the API and Worker runtime guard', () => {
     // CLI side: the shared environment validation never refuses command authority.
     // A production target needs an accepted sslmode (owner decision 2026-11-19: a missing sslmode is refused in production).
-    expect(() => validate({ ...base, PG_DATABASE_URL: `${base.PG_DATABASE_URL}?sslmode=verify-full`, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' })).not.toThrow();
+    // Owner decision 2 (review of #327): DB_TARGET=production is a production runtime, so platform-admin MFA must be on there
+    // too (a production one-off runs through rab-api with runtime.env, which sets it).
+    expect(() => validate({ ...base, PG_DATABASE_URL: `${base.PG_DATABASE_URL}?sslmode=verify-full`, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true', AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'true' })).not.toThrow();
+    expect(() => validate({ ...base, PG_DATABASE_URL: `${base.PG_DATABASE_URL}?sslmode=verify-full`, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' })).toThrow(/AUTH_MFA_ENFORCE_PLATFORM_ADMIN must be true in production/);
     expect(() => validate({ ...base, DB_TARGET: 'local' })).not.toThrow();
     // Runtime side: the long-running API and Worker refuse both, by name.
     for (const processName of ['api', 'worker'] as const) {

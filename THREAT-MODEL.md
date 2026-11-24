@@ -10506,3 +10506,45 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## MFA enforced for platform admins in production (owner decision 2, 2026-11-21; branch chore/mfa-platform-admin-production-default; no SQL; the only server change is the Admin panel Security tab text)
+- **Finding:** every `AUTH_MFA_ENFORCE_*` switch was off in production, so a platform administrator (cross-organisation
+  read and admin actions, MFA reset of other users) could sign in with a password alone unless they had enrolled
+  voluntarily. A phished or reused platform-admin password was a full platform takeover.
+- **Control:** `docker-compose.production.yml` defaults `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` to `true` and
+  `env/runtime.env.example` (the image deployment's rab-api/rab-worker runtime file) sets it. A platform admin without an
+  authenticator is made to enrol during their next sign-in (`LoginSecondFactorPolicyService`), never locked out. The
+  first-admin bootstrap already refuses to run without it, so the template now matches the only supported way to create
+  the first admin. The Admin panel Security tab warns when platform admins are not forced (it used to warn when anyone
+  was forced). The code default stays `false` (development and tests); the other three enforcement switches keep their
+  `false` defaults: organisation owners and the Initial Manager are switched on by the owner at the DigitalOcean move,
+  other web users about 4 weeks later, mobile stays exempt (deploy checklist in OWNER-LOGIN-DEPLOYMENT.md section 7).
+- **Tests (boot):** `platform-admin-mfa-production.spec.ts` (the problem function; `validate()` refuses false and missing
+  in production, accepts true, accepts false only with a 20+ character reason, development unaffected; the override is
+  logged once and audited once with the truncated reason, nothing is reported when the switch is on or outside
+  production, and an unwritable audit event throws); `admin-config-mfa-tone.spec.ts` (the Security tab row: ok when
+  platform admins are forced, warn otherwise, strict true only, 403 before any setting is read for a non-admin).
+- **Tests:** `compose-owner-login.test.cjs` pins the five production defaults (platform admin `true`, the other three
+  `false`, mobile `exempt`), that the runtime template assigns only the platform-admin switch, and that the lint accepts
+  it.
+- **Fail closed at boot (review of #327, Medium):** `env.validation.ts` refuses a production boot (API and Worker share it)
+  with `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` off or missing (`platform-admin-mfa-production.ts`; production = any of NODE_ENV,
+  RAB_RUNTIME_ENV or DB_TARGET, the rate-limit rule's `isProductionRuntime`, in env validation and in main.ts), so a server whose
+  `runtime.env` predates this change, or a platform variable set to false, no longer starts silently without platform-admin
+  MFA. The only exception is the break-glass override `AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE=<written reason, 20+
+  characters>`: the process starts, and rab-api logs a WARNING line and sends a critical
+  `security.mfa.platform_admin_enforcement_overridden` event (with the reason, truncated to 200) to the external audit sink
+  at every start; an event that cannot be written refuses the start. `--lint-env-file runtime` refuses a runtime.env
+  without the switch set to exactly `true`, unless the override with a reason is present; the override is refused in any
+  other env file. Break-glass recovery when the only platform admin lost the authenticator and recovery codes (the switch
+  does not help: an enrolled account is always challenged) is documented in OWNER-LOGIN-DEPLOYMENT.md section 7:
+  `grant-platform-admin` on a second account, which enrols and runs the audited reset; keep two enrolled platform admins.
+- **Residual:** an operator with write access to the server can still set the override; that is visible (log line, critical
+  audit event every start) rather than silent.
+- **Gate (lead request, same PR):** `scripts/compose-owner-login.cjs` refuses any committed
+  `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` other than `${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-true}` or a literal `true` in the deploy
+  compose files (`false`, `:-false`, `:-`, a bare `${...}`, `:?`, the list form and a quoted key are refused), requires
+  docker-compose.production.yml to carry exactly that expression, and refuses the key in any env file unless it is exactly
+  `true` (an empty value would mean the code default, false). Messages name the key, never the value. Tests: two cases
+  in `compose-owner-login.test.cjs` (every refused form, the accepted forms, the committed production file passes and the
+  same file turned off fails; env-file values; the other three switches still accept false).

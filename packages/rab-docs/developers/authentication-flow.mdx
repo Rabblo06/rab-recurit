@@ -94,7 +94,7 @@ For cookie-authenticated requests, `JwtAuthGuard` checks the `Origin` header aga
 `LoginSecondFactorPolicyService` runs in `AuthService.completeLogin` for every provider:
 
 - An enrolled user is always challenged on the web.
-- A user whose role is covered by an enforcement flag must enrol. The flags are `AUTH_MFA_ENFORCE_PLATFORM_ADMIN`, `_ORGANISATION_OWNER`, `_INITIAL_MANAGER` and `_OTHER_WEB_USERS`, and all default to false.
+- A user whose role is covered by an enforcement flag must enrol. The flags are `AUTH_MFA_ENFORCE_PLATFORM_ADMIN`, `_ORGANISATION_OWNER`, `_INITIAL_MANAGER` and `_OTHER_WEB_USERS`, and all default to false in code. Production turns `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` on (owner decision 2, 21 Nov 2026); the other three follow the owner's scheduled rollout in `packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md`.
 - Mobile targets are exempt while `AUTH_MFA_MOBILE_POLICY=exempt`, the default.
 
 A challenged sign-in answers `409 SECOND_FACTOR_REQUIRED {requirement, challengeToken, challengeExpiresAt}` and creates no session. The client finishes at `POST /auth/mfa/challenge/verify` (or `/enrolment` followed by `/enrolment/confirm`).

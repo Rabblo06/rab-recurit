@@ -18,6 +18,8 @@ import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeor
 import { runDatabaseBootGates } from './database/boot-checks/database-boot-gates';
 import { installSessionRoleResetOnDataSource } from './database/postgres/session-role-reset';
 import { startSecurityPostureMonitoring } from './engine/core-modules/health/security-readiness';
+import { reportPlatformAdminMfaOverride } from './engine/core-modules/environment/platform-admin-mfa-production';
+import { isProductionRuntime } from './engine/core-modules/throttler/rate-limit-bypass';
 import { installHttpFirstShutdown } from './engine/utils/http-first-shutdown';
 
 /** Refuses to start: prints a sanitised reason and exits non-zero before any listener or connection is opened. */
@@ -45,12 +47,27 @@ async function bootstrap(): Promise<void> {
   // tenant context installs it too), then the external security audit sink and the semantic posture monitor, whose drift
   // turns /healthz unready (security-readiness.ts). An invalid audit-sink configuration refuses to start.
   installSessionRoleResetOnDataSource(app.get(DataSource));
-  try {
-    startSecurityPostureMonitoring({ dataSource: app.get(DataSource), baseline: gateReport.semanticBaseline, processLabel: 'api process' });
-  } catch (error) {
-    refuseStartup(error);
-  }
+  const securityMonitoring = (() => {
+    try {
+      return startSecurityPostureMonitoring({ dataSource: app.get(DataSource), baseline: gateReport.semanticBaseline, processLabel: 'api process' });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   const environmentService = app.get(EnvironmentService);
+  // Owner decision 2 + review of #327: env validation already refused a production start with platform-admin MFA off and
+  // no override; an active break-glass override is logged and audited here, every start (an unwritable event refuses).
+  await reportPlatformAdminMfaOverride({
+    env: {
+      AUTH_MFA_ENFORCE_PLATFORM_ADMIN: environmentService.get('AUTH_MFA_ENFORCE_PLATFORM_ADMIN'),
+      AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE: environmentService.get('AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE'),
+    },
+    // The same any-signal production predicate as env validation (NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET).
+    production: environmentService.get('NODE_ENV') === 'production' || isProductionRuntime(process.env),
+    sink: securityMonitoring.sink,
+    processLabel: 'api process',
+    log: (line) => console.error(line), // eslint-disable-line no-console
+  }).catch(refuseStartup);
   // HWS runtime cutover (Part 26): no-op unless HWS_RUNTIME_ENABLED=true, in which case a hole in the registry, the
   // entity/schema classification, or the migrations-table qualification is refused here, before any request or job.
   await assertHwsStartupInvariants(app.get(DataSource), environmentService.get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
