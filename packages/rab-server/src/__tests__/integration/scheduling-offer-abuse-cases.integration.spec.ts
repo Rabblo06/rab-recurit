@@ -326,6 +326,16 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect((await shiftRow(shift.id)).required_count).toBe(2);
     });
 
+    it('a direct (manager-created) shift opens its pipeline for its owner only; another organisation gets 404', async () => {
+      const own = await seedOrg(MANAGER_PERMS);
+      const other = await seedOrg(MANAGER_PERMS);
+      const token = await login(own.adminEmail);
+      const shift = await makeAndPublishShift(own.organisation, own.venue, token);
+      const url = `/rest/v1/shifts/${shift.id}/pipeline`;
+      expect((await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${token}`)).status).toBe(200);
+      expect((await request(app.getHttpServer()).get(url).set('Authorization', `Bearer ${await login(other.adminEmail)}`)).status).toBe(404);
+    });
+
     it('rolls the headcount back when no staff can receive an offer', async () => {
       const own = await seedOrg(MANAGER_PERMS);
       const token = await login(own.adminEmail);
