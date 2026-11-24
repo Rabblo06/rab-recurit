@@ -729,7 +729,7 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     // fail-closed path: an unknown document kind must be refused, never rendered as something else.
     const prog = [
       "const u=require('/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js')",
-      "Promise.resolve().then(()=>u.renderReportPdf({kind:'no-such-document',data:{}},Object.assign({},process.env,{PDF_RENDERER:'native'}))).then(()=>console.log('UNEXPECTED render ok'),e=>console.log('refused: '+e.message))",
+      "Promise.resolve().then(()=>u.renderReportPdf({kind:'no-such-document',data:{}})).then(()=>console.log('UNEXPECTED render ok'),e=>console.log('refused: '+e.message))",
     ].join(';');
     const bad = execIn(w, '1000:1000', `cd /app && HOME=/nonexistent TMPDIR=/tmp/crewflow-jobs XDG_CONFIG_HOME=/tmp/crewflow-jobs/.config XDG_CACHE_HOME=/tmp/crewflow-jobs/.cache node -e "${prog}"`);
     write(`unknown-document render: ${bad.out.trim()}`);
