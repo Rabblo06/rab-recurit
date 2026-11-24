@@ -4,6 +4,7 @@ import { rotateShiftQrLockSql, rotateShiftQrUpdateSql } from './rotate-shift-qr.
 import { SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from './sent-shifts-sql';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { isJobRoleInScope } from '../utils/job-role-scope';
+import { assertPayRateSet, organisationLocalDate } from '../utils/pay-rate-rules';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
 import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
 import { venueSummaryCached } from '../../venue/services/venue-summary-cache';
@@ -676,33 +677,35 @@ export class SchedulingService {
   }
 
   /**
-   * Rate resolution, `assignment → staff role rate → venue role rate → org
-   * default` (rab-workforce-architecture.md §1 A6) — staff-specific
-   * overrides don't exist yet (no per-staff rate table built), so this
-   * resolves venue role rate → job role default. An explicit `payRatePence`
-   * always wins over both. Public (not private) and takes an already-open,
-   * transaction-participating `manager` — `OfferService.createShiftAndSend`
-   * reuses this rather than duplicating the lookup for its own shift-creation
-   * path.
+   * Shift rate resolution (rab-workforce-architecture.md §1 A6): explicit `payRatePence` → the venue role rate in force on
+   * the shift's start → the job role default. The staff role rate step is applied per seat, at send and confirmation, never
+   * here (the shift has no staff). Public and transaction-participating: `insertNewShiftTx` (create, createDraftTx,
+   * OfferService.createShiftAndSend, the batch builders) and `submitRequest` call it.
+   *   - Owner decision 40: "in force" uses the shift start's ORGANISATION-LOCAL calendar date (core.organisation.timezone),
+   *     both ends inclusive: `effective_from <= day AND (effective_to IS NULL OR effective_to >= day)`; latest
+   *     effective_from wins.
+   *   - Owner decision 39: a result of £0 (or less) is refused with PayRateRequiredException (409 PAY_RATE_REQUIRED, "Set a
+   *     pay rate for this role first.") instead of creating a £0 shift — including an explicit 0.
    */
   async resolvePayRate(
     manager: EntityManager,
     params: { venueId: string; jobRoleId: string; startsAt: string; payRatePence?: number },
   ): Promise<number> {
-    if (params.payRatePence !== undefined) return params.payRatePence;
+    if (params.payRatePence !== undefined) return assertPayRateSet(params.payRatePence);
 
+    const day = await organisationLocalDate(manager, params.startsAt);
     const rate = await manager
       .createQueryBuilder(VenueRoleRate, 'r')
       .where('r.venue_id = :venueId', { venueId: params.venueId })
       .andWhere('r.job_role_id = :jobRoleId', { jobRoleId: params.jobRoleId })
-      .andWhere('r.effective_from <= :start', { start: params.startsAt })
-      .andWhere('(r.effective_to IS NULL OR r.effective_to >= :start)', { start: params.startsAt })
+      .andWhere('r.effective_from <= CAST(:day AS date)', { day })
+      .andWhere('(r.effective_to IS NULL OR r.effective_to >= CAST(:day AS date))', { day })
       .orderBy('r.effective_from', 'DESC')
       .getOne();
-    if (rate) return rate.payRatePence;
+    if (rate) return assertPayRateSet(rate.payRatePence);
 
     const jobRole = await manager.findOne(JobRole, { where: { id: params.jobRoleId } });
-    return jobRole?.defaultRatePence ?? 0;
+    return assertPayRateSet(jobRole?.defaultRatePence);
   }
 
   /**
@@ -868,6 +871,8 @@ export class SchedulingService {
       // backstop for any other writer).
       if (shift.archivedAt) throw new ConflictException({ code: 'SHIFT_ARCHIVED', message: 'This draft shift is archived. Restore it before publishing.' });
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OPEN);
+      // Owner decision 39: a draft priced at £0 (created before the rule) is never published.
+      assertPayRateSet(shift.payRatePence);
       await manager.update(Shift, id, { status: ShiftStatus.OPEN, publishedAt: new Date() });
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_PUBLISHED, { entityType: 'shift', entityId: id, metadata: { previousStatus: shift.status } });
       // C1b realtime (same transaction): shift.updated (published) → shift owner + venue managers. Ids only.

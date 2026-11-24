@@ -10558,3 +10558,29 @@ workspace-table shape (structure level 27) is the reviewed alternative.
   403 nothing written; body `organisationId` / `workspaceId` / `createdBy` / `staffProfileId` → 400; overlap → 409; RLS
   WITH CHECK refuses another author / another workspace; immutable columns 42501; orphans never used),
   `staff-role-rate.service.spec.ts`, `staff-role-rate-resolution.spec.ts`, `staff-role-rate-sql.spec.ts`.
+
+## Pay rate rules — £0 shifts refused, rate periods judged in the organisation's time zone (branch fix/pay-rate-decisions-39-40, owner decisions 39 and 40; no SQL)
+
+`SchedulingService.resolvePayRate` and the shift publish/approve paths. Decided by the owner 2026-11-22
+(DECISIONS-PENDING.md 39, 40). No table, policy, grant or migration change.
+
+- **Asset:** the pay of every shift (the rate each seat is later snapshotted from) and therefore attendance earned pence,
+  payroll records and payslips.
+- **Threats and controls:**
+  - *A shift silently paid £0* (decision 39): a job role with no default and no venue rate used to resolve to 0 pence and
+    the shift was created and published at £0 — failing open on money. Now every path that creates a shift
+    (`insertNewShiftTx`: create, the AI draft proposal, create-and-send, the batch builders; and the Venue Manager request
+    `submitRequest`) refuses a resolved rate of £0 — an explicit 0, a 0 venue rate and a 0 / missing default included — with
+    409 `PAY_RATE_REQUIRED` ("Set a pay rate for this role first."), inside the same transaction (nothing is inserted).
+    `publish` and `approveShiftRequest` refuse a stored £0 rate (drafts and requests created before the rule).
+  - *A rate applied on the wrong day* (decision 40): the period comparison now uses the shift start's calendar date in
+    the organisation's time zone (`core.organisation.timezone`, computed by PostgreSQL), both ends inclusive, instead of
+    an implicit cast of the UTC instant. A rate ending on day D applies to a shift starting any time on D (organisation-
+    local); 23:30 UTC is the next day in a UTC+1 organisation.
+  - Inputs: the start instant is bound as a parameter; the time zone comes from the bound organisation's row
+    (`core.current_org()`), never from the client.
+- **Residual:** an invalid stored time zone makes the lookup error (fail closed; validation of the column is #251). Existing
+  £0 seats or confirmed snapshots are not changed (never recalculated).
+- **Tests:** `resolve-pay-rate.spec.ts` (every precedence level, the £0 refusal at each level, the organisation-local date
+  query), `resolve-pay-rate.integration.spec.ts` (create service + HTTP 409, create-and-send, publish of a £0 draft,
+  inclusive end date, UTC+1 organisation, snapshot never recalculated).
