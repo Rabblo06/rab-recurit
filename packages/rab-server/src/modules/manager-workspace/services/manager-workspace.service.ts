@@ -17,6 +17,7 @@ import { CreateManagerWorkspaceDto } from '../dto/create-manager-workspace.dto';
 import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-name.dto';
 import { UpdateManagerWorkspaceSubdomainDto } from '../dto/update-manager-workspace-subdomain.dto';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
+import { managerWorkspaceByOwnerCached } from './manager-workspace-display-cache';
 import { SubdomainAvailability, SubdomainService } from './subdomain.service';
 import { assertCallerMayProvision, WorkspaceProvisioningService } from './workspace-provisioning.service';
 import { markNewWorkspaceInitial } from '../../../engine/core-modules/upgrade/upgrade-migration.service';
@@ -172,7 +173,7 @@ export class ManagerWorkspaceService {
   async getMine(ctx: AuthContext, opts: { skipCache?: boolean } = {}): Promise<ManagerWorkspaceResponse> {
     const response = await this.tenantContext.runInTenantContext(coreOnly(ctx), async (manager): Promise<ManagerWorkspaceResponse> => {
       if (opts.skipCache) await this.entityCache.invalidate('manager_workspace_by_owner', ctx.userId);
-      const cached = await this.entityCache.getManagerWorkspaceByOwner(manager, ctx.userId);
+      const cached = await managerWorkspaceByOwnerCached(this.entityCache, manager, ctx.userId);
       if (cached) {
         return {
           id: cached.id,
