@@ -48,6 +48,10 @@
  *       ULT_PG15_IMAGE: PostgreSQL 15 refused].
  *   L11 deleting a seeded workspace (superuser) removes its logbook rows (FK cascade) and nothing else.
  *
+ * Not covered here, by design: a PATCH release start (the images are minor releases). Its one exit-0 state with /healthz
+ * upgradeFailed = true (a .0 command deferred under --force: a forced marker row, OWNER-LOGIN-DEPLOYMENT.md 3.6 (e)) can
+ * therefore never occur in these cases; a future patch case must expect it, not treat it as a regression.
+ *
  * Limits: at most five running containers of this run; every data dir a tmpfs; cleanup = `down` of this run's own projects
  * only (never a prune, never another project). Results: <out>/RESULTS.json, SUMMARY.md, run.log, evidence/.
  */

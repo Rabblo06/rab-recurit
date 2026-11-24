@@ -77,7 +77,7 @@ const RUNTIME_KEYS = [
  * 2026-11-20) is compared in the reference render only (both files commit ${AI_ENABLED:-false}, so both render false there);
  * in the deployed model it is the operator's compose.env value: exactly true or false, the same on both services.
  */
-const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
+const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'CREWFLOW_HWS_CUTOVER_BACKUP_MARKER', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
   'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
   'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
   'DISABLE_DB_MIGRATIONS', 'DISABLE_CRON_JOBS_REGISTRATION',
@@ -402,8 +402,14 @@ const envOf = (svc) => svc?.environment ?? {};
 const baseName = (p) => String(p).split(/[\\/]/).pop();
 /** The one bind every app service has: the PostgreSQL CA, read-only (verify-full). */
 const caMount = (v) => v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true;
-const withoutCa = (vols) => {
-  const rest = (vols ?? []).filter((v) => !caMount(v));
+/**
+ * Release 0.7.0 (Part C3): rab-api's HWS cutover backup directory, read-only. Like the CA, its SOURCE is the operator's
+ * (CREWFLOW_HWS_CUTOVER_BACKUP_DIR in compose.env; /dev/null when unset), so only the target and read-only are compared: a
+ * writable one is not this mount and still fails the comparison.
+ */
+const backupMount = (name, v) => name === 'rab-api' && v.type === 'bind' && v.target === '/run/crewflow/hws-cutover-backup' && v.read_only === true;
+const withoutCa = (vols, name = null) => {
+  const rest = (vols ?? []).filter((v) => !caMount(v) && !backupMount(name, v));
   return rest.length ? rest : undefined;
 };
 /**
@@ -426,7 +432,7 @@ const importGuardMount = (v) => longFormTmpfs(v)
   && Number(v.tmpfs?.size) === IMPORT_GUARD_BYTES
   && Number(v.tmpfs?.mode) === IMPORT_GUARD_MODE;
 /** The variant's volumes for the production comparison: the CA bind, and on rab-api the exact import guard, left out. */
-const comparableVariantVolumes = (name, vols) => withoutCa(name === IMPORT_GUARD_SERVICE ? (vols ?? []).filter((v) => !importGuardMount(v)) : vols);
+const comparableVariantVolumes = (name, vols) => withoutCa(name === IMPORT_GUARD_SERVICE ? (vols ?? []).filter((v) => !importGuardMount(v)) : vols, name);
 /**
  * rab-ops removal (PR 2): the retired operations container must not come back, by name, under the "ops" profile, or under
  * ANY name and profile (security review of PR #124, MEDIUM: a `rab-maint` with `profiles: ["maint"]` reading .env.ops
@@ -541,7 +547,7 @@ function checkVariant(variant, production, variantFiles = variant) {
       // Allowed differences: the read-only PostgreSQL CA bind (the image file mounts it from the host) and rab-api's exact
       // OpenShip import guard.
       const av = key === 'volumes' ? comparableVariantVolumes(name, a.volumes) : a[key];
-      const bv = key === 'volumes' ? withoutCa(b.volumes) : b[key];
+      const bv = key === 'volumes' ? withoutCa(b.volumes, name) : b[key];
       if (stable(av) !== stable(bv)) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
     for (const key of PINNED_ENV) {
@@ -746,10 +752,119 @@ function hostBindProblems(services, where, rootDir) {
   return out;
 }
 
-function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = undefined } = {}) {
+/** Release 0.7.0: the first release whose image runs the HWS cutover; HWS_RUNTIME_ENABLED=true needs at least this image. */
+const HWS_MIN_IMAGE_VERSION = '0.7.0';
+const HWS_CUTOVER_BACKUP_TARGET = '/run/crewflow/hws-cutover-backup';
+const versionAtLeast = (v, min) => {
+  const a = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(v ?? ''));
+  const b = /^(\d+)\.(\d+)\.(\d+)$/.exec(min);
+  if (!a || !b) return false;
+  for (let i = 1; i <= 3; i += 1) if (Number(a[i]) !== Number(b[i])) return Number(a[i]) > Number(b[i]);
+  return true;
+};
+
+/**
+ * Security review of the 0.7.0 release PR, M1: HWS on is tied to an image that runs the HWS cutover. Refuses
+ * HWS_RUNTIME_ENABLED=true on rab-api / rab-worker unless the resolved image's baked CREWFLOW_APP_VERSION (Dockerfile ENV,
+ * read with `docker image inspect` by the caller) is at least 0.7.0. Unknown version = refused (fail closed). Pure.
+ */
+function hwsImageProblems(services, imageAppVersion, where) {
+  const out = [];
+  for (const name of ['rab-api', 'rab-worker']) {
+    const svc = services?.[name];
+    if (!svc || String(envOf(svc).HWS_RUNTIME_ENABLED ?? '').trim().toLowerCase() !== 'true') continue;
+    const version = typeof imageAppVersion === 'function' ? imageAppVersion(String(svc.image ?? '')) : null;
+    if (!versionAtLeast(version, HWS_MIN_IMAGE_VERSION)) {
+      out.push(`${name}: HWS_RUNTIME_ENABLED=true needs a ${HWS_MIN_IMAGE_VERSION} or later image (the release that runs the HWS cutover)${where}; the image reports CREWFLOW_APP_VERSION=${version ?? 'unknown'}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Security review of the 0.7.0 release PR, L2 (+ re-check R1): the rab-api HWS cutover backup bind. Its source is the
+ * operator's (CREWFLOW_HWS_CUTOVER_BACKUP_DIR) and must be exactly /dev/null (unset), or an existing directory that:
+ *   - is not the project directory, CREWFLOW_SECRETS_DIR, a service env file's directory or a --env-file's directory (nor an
+ *     ancestor of one);
+ *   - is not under /etc, /root, /home, /proc, /sys, /dev, /tmp or /boot;
+ *   - holds only regular files (no symlink, no directory) named marker.json or *.dump.
+ * Read-only is enforced by the volume comparison. Pure apart from realpath / stat / readdir.
+ */
+function backupBindProblems(services, { projectDirectory = null, secretsDir = null, envFiles = [] } = {}, where = '') {
+  const out = [];
+  const api = services?.['rab-api'];
+  const norm = (p) => {
+    let x = String(p ?? '').replace(/\\/g, '/');
+    // A POSIX absolute path (the deploy host); a drive-letter path only so the suite also runs on a developer's Windows host.
+    if (!x.startsWith('/') && !/^[A-Za-z]:\//.test(x)) return null;
+    try {
+      x = fs.realpathSync(x);
+    } catch {
+      /* judged as written */
+    }
+    return path.posix.normalize(x.replace(/\\/g, '/')).replace(/\/+$/, '') || '/';
+  };
+  for (const v of Array.isArray(api?.volumes) ? api.volumes : []) {
+    if (v?.target !== HWS_CUTOVER_BACKUP_TARGET) continue;
+    if (v.type !== 'bind') {
+      out.push(`rab-api: the HWS cutover backup mount must be a bind${where}`);
+      continue;
+    }
+    const raw = String(v.source ?? '');
+    if (raw === '/dev/null') continue;
+    const source = norm(raw);
+    if (!source) {
+      out.push(`rab-api: the HWS cutover backup directory must be an absolute path${where}`);
+      continue;
+    }
+    let isDir = false;
+    try {
+      isDir = fs.statSync(source).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) out.push(`rab-api: the HWS cutover backup source is neither /dev/null nor an existing directory${where}`);
+    const under = (dir) => source === dir || source.startsWith(`${dir}/`);
+    for (const dir of ['/etc', '/root', '/home', '/proc', '/sys', '/dev', '/tmp', '/boot']) if (under(dir)) out.push(`rab-api: the HWS cutover backup directory is under ${dir}${where}`);
+    if (isDir) {
+      // Re-check R1: only the dump(s) and the marker; nothing else of the host is exposed through this mount.
+      let entries = [];
+      try {
+        entries = fs.readdirSync(source, { withFileTypes: true });
+      } catch {
+        out.push(`rab-api: the HWS cutover backup directory cannot be listed${where}`);
+      }
+      const stray = entries.filter((e) => !e.isFile() || !(e.name === 'marker.json' || /\.dump$/.test(e.name)));
+      if (stray.length) out.push(`rab-api: the HWS cutover backup directory holds something other than regular marker.json / *.dump files (${stray.length} entr${stray.length === 1 ? 'y' : 'ies'})${where}`);
+    }
+    if (source === '/') out.push(`rab-api: the HWS cutover backup directory is the host root${where}`);
+    const envDirs = [];
+    for (const svc of Object.values(services ?? {})) {
+      for (const e of svc?.env_file ?? []) {
+        const file = norm(typeof e === 'string' ? e : e?.path);
+        if (file) envDirs.push(path.posix.dirname(file));
+      }
+    }
+    const protectedDirs = [
+      ['the project directory', norm(projectDirectory)],
+      ['CREWFLOW_SECRETS_DIR', norm(secretsDir)],
+      ...envDirs.map((d) => ['an env file directory', d]),
+      ...(envFiles ?? []).map((f) => norm(f)).filter(Boolean).map((f) => ['an --env-file directory', path.posix.dirname(f)]),
+    ];
+    for (const [label, dir] of protectedDirs) {
+      if (!dir) continue;
+      if (dir === source || dir.startsWith(source === '/' ? '/' : `${source}/`)) out.push(`rab-api: the HWS cutover backup directory is ${label} or an ancestor of it${where}`);
+    }
+  }
+  return out;
+}
+
+function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = undefined, imageAppVersion = null, projectDirectory = null, secretsDir = null, envFiles = [] } = {}) {
   const problems = [];
   const fail = (m) => problems.push(m);
   const services = merged?.services ?? {};
+  for (const pr of hwsImageProblems(services, imageAppVersion, ' in the deployed model')) fail(pr);
+  for (const pr of backupBindProblems(services, { projectDirectory, secretsDir, envFiles }, ' in the deployed model')) fail(pr);
   // Credential isolation in the deployed model (the same rules checkVariant applies to the committed file).
   for (const name of ['rab-api', 'rab-worker']) {
     const svc = services[name];
@@ -878,7 +993,7 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     }
     for (const key of RUNTIME_KEYS) {
       const value = key === 'volumes' ? comparableVariantVolumes(name, a.volumes) : a[key];
-      const expected = key === 'volumes' ? withoutCa(b.volumes) : b[key];
+      const expected = key === 'volumes' ? withoutCa(b.volumes, name) : b[key];
       if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
     // The approval mode is the operator's compose.env opt-in (BC-11/C4): validated, not compared with the reference render.
@@ -1089,7 +1204,33 @@ function environmentMode(argv) {
     }
     envFileKeys[name] = entry;
   }
-  return { problems: [...images.problems, ...skippedEnvFiles, ...pgCaFileEnvironmentProblems(env, projectDirectory), ...checkDeployment(model, production, envFileKeys, { dockerRoot: dockerRootDir() ?? '/var/lib/docker' })], lines: images.lines };
+  return {
+    problems: [
+      ...images.problems,
+      ...skippedEnvFiles,
+      ...pgCaFileEnvironmentProblems(env, projectDirectory),
+      ...checkDeployment(model, production, envFileKeys, {
+        dockerRoot: dockerRootDir() ?? '/var/lib/docker',
+        imageAppVersion: imageAppVersionOf,
+        projectDirectory,
+        secretsDir: env.CREWFLOW_SECRETS_DIR ?? null,
+        envFiles: envFileArgs.map((f) => path.resolve(f)),
+      }),
+    ],
+    lines: images.lines,
+  };
+}
+
+/** The resolved image's baked CREWFLOW_APP_VERSION (`docker image inspect`; pull the release first). Null when unknown. */
+function imageAppVersionOf(ref) {
+  if (!ref) return null;
+  try {
+    const envs = JSON.parse(execFileSync('docker', ['image', 'inspect', '--format', '{{json .Config.Env}}', ref], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    const hit = (Array.isArray(envs) ? envs : []).find((e) => String(e).startsWith('CREWFLOW_APP_VERSION='));
+    return hit ? String(hit).slice('CREWFLOW_APP_VERSION='.length) : null;
+  } catch {
+    return null;
+  }
 }
 
 if (require.main === module) {
@@ -1117,4 +1258,5 @@ if (require.main === module) {
 }
 
 module.exports = {
+  hwsImageProblems, backupBindProblems, HWS_MIN_IMAGE_VERSION,
   NOT_THE_APP_LOGIN, PINNED_ENV, BLANK_IS_UNSET_PINNED_ENV, pinnedEnvValue, DB_SERVICE, DB_SETUP_SERVICE, DB_HARDEN_SERVICE, ADMIN_SERVICES, PID1_ENTRYPOINTS, optionAProblems, dbHardenProblems, pid1Problems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, pgCaFileEnvironmentProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

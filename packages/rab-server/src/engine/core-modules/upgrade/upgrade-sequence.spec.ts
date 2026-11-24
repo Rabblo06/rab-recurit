@@ -1,4 +1,7 @@
-import { commandStepName, lastStepOfVersion, migrationsStepName, STEP_NAME_PATTERN, stepsForVersion, versionOfStep } from './upgrade-sequence';
+import { createHash } from 'node:crypto';
+import { commandStepName, instanceStepsForVersion, lastStepOfVersion, migrationsStepName, STEP_NAME_PATTERN, stepsForVersion, versionOfStep } from './upgrade-sequence';
+import { PUBLISHED_VERSION_STEPS } from './upgrade-commands/published-steps';
+import { CREWFLOW_PREVIOUS_VERSIONS, readAppVersion } from './upgrade-version';
 import type { UpgradeCommand } from './upgrade-commands/upgrade-command';
 import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
 
@@ -25,6 +28,31 @@ describe('upgrade-sequence (Twenty upgrade-command-registry naming)', () => {
       expect(key).toMatch(/^\d+-\d+$/);
       const names = list.map((c) => commandStepName('0.6.0', c));
       expect(new Set(names).size).toBe(names.length);
+    }
+  });
+});
+
+describe('published versions keep their steps (security review of the 0.7.0 release PR, L1)', () => {
+  it('every previous version and the code version produce exactly their pinned, append-only steps', () => {
+    const code = readAppVersion({});
+    for (const v of [...CREWFLOW_PREVIOUS_VERSIONS, code]) {
+      expect([v, PUBLISHED_VERSION_STEPS[v]]).toEqual([v, expect.any(Array)]);
+      expect([v, stepsForVersion(v)]).toEqual([v, [...PUBLISHED_VERSION_STEPS[v]!]]);
+    }
+  });
+
+  it('re-check R2: the steps of the PUBLISHED versions match a second, independent pin (sha256), so editing them needs two reviewed changes', () => {
+    // Update this hash ONLY when a release is published (its version appended to CREWFLOW_PREVIOUS_VERSIONS); never to edit an
+    // already published version's steps. (No CODEOWNERS file exists in this repository; adding one changes review rules for the
+    // whole repository and is a lead / owner decision, so the second pin lives here.)
+    const published = CREWFLOW_PREVIOUS_VERSIONS.map((v) => [v, PUBLISHED_VERSION_STEPS[v]]);
+    expect(createHash('sha256').update(JSON.stringify(published)).digest('hex')).toBe('b9cfb033f211551c3008dcd223898def4fa480abd7e83fabe2937f23acf54ee7');
+  });
+
+  it('the HWS cutover stays registered while 0.7.0 is the code version or a previous one', () => {
+    if ([...CREWFLOW_PREVIOUS_VERSIONS, readAppVersion({})].includes('0.7.0')) {
+      expect((UPGRADE_COMMANDS['0-7'] ?? []).map((c) => c.name)).toContain('HwsCutover');
+      expect(instanceStepsForVersion('0.7.0')).toContain('0.7.0_HwsCutover_1786721540100');
     }
   });
 });

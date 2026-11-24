@@ -10506,3 +10506,67 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   invisible).
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
+
+## Release 0.7.0 — the C3 cutover registered; HWS switched on in the deploy change (DRAFT release PR #175; needs the owner's deploy approval)
+
+The copy path itself is threat-modelled in the C3 entry added by **PR #178**. That entry covers:
+- the cross-tenant copy;
+- the RLS bypass window (A′);
+- serving a partial copy and the one-way sentinel;
+- the backup marker rules;
+- the core write fence and the HWS-off refusal;
+- rows left behind;
+- forged state;
+- duplicate pay statements;
+- disclosure;
+- the 5-minute budget per start;
+- #150's tests.
+
+This entry covers only what release 0.7.0 adds to switch it on.
+
+- **Activation.**
+  - The release registers the step: `'0-7'` in the upgrade registry, so `0.7.0_HwsCutover_1786721540100` runs.
+  - The version goes to 0.7.0, with `CREWFLOW_PREVIOUS_VERSIONS` + 0.6.0 and the reviewed upgrade-from list `CREWFLOW_UPGRADE_FROM_VERSIONS['0.7.0'] = ['0.6.0']` (every published 0.6.x; #240's rule: a missing entry refuses every start, 64). The upgrade is strict from 0.6.0: an R254/R256 database is refused with 65 and must take 0.6.0 first.
+  - `HWS_RUNTIME_ENABLED` stays `"false"` in both production compose files in this release PR (security review M1). It flips to `"true"` only in the deploy change that also bumps the production digest to the published 0.7.0 image. An image older than 0.7.0 never runs with HWS on, because it never ran the cutover and would serve un-copied workspace schemas.
+  - `staging/verify-image-compose.cjs` enforces this in the deployed model. It refuses `HWS_RUNTIME_ENABLED=true` unless the resolved rab-api / rab-worker image's baked `CREWFLOW_APP_VERSION` (from `docker image inspect`) is at least 0.7.0. An unknown version is refused (fail closed).
+- **The backup mount (proposed H6 exception; needs independent security review).** rab-api gets exactly one host mount: `${CREWFLOW_HWS_CUTOVER_BACKUP_DIR:-/dev/null}:/run/crewflow/hws-cutover-backup:ro`.
+  - It is read-only and rab-api only. The H6 test (`deployment-worker.test.cjs`) pins the exact string in both production files, and `verify-image-compose` refuses a writable mount.
+  - In the deployed model (`verify-image-compose`, security review L2), its source must be exactly `/dev/null`, or an existing directory that:
+    - is not the project directory, `CREWFLOW_SECRETS_DIR` or an env file's directory, nor an ancestor of one;
+    - is not under `/etc`, `/root`, `/home`, `/proc` or `/sys`.
+  - When the variable is unset it falls back to an empty file. No marker can be read there, so the copy is refused: fail closed.
+  - Exposure: read-only access to the pre-cutover dump of the same database rab-api already reaches. The operator encrypts the dump at rest and removes it after acceptance (MIGRATION-AND-ROLLBACK-PLAN.md §4.7, §5.1).
+  - `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` is committed on rab-api, and nothing can redirect it:
+    - an env file cannot set it (`compose-owner-login.cjs` `COMMITTED_KEYS`);
+    - a compose override cannot change it (`verify-image-compose` `PINNED_ENV`);
+    - the committed `environment:` value wins over `env_file` anyway.
+  - **Residual: erased data persists in the dump.** While the dump stays mounted, it keeps data that is erased after it was taken (GDPR erasure, user deletion). Unset `CREWFLOW_HWS_CUTOVER_BACKUP_DIR` and move the dump to the encrypted backup store as soon as the release is accepted. That store's retention (§5.1) then governs it.
+- **Timing.**
+  - The cutover runs in the migrate child before the API listens.
+  - The Worker starts only after the API is healthy, so no Worker writes during the copy.
+  - The migrations must be applied first. The 0.7.0 API refuses (503) every workspace against an unmigrated database: fail closed.
+- **Rollback after the cutover** (§4.7):
+  - the 0.7.0 image refuses to boot with HWS off;
+  - a previous image, where it starts at all, sees the core copies of cut-over workspaces as read-only (the fence);
+  - undoing the release means restoring the pre-cutover dump, and every write after the cutover is lost.
+- **Never silently skipped: the HWS-off / zero-workspace fix, a Part B runner change.**
+  - **Problem.** With HWS off and nothing pending, the step used to be recorded completed. It then never ran when HWS was switched on, so the sentinel was never written and fail-closed routing never turned on.
+  - **Runner change.** An upgrade command may now return `{ deferred }`. The runner then:
+    - records no logbook row and logs a WARNING;
+    - reports the step in `UpgradeRunReport.deferred`;
+    - **stops the release** (security review L1): no later instance command and no workspace pass of the version run;
+    - so no later step can be recorded and the version stays incomplete; the next start runs the step again;
+    - lets the next release's strict check refuse (65), without --force, unconditionally until the step has completed;
+    - on a PATCH start that resumes its .0 (#240) with migrations pending, a deferral refuses like a failure (66, flagged `deferred`, nothing applied or recorded); under --force the start records ONE forced marker attempt for the step (`failed`, error `DeferredUnderForce: ...`) before the migrations apply, so the later retry on that moved-past schema is recorded forced (#240's trace is kept), and the start then ends with no patch migrations step and no workspace pass (exit 0; /healthz `failed` until the step completes). Tests: `upgrade-runner-deferral.spec.ts`, `cross-upgrade-resume.integration.spec.ts` case 9;
+    - and `PUBLISHED_VERSION_STEPS` pins each published version's steps (append-only), with a spec that fails if a registered step disappears, e.g. `UPGRADE_COMMANDS['0-7']` while 0.7.0 is the code or a previous version.
+  - **Where the cutover uses it.** The cutover defers only when HWS is off and nothing is pending. HWS off with something pending still refuses.
+  - **Host environment.** Upgrade commands now read host facts (HWS flag, marker path) from the start's own environment (`createUpgradeCommandHost({ env })`), not from `process.env` in an in-process run.
+- **Tests.**
+  - `hws-c3-cutover.integration.spec.ts` "release 0.7.0 no-op fix":
+    - (a) HWS off with zero workspaces is deferred: no row, no sentinel;
+    - (b) HWS off with every workspace verified is deferred;
+    - (c) the next HWS-on start completes and writes the sentinel;
+    - (d) a later HWS-off start leaves the completed step alone.
+  - `verify-image-compose.test.cjs` refuses HWS switched off in one file, and a writable backup mount.
+  - `deployment-worker.test.cjs` (H6) allows only the exact read-only mount on rab-api, and none on rab-worker.
+  - The B2 ledger, runner and release-floor suites start from a 0.6.0-complete database with a backup marker that passes the real checks. No seam skips the cutover.

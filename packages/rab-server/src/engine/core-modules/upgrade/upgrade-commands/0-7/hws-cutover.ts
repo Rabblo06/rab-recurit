@@ -15,7 +15,8 @@
  * to exactly one workspace, search_path pg_catalog). Per-workspace state lives in core.hws_cutover_state (started →
  * verified; crewflow-owned, no runtime DML — security review L-2), never in audit_log (written as a human-readable record):
  *   0. HWS runtime OFF and any workspace not yet verified → refuse (HWS_RUNTIME_OFF), nothing written: the core copies stay
- *      served; the first start with HWS on does the cutover. HWS ON → first of all the one-way "cutover active" sentinel
+ *      served; the first start with HWS on does the cutover. HWS OFF and nothing pending → DEFERRED (release 0.7.0): nothing
+ *      written and the step NOT recorded, so it runs again at every start until one with HWS on. HWS ON → first of all the one-way "cutover active" sentinel
  *      (core.hws_cutover_activation; re-check N-1 / N-2) is written, also on a fresh install with no workspace: from then on
  *      routing requires a verified state (fail closed), new workspaces are marked verified by the database at insertion, and
  *      an HWS-off process refuses to boot.
@@ -100,6 +101,13 @@ export interface HwsCutoverReport {
   workspaces: WorkspaceCutoverOutcome[];
   backup: 'verified' | 'not-needed';
   unmappedNotes: number;
+  /**
+   * Release 0.7.0 (C3 no-op fix): set when HWS is OFF and nothing is pending. The command then returns `{ deferred }` and the
+   * runner records nothing, so the step runs again at every start until it runs with HWS ON (which writes the activation
+   * sentinel even when nothing is pending). Before this, the step was recorded completed here and never ran again once HWS
+   * was switched on: the sentinel was never written and fail-closed routing never turned on.
+   */
+  deferred?: string;
 }
 
 export interface HwsCutoverOptions {
@@ -406,7 +414,11 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
 
   // 0. HWS off: the core copies stay authoritative and served; nothing is written (no block, no state, no sentinel).
   if (ctx.host?.hwsRuntimeEnabled !== true) {
-    if (!pending.length) return report;
+    if (!pending.length) {
+      report.deferred = `HWS runtime routing is OFF (HWS_RUNTIME_ENABLED) and nothing is pending (${all.length} workspace(s)); the cutover runs, and writes the activation sentinel, at the first start with HWS on`;
+      log(`hws cutover: deferred (HWS off, nothing pending): not recorded, runs again at the next start`);
+      return report;
+    }
     throw new HwsCutoverRefused(
       'HWS_RUNTIME_OFF',
       `hws cutover refused: HWS runtime routing is OFF in this deployment (HWS_RUNTIME_ENABLED) and ${pending.length} workspace(s) are not cut over. A copy made now would be a snapshot that later writes to core make stale. Start this release with HWS on. Nothing was written.`,
@@ -605,7 +617,10 @@ export function createHwsCutoverCommand(options: HwsCutoverOptions = {}): Upgrad
     name: HWS_CUTOVER_NAME,
     timestamp: HWS_CUTOVER_TIMESTAMP,
     run: async (ctx) => {
-      await runHwsCutover(ctx, options);
+      const report = await runHwsCutover(ctx, options);
+      // HWS off with nothing pending: not recorded (the runner's deferred result), never a silent completion.
+      if (report.deferred) return { deferred: report.deferred };
+      return undefined;
     },
   };
 }

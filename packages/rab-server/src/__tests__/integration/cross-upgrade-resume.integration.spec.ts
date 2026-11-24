@@ -47,7 +47,11 @@ import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, reg
  *      0.7.1 migration applies; if it fails again the start refuses (66, the log names the command, not a migration) and the
  *      migration is NOT applied, unless --force (review B: the migration applies, 70, rows forced, still blocked); when
  *      0.7.0's migrations step is not completed the start refuses (65) and nothing is applied;
- *   8. review O3: after a FRESH 0.7.1 whose 0.7.0 retry failed (rows executed by 0.7.1 only), 0.7.2 resumes 0.7.0 (not 65).
+ *   8. review O3: after a FRESH 0.7.1 whose 0.7.0 retry failed (rows executed by 0.7.1 only), 0.7.2 resumes 0.7.0 (not 65);
+ *   9. release 0.7.0 (#175 refresh review): a .0 step that DEFERS (returns `{ deferred }`, like the C3 cutover with HWS off
+ *      and nothing pending) on the patch's retry, with the patch migration pending: unforced -> 66 flagged deferred, nothing
+ *      applied, nothing recorded; --force -> the migration applies, ONE forced marker row (failed, DeferredUnderForce), no
+ *      0.7.1 migrations step, no workspace pass, exit 0; the later unforced retry (nothing pending) is recorded forced.
  * Self-sufficient on the shared database: beforeAll seeds a completed `0.6.0_TypeOrmMigrations` row when needed; afterAll
  * removes every row and workspace written here (the 0.7.0 / 0.7.1 instance rows included).
  */
@@ -365,41 +369,41 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
     }
   });
 
-  describe('7. the order invariant through the real locked start, with a real patch-only migration (review R1)', () => {
-    class PatchProbeMigration implements MigrationInterface {
-      name = PATCH_MIGRATION;
-      async up(queryRunner: QueryRunner): Promise<void> {
-        events.push('patch migration');
-        await queryRunner.query('SELECT 1');
-      }
-      async down(): Promise<void> {
-        // nothing to undo
-      }
+  class PatchProbeMigration implements MigrationInterface {
+    name = PATCH_MIGRATION;
+    async up(queryRunner: QueryRunner): Promise<void> {
+      events.push('patch migration');
+      await queryRunner.query('SELECT 1');
     }
-    /**
-     * The real migrate-on-start child (its own UpgradeRun and hooks, deploy post-checks included) as a 0.7.1 image: the
-     * testUpgrade seam sets the version, the published list and the registry with the cutover probe; the runner seam only adds
-     * the patch migration to this code's chain.
-     */
-    const startPatch = async (force = false) => {
-      const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true' };
-      if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
-      return runMigrateOnStart(
-        { migrationApprovalMode: 'none' },
-        {
-          env,
-          log: (l) => lines.push(l),
-          cacheFlush: async () => undefined,
-          ...(force ? { upgradeForce: true as const } : {}),
-          testUpgrade: { codeVersion: '0.7.1', previousVersions: PREV_071, upgradeFrom: UF, registry: REGISTRY() },
-          testWorkspace: { registry: WORKSPACE_UPGRADE_COMMANDS, workspaceIds: [w.id] },
-          runner: (options) =>
-            runLockedMigrations({ ...options, dataSourceOverrides: { ...options.dataSourceOverrides, migrations: [MIGRATIONS_GLOB, PatchProbeMigration] } }),
-        },
-      );
-    };
-    const patchApplied = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.migrations WHERE name = $1', [PATCH_MIGRATION])).rows[0].n) === 1;
+    async down(): Promise<void> {
+      // nothing to undo
+    }
+  }
+  /**
+   * The real migrate-on-start child (its own UpgradeRun and hooks, deploy post-checks included) as a 0.7.1 image: the
+   * testUpgrade seam sets the version, the published list and the registry with the cutover probe; the runner seam only adds
+   * the patch migration to this code's chain.
+   */
+  const startPatch = async (force = false, registry: Record<string, readonly UpgradeCommand[]> = REGISTRY()) => {
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true' };
+    if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+    return runMigrateOnStart(
+      { migrationApprovalMode: 'none' },
+      {
+        env,
+        log: (l) => lines.push(l),
+        cacheFlush: async () => undefined,
+        ...(force ? { upgradeForce: true as const } : {}),
+        testUpgrade: { codeVersion: '0.7.1', previousVersions: PREV_071, upgradeFrom: UF, registry },
+        testWorkspace: { registry: WORKSPACE_UPGRADE_COMMANDS, workspaceIds: [w.id] },
+        runner: (options) =>
+          runLockedMigrations({ ...options, dataSourceOverrides: { ...options.dataSourceOverrides, migrations: [MIGRATIONS_GLOB, PatchProbeMigration] } }),
+      },
+    );
+  };
+  const patchApplied = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.migrations WHERE name = $1', [PATCH_MIGRATION])).rows[0].n) === 1;
 
+  describe('7. the order invariant through the real locked start, with a real patch-only migration (review R1)', () => {
     beforeAll(async () => {
       await dropNewerInstanceRows();
       backup = false;
@@ -515,5 +519,124 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
     } finally {
       await dropNewerInstanceRows();
     }
+  });
+
+  describe('9. release 0.7.0: a .0 step that DEFERS on the patch retry, with the patch migration pending (#175 refresh review)', () => {
+    const DT = T0 + 1;
+    const DEFER_STEP = `0.7.0_ProbeDeferCutover_${DT}`;
+    /** On: the probe defers (as the C3 cutover with HWS off and nothing pending); off: it completes. Writes nothing either way. */
+    let deferNow = true;
+    const deferProbe: UpgradeCommand = {
+      name: 'ProbeDeferCutover',
+      timestamp: DT,
+      run: async (ctx) => {
+        const [m] = (await ctx.query('SELECT EXISTS (SELECT 1 FROM core.migrations WHERE name = $1) AS applied', [PATCH_MIGRATION])) as Array<{ applied: boolean }>;
+        events.push(`defer(patch migration applied=${m?.applied === true})`);
+        return deferNow ? { deferred: 'probe: HWS runtime routing is OFF and nothing is pending' } : undefined;
+      },
+    };
+    const R9 = (): Record<string, readonly UpgradeCommand[]> => ({ ...UPGRADE_COMMANDS, '0-7': [deferProbe] });
+    const status9 = async () => {
+      const c = new Client({ connectionString: appUrl });
+      await c.connect();
+      try {
+        return await readUpgradeStatus(upgradeSessionOf(c), '0.7.1', R9());
+      } finally {
+        await c.end();
+      }
+    };
+
+    beforeAll(async () => {
+      await dropNewerInstanceRows();
+      await admin.query(`UPDATE core.workspace_schema_registry SET migration_error = NULL WHERE workspace_id = $1`, [w.id]);
+      await admin.query('DELETE FROM core.migrations WHERE name = $1', [PATCH_MIGRATION]);
+      deferNow = true;
+      // 0.7.0 (plain session, lock held): its migrations step completes, the probe defers: no row, no workspace pass.
+      const at070 = new UpgradeRun({
+        codeVersion: '0.7.0',
+        previousVersions: PREV_070,
+        upgradeFrom: UF,
+        force: false,
+        log: (l) => lines.push(l),
+        registry: R9(),
+        workspaceRegistry: WORKSPACE_UPGRADE_COMMANDS,
+        workspaceRunner: { workspaceIds: [w.id] },
+      });
+      expect(await start(at070)).toMatchObject({ kind: 'continue', from: '0.6.0' });
+      expect(at070.report.deferred).toEqual([DEFER_STEP]);
+      expect(at070.report.workspaces).toBeNull();
+      expect(await instanceRows('0.7.0_TypeOrmMigrations')).toEqual([{ status: 'completed', attempt: 1, v: '0.7.0', forced: false }]);
+      expect(await instanceRows(DEFER_STEP)).toEqual([]);
+      // The real locked start takes the migration lock itself.
+      await app.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK]);
+    });
+    afterAll(async () => {
+      await admin.query('DELETE FROM core.migrations WHERE name = $1', [PATCH_MIGRATION]).catch(() => undefined);
+      await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
+      await dropNewerInstanceRows();
+    });
+
+    it('9a. unforced: the retry defers BEFORE the patch migration -> 66 flagged deferred; nothing applied, nothing recorded', async () => {
+      events.length = 0;
+      const from = lines.length;
+      const count = await allRowCount();
+      const result = await startPatch(false, R9());
+      expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['migrationFailed', 66]);
+      expect(lines.slice(from).some((l) => /FAILED \(migrationFailed\): MinorReleaseResumeFailedError: .*was deferred \(not recorded\)/.test(l))).toBe(true);
+      expect(lines.slice(from).some((l) => l.includes(`ERROR: the upgrade command ${DEFER_STEP} was DEFERRED again (not recorded) before any migration of this start`))).toBe(true);
+      expect(lines.slice(from).some((l) => l.includes('failed again'))).toBe(false);
+      expect(result.failedMigration ?? null).toBeNull();
+      expect(events).toEqual(['defer(patch migration applied=false)']);
+      expect(result.upgrade?.deferred).toEqual([DEFER_STEP]);
+      expect(result.upgrade?.recorded).toEqual([]);
+      expect(await patchApplied()).toBe(false);
+      expect(await allRowCount()).toBe(count);
+      expect(await instanceRows(DEFER_STEP)).toEqual([]);
+      expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([]);
+    });
+
+    it('9b. --force: the migration applies, ONE forced marker row (DeferredUnderForce), no 0.7.1 migrations step, no workspace pass, exit 0', async () => {
+      events.length = 0;
+      const from = lines.length;
+      const result = await startPatch(true, R9());
+      expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['ok', 0]);
+      expect(events).toEqual(['defer(patch migration applied=false)', 'patch migration']);
+      expect(await patchApplied()).toBe(true);
+      expect(result.upgrade?.commandFailure ?? null).toBeNull();
+      expect(result.upgrade?.deferred).toEqual([DEFER_STEP]);
+      expect(result.upgrade?.recorded).toEqual([{ name: DEFER_STEP, status: 'failed', attempt: 1 }]);
+      expect(result.upgrade?.workspaces ?? null).toBeNull();
+      expect(lines.slice(from).some((l) => l.includes(`WARNING: upgrade --force: ${DEFER_STEP} was deferred again; recorded as a forced marker (attempt 1, DeferredUnderForce)`))).toBe(true);
+      expect(await instanceRows(DEFER_STEP)).toEqual([{ status: 'failed', attempt: 1, v: '0.7.1', forced: true }]);
+      const [marker] = (await admin.query(`SELECT error_message FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [DEFER_STEP])).rows as Array<{ error_message: string }>;
+      expect(marker?.error_message).toMatch(/^DeferredUnderForce: deferred under --force: probe: HWS runtime routing is OFF/);
+      expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([]);
+      // /healthz: the .0 step's latest attempt is the forced marker, so 'failed' until a start completes it.
+      expect((await status9()).state).toBe('failed');
+    });
+
+    it('9c. the cause resolved, unforced (nothing pending): the retry is recorded FORCED (the marker keeps the trace), then 0.7.1_TypeOrmMigrations', async () => {
+      deferNow = false;
+      events.length = 0;
+      const from = lines.length;
+      const result = await startPatch(false, R9());
+      expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['ok', 0]);
+      expect(events).toEqual(['defer(patch migration applied=true)']);
+      expect(lines.slice(from).some((l) => l.includes(`WARNING: ${DEFER_STEP} runs on a schema that an earlier --force start moved past 0.7.0`))).toBe(true);
+      expect(result.upgrade?.recorded).toEqual([
+        { name: DEFER_STEP, status: 'completed', attempt: 2 },
+        { name: '0.7.1_TypeOrmMigrations', status: 'completed', attempt: 1 },
+      ]);
+      expect(await instanceRows(DEFER_STEP)).toEqual([
+        { status: 'failed', attempt: 1, v: '0.7.1', forced: true },
+        { status: 'completed', attempt: 2, v: '0.7.1', forced: true },
+      ]);
+      expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([{ status: 'completed', attempt: 1, v: '0.7.1', forced: false }]);
+      // /healthz ok again (another spec file's workspace issue on the shared database would read 'failed'; ignored here, as in 5).
+      const s9 = await status9();
+      const foreign = (s9.workspaces ?? []).filter((x) => !created.some((c) => c.id === x.workspaceId));
+      expect((s9.workspaces ?? []).filter((x) => x.workspaceId === w.id)).toEqual([]);
+      expect(s9.state).toBe(foreign.length ? 'failed' : 'ok');
+    });
   });
 });

@@ -63,6 +63,7 @@ import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof } from './fresh-install';
 import { runCacheFlush } from '../../cache-flush';
 import { MinorReleaseResumeFailedError, UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
+import { createUpgradeCommandHost } from '../../../../../engine/core-modules/upgrade/upgrade-command-host';
 import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
@@ -459,6 +460,9 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       log,
       testFailCommand,
       registry,
+      // Release 0.7.0: upgrade commands read host facts (HWS flag, backup marker path) from THIS start's environment, the same
+      // one every other decision of the start uses (process.env in the migrate child; the given env in process).
+      host: createUpgradeCommandHost({ env }),
       ...(tw ? { workspaceRegistry: tw.registry, workspaceRunner: { workspaceIds: tw.workspaceIds } } : {}),
       // Part C3 (review L-4): a command that just BLOCKED workspaces bumps the epoch before it goes on; failing is fatal for it.
       flushBlockCache: async () => {
@@ -576,7 +580,12 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     // migrations or the gates refuses (the C3 continue path and CREWFLOW_UPGRADE_FAILURE are removed: a failed
     // migration never serves). The logbook already holds the failed row (UpgradeRun.onApplyFailure); the next start is
     // attempt N+1. Only a failed upgrade COMMAND serves (exit 70), decided above in the success path.
-    if (error instanceof MinorReleaseResumeFailedError) {
+    if (error instanceof MinorReleaseResumeFailedError && error.deferred) {
+      // Release 0.7.0: the .0 step deferred (not recorded), it did not fail.
+      log(
+        `ERROR: the upgrade command ${error.step} was DEFERRED again (not recorded) before any migration of this start; no migration was applied (${pending.length} pending); refusing to start (exit 66). The next start runs it again.`,
+      );
+    } else if (error instanceof MinorReleaseResumeFailedError) {
       log(
         `ERROR: the upgrade command ${error.step} (attempt ${error.attempt ?? '?'}) failed again before any migration of this start; no migration was applied (${pending.length} pending); refusing to start (exit 66). The next start retries it.`,
       );

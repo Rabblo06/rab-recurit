@@ -445,7 +445,8 @@ provider's uptime monitor (or any external HTTP checker) at the API through the 
   - 503 means the database is unreachable, or the security posture drifted. Posture drift stays 503 until a restart
     passes the boot check again.
 - Optional second rule: alert when the 200 body contains `"upgradeFailed":true`. That is a failed upgrade served
-  degraded (C3, section 2). The body never names the migration; the name is in the API's start-up ERROR log.
+  degraded (C3, section 2), or a patch start's `.0` command deferred under `upgrade --force` (3.6 (e): expected until a
+  start completes that command). The body never names the migration or step; the name is in the API's start-up log.
 - `/healthz` does NOT cover the Worker, Redis memory or the BullMQ schedulers. Check those in the Admin Panel → Health
   tab (API, Database, Redis, Worker and BullMQ schedulers indicators, platform admins only). A Worker that is down, or
   schedulers lost from Redis, shows there and in the Worker's own container health, not in `/healthz`.
@@ -485,6 +486,32 @@ provider's uptime monitor (or any external HTTP checker) at the API through the 
   failed and the patch ships its fix while the `.0` also has instance commands, the patch start refuses 65 ("Nothing was
   applied"): the `.0`'s commands may only run on a schema with all `.0` migrations applied, and the patch cannot apply them
   without its own. Use `upgrade --force` (every migration, then the `.0`'s commands; rows marked forced), after review.
+- **(e) A patch release over a DEFERRED `.0` command (release 0.7.0 on: e.g. 0.7.1 after 0.7.0's HWS cutover deferred,
+  because HWS was off and nothing was pending).** A deferral is not a failure, but the `.0` is incomplete until the command
+  completes, so the patch handles it like (d):
+  - **Plain start, the patch carries migrations:** the start refuses (exit 66) and the API does not serve. The log says
+    `ERROR: the upgrade command <step> was DEFERRED again (not recorded) before any migration of this start`. No migration
+    was applied and nothing was recorded.
+  - **The manual `upgrade --force` command:** the patch's migrations apply and the API serves, but the run stops there.
+    The start exits 0 ("schema current"). There is no exit-70 WARNING from `api-prestart.sh`, and the Worker starts.
+    What the operator sees:
+    - the log line `WARNING: upgrade --force: <step> was deferred again; recorded as a forced marker (attempt N,
+      DeferredUnderForce)`;
+    - **public `/healthz` reports `upgradeFailed: true`**, and an uptime monitor's `"upgradeFailed":true` rule (3.5a)
+      alerts;
+    - the platform-admin health report shows the step's latest attempt as failed with `DeferredUnderForce: deferred under
+      --force: ...`.
+
+    The marker keeps a record that this forced start moved the schema past the `.0`, so the later run of the command is
+    recorded `forced` too. Until then, the patch's own migrations step and the workspace pass are not recorded.
+  - **This is expected, not a regression.** Do not restore because of it. Remove the cause of the deferral, then start
+    again with a plain `$P up -d`. For the HWS cutover, the cause is HWS being off: switch HWS on in the deploy change of
+    MIGRATION-AND-ROLLBACK-PLAN.md §4.7, with its verified backup. That start runs the command (WARNING `... runs on a
+    schema that an earlier --force start moved past 0.7.0`, recorded forced), then records the patch's migrations step and
+    runs the workspace pass. After that, `/healthz` reports `upgradeFailed: false`.
+  - **Plain start, nothing pending:** a deferral records nothing and the start serves (exit 0). `/healthz` stays
+    `upgradeFailed: false`; the WARNING `upgrade command <step> DEFERRED, not recorded` in the log is the only sign. The
+    `.0` stays incomplete, so the next minor release refuses (65) until a start completes the command.
 
 **3.7 One API (C5).** Rolling and blue-green deploys are not supported, and the gate refuses more than one rab-api replica or a start-first update:
 - two versions race for the migration lock, and a waiter can block for up to 600 s;
