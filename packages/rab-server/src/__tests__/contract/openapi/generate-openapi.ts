@@ -2,48 +2,36 @@ import 'reflect-metadata';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { buildOpenApiDocument, OPENAPI_DOCUMENT_PATH, serialiseOpenApiDocument } from './build-openapi-document';
+import { buildOpenApiDocument, serialiseOpenApiDocument } from './build-openapi-document';
 
 /**
- * Writes the generated OpenAPI document to packages/rab-server/openapi/crewflow-api.openapi.json, or with `--check`
- * fails (exit 1) when the committed file differs from what the code generates (ci-server runs the check).
+ * Writes the generated OpenAPI document to the file given with `--out` (ci-server `openapi` writes it under RUNNER_TEMP
+ * and uploads it as the `openapi` artefact). The document is never committed and never served.
  *
  *   npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
- *     packages/rab-server/src/__tests__/contract/openapi/generate-openapi.ts [--check]
+ *     packages/rab-server/src/__tests__/contract/openapi/generate-openapi.ts --out <file>
  *
- * Reflection only: no database, no Redis, no network, nothing listens.
+ * Reflection only: no database, no Redis, no network, nothing listens. The document is built twice and must come out
+ * byte-identical (a generator whose output depends on load order would make every artefact diff noise).
  */
-async function main(): Promise<void> {
+function main(): void {
   const args = process.argv.slice(2);
-  if (args.some((a) => a !== '--check')) throw new Error(`unknown argument(s): ${args.join(' ')} (only --check)`);
-  const generated = serialiseOpenApiDocument(await buildOpenApiDocument());
-  const relative = path.relative(process.cwd(), OPENAPI_DOCUMENT_PATH);
-  if (args.includes('--check')) {
-    const committed = fs.existsSync(OPENAPI_DOCUMENT_PATH) ? fs.readFileSync(OPENAPI_DOCUMENT_PATH, 'utf8').replace(/\r\n/g, '\n') : '';
-    if (committed === generated) {
-      console.log(`${relative} matches the code (${Object.keys(JSON.parse(generated).paths).length} paths)`);
-      return;
-    }
-    const a = committed.split('\n');
-    const b = generated.split('\n');
-    let line = 0;
-    while (line < a.length && line < b.length && a[line] === b[line]) line++;
-    console.error(`::error file=${relative}::the committed OpenAPI document is out of date with the code (first difference at line ${line + 1}).`);
-    console.error(`  committed: ${a[line] ?? '<end of file>'}`);
-    console.error(`  generated: ${b[line] ?? '<end of file>'}`);
-    console.error('Regenerate it and commit the result: npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/__tests__/contract/openapi/generate-openapi.ts');
-    process.exitCode = 1;
-    return;
-  }
-  fs.mkdirSync(path.dirname(OPENAPI_DOCUMENT_PATH), { recursive: true });
-  fs.writeFileSync(OPENAPI_DOCUMENT_PATH, generated);
-  console.log(`wrote ${relative}`);
+  const outIndex = args.indexOf('--out');
+  const out = outIndex >= 0 ? args[outIndex + 1] : undefined;
+  if (!out || args.length !== 2) throw new Error('usage: generate-openapi.ts --out <file>');
+  const first = serialiseOpenApiDocument(buildOpenApiDocument());
+  const second = serialiseOpenApiDocument(buildOpenApiDocument());
+  if (first !== second) throw new Error('OpenAPI: two builds of the same code differ (the generator is not deterministic)');
+  fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+  fs.writeFileSync(out, first);
+  const doc = JSON.parse(first) as { paths: Record<string, Record<string, unknown>>; components: { schemas: Record<string, unknown> } };
+  const operations = Object.values(doc.paths).reduce((n, item) => n + Object.keys(item).length, 0);
+  console.log(`wrote ${out}: ${operations} operations, ${Object.keys(doc.paths).length} paths, ${Object.keys(doc.components.schemas).length} schemas`);
 }
 
-main().then(
-  () => process.exit(process.exitCode ?? 0),
-  (error: unknown) => {
-    console.error(error);
-    process.exit(1);
-  },
-);
+try {
+  main();
+} catch (error) {
+  console.error(error);
+  process.exit(1);
+}

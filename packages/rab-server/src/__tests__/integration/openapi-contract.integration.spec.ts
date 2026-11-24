@@ -4,7 +4,6 @@ import { INestApplication, RequestMethod, Type } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { DiscoveryModule, DiscoveryService, MetadataScanner } from '@nestjs/core';
 import { Test, TestingModule } from '@nestjs/testing';
-import * as fs from 'fs';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -16,19 +15,19 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { NotificationService } from '../../modules/notification/services/notification.service';
 import { Venue } from '../../modules/venue/entities/venue.entity';
-import { OPENAPI_DOCUMENT_PATH } from '../contract/openapi/build-openapi-document';
+import { buildOpenApiDocument } from '../contract/openapi/build-openapi-document';
 import { CONTRACT_RESPONSES } from '../contract/openapi/contract-responses';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { businessTable } from './helpers/hws-fixtures';
 import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
- * Contract tests for the committed OpenAPI document (packages/rab-server/openapi/crewflow-api.openapi.json).
+ * Contract tests for the OpenAPI document generated from the code (src/__tests__/contract/openapi/; built here in-process,
+ * the same build ci-server `openapi` uploads as an artefact; never committed).
  *
  *  1. The document describes exactly the API the real AppModule serves: every live route is an operation of the
  *     document and every operation is a live route (the generator reads controller classes from the source tree; this
- *     closes the gap between "declared" and "registered"). ci-server separately fails when the committed file differs
- *     from what the code generates.
+ *     closes the gap between "declared" and "registered").
  *  2. The client contract endpoints (x-crewflow-contract: what the Staff app parses) answer real requests, made the way
  *     the app makes them, with bodies that validate against the document's response schemas. A renamed, retyped or
  *     dropped field the app relies on fails here, before an installed app breaks.
@@ -117,10 +116,10 @@ function liveOperations(moduleRef: TestingModule): string[] {
   return [...out].sort();
 }
 
-describeIfDb('OpenAPI contract: the committed document is the live API, and the client contract endpoints honour it', () => {
+describeIfDb('OpenAPI contract: the generated document is the live API, and the client contract endpoints honour it', () => {
   jest.setTimeout(300_000);
 
-  const doc = JSON.parse(fs.readFileSync(OPENAPI_DOCUMENT_PATH, 'utf8')) as OpenApiDocument;
+  const doc = buildOpenApiDocument() as unknown as OpenApiDocument;
   let moduleRef: TestingModule;
   let app: INestApplication;
   let owner: DataSource;
@@ -195,7 +194,7 @@ describeIfDb('OpenAPI contract: the committed document is the live API, and the 
     await app?.close();
   });
 
-  it('the committed document has exactly the live route table (no undocumented route, no documented ghost)', () => {
+  it('the generated document has exactly the live route table (no undocumented route, no documented ghost)', () => {
     const live = liveOperations(moduleRef);
     const documented = Object.entries(doc.paths)
       .flatMap(([route, item]) => Object.keys(item).map((method) => `${method.toUpperCase()} ${route}`))
