@@ -19,6 +19,7 @@ import { WORKSPACE_UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/up
 import { upgradeSessionOf, UpgradeSession } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { WorkspaceCommandRunner, WorkspaceRunOptions } from '../../engine/core-modules/upgrade/workspace-command-runner';
 import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
+import { takeAttendanceLevelsDownTo } from './helpers/attendance-levels-down';
 import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
@@ -350,6 +351,7 @@ describeIfDb('M4 §11: attendance staff-own-or-manager RLS predicate, structure 
     const before = await body();
     await admin.query('BEGIN');
     try {
+      await takeAttendanceLevelsDownTo(admin, 25);
       await expect(new WorkspaceAttendanceStaffScope1786722120000().down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: \d+ workspace schema\(s\) are at structure level 25/);
     } finally {
       await admin.query('ROLLBACK');
@@ -371,6 +373,7 @@ describeIfDb('M4 §11: attendance staff-own-or-manager RLS predicate, structure 
     const before = { body: await prosrc(), core: await corePolicies() };
     await admin.query('BEGIN');
     try {
+      await takeAttendanceLevelsDownTo(admin, 25);
       const { rows } = await admin.query(
         `SELECT DISTINCT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname ~ '^workspace_[0-9a-f]{32}$' AND c.relname = 'attendance' AND c.relkind = 'r'`,
       );

@@ -1,44 +1,44 @@
 import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
 
 /**
- * Release 0.7.0, workspace structure level 26 (security finding S11 / architecture §5.7, owner decision 2026-11-21: "make
- * attendance_correction insert-only in the database"). DRAFT — NEW SQL, owner SQL review FIRST; never edited after merge once
- * approved. Depends on level 25 (AttendanceStaffScope), #243, #177 and #175.
+ * Security finding S11 / architecture §5.7 (owner decision 2026-11-21: "make attendance_correction insert-only in the
+ * database"). DRAFT — NEW SQL, owner SQL review FIRST; never edited after merge once approved.
+ *
+ * THE statements, in one place, for every copy of `attendance_correction`:
+ *   - `core.attendance_correction` (HWS off: production today): migration AttendanceCorrectionInsertOnly1786722110000;
+ *   - every `workspace_<hex>.attendance_correction` (HWS on): the 0.7.0 workspace command that follows the 0.7.0 release
+ *     chain (#175 / #177 / #243), the level-26 command object at the end of this file.
  *
  * The gap: a correction row is itself audit evidence (architecture §11: "original values are never overwritten in place"),
- * but in every workspace schema the runtime could UPDATE or DELETE it:
- *   - the runtime login crewflow_owner inherits the table owner crewflow, so grants never bound it (owner-login BC-01/BC-13);
- *   - crewflow_app (the schema role the parity guards reproduce) still held UPDATE and DELETE, a grant copied into the
- *     template (THREAT-MODEL "copied-grant drift ... attendance_correction UPDATE/DELETE", open since 1786720020000);
+ * but the runtime could UPDATE or DELETE it:
+ *   - the runtime login crewflow_owner inherits the table owner crewflow, so grants never bound it (owner-login BC-01 / BC-13);
+ *   - crewflow_app (the schema role the owner-login parity guards reproduce) still holds UPDATE and DELETE (the copied-grant
+ *     drift recorded in THREAT-MODEL since CrewflowAppCopiedWriteGrantRevoke1786720020000);
  *   - the policy attendance_correction_tenant is FOR ALL, so RLS admitted both for any tenant row.
  * Nothing in the application updates or deletes a correction (AttendanceService inserts one row per changed field).
  *
- * What it does, for one workspace schema:
- *   1. `REVOKE UPDATE, DELETE ON <schema>.attendance_correction FROM crewflow_app` (the template grant drift closed; the core
- *      copy is revoked by the migration);
- *   2. three statement-level BEFORE triggers, UPDATE / DELETE / TRUNCATE, calling the existing owner-login guard
- *      core.owner_login_grant_parity_guard() (OwnerLoginGrantParityGuards1786721420000, unchanged). It refuses the runtime
- *      login with 42501 per STATEMENT (even one RLS leaves with no row), and lets through only crewflow, rab_secure_owner and
- *      superusers: definers, the workspace migrator (SET LOCAL ROLE crewflow) and foreign-key actions, which run as the table
- *      owner. So an `organisation` / `attendance` CASCADE behaves exactly as before (retention unchanged: this is not a new
- *      business rule), while no statement of the runtime can change or remove a correction.
- *   Trigger names do not match `_%_grant_parity_%` on purpose: those are the frozen PAY-1 set counted by its own checks.
- *   - Idempotent: REVOKE of a privilege not held is a no-op; each trigger is created only when the table has no trigger of
- *     that name (a trigger of that name with another definition is left alone and the post-step fingerprint check refuses
- *     the workspace: fail closed). Additive only (no DROP), so `mayDrop` is not declared.
- *   - Lock: SHARE ROW EXCLUSIVE on this workspace's attendance_correction for the catalog change only (no scan).
- * The same statements on `core.attendance_correction` (the HWS-off copy) and in core.provision_workspace (new workspaces)
- * are in migration AttendanceCorrectionInsertOnly1786722110000. Twenty has no equivalent: a Crewflow addition.
+ * What it does, for one schema: three statement-level BEFORE triggers, UPDATE / DELETE / TRUNCATE, calling the existing
+ * owner-login guard core.owner_login_grant_parity_guard() (OwnerLoginGrantParityGuards1786721420000, unchanged). It refuses the
+ * runtime login with 42501 per STATEMENT (even one that RLS leaves with no row) and lets through only crewflow,
+ * rab_secure_owner and superusers: definers, the workspace migrator (SET LOCAL ROLE crewflow) and foreign-key actions, which
+ * run as the table owner. The attendance foreign key is turned into RESTRICT separately (AttendanceCorrectionEvidenceRestrict
+ * 1786722115000, owner decision 46), so deleting the parent attendance can no longer cascade the corrections away; the
+ * organisation CASCADE (tenant offboarding, LC-2) is unchanged.
+ * Trigger names deliberately do not match `_%_grant_parity_%`: that is the frozen PAY-1 set, counted by its own checks.
+ * Idempotent: each trigger is created only when the table has no trigger of that name. Additive only (no DROP).
+ *
+ * Not here (with the workspace copies, in the same release): `REVOKE UPDATE, DELETE ... FROM crewflow_app` on core AND every
+ * workspace schema together. tools/check-rls-coverage.ts requires a workspace table's grants to equal its core counterpart's,
+ * so that (cosmetic) schema-role grant can only move together with the workspace command. The runtime login is not bound by
+ * it anyway (it inherits the owner); the triggers are the enforcement.
  */
-export const ATTENDANCE_CORRECTION_INSERT_ONLY_TIMESTAMP = 1786722110000;
-
 export const ATTENDANCE_CORRECTION_GUARD_FUNCTION = 'core.owner_login_grant_parity_guard';
 
-/** The three guard triggers, in a fixed order. */
+/** The three guard triggers, in a fixed order. tgtype = BEFORE (2) + statement level + UPDATE 16 / DELETE 8 / TRUNCATE 32. */
 export const ATTENDANCE_CORRECTION_INSERT_ONLY_TRIGGERS = [
-  { name: 'attendance_correction_insert_only_update', event: 'UPDATE' },
-  { name: 'attendance_correction_insert_only_delete', event: 'DELETE' },
-  { name: 'attendance_correction_insert_only_truncate', event: 'TRUNCATE' },
+  { name: 'attendance_correction_insert_only_update', event: 'UPDATE', tgtype: 18 },
+  { name: 'attendance_correction_insert_only_delete', event: 'DELETE', tgtype: 10 },
+  { name: 'attendance_correction_insert_only_truncate', event: 'TRUNCATE', tgtype: 34 },
 ] as const;
 
 function checkedSchema(schema: string): string {
@@ -46,36 +46,70 @@ function checkedSchema(schema: string): string {
   return schema;
 }
 
-/** The statements for one schema ('core' or a validated workspace schema). */
+/** The guard triggers for one schema ('core' or a validated workspace schema). */
 export function attendanceCorrectionInsertOnlySql(schema: string): string {
   const s = checkedSchema(schema);
   const t = `"${s}".attendance_correction`;
   // sql-injection-reviewed: s is 'core' or a regex-validated `workspace_<32 hex>` name; trigger names, events and the function are constants.
   const creates = ATTENDANCE_CORRECTION_INSERT_ONLY_TRIGGERS.map(
+    // sql-injection-reviewed: t is built from the validated schema above; g.name / g.event are constants of this file.
     (g) => `  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid = '${t}'::pg_catalog.regclass AND t.tgname = '${g.name}') THEN
     CREATE TRIGGER ${g.name} BEFORE ${g.event} ON ${t} FOR EACH STATEMENT EXECUTE FUNCTION ${ATTENDANCE_CORRECTION_GUARD_FUNCTION}();
   END IF;`,
   ).join('\n');
-  return `REVOKE UPDATE, DELETE ON ${t} FROM crewflow_app;
-DO $correction_insert_only$
+  return `DO $correction_insert_only$
 BEGIN
 ${creates}
 END
 $correction_insert_only$`;
 }
 
-/** down() only (core): the triggers dropped and the copied grant restored (the state before this migration). */
+/** down() only: the triggers dropped (the state before). */
 export function attendanceCorrectionInsertOnlyDownSql(schema: string): string {
   const s = checkedSchema(schema);
   const t = `"${s}".attendance_correction`;
-  // sql-injection-reviewed: as above.
-  return [...ATTENDANCE_CORRECTION_INSERT_ONLY_TRIGGERS.map((g) => `DROP TRIGGER IF EXISTS ${g.name} ON ${t}`), `GRANT UPDATE, DELETE ON ${t} TO crewflow_app`].join(';\n');
+  return ATTENDANCE_CORRECTION_INSERT_ONLY_TRIGGERS.map(
+    // sql-injection-reviewed: t is built from the validated schema above; g.name is a constant of this file.
+    (g) => `DROP TRIGGER IF EXISTS ${g.name} ON ${t}`).join(';\n');
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Release 0.7.0, workspace structure level 26 (lead allocation). DRAFT — NEW SQL, owner SQL review FIRST. The core copy got
+// the triggers (AttendanceCorrectionInsertOnly1786722110000, #306) and the RESTRICT key (AttendanceCorrectionEvidenceRestrict
+// 1786722115000, owner decision 46). This command applies to every existing READY workspace schema, in order:
+//   1. `REVOKE UPDATE, DELETE ... FROM crewflow_app` (the copied-grant drift; core is revoked in the same release by
+//      WorkspaceAttendanceCorrectionInsertOnly1786722130000, so check-rls-coverage's "workspace grants = core grants" holds);
+//   2. the same three guard triggers as core (created only when missing);
+//   3. `attendance_correction_attendance_id_fkey` ON DELETE CASCADE -> RESTRICT (only when it is still CASCADE).
+// It drops and re-adds a constraint, so `mayDrop` is declared. Idempotent: REVOKE of a privilege not held is a no-op, the
+// triggers and the key change are guarded. WorkspaceAttendanceCorrectionInsertOnly1786722130000 folds the same SQL into
+// core.provision_workspace so new workspaces are built at level 26.
+
+export const ATTENDANCE_CORRECTION_INSERT_ONLY_TIMESTAMP = 1786722130000;
+
+/** The level-26 statements for one workspace schema. */
+export function workspaceCorrectionInsertOnlySql(schema: string): string {
+  const s = checkedSchema(schema);
+  const t = `"${s}".attendance_correction`;
+  // sql-injection-reviewed: s is a regex-validated schema name; the constraint, column and table names are constants.
+  const restrict = `DO $correction_restrict$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid = '${t}'::pg_catalog.regclass
+              AND k.conname = 'attendance_correction_attendance_id_fkey' AND k.contype = 'f' AND k.confdeltype = 'c') THEN
+    ALTER TABLE ${t}
+      DROP CONSTRAINT attendance_correction_attendance_id_fkey,
+      ADD CONSTRAINT attendance_correction_attendance_id_fkey FOREIGN KEY (attendance_id) REFERENCES "${s}".attendance(id) ON DELETE RESTRICT;
+  END IF;
+END
+$correction_restrict$`;
+  // sql-injection-reviewed: t is built from the validated schema s; the REVOKE names constants only.
+  return [`REVOKE UPDATE, DELETE ON ${t} FROM crewflow_app`, attendanceCorrectionInsertOnlySql(s), restrict].join(';\n');
 }
 
 /**
  * Expected `core.workspace_schema_fingerprint_v2` of a level-26 workspace per PostgreSQL major. Measured, never derived
- * (ws-attendance-correction-insert-only.integration.spec.ts `[l26-fp]`; the per-major fingerprints ci run prints the measured
- * value on a mismatch). An undeclared major makes AttendanceCorrectionInsertOnly1786722110000 refuse (exit 66): fail closed.
+ * (ws-attendance-correction-insert-only.integration.spec.ts `[l26-fp]`; the fingerprints ci run prints `MISMATCH (measured …)`).
+ * PLACEHOLDERS until CI measures them (fail closed).
  */
 export const ATTENDANCE_CORRECTION_INSERT_ONLY_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
   16: '0000000000000000000000000000000000000000000000000000000000000026',
@@ -83,15 +117,16 @@ export const ATTENDANCE_CORRECTION_INSERT_ONLY_FINGERPRINTS_V2: Readonly<Partial
   18: '0000000000000000000000000000000000000000000000000000000000000028',
 });
 
-export const ATTENDANCE_CORRECTION_INSERT_ONLY_PROVISION_LITERAL = 'db:provision_workspace@AttendanceCorrectionInsertOnly1786722110000';
+export const ATTENDANCE_CORRECTION_INSERT_ONLY_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceAttendanceCorrectionInsertOnly1786722130000';
 
 export const ATTENDANCE_CORRECTION_INSERT_ONLY: WorkspaceUpgradeCommand = Object.freeze({
   kind: 'workspace',
   name: 'AttendanceCorrectionInsertOnly',
   timestamp: ATTENDANCE_CORRECTION_INSERT_ONLY_TIMESTAMP,
-  sql: attendanceCorrectionInsertOnlySql,
+  sql: workspaceCorrectionInsertOnlySql,
   structure: Object.freeze({
     level: 26,
+    mayDrop: true,
     fingerprints: ATTENDANCE_CORRECTION_INSERT_ONLY_FINGERPRINTS_V2,
     provisionFunctionLiteral: ATTENDANCE_CORRECTION_INSERT_ONLY_PROVISION_LITERAL,
   }),

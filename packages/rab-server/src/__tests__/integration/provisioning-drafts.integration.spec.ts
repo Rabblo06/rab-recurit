@@ -36,6 +36,8 @@ import { STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE } from '../../engine/core-mod
 import { composeServerPathTemplateLevel24 } from '../../database/typeorm/workspace-schema/structure-level-24';
 import { STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/staff-profile-shift-team-multi-role';
 import { composeServerPathTemplateLevel25 } from '../../database/typeorm/workspace-schema/structure-level-25';
+import { composeServerPathTemplateLevel26 } from '../../database/typeorm/workspace-schema/structure-level-26';
+import { ATTENDANCE_CORRECTION_INSERT_ONLY } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-correction-insert-only';
 import { ATTENDANCE_STAFF_SCOPE } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { composeServerPathTemplateV1GrantParity } from '../../database/typeorm/workspace-schema/v1/server-path-template-grant-parity';
@@ -67,7 +69,17 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *   v20: WorkspaceGrantParityGuards1786721430000 (owner-login PAY-1, re-frozen in place 2026-11-04 for PAY-1b): the v19
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
-function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23 | 24 | 25): string {
+function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26): string {
+  // S11, structure level 26 (WorkspaceAttendanceCorrectionInsertOnly1786722130000; DRAFT SQL, owner review first): the same
+  // guarded v3 body over template(25) + the level-26 statements, derived exactly as that migration derives it.
+  if (through === 26) {
+    const structure = ATTENDANCE_CORRECTION_INSERT_ONLY.structure!;
+    const fp = structure.fingerprints[workspaceFingerprintMajor()];
+    if (!fp) throw new Error('no declared level-26 fingerprint for this PostgreSQL major');
+    const sql26 = provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel26(), modulesThrough(20).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) })), 26, fp, structure.provisionFunctionLiteral!);
+    const open26 = 'AS $provision$';
+    return sql26.slice(sql26.indexOf(open26) + open26.length, sql26.lastIndexOf('$provision$'));
+  }
   // M4 §11 LOW, structure level 25 (WorkspaceAttendanceStaffScope1786722120000; DRAFT SQL, owner review first): the same guarded v3
   // body over template(24) + the attendance ALTER POLICY, derived exactly as that migration derives it.
   if (through === 25) {
@@ -227,7 +239,8 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const l23 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000'`);
       const l24 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'StaffShiftTeamMultiRole1786721600000'`);
       const l25 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceStaffScope1786722120000'`);
-      expect(prosrc).toBe(approvedProvisionBody(l25.length === 1 ? 25 : l24.length === 1 ? 24 : l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
+      const l26 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceAttendanceCorrectionInsertOnly1786722130000'`);
+      expect(prosrc).toBe(approvedProvisionBody(l26.length === 1 ? 26 : l25.length === 1 ? 25 : l24.length === 1 ? 24 : l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
     const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'core'::regnamespace AND proname = 'worker_record_workspace_schema_drift'`);

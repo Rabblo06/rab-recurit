@@ -1,15 +1,17 @@
 import { Client } from 'pg';
 
-import { AttendanceCorrectionInsertOnly1786722110000 } from '../../../database/typeorm/core/migrations/1786722110000-AttendanceCorrectionInsertOnly';
-import { AttendanceStaffScopeRls1786722100000 } from '../../../database/typeorm/core/migrations/1786722100000-AttendanceStaffScopeRls';
+import { WorkspaceAttendanceCorrectionInsertOnly1786722130000 } from '../../../database/typeorm/core/migrations/1786722130000-WorkspaceAttendanceCorrectionInsertOnly';
+import { WorkspaceAttendanceStaffScope1786722120000 } from '../../../database/typeorm/core/migrations/1786722120000-WorkspaceAttendanceStaffScope';
+import { correctionAttendanceFkSql } from '../../../database/typeorm/workspace-schema/attendance-correction-evidence-restrict-sql';
 import { attendanceCorrectionInsertOnlyDownSql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-correction-insert-only';
-import { attendanceTenantOnlySql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
+import { attendanceCorrectionTenantOnlySql, attendanceTenantOnlySql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/attendance-staff-scope';
 
 /**
- * Test-only (inside a transaction the caller rolls back): takes the attendance structure levels ABOVE `level` down, newest
- * first, the way an owner-run rollback would: every workspace schema back to the previous form, then the migration's own
+ * Test-only (inside a transaction the caller rolls back): takes the attendance workspace structure levels ABOVE `level` down,
+ * newest first, the way an owner-run rollback would: every workspace schema back to the previous form, then the migration's own
  * down(). A spec of an older level uses it before calling its own migration's down(), which needs its own body installed.
- * Levels: 26 = AttendanceCorrectionInsertOnly1786722110000, 25 = AttendanceStaffScopeRls1786722100000.
+ * Levels: 26 = WorkspaceAttendanceCorrectionInsertOnly1786722130000, 25 = WorkspaceAttendanceStaffScope1786722120000. The core
+ * copies (#305 / #306) are not touched: they are not structure levels.
  */
 export async function takeAttendanceLevelsDownTo(admin: Client, level: number): Promise<void> {
   const runner = { isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await admin.query(sql, params as unknown[])).rows } as never;
@@ -21,12 +23,20 @@ export async function takeAttendanceLevelsDownTo(admin: Client, level: number): 
         [table],
       )
     ).rows.map((r) => String(r.nspname));
-  if (level < 26 && (await applied('AttendanceCorrectionInsertOnly1786722110000'))) {
-    for (const s of await schemas('attendance_correction')) await admin.query(attendanceCorrectionInsertOnlyDownSql(s));
-    await new AttendanceCorrectionInsertOnly1786722110000().down(runner);
+  if (level < 26 && (await applied('WorkspaceAttendanceCorrectionInsertOnly1786722130000'))) {
+    for (const s of await schemas('attendance_correction')) {
+      await admin.query(attendanceCorrectionInsertOnlyDownSql(s));
+      await admin.query(`GRANT UPDATE, DELETE ON "${s}".attendance_correction TO crewflow_app`);
+      const [fk] = (await admin.query(`SELECT confdeltype::text AS d FROM pg_constraint WHERE conrelid = ('"' || $1 || '".attendance_correction')::regclass AND conname = 'attendance_correction_attendance_id_fkey'`, [s])).rows;
+      if (fk?.d === 'r') await admin.query(correctionAttendanceFkSql(s, 'CASCADE'));
+    }
+    await new WorkspaceAttendanceCorrectionInsertOnly1786722130000().down(runner);
   }
-  if (level < 25 && (await applied('AttendanceStaffScopeRls1786722100000'))) {
-    for (const s of await schemas('attendance')) await admin.query(attendanceTenantOnlySql(s));
-    await new AttendanceStaffScopeRls1786722100000().down(runner);
+  if (level < 25 && (await applied('WorkspaceAttendanceStaffScope1786722120000'))) {
+    for (const s of await schemas('attendance')) {
+      await admin.query(attendanceTenantOnlySql(s));
+      await admin.query(attendanceCorrectionTenantOnlySql(s));
+    }
+    await new WorkspaceAttendanceStaffScope1786722120000().down(runner);
   }
 }

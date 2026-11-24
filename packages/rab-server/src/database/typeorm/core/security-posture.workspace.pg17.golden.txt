@@ -90,7 +90,7 @@ ws|column|payslip.paid_by|crewflow_app|UPDATE
 ws|column|payslip.payment_reference|crewflow_app|UPDATE
 ws|column|payslip.updated_at|crewflow_app|UPDATE
 ws|column|payslip.version|crewflow_app|UPDATE
-ws|fk|attendance_correction|attendance_correction_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE CASCADE
+ws|fk|attendance_correction|attendance_correction_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE RESTRICT
 ws|fk|attendance|attendance_shift_assignment_id_fkey|FOREIGN KEY (shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
 ws|fk|attendance|attendance_shift_assignment_workspace_fkey|FOREIGN KEY (shift_assignment_id, workspace_id) REFERENCES workspace_*.shift_assignment(id, workspace_id)
 ws|fk|attendance|attendance_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
