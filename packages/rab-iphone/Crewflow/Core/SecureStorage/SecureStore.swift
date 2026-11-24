@@ -10,6 +10,26 @@ public protocol SecureStore: AnyObject, Sendable {
     func set(_ value: String, for key: String) throws
     func remove(_ key: String)
     func removeAll()
+    /// Three-way read: a value, definitely absent, or the read FAILED (e.g.
+    /// `errSecInteractionNotAllowed` before first unlock). `string(for:)`
+    /// folds a failure into "absent", which is right for the session (fail
+    /// closed: sign in again) but wrong for data that must never be
+    /// overwritten on a failed read (the offline punch queue).
+    func read(_ key: String) -> SecureStoreRead
+}
+
+/// The result of `SecureStore.read`.
+public enum SecureStoreRead: Equatable, Sendable {
+    case value(String)
+    case absent
+    case failed(OSStatus)
+}
+
+extension SecureStore {
+    /// Stores that cannot fail a read (in-memory) report value or absent.
+    public func read(_ key: String) -> SecureStoreRead {
+        string(for: key).map { .value($0) } ?? .absent
+    }
 }
 
 public struct KeychainError: Error, Equatable {
@@ -44,16 +64,23 @@ public final class KeychainStore: SecureStore, @unchecked Sendable {
     }
 
     public func string(for key: String) -> String? {
+        // Any failure (including errSecInteractionNotAllowed before first
+        // unlock) reads as "absent": the caller then treats the session as
+        // missing, which fails closed (sign-in required).
+        if case .value(let text) = read(key) { return text }
+        return nil
+    }
+
+    public func read(_ key: String) -> SecureStoreRead {
         var query = baseQuery(key)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        // Any failure (including errSecInteractionNotAllowed before first
-        // unlock) reads as "absent": the caller then treats the session as
-        // missing, which fails closed (sign-in required).
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if status == errSecItemNotFound { return .absent }
+        guard status == errSecSuccess else { return .failed(status) }
+        guard let data = result as? Data, let text = String(data: data, encoding: .utf8) else { return .failed(errSecDecode) }
+        return .value(text)
     }
 
     public func set(_ value: String, for key: String) throws {
