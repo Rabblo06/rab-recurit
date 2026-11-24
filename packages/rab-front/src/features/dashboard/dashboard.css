@@ -58,7 +58,7 @@
 .dash-profile { grid-row: span 1; padding: 0; overflow: hidden; min-height: 300px; display: flex; flex-direction: column; justify-content: flex-end; background: var(--ink-surface); border-color: transparent; }
 .dash-profile-photo, .dash-profile-initials { position: absolute; inset: 0; }
 .dash-profile-photo .avatar, .dash-profile-photo img, .dash-profile-photo > * { width: 100% !important; height: 100% !important; border-radius: 0 !important; object-fit: cover; font-size: 64px; }
-.dash-profile-initials { display: flex; align-items: center; justify-content: center; font-size: 64px; font-weight: 300; letter-spacing: 0.04em; color: rgba(255, 255, 255, 0.85); background: radial-gradient(120% 90% at 30% 20%, #4a4c55, var(--ink-surface)); }
+.dash-profile-initials { display: flex; align-items: center; justify-content: center; font-size: 64px; font-weight: 300; letter-spacing: 0.04em; color: var(--font-secondary); background: radial-gradient(120% 90% at 30% 20%, var(--bg-primary), var(--border-light)); }
 .dash-profile-foot { position: relative; display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; padding: 20px; background: linear-gradient(transparent, rgba(16, 17, 20, 0.72)); color: #fff; }
 .dash-profile-name { font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
 .dash-profile-role { margin-top: 4px; font-size: 12px; color: rgba(255, 255, 255, 0.78); }

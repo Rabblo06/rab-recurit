@@ -7,9 +7,9 @@ describe('setupStageStates — server-reported stages only', () => {
     expect(SETUP_STAGES.map((s) => s.label)).toEqual([
       'Validating',
       'Creating workspace',
-      'Preparing database',
-      'Applying FORCE RLS',
-      'Verifying workspace',
+      'Preparing your workspace',
+      'Securing your workspace',
+      'Checking everything',
       'Ready',
     ]);
   });

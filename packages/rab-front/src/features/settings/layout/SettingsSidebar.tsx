@@ -1,23 +1,20 @@
 import { NavLink } from 'react-router-dom';
 import type { Icon as TablerIcon } from '@tabler/icons-react';
-import { LayoutGroup, motion } from 'framer-motion';
-import { spring, usePrefersReducedMotion } from '../../../shared/motion';
+import NavigationIndicator, { NavigationIndicatorScope } from '../../../shared/components/NavigationIndicator';
 import { useLeadershipCapabilities } from '../members/leadershipCapabilities';
 import {
   IconUserCircle, IconAdjustmentsHorizontal, IconKey,
-  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconShieldCheck, IconLogout, IconSparkles,
+  IconBuilding, IconUsersGroup, IconShieldLock, IconMail, IconCalendar, IconLogout, IconSparkles,
 } from '@tabler/icons-react';
 
 const userNav = [
   { to: '/settings/profile', label: 'Profile', Icon: IconUserCircle },
   { to: '/settings/experience', label: 'Experience', Icon: IconAdjustmentsHorizontal },
-  { to: '/settings/account', label: 'Account', Icon: IconKey },
-  { to: '/settings/security', label: 'Security', Icon: IconShieldCheck },
+  { to: '/settings/account', label: 'Accounts', Icon: IconKey },
 ];
 
 const workspaceNav = [
   { to: '/settings/my-workspace', label: 'General', Icon: IconBuilding },
-  { to: '/settings/my-workspace/domains', label: 'Domains', Icon: IconWorld },
   { to: '/settings/workspace/members', label: 'Members', Icon: IconUsersGroup },
 ];
 
@@ -30,13 +27,10 @@ const workspaceNav = [
 function SettingsLink({ to, label, Icon, end }: { to: string; label: string; Icon: TablerIcon; end?: boolean }) {
   // Framer's MotionConfig does not stop shared-layout moves (and paints one frame at the old row), so reduced motion
   // renders a plain, non-shared highlight instead.
-  const reduce = usePrefersReducedMotion();
   return (
     <NavLink to={to} title={label} aria-label={label} end={end} className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}>
       {({ isActive }) => <>
-        {isActive && (reduce
-          ? <span className="nav-active-pill" aria-hidden="true" />
-          : <motion.span layoutId="settings-active-pill" className="nav-active-pill" aria-hidden="true" transition={spring} />)}
+        <NavigationIndicator active={isActive} priority={to.length} />
         <Icon size={16} stroke={1.8} />
         <span>{label}</span>
       </>}
@@ -62,12 +56,13 @@ export default function SettingsSidebar({
 }) {
   const { canAdd } = useLeadershipCapabilities(isPlatformAdminOnly);
   return (
-    <LayoutGroup id="settings-navigation">
+    <NavigationIndicatorScope>
     <aside className={compact ? 'settings-mode-navigation' : 'settings-shell-sidebar'} aria-label="Settings navigation">
       <div className="sidebar-section">
         <p className="sidebar-section-label">Your account</p>
         <nav className="sidebar-nav">
-          {userNav.map(({ to, label, Icon }) => <SettingsLink key={to} to={to} label={label} Icon={Icon} />)}
+          {userNav.map(({ to, label, Icon }) => <SettingsLink key={to} to={to} label={label} Icon={Icon} end={to === '/settings/account'} />)}
+          <div className="settings-account-children"><SettingsLink to="/settings/account/emails" label="Emails" Icon={IconMail} /><SettingsLink to="/settings/account/calendar" label="Calendar" Icon={IconCalendar} /></div>
         </nav>
       </div>
 
@@ -97,6 +92,6 @@ export default function SettingsSidebar({
         </nav>
       </div>
     </aside>
-    </LayoutGroup>
+    </NavigationIndicatorScope>
   );
 }

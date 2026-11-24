@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { IconCheck, IconCopy, IconPencil } from '@tabler/icons-react';
+import { IconCopy, IconDeviceFloppy } from '@tabler/icons-react';
+import { Link } from 'react-router-dom';
+import SettingsHeaderActions from '../layout/SettingsHeaderActions';
+import ConfirmDialog from '../../../shared/components/ConfirmDialog';
 import { normalizeSubdomain } from '@rab/shared';
 import { api } from '../../../shared/api';
 import { toast } from '../../../shared/lib/toast';
@@ -36,23 +39,25 @@ export default function MyWorkspaceDomainsPage() {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
+    let cancelled = false;
     setCheck(null);
     setCheckFailed(false);
+    setChecking(false);
     if (!editing || !subdomain || subdomain === workspace?.subdomain) return;
     setChecking(true);
     clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       try {
         const { data } = await api.post<SubdomainCheck>('/manager-workspaces/subdomain/check', { candidate: subdomain });
-        setCheck(data);
+        if (!cancelled) setCheck(data);
       } catch {
         // The real check runs again on save; meanwhile tell the user why there is no answer.
-        setCheckFailed(true);
+        if (!cancelled) setCheckFailed(true);
       } finally {
-        setChecking(false);
+        if (!cancelled) setChecking(false);
       }
     }, DEBOUNCE_MS);
-    return () => clearTimeout(debounceRef.current);
+    return () => { cancelled = true; clearTimeout(debounceRef.current); };
   }, [subdomain, editing, workspace?.subdomain]);
 
   const save = useMutation({
@@ -96,38 +101,19 @@ export default function MyWorkspaceDomainsPage() {
   }
 
   return (
-    <div className="settings-page">
+    <div className="settings-page subdomain-settings">
+      <SettingsHeaderActions><Link className="btn btn-outline" to="/settings/my-workspace">Cancel</Link><button className="btn btn-dark" disabled={!editing || !canSave || confirming || checking} onClick={() => setConfirming(true)}><IconDeviceFloppy size={14} /> Save</button></SettingsHeaderActions>
       <div className="settings-section">
         <h3>Subdomain</h3>
-        <p>Manage your workspace subdomain and access URL.</p>
-        {editing ? (
-          <div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
-                <input value={subdomain} onChange={(e) => setSubdomain(normalizeSubdomain(e.target.value))} placeholder="subdomain" />
-              </div>
-              <button className="btn btn-dark" disabled={!canSave || confirming} onClick={() => setConfirming(true)}>
-                Save
-              </button>
-              <button className="btn btn-outline" onClick={() => { setEditing(false); setConfirming(false); }}>Cancel</button>
-            </div>
-            {confirming && canSave && (
-              <div role="alertdialog" aria-label="Confirm address change" className="settings-row" style={{ marginTop: 10, display: 'block' }}>
-                <p style={{ margin: '0 0 8px', fontSize: 12 }}>
-                  Your workspace will move to <strong>{newUrl ?? subdomain}</strong>. The old address
-                  {routedUrl ? <> <strong>{routedUrl}</strong></> : <> <strong>{workspace.subdomain}</strong></>} will redirect
-                  there for a while and stays reserved for this workspace during that time, so nobody else can take it. Existing
-                  links and bookmarks keep working through the redirect; people signed in on the old address will need to sign in
-                  again on the new one.
-                </p>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="btn btn-dark" disabled={save.isPending} onClick={() => save.mutate()}>
-                    {save.isPending ? 'Saving…' : 'Change address'}
-                  </button>
-                  <button className="btn btn-outline" disabled={save.isPending} onClick={() => setConfirming(false)}>Keep current address</button>
-                </div>
-              </div>
-            )}
+        <p>Set the name of your subdomain.</p>
+        <div>
+          <div className="settings-subdomain-input">
+            <input aria-label="Subdomain" value={editing ? subdomain : workspace.subdomain} disabled={save.isPending} onChange={(e) => { setEditing(true); setSubdomain(normalizeSubdomain(e.target.value)); }} placeholder="subdomain" />
+            {host.workspaceBaseDomain && <span>.{host.workspaceBaseDomain}</span>}
+          </div>
+          <ConfirmDialog open={confirming} title="Change subdomain?" description={
+            'Your workspace will move to ' + (newUrl ?? subdomain) + '. The old address will temporarily redirect and remain reserved. People using the old address may need to sign in again on the new one.'
+          } confirmLabel="Confirm" destructive loading={save.isPending} onConfirm={() => { if(canSave && !checking) save.mutate(); }} onCancel={() => setConfirming(false)} />
             {subdomain.length >= 3 && !sameAsCurrent && (
               <div style={{ marginTop: 8, fontSize: 12 }}>
                 {checking ? (
@@ -162,21 +148,11 @@ export default function MyWorkspaceDomainsPage() {
               </div>
             )}
           </div>
-        ) : (
-          <div className="settings-row">
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {workspace.subdomain}
-              <span className="badge badge-active"><IconCheck size={11} /> Verified</span>
-            </span>
-            <button className="btn-icon" title="Edit subdomain" onClick={() => { setSubdomain(workspace.subdomain); setEditing(true); }}>
-              <IconPencil size={14} />
-            </button>
-          </div>
-        )}
+
       </div>
 
-      <div className="settings-section">
-        <h3>Workspace URL</h3>
+      <details className="settings-section subdomain-address-details">
+        <summary>Workspace URL</summary>
         <p>{routedUrl ? 'This is the URL to access your workspace.' : 'Workspace addresses are not enabled for this environment yet — use the application at this address.'}</p>
         <div className="settings-row">
           <span style={{ color: 'var(--font-primary)' }}>{url}</span>
@@ -184,7 +160,7 @@ export default function MyWorkspaceDomainsPage() {
             <IconCopy size={14} /> {copied ? 'Copied' : 'Copy URL'}
           </button>
         </div>
-      </div>
+      </details>
     </div>
   );
 }

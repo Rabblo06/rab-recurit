@@ -186,6 +186,7 @@ export default function EnrolmentDialog({
       <SecurityModal
         {...common}
         open
+        presentation="setup-page"
         title="Connect your authenticator"
         description="Scan the QR code with your authenticator app, then enter the 6-digit code."
         onClose={closeIfIdle}
@@ -215,8 +216,9 @@ export default function EnrolmentDialog({
           </>
         }
       >
-        <StepIndicator current={2} />
-        <ScanBlock material={step.material} />
+        <div className="acs-setup-intro"><h3>Authenticator app</h3><p>Scan with your authenticator app to generate one-time codes for signing in.</p></div>
+        <ScanBlock material={step.material} compactKey />
+        <div className="acs-setup-verification"><h3>Verify the code from the app</h3><p>Enter the six-digit code below.</p>
         <OtpInput
           value={code}
           onChange={(v) => {
@@ -228,6 +230,7 @@ export default function EnrolmentDialog({
           disabled={busy}
           autoFocus
         />
+        </div>
         {codeError && (
           <Notice tone="error" live id="acs-enrol-code-error">
             {codeError}
@@ -242,6 +245,7 @@ export default function EnrolmentDialog({
     <SecurityModal
       {...common}
       open
+      presentation="compact"
       title="Confirm it’s you"
       description={
         withPassword
@@ -271,7 +275,7 @@ export default function EnrolmentDialog({
         </>
       }
     >
-      <StepIndicator current={1} />
+
       <ConfirmIdentityFields
         status={status}
         intent="enrol"

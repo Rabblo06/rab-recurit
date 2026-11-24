@@ -1,3 +1,4 @@
+import CookieNotice from './shell/CookieNotice';
 import { MotionConfig } from 'framer-motion';
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { lazyWithPreload } from './shared/lib/lazyWithPreload';
@@ -12,6 +13,7 @@ import Login from './features/auth/Login';
 import Layout from './shell/Layout';
 import ToastHost from './shell/ToastHost';
 import Dashboard from './features/dashboard/Dashboard';
+import UpNext from './features/up-next/UpNext';
 import PlatformAdminRoute from './features/settings/PlatformAdminRoute';
 import CeoRoute from './features/settings/CeoRoute';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
@@ -252,7 +254,9 @@ function OnboardingGate({ children }: { children: JSX.Element }) {
   if (!mustOwnWorkspace) return children;
   if (workspaceLoading || workspaceErrored) return null;
   if (!workspace) return <Navigate to="/onboarding/workspace" replace />;
-  if (!workspace.onboardingCompletedAt) return <Navigate to="/onboarding/profile" replace />;
+  // New UI: an unfinished onboarding goes to the preparation screen first while the schema it needs is still being
+  // built (only when this session routes through the workspace schema, as below), otherwise to the profile step.
+  if (!workspace.onboardingCompletedAt) return <Navigate to={workspace.schemaRequired === true && (workspace.schemaStatus === 'CREATING' || workspace.schemaStatus === 'FAILED') ? '/onboarding/preparing' : '/onboarding/profile'} replace />;
   // Phase B P8: a workspace whose schema is still being built (CREATING) or whose last attempt failed (FAILED) is resumed
   // or retried ONLY by its owner's own request — the preparation screen auto-resumes CREATING and offers "Try again" on
   // FAILED. Redirect there only when the server says this session actually routes through the workspace schema
@@ -376,6 +380,7 @@ export default function App() {
       {/* App-wide motion policy: with OS "reduce motion", Framer Motion drops transforms everywhere (opacity only). */}
       <MotionConfig reducedMotion="user">
       <AppErrorBoundary>
+        <CookieNotice />
         {/* Wave 3 lane H: which workspace (if any) this host is, resolved before the session bootstraps. */}
         <WorkspaceHostGate>
         <SessionBootstrap>
@@ -404,18 +409,27 @@ export default function App() {
               own correct handling for a stale/already-READY revisit (shows the welcome fast-path, then
               leaves again) — see its own doc comment. */}
           <Route path="/onboarding/preparing" element={<RequireAuth><WorkspacePreparationScreen /></RequireAuth>} />
+          <Route path="/onboarding/welcome" element={<RequireAuth><WorkspacePreparationScreen welcomeOnly /></RequireAuth>} />
           <Route path="/" element={<RequireAuth><OnboardingGate><Layout /></OnboardingGate></RequireAuth>}>
             <Route index element={<Dashboard />} />
+            <Route path="up-next" element={<UpNext />} />
             <Route path="chat" element={<AiChatPage />} />
             <Route path="users" element={<Users />} />
             <Route path="users/:id" element={<UserProfile />} />
             <Route path="shifts" element={<Shifts />} />
+            <Route path="shifts/open" element={<Shifts key="open" fixedStatus="open" title="Open Shifts" />} />
+            <Route path="shifts/draft" element={<Shifts key="draft" fixedStatus="draft" title="Draft Shifts" />} />
+            <Route path="shifts/completed" element={<Shifts key="completed" fixedStatus="completed" title="Completed Shifts" />} />
             <Route path="offers" element={<Offers />} />
+            <Route path="offers/pending" element={<Offers key="pending" fixedStatus="pending" title="Pending Offers" />} />
+            <Route path="offers/awaiting-confirmation" element={<Offers key="awaiting" fixedStatus="staff_accepted" title="Awaiting Confirmation" />} />
+            <Route path="offers/confirmed" element={<Offers key="confirmed" fixedStatus="manager_confirmed" title="Confirmed Offers" />} />
             <Route path="venue-offers" element={<VenueOffers />} />
             <Route path="venue-offers/:shiftId" element={<VenueOfferPipeline />} />
             <Route path="calendar" element={<Calendar />} />
             <Route path="payroll" element={<Payroll />} />
             <Route path="venues" element={<Venues />} />
+            <Route path="venues/archived" element={<Venues fixedStatus="archived" title="Archived Venues" />} />
             <Route path="audit" element={<AuditLog />} />
             <Route path="help" element={<HelpCenter />} />
             <Route path="support" element={<Support />} />
@@ -424,7 +438,10 @@ export default function App() {
               <Route path="profile" element={<ProfilePage />} />
               <Route path="experience" element={<ExperiencePage />} />
               <Route path="account" element={<AccountPage />} />
-              <Route path="security" element={<SecurityPage />} />
+              <Route path="account/emails" element={<AccountPage />} />
+              <Route path="account/calendar" element={<AccountPage />} />
+              <Route path="account/new" element={<AccountPage />} />
+              <Route path="security" element={<ProfilePage />} />
               <Route path="my-workspace" element={<MyWorkspaceGeneralPage />} />
               <Route path="my-workspace/domains" element={<MyWorkspaceDomainsPage />} />
               <Route path="workspace" element={<WorkspaceGeneralPage />} />

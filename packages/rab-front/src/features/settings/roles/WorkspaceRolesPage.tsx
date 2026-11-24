@@ -1,3 +1,4 @@
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -42,8 +43,7 @@ export default function WorkspaceRolesPage({ embedded = false }: { embedded?: bo
         <div className="members-toolbar roles-toolbar">
           {embedded && <div className="member-section-heading"><h3>Workspace roles</h3><p>Keep access clear and consistent across your team.</p></div>}
           <div className="toolbar-search">
-            <IconSearch size={14} />
-            <input aria-label="Search roles" placeholder="Search a role…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <SearchField label="Search roles" type="text" aria-label="Search roles" placeholder="Search a role…" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
           <button className="btn btn-outline" onClick={openCreate}>+ Create role</button>
         </div>

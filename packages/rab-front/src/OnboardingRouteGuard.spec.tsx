@@ -75,7 +75,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
 
     mountAuthenticatedAt('/onboarding/profile');
 
-    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
     expect(screen.queryByText('Create your profile')).toBeNull();
     expect(mockApi.post).toHaveBeenCalledWith('/auth/logout');
     expect(mockBroadcastLogout).toHaveBeenCalled();
@@ -90,7 +90,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
 
     mountAuthenticatedAt('/onboarding/workspace');
 
-    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
     expect(screen.queryByText('Create your workspace')).toBeNull();
     expect(mockApi.post).toHaveBeenCalledWith('/auth/logout');
   });
@@ -105,7 +105,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
 
     mountAuthenticatedAt('/onboarding/profile');
 
-    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
     expect(screen.queryByText('Create your profile')).toBeNull();
   });
 
@@ -138,7 +138,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
     // CreateProfileScreen sets this one-time trigger when onboarding genuinely completes.
     markPendingManagerWelcome('ws-1');
 
-    mountAuthenticatedAt('/onboarding/preparing');
+    mountAuthenticatedAt('/onboarding/welcome');
 
     // READY → the 8s presentation floor, then the animated welcome overlay. Never a sign-out.
     await waitFor(() => expect(document.querySelector('.welcome-overlay')).not.toBeNull(), { timeout: 10_000 });
@@ -161,7 +161,7 @@ describe('OnboardingRouteGuard — browser Back after completed onboarding', () 
       throw new Error(`unexpected GET ${url}`);
     });
     const first = mountAuthenticatedAt('/onboarding/profile');
-    await waitFor(() => expect(screen.getByText('Welcome to your workspace')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Welcome to Crewflow')).toBeInTheDocument());
     first.unmount();
 
     // Second mount, same tab — the QueryClient singleton (and its cache) survives the unmount.

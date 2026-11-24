@@ -5,6 +5,8 @@ import Drawer from '../../shared/components/Drawer';
 import { toast } from '../../shared/lib/toast';
 import { buildGeofencePayload, parseCoordinatePair, validateGeofence } from './venueGeofence';
 import VenuePhotoField from './VenuePhotoField';
+import AddressInput from '../users/AddressInput';
+import StaffSelect from '../users/StaffSelect';
 import { getApiErrorMessage, normalizeApiError } from '../../shared/lib/apiError';
 import { notifyApiError } from '../../shared/lib/mutationFeedback';
 
@@ -13,7 +15,7 @@ interface Venue {
   name: string;
   clientName: string | null;
   type: string;
-  address: { line1?: string; city?: string; postcode?: string };
+  address: { line1?: string; line2?: string; city?: string; state?: string; postcode?: string; country?: string };
   instructions: string | null;
   breakPaid: boolean;
   defaultBreakMinutes: number | null;
@@ -46,8 +48,13 @@ const fmtMoney = (pence: number) => `£${(pence / 100).toFixed(2)}`;
 const empty = {
   name: '',
   clientName: '',
+  clientFirstName: '',
+  clientLastName: '',
   type: 'hotel',
   line1: '',
+  line2: '',
+  state: '',
+  country: '',
   city: '',
   postcode: '',
   instructions: '',
@@ -105,8 +112,13 @@ export default function CreateVenueDrawer() {
       const loaded = {
         name: venue.name,
         clientName: venue.clientName ?? '',
+        clientFirstName: (venue.clientName ?? '').trim().split(/\s+/)[0] ?? '',
+        clientLastName: (venue.clientName ?? '').trim().split(/\s+/).slice(1).join(' '),
         type: venue.type,
         line1: venue.address?.line1 ?? '',
+        line2: venue.address?.line2 ?? '',
+        state: venue.address?.state ?? '',
+        country: venue.address?.country ?? '',
         city: venue.address?.city ?? '',
         postcode: venue.address?.postcode ?? '',
         instructions: venue.instructions ?? '',
@@ -166,7 +178,7 @@ export default function CreateVenueDrawer() {
         name: body.name,
         clientName: body.clientName || undefined,
         type: body.type,
-        address: { line1: body.line1, city: body.city, postcode: body.postcode },
+        address: { line1: body.line1, city: body.city, postcode: body.postcode, ...(body.line2 ? { line2: body.line2 } : {}), ...(body.state ? { state: body.state } : {}), ...(body.country ? { country: body.country } : {}) },
         instructions: body.instructions || undefined,
         breakPaid: body.breakPaid,
         defaultBreakMinutes: body.defaultBreakMinutes ? Number(body.defaultBreakMinutes) : undefined,
@@ -288,20 +300,12 @@ export default function CreateVenueDrawer() {
         onRemove={() => { setPendingPhoto(null); setPendingPhotoRemove(!!photoFileId); }}
       />
       <div className="field"><label>Venue name</label><input value={form.name} onChange={f('name')} /></div>
-      <div className="form-grid">
-        <div className="field"><label>Client name</label><input value={form.clientName} onChange={f('clientName')} /></div>
-        <div className="field">
-          <label>Type</label>
-          <select value={form.type} onChange={f('type') as any}>
-            {VENUE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </div>
+      <div className="field"><label htmlFor="venue-type">Type</label>
+        <StaffSelect id="venue-type" label="Type" placeholder="Select type…" value={form.type} onChange={type => setForm(previous => ({ ...previous, type }))}
+          options={VENUE_TYPES.map(value => ({ value, label: value === 'other' ? 'Custom type' : value[0].toUpperCase() + value.slice(1) }))} />
       </div>
-      <div className="field"><label>Address</label><input value={form.line1} onChange={f('line1')} /></div>
-      <div className="form-grid">
-        <div className="field"><label>City</label><input value={form.city} onChange={f('city')} /></div>
-        <div className="field"><label>Postcode</label><input value={form.postcode} onChange={f('postcode')} /></div>
-      </div>
+      <AddressInput address={form.line1} address2={form.line2} city={form.city} state={form.state} postcode={form.postcode} country={form.country}
+        onChange={address => setForm(previous => ({ ...previous, line1: address.address, line2: address.address2, city: address.city, state: address.state, postcode: address.postcode, country: address.country }))} />
       <div className="field"><label>Note</label><textarea value={form.instructions} onChange={f('instructions') as any} rows={3} placeholder="Entrance instructions, security access, meeting point, dress expectations…" /></div>
 
       <h4 style={{ margin: '16px 0 8px', fontSize: 13, fontWeight: 600 }}>Location &amp; Geofence</h4>
@@ -379,13 +383,9 @@ export default function CreateVenueDrawer() {
 
       {saveError && <p className="field-hint" role="alert" style={{ color: 'var(--feedback-error)', fontSize: 12 }}>{saveError}</p>}
 
-      <h4 style={{ margin: '16px 0 8px', fontSize: 13, fontWeight: 600 }}>Pay Details</h4>
-      {!editId ? (
-        <p style={{ fontSize: 12, color: 'var(--color-text-secondary, #6b7280)' }}>
-          Save the venue first to add role pay rates.
-        </p>
-      ) : (
+      {editId && (
         <>
+          <h4 style={{ margin: '16px 0 8px', fontSize: 13, fontWeight: 600 }}>Pay Details</h4>
           {roleRates.data?.map((rate) => {
             const role = jobRoles.data?.find((r) => r.id === rate.jobRoleId);
             return (

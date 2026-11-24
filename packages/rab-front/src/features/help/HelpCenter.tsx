@@ -1,3 +1,4 @@
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { IconArrowUpRight, IconSearch } from '@tabler/icons-react';
@@ -18,8 +19,7 @@ export default function HelpCenter() {
           <h2>How can we help?</h2>
           <p>Short guides to the things you do in Crewflow every day.</p>
           <label className="help-search">
-            <IconSearch size={16} stroke={1.6} aria-hidden="true" />
-            <input type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search help" aria-label="Search help" />
+            <SearchField label="Search help" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search help" aria-label="Search help" />
           </label>
         </div>
         {topics.length === 0 ? (

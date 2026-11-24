@@ -31,7 +31,9 @@ describe('no Initial Manager yet — the invite form', () => {
 
   it('has no workspace fields — the recipient chooses their own workspace after activating', async () => {
     mount();
-    await screen.findByText('Invite your Initial Manager');
+    await screen.findByText('Invite by email');
+    expect(screen.getByRole('table', { name: 'Initial Manager invitations' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Expires in' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Workspace name')).toBeNull();
     expect(screen.queryByLabelText('Subdomain')).toBeNull();
   });
@@ -42,16 +44,17 @@ describe('no Initial Manager yet — the invite form', () => {
       throw new Error(`unexpected POST ${url}`);
     });
     mount();
-    await screen.findByText('Invite your Initial Manager');
+    await screen.findByText('Invite by email');
 
+    expect(screen.queryByLabelText('First name')).toBeNull();
+    expect(screen.queryByLabelText('Last name')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Send Invitation' })).toBeDisabled();
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'manager@northside.test' } });
-    fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Pat' } });
-    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Ng' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Send Invitation' }));
 
     await waitFor(() => expect(post).toHaveBeenCalledWith('/managers/initial-manager-invite', {
-      email: 'manager@northside.test', firstName: 'Pat', lastName: 'Ng',
+      email: 'manager@northside.test',
     }));
     expect(await screen.findByText('Invitation created for manager@northside.test.')).toBeInTheDocument();
     expect(screen.queryByText(/has been received/i)).toBeNull();
@@ -65,6 +68,8 @@ describe('an Initial Manager already exists — status only, never a second invi
     mount();
 
     expect(await screen.findByText('pending@northside.test')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Initial Manager invitations' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Expires in' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Workspace name')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /Resend invitation/i }));
@@ -96,12 +101,10 @@ describe('an Initial Manager already exists — status only, never a second invi
     fireEvent.click(await screen.findByRole('button', { name: /Replace Invitation/i }));
 
     fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'new@northside.test' } });
-    fireEvent.change(screen.getByLabelText('First name'), { target: { value: 'Jo' } });
-    fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Replace Invitation' }));
     await waitFor(() => expect(post).toHaveBeenCalledWith('/managers/initial-manager-invite/replace', {
-      expectedProfileId: 'mp-1', email: 'new@northside.test', firstName: 'Jo', lastName: 'Lee',
+      expectedProfileId: 'mp-1', email: 'new@northside.test',
     }));
     // Exactly one rendering of this message — a real bug caught here during development: the
     // page's own top-level error paragraph and the shared form's own `error` prop both showed

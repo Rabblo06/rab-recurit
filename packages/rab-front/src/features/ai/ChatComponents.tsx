@@ -1,3 +1,4 @@
+import { RadioGroup } from '../../shared/components/arc/radio-group/radio-group';
 import { useId, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { IconCheck, IconChevronRight, IconCircle, IconCopy, IconExclamationMark, IconSparkles, IconSquare, IconX } from '@tabler/icons-react';
@@ -51,7 +52,7 @@ export function ChatApproval({ title, description, records, status = 'pending', 
 
 export function ChatQuestion({ question, options, onAnswer }: { question: string; options: string[]; onAnswer?: (answer: string) => void }) {
   const id = useId(); const [selected, setSelected] = useState('');
-  return <fieldset className="ai-card"><legend>{question}</legend>{options.map(option => <label key={option}><input type="radio" name={id} value={option} checked={selected === option} onChange={() => setSelected(option)}/>{option}</label>)}<div className="ai-card-actions"><button className="btn btn-dark" disabled={!selected || !onAnswer} onClick={() => onAnswer?.(selected)}>Continue</button></div></fieldset>;
+  return <fieldset className="ai-card"><RadioGroup label={question} name={id} options={options.map(value => ({value, label: value}))} value={selected} onValueChange={setSelected} /><div className="ai-card-actions"><button className="btn btn-dark flow-button" disabled={!selected || !onAnswer} onClick={() => onAnswer?.(selected)}>Continue</button></div></fieldset>;
 }
 
 export function ChatQueue({ items, onEdit, onCancel }: { items: { id: string; text: string }[]; onEdit?: (id: string) => void; onCancel?: (id: string) => void }) {

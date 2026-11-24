@@ -1,6 +1,7 @@
+import { motion as arcMotion } from 'framer-motion';
 import { useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { IconRefresh, IconX } from '@tabler/icons-react';
+import { IconRefresh, IconTrash, IconMail, IconSend } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
 import ConfirmDialog from '../../../shared/components/ConfirmDialog';
 import { TableSkeleton } from '../../../shared/components/LoadingState';
@@ -29,9 +30,11 @@ const PAGE_SIZE = 10;
  * and the organisation exists only after that. Same form, list and confirmation patterns as the member invitation form
  * (`InviteMembersPanel`). The server (`/admin/organisation-invitations`, platform administrators only) is authoritative.
  */
-export default function CeoInvitationPanel({ roleControl }: { roleControl?: ReactNode }) {
+export default function CeoInvitationPanel({ roleControl, modeSelect, draftEmail, onDraftEmailChange }: { roleControl?: ReactNode; modeSelect?: ReactNode; draftEmail?: string; onDraftEmailChange?: (email: string) => void }) {
   const qc = useQueryClient();
-  const [email, setEmail] = useState('');
+  const [localEmail, setLocalEmail] = useState('');
+  const email = draftEmail ?? localEmail;
+  const setEmail = onDraftEmailChange ?? setLocalEmail;
   const [error, setError] = useState('');
   const [page, setPage] = useState(1);
   const [revokeTarget, setRevokeTarget] = useState<CeoInvitation | null>(null);
@@ -83,30 +86,33 @@ export default function CeoInvitationPanel({ roleControl }: { roleControl?: Reac
   return <>
     <section className="member-invite-card invite-by-email" aria-labelledby="add-organisation-heading">
       <div className="member-section-heading">
-        <h3 id="add-organisation-heading">Add organisation</h3>
-        <p>Invite an organisation's CEO to complete their account and workspace setup.</p>
+        <h3 id="add-organisation-heading">Invite by email</h3>
+        <p>Send an invite email to your team.</p>
       </div>
       {error && <p role="alert" className="member-error feedback-error">{error}</p>}
-      <form onSubmit={submit} noValidate>
+      <form className={`compact-invite-form inline-invite-form leadership-invite-form${email ? ' has-draft' : ''}`} onSubmit={submit} noValidate>
         <div className="invite-row">
-          {roleControl}
           <div className="invite-field">
             <label htmlFor="ceo-email">CEO email</label>
+            <div className={`invite-email-group${modeSelect ? ' has-mode' : ''}`}>
+              {modeSelect}
             <input
               id="ceo-email"
               type="email"
               inputMode="email"
               autoComplete="off"
-              placeholder="ceo@company.com"
+              placeholder="name@company.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
               disabled={send.isPending}
             />
+            </div>
           </div>
+          <div className="invite-field">{roleControl}</div>
         </div>
         <p className="invite-help">The CEO enters their own name and organisation name. The link works for 24 hours.</p>
-        <button className="btn btn-dark invite-submit" disabled={send.isPending}>{send.isPending ? 'Sending…' : 'Send invitation'}</button>
+        <button className="btn btn-dark invite-submit" aria-label="Send invitation" disabled={!email.trim() || send.isPending}><IconSend size={14} aria-hidden="true" />{send.isPending ? 'Sending…' : 'Invite'}</button>
       </form>
     </section>
 
@@ -114,17 +120,17 @@ export default function CeoInvitationPanel({ roleControl }: { roleControl?: Reac
       <h3 id="pending-organisations-heading">Pending organisation invitations</h3>
       {invitations.isLoading ? <TableSkeleton columns={3} /> : invitations.isError ? (
         <p role="alert" className="member-error feedback-error">Invitations could not be loaded. <button className="btn btn-outline" onClick={() => invitations.refetch()}>Retry</button></p>
-      ) : !rows.length ? (
-        <p className="pending-empty">No organisation invitations pending.</p>
       ) : (
         <div className="members-table-wrap">
           <table className="table invitations-table">
-            <thead><tr><th>CEO email</th><th>Expires in</th><th><span className="visually-hidden">Actions</span></th></tr></thead>
+            <thead><tr><th>Email</th><th>Role</th><th>Expires in</th><th><span className="visually-hidden">Actions</span></th></tr></thead>
             <tbody>
+              {!rows.length && <tr><td colSpan={4} className="pending-empty">No organisation invitations pending.</td></tr>}
               {rows.map((inv) => {
                 const canResend = inv.sendCount < inv.maxSends;
-                return <tr key={inv.id}>
-                  <td>{inv.email}</td>
+                return <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={inv.id}>
+                  <td><span className="invitation-email"><IconMail size={13} aria-hidden="true" />{inv.email}</span></td>
+                  <td className="cell-muted">CEO (Organisation)</td>
                   <td className={inv.status === 'expired' ? 'feedback-error' : 'cell-muted'}>{inv.status === 'expired' ? 'Expired' : <>• {expiresIn(inv.expiresAt)}</>}</td>
                   <td className="invitation-actions">
                     <button
@@ -135,9 +141,9 @@ export default function CeoInvitationPanel({ roleControl }: { roleControl?: Reac
                       title={canResend ? `Send again (${inv.sendCount} of ${inv.maxSends} sent)` : 'All three sends used — revoke and invite again'}
                       onClick={() => action.mutate({ id: inv.id, kind: 'resend' })}
                     ><IconRefresh size={14} /></button>
-                    <button type="button" className="btn-icon" aria-label={`Revoke invitation to ${inv.email}`} disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconX size={14} /></button>
+                    <button type="button" className="btn-icon" aria-label={`Revoke invitation to ${inv.email}`} disabled={action.isPending} onClick={() => setRevokeTarget(inv)}><IconTrash size={14} /></button>
                   </td>
-                </tr>;
+                </arcMotion.tr>;
               })}
             </tbody>
           </table>
@@ -153,6 +159,7 @@ export default function CeoInvitationPanel({ roleControl }: { roleControl?: Reac
     </section>
 
     <ConfirmDialog
+      dialogClassName="invitation-confirm-dialog"
       open={!!revokeTarget}
       title="Revoke this invitation?"
       description={revokeTarget ? `The link sent to ${revokeTarget.email} will stop working immediately.` : ''}

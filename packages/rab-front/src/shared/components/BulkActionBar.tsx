@@ -1,3 +1,4 @@
+import HoldToConfirm from './arc/hold-to-confirm/hold-to-confirm';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -9,6 +10,7 @@ import { duration, ease, usePrefersReducedMotion } from '../motion';
 
 export interface BulkAction {
   key: string;
+  holdToConfirm?: boolean;
   label: string;
   icon: ReactNode;
   onClick: () => void;
@@ -62,7 +64,7 @@ export default function BulkActionBar({ count, onClear, actions = [], scopeNote 
   const inline = compact ? actions.slice(0, 1) : actions;
   const overflow = compact ? actions.slice(1) : [];
 
-  const button = (a: BulkAction) => (
+  const button = (a: BulkAction) => a.holdToConfirm ? <HoldToConfirm key={a.key} label={a.label} title={a.title} tone="danger" duration={1800} confirmed={false} disabled={a.disabled} onConfirm={a.onClick}/> : (
     <button key={a.key} type="button" className={`bulk-action-btn${a.tone === 'danger' ? ' is-danger' : ''}`} onClick={a.onClick} disabled={a.disabled} title={a.title}>
       <span className="bulk-action-icon" aria-hidden="true">{a.icon}</span>{a.label}
     </button>
@@ -95,7 +97,7 @@ export default function BulkActionBar({ count, onClear, actions = [], scopeNote 
                 </button>
                 <Popover open={moreOpen} onClose={() => setMoreOpen(false)} anchorRef={moreRef} align="end" minWidth={180} role="presentation">
                   <div role="menu" aria-label="More bulk actions" className="bulk-action-menu">
-                    {overflow.map((a) => (
+                    {overflow.map((a) => a.holdToConfirm ? button(a) : (
                       <button key={a.key} type="button" role="menuitem" className={`dropdown-item${a.tone === 'danger' ? ' danger' : ''}`} disabled={a.disabled} title={a.title}
                         onClick={() => { setMoreOpen(false); a.onClick(); }}>
                         {a.icon}{a.label}

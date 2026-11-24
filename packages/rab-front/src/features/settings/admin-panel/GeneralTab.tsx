@@ -1,3 +1,5 @@
+import { motion as arcMotion } from 'framer-motion';
+import { SearchField } from '../../../shared/components/arc/search-field/search-field';
 import { useRef, useState } from 'react';
 import { IconCheck } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
@@ -105,7 +107,7 @@ export default function GeneralTab({ meId }: { meId?: string }) {
             <button type="button" aria-pressed={mode === 'user'} onClick={() => { setMode('user'); setQuery(''); setInput(''); setResetDone(null); }}>User</button>
             <button type="button" aria-pressed={mode === 'org'} onClick={() => { setMode('org'); setQuery(''); setInput(''); setResetDone(null); }}>Organisation</button>
           </div>
-          <input
+          <SearchField label="Search"
             ref={inputRef}
             className="ap-input ap-grow"
             type="search"
@@ -169,13 +171,13 @@ export default function GeneralTab({ meId }: { meId?: string }) {
                     <tr><td colSpan={5} className="ap-empty">No organisations match this search.</td></tr>
                   ) : (
                     orgResults.map((org) => (
-                      <tr key={org.id} data-selected={shownOrg?.id === org.id || undefined}>
+                      <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={org.id} data-selected={shownOrg?.id === org.id || undefined}>
                         <td><button type="button" className="ap-btn ap-sm" onClick={() => setSelectedOrg(org)} aria-label={`Show ${org.name}`}>{org.name}</button></td>
                         <td className="ap-mono">{org.slug}</td>
                         <td>{org.suspended ? <span className="ap-pill ap-bad">Suspended</span> : <span className="ap-pill ap-ok">Active</span>}</td>
                         <td className="ap-muted">{org.ceo ? `${org.ceo.name || org.ceo.email}${org.ceo.activated ? '' : ' (not activated)'}` : '—'}</td>
                         <td className="ap-muted">{formatDate(org.createdAt)}</td>
-                      </tr>
+                      </arcMotion.tr>
                     ))
                   )}
                 </tbody>
@@ -211,11 +213,11 @@ export default function GeneralTab({ meId }: { meId?: string }) {
                 <tr><td colSpan={3} className="ap-empty">No users yet.</td></tr>
               ) : (
                 recent.data.map((u) => (
-                  <tr key={u.id}>
+                  <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={u.id}>
                     <td>{fullName(u)}</td>
                     <td>{u.organisationName ?? '—'}</td>
                     <td>{formatDate(u.createdAt)}</td>
-                  </tr>
+                  </arcMotion.tr>
                 ))
               )}
             </tbody>

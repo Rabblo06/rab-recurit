@@ -218,7 +218,7 @@ export default function StepUpHost() {
         <div className="modal-actions">
           <button type="button" className="btn btn-outline" onClick={() => finish(false)} disabled={busy}>Cancel</button>
           {(usesPassword || needsCode) && (
-            <button type="submit" className="btn btn-dark" disabled={!canSubmit} aria-busy={busy || undefined}>{busy ? 'Please wait…' : usesPassword ? 'Continue' : 'Verify code'}</button>
+            <button type="submit" className={`btn btn-dark${usesPassword ? ' flow-button' : ''}`} disabled={!canSubmit} aria-busy={busy || undefined}>{busy ? 'Please wait…' : usesPassword ? 'Continue' : 'Verify code'}</button>
           )}
         </div>
       </form>
@@ -240,7 +240,7 @@ export default function StepUpHost() {
           }}
         >
           {returnTo && <input type="hidden" name="returnTo" value={returnTo} />}
-          <button type="submit" className="btn btn-outline" style={{ width: '100%' }} disabled={redirecting !== null} aria-busy={redirecting === provider || undefined}>
+          <button type="submit" className="btn btn-outline flow-button flow-button-light" style={{ width: '100%' }} disabled={redirecting !== null} aria-busy={redirecting === provider || undefined}>
             {redirecting === provider ? `Opening ${PROVIDER_LABEL[provider]}…` : `Continue with ${PROVIDER_LABEL[provider]}`}
           </button>
         </form>

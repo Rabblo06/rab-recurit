@@ -19,7 +19,7 @@ function mountAt(path = '/onboarding/workspace') {
       <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/onboarding/workspace" element={<CreateWorkspaceScreen />} />
-          <Route path="/onboarding/profile" element={<div>PROFILE</div>} />
+          <Route path="/onboarding/preparing" element={<div>PREPARING</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -146,7 +146,7 @@ describe('subdomain availability', () => {
     expect(post).not.toHaveBeenCalledWith('/manager-workspaces', expect.anything());
 
     resolveCheck!({ data: availableCheck('issac') });
-    await waitFor(() => expect(screen.getByText('PROFILE')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('PREPARING')).toBeInTheDocument());
   });
 
   it('stale (superseded) availability responses never overwrite a newer one', async () => {
@@ -182,7 +182,7 @@ describe('successful submission and backend errors', () => {
     await fillForm('Issac Recruitment', 'issac');
     await screen.findByText(/is available/);
     fireEvent.click(screen.getByRole('button', { name: 'Create workspace' }));
-    await waitFor(() => expect(screen.getByText('PROFILE')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('PREPARING')).toBeInTheDocument());
   });
 
   it('a backend creation failure (5xx) shows the safe generic error and stays on the form', async () => {
@@ -201,7 +201,7 @@ describe('successful submission and backend errors', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create workspace' }));
     // 5xx: the shared normaliser shows the safe generic text (owner rule), never the server body.
     expect(await screen.findByText('Something went wrong. Please try again.')).toBeInTheDocument();
-    expect(screen.queryByText('PROFILE')).toBeNull();
+    expect(screen.queryByText('PREPARING')).toBeNull();
   });
 
   it('Enter-key submission runs the same validation as a click', async () => {
@@ -225,10 +225,10 @@ describe('successful submission and backend errors', () => {
     await screen.findByText(/is available/);
     const button = screen.getByRole('button', { name: 'Create workspace' });
     fireEvent.click(button);
-    await waitFor(() => expect(button).toBeDisabled());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Create workspace' })).toBeNull());
     fireEvent.click(button); // second click while disabled/in-flight — must not fire a second POST
     resolveCreate!({ data: { id: 'ws-1', name: 'Issac Recruitment', subdomain: 'issac' } });
-    await waitFor(() => expect(screen.getByText('PROFILE')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('PREPARING')).toBeInTheDocument());
     expect(post.mock.calls.filter(([u]) => u === '/manager-workspaces')).toHaveLength(1);
   });
 });

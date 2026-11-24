@@ -1,6 +1,7 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { duration, ease, usePrefersReducedMotion } from '../motion';
+import './responsive-workspace.css';
 
 /**
  * Shared right-side docked panel.
@@ -13,14 +14,14 @@ import { duration, ease, usePrefersReducedMotion } from '../motion';
  * - Opens in 300ms (ease-out), closes in 220ms (ease-in) — exits faster than entrances (`shared/motion.ts`); the
  *   panel content fades in once the dock has started opening, so nothing is read mid-slide
  * - Escape key and clicking outside the panel close it
- * - On small screens (≤640px) the dock becomes a fixed overlay (90vw) instead
+ * - When space is limited the dock becomes a fixed overlay instead
  *   of pushing content — see the .side-panel-dock media query
  */
 export default function RightSidePanel({ open, onClose, children, width, requestClose, className = '', persistent = false, resizing = false }: {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
-  /** Desktop target width in px. Defaults to 408 (the Ctrl+K panel's width). Mobile always uses 90vw regardless. */
+  /** Desktop target width in px. Defaults to 408 (the Ctrl+K panel's width). Phone screens use the full viewport width. */
   width?: number;
   className?: string;
   /** A contextual dock stays open while its background page is used. Escape is local to it. */
@@ -80,8 +81,14 @@ export default function RightSidePanel({ open, onClose, children, width, request
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, onClose, requestClose, persistent]);
 
-  const isMobile = typeof window !== 'undefined' && window.innerWidth <= 640;
-  const targetWidth = isMobile ? Math.round(window.innerWidth * 0.9) : (width ?? 408);
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === 'undefined' ? 1280 : window.innerWidth);
+  useEffect(() => {
+    const update = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+  const targetWidth = viewportWidth <= 640 ? viewportWidth : Math.min(width ?? 408, viewportWidth);
+  const overlay = viewportWidth < Math.max(960, (width ?? 408) + 600);
 
   return (
     <AnimatePresence>
@@ -89,17 +96,16 @@ export default function RightSidePanel({ open, onClose, children, width, request
         <motion.div
           ref={dockRef}
           className={`side-panel-dock ${className}`}
+          data-layout={overlay ? 'overlay' : 'docked'}
           initial={reducedMotion ? false : { width: 0 }}
           animate={{ width: targetWidth }}
           exit={{ width: 0, transition: { duration: reducedMotion ? 0 : duration.drawerOut, ease: ease.in } }}
           transition={{ duration: reducedMotion || resizing ? 0 : persistent ? 0.2 : duration.drawerIn, ease: ease.out }}
         >
-          {/* Inline width only applied on desktop — on mobile the .side-panel
-              media-query rule (90vw) must win, and an inline style would
-              otherwise always beat it regardless of viewport. */}
+          {/* Keep the inner card in sync with viewport changes as well as the animated dock. */}
           <motion.div
             className="side-panel"
-            style={!isMobile && width ? { width } : undefined}
+            style={{ width: targetWidth }}
             initial={reducedMotion ? false : { opacity: 0 }}
             animate={{ opacity: 1, transition: { duration: duration.drawerContent, ease: ease.out, delay: reducedMotion ? 0 : 0.08 } }}
             exit={{ opacity: 0, transition: { duration: 0.15, ease: ease.in } }}

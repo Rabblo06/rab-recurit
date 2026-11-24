@@ -257,3 +257,32 @@
 }
 .ap-chart { width: 100%; min-height: 220px; }
 .ap-root .ap-ai-flag { padding: 12px 0 0; border-top: 1px solid var(--border-light); }
+
+/* Compact settings cards: factual health states and existing maintenance control. */
+.ap-health-list { max-width:700px; border:1px solid var(--border-light); border-radius:8px; overflow:hidden; background:var(--bg-primary); }
+.ap-health-item + .ap-health-item { border-top:1px solid var(--border-light); }
+.ap-health-item summary { display:flex; align-items:center; gap:10px; min-height:42px; padding:10px 14px; cursor:pointer; list-style:none; color:var(--font-secondary); font-size:13px; }
+.ap-health-item summary::-webkit-details-marker { display:none; }
+.ap-health-item summary > .ap-pill { margin-left:auto; }
+.ap-health-item summary:focus-visible { outline:2px solid var(--color-blue); outline-offset:-3px; }
+.ap-health-item summary:hover { background:var(--bg-secondary); }
+.ap-health-chevron { transition:transform 140ms ease; }
+.ap-health-item[open] .ap-health-chevron { transform:rotate(90deg); }
+.ap-health-detail { border-top:1px solid var(--border-light); padding:12px 40px 18px; font-size:12px; color:var(--font-secondary); }
+.ap-health-detail dl { display:grid; grid-template-columns:100px 1fr; gap:10px; }
+.ap-health-detail dt { color:var(--font-tertiary); }
+.ap-health-detail dd { margin:0; overflow-wrap:anywhere; }
+.ap-health-empty { padding:16px; }
+.ap-maintenance-card { max-width:700px; }
+.ap-maintenance-card .ap-flagrow { padding:0 0 16px; align-items:flex-start; gap:12px; }
+.ap-maintenance-card .ap-flagrow > div { flex:1; }
+.ap-maintenance-preview { border:0; border-top:1px solid var(--border-light); padding:16px 0 0; margin:12px 0; display:grid; gap:14px; min-width:0; }
+.ap-maintenance-preview legend { color:var(--font-tertiary); font-size:11px; padding:0 8px 0 0; }
+.ap-maintenance-preview label { display:grid; gap:5px; color:var(--font-tertiary); font-size:12px; }
+.ap-date-preview { display:flex; border:1px solid var(--border-light); border-radius:6px; overflow:hidden; background:var(--bg-secondary); }
+.ap-date-preview input { min-width:0; width:100%; border:0; background:transparent; padding:7px 10px; font:inherit; }
+.ap-date-preview > span { padding:7px 10px; border-left:1px solid var(--border-light); }
+.ap-maintenance-status { display:flex; justify-content:flex-end; margin-top:16px; }
+@media(prefers-reduced-motion:reduce) { .ap-health-chevron { transition:none; } }
+
+.ap-health-section > .ap-block-head { max-width:700px; }

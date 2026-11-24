@@ -59,7 +59,7 @@ export default function ConfirmEmailChange() {
                   {error}
                 </motion.p>
               )}
-              <button type="button" style={{ ...s.submitBtn, opacity: loading ? 0.65 : 1 }} disabled={loading} onClick={handleConfirm}>
+              <button type="button" className="flow-button" aria-busy={loading || undefined} style={{ ...s.submitBtn, opacity: loading ? 0.65 : 1 }} disabled={loading} onClick={handleConfirm}>
                 {loading ? 'Confirming…' : 'Confirm this email'}
               </button>
               <Link to="/login" style={s.backBtn}>← Back to sign in</Link>

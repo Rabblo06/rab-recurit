@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import {
   IconX, IconTimelineEvent, IconCalendarPlus, IconRocket, IconSend, IconChecklist, IconUserCheck, IconMapPin,
@@ -73,7 +74,7 @@ export default function ShiftTimelinePanel({ shiftId, title, onClose }: { shiftI
   });
   const items = query.data?.pages.flatMap((p) => p.items) ?? [];
 
-  return (
+  const panel = (
     <RightSidePanel open={!!shiftId} onClose={onClose}>
       <div className="timeline-head">
         <IconTimelineEvent size={16} />
@@ -114,4 +115,7 @@ export default function ShiftTimelinePanel({ shiftId, title, onClose }: { shiftI
       </div>
     </RightSidePanel>
   );
+  // Route-local state stays here; the dock must be a sibling of main content, like Ctrl+K.
+  const workspace = typeof document !== 'undefined' ? document.querySelector('.app-layout') : null;
+  return workspace ? createPortal(panel, workspace) : panel;
 }

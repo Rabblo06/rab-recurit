@@ -1,0 +1,22 @@
+.role-baseline-card { display:flex; align-items:center; gap:12px; border:1px solid var(--border-light); border-radius:8px; padding:14px; background:var(--bg-primary); }
+.role-baseline-card > span { flex:1; min-width:0; }
+.role-baseline-card strong { display:block; font-size:13px; font-weight:500; }
+.role-baseline-card small { display:block; margin-top:4px; color:var(--font-tertiary); font-size:11px; }
+.role-access-trigger { display:inline-flex; align-items:center; justify-content:space-between; gap:7px; min-width:100px; padding:4px 8px; border:1px solid var(--border-light); border-radius:5px; background:var(--bg-secondary); color:var(--font-primary); font:inherit; font-size:12px; cursor:pointer; }
+.role-access-trigger:disabled { opacity:.5; cursor:default; }
+.role-access-trigger:focus-visible,.role-advanced-link:focus-visible { outline:2px solid var(--color-blue); outline-offset:2px; }
+.role-access-menu { padding:5px; }
+.role-access-menu .dropdown-item { width:100%; justify-content:space-between; }
+.role-access-menu .dropdown-item:disabled { opacity:.45; cursor:not-allowed; }
+.role-v2-rule .role-rule-main { color:inherit; text-decoration:none; }
+.role-advanced-link { display:grid; place-items:center; padding:5px; color:var(--font-tertiary); border-radius:4px; }
+.role-advanced-link:hover { background:var(--bg-secondary); }
+@media(max-width:540px) { .role-v2-rule { flex-wrap:wrap; } .role-v2-rule .role-rule-main { min-width:55%; } .role-baseline-card { flex-wrap:wrap; } }
+
+.role-preview-list { margin-top:16px; border-top:1px solid var(--border-light); }
+.role-preview-list label { display:flex; align-items:center; gap:14px; min-height:38px; border-bottom:1px solid var(--border-light); padding:8px; font-size:12px; }
+.role-preview-list label > span:first-child { flex:1; }
+.role-preview-list label > span:nth-child(2) { color:var(--font-tertiary); font-size:11px; }
+.role-preview-list input { margin:0; }
+.role-v2-rule { min-height:42px; }
+.role-v2-rule .role-rule-summary { font-size:10px; color:var(--font-tertiary); }

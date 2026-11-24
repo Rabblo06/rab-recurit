@@ -1,3 +1,5 @@
+import { motion as arcMotion } from 'framer-motion';
+import { SearchField } from '../../shared/components/arc/search-field/search-field';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -75,7 +77,7 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
       onKeyDown={(e) => { if (e.key === 'Escape' && !assign.isPending) { e.preventDefault(); onCancel(); } }}>
       <div className="vm-staff-picker-topbar">
         <button className="btn btn-outline" disabled={assign.isPending} onClick={onCancel}>Cancel</button>
-        <button className="btn btn-accent-outline" disabled={selected.size === 0 || assign.isPending} onClick={() => assign.mutate()}>
+        <button className="btn btn-accent-outline flow-button flow-button-light" aria-busy={assign.isPending || undefined} disabled={selected.size === 0 || assign.isPending} onClick={() => assign.mutate()}>
           {assign.isPending ? 'Saving...' : 'Confirm'}
         </button>
       </div>
@@ -84,7 +86,7 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
       </div>
       <div className="vm-staff-picker-tab">Staff <span>{ownerFlow ? 'Your workspace' : `${venueManagerName}’s workspace`}</span></div>
       <div className="list-toolbar vm-staff-picker-toolbar">
-        <div className="toolbar-search"><IconSearch size={14} /><input aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={assign.isPending} /></div>
+        <div className="toolbar-search"><SearchField label="Search staff" type="text" aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={assign.isPending} /></div>
       </div>
       {assign.isError && <p className="vm-staff-picker-notice error" role="alert">Could not assign the selected staff. Their status may have changed — Cancel and try again.</p>}
       <div className="vm-staff-picker-table-wrap">
@@ -99,14 +101,14 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
               const already = assignedIds.has(row.id);
               const checked = already || selected.has(row.id);
               return (
-                <tr key={row.id} className={checked ? 'vm-staff-picker-selected' : ''} onClick={() => toggle(row.id)}>
+                <arcMotion.tr layout="position" initial={false} transition={{layout:{type:"spring",stiffness:340,damping:34}}} key={row.id} className={checked ? 'vm-staff-picker-selected' : ''} onClick={() => toggle(row.id)}>
                   <td><input type="checkbox" aria-label={`Select ${row.firstName} ${row.lastName}`} checked={checked} disabled={already || assign.isPending}
                     onClick={(e) => e.stopPropagation()} onChange={() => toggle(row.id)} /></td>
                   <td><span className="vm-staff-picker-name"><span className="mini-avatar" aria-hidden="true">{row.firstName[0]}</span>{row.firstName} {row.lastName}</span></td>
                   <td>{row.staffRef || '—'}</td><td>{row.email}</td><td>{row.phone || '—'}</td>
                   <td>{already ? <span className="badge badge-active">Assigned</span> : <span className={`badge ${row.accountStatus === 'active' ? 'badge-active' : 'badge-pending'}`}>{row.accountStatus === 'active' ? 'active' : 'invited'}</span>}</td>
                   <td>{timeAgo(row.createdAt)}</td>
-                </tr>
+                </arcMotion.tr>
               );
             })}</tbody>
           </table>

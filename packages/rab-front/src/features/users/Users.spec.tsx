@@ -567,7 +567,7 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
     expect(screen.queryByRole('tab', { name: /^Notes$/ })).toBeNull();
     expect(screen.getAllByText('Venue').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Venue Test 3').length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: /Upload photo|Change photo|photo/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Change photo' })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /Send Email/ }).length).toBeGreaterThan(0);
     await user.click(screen.getByRole('tab', { name: /Timeline/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/timeline'));

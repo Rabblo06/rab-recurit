@@ -5,7 +5,7 @@ describe('getStaffDisplayStatus', () => {
   // a staff member mid-invitation must never read as "Active" just because
   // `employmentStatus` happens to default to 'active' before the account
   // has ever been activated.
-  it('derives "Pending invite (n/3)" for a staff member with an open pending invitation, regardless of employmentStatus', () => {
+  it('derives "Pending" for a staff member with an open pending invitation, regardless of employmentStatus', () => {
     const result = getStaffDisplayStatus({
       userType: 'staff',
       accountStatus: 'invited',
@@ -13,7 +13,7 @@ describe('getStaffDisplayStatus', () => {
       invitationStatus: 'pending',
       pendingInvite: { sendNumber: 2 },
     });
-    expect(result.label).toBe('Pending invite (2/3)');
+    expect(result.label).toBe('Pending');
     expect(result.tone).toBe('pending');
   });
 

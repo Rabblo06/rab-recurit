@@ -13,7 +13,12 @@ export function useRecordSelection(ids: string[], options: { actions?: (selected
   const clear = () => setSelected(new Set());
   const allCheckbox = <input type="checkbox" aria-label="Select all visible records" disabled={!ids.length} checked={allSelected} ref={el=>{if(el)el.indeterminate=count>0&&!allSelected;}} onChange={()=>setSelected(allSelected ? new Set() : new Set(ids))} />;
   const checkbox = (id:string, label:string) => <input type="checkbox" aria-label={`Select ${label}`} checked={selected.has(id)} onChange={()=>setSelected(previous=>{const next=new Set(previous);if(next.has(id))next.delete(id);else next.add(id);return next;})} />;
+  const groupCheckbox = (groupIds: string[], label: string) => {
+    const count = groupIds.filter(id => selected.has(id)).length;
+    const checked = groupIds.length > 0 && count === groupIds.length;
+    return <input type="checkbox" aria-label={label} checked={checked} ref={element => { if (element) element.indeterminate = count > 0 && !checked; }} onChange={() => setSelected(previous => { const next = new Set(previous); groupIds.forEach(id => checked ? next.delete(id) : next.add(id)); return next; })} />;
+  };
   // Floating bar (portal) instead of an inline toolbar summary; it carries actions only when the page supplies them.
   const summary = <BulkActionBar count={count} onClear={clear} actions={options.actions?.(selectedIds) ?? []} />;
-  return {allCheckbox,checkbox,summary,isSelected:(id:string)=>selected.has(id),selectedIds,clear};
+  return {allCheckbox,checkbox,groupCheckbox,summary,isSelected:(id:string)=>selected.has(id),selectedIds,clear};
 }

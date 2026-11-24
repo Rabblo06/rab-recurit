@@ -838,3 +838,41 @@
     min-height: 680px;
   }
 }
+/* Settings enrollment: compact identity prompt followed by a full setup surface. */
+.acs-presentation-compact .modal.acs-modal { width:400px; border-radius:10px; padding:24px; }
+.acs-presentation-compact .acs-modal-top .acs-emblem { display:none; }
+.acs-presentation-compact .acs-modal-top { justify-content:flex-end; }
+.acs-presentation-compact .acs-modal-title { font-size:18px; }
+.acs-presentation-compact .acs-modal-footer { gap:8px; }
+.acs-presentation-compact .acs-modal-footer .acs-btn { flex:1; }
+.modal-overlay.acs-presentation-setup-page { padding:0; background:var(--acs-surface); align-items:stretch; }
+.acs-presentation-setup-page .modal.acs-modal { width:100%; max-width:none; height:100dvh; max-height:100dvh; border-radius:0; padding:0 24px 36px; box-shadow:none; }
+.acs-presentation-setup-page .acs-modal-inner { position:relative; gap:0; }
+.acs-presentation-setup-page .acs-modal-top { position:absolute; right:0; top:8px; }
+.acs-presentation-setup-page .acs-modal-top .acs-emblem { display:none; }
+.acs-presentation-setup-page .acs-modal-title { font-size:13px; text-align:center; padding:18px 40px; border-bottom:1px solid var(--acs-line); }
+.acs-presentation-setup-page .acs-modal-inner > div > .acs-helper { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+.acs-presentation-setup-page .acs-modal-form { width:min(700px,100%); margin:30px auto 0; gap:24px; }
+.acs-presentation-setup-page .acs-modal-body { align-items:center; gap:18px; }
+.acs-presentation-setup-page .acs-setup-intro { width:100%; margin-bottom:6px; }
+.acs-presentation-setup-page h3 { font-size:13px; margin:0 0 8px; font-weight:600; }
+.acs-presentation-setup-page p { font-size:12px; color:var(--acs-muted); line-height:1.6; margin:0; }
+.acs-presentation-setup-page .acs-scan-block { display:block; padding:0; background:transparent; border:0; }
+.acs-presentation-setup-page .acs-qr { width:280px; height:280px; padding:20px; border:1px solid var(--acs-line); border-radius:7px; background:white; }
+.acs-presentation-setup-page .acs-qr img { width:100%; height:100%; object-fit:contain; }
+.acs-presentation-setup-page .acs-scan-info { display:none; }
+.acs-setup-key-details { max-width:100%; width:280px; font-size:11px; color:var(--acs-muted); }
+.acs-setup-key-details summary { cursor:pointer; margin-bottom:12px; }
+.acs-presentation-setup-page .acs-setup-verification { margin-top:12px; text-align:center; }
+.acs-presentation-setup-page .acs-otp { margin:14px auto 0; }
+.acs-presentation-setup-page .acs-otp-box { width:30px; height:38px; border-radius:7px; font-size:14px; }
+.acs-presentation-setup-page .acs-modal-footer { justify-content:center; }
+.acs-presentation-setup-page .acs-modal-footer .acs-btn { min-height:30px; padding:5px 12px; font-size:12px; }
+@media(max-width:480px) {
+ .modal-overlay.acs-presentation-compact { align-items:center; }
+ .acs-presentation-setup-page .modal.acs-modal { padding:0 16px 24px; }
+ .acs-presentation-setup-page .acs-qr { width:240px; height:240px; }
+ .acs-presentation-setup-page .acs-modal-form { margin-top:24px; }
+}
+
+.modal-overlay.acs-presentation-compact, .modal-overlay.acs-presentation-setup-page { z-index:1200; }

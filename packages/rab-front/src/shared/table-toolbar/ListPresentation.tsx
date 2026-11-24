@@ -1,3 +1,6 @@
+import { motion, useReducedMotion } from 'framer-motion';
+import { motionTokens } from '../components/arc/motion-tokens';
+import { Pagination } from '../components/arc/pagination/pagination';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { IconCheck, IconChevronDown, IconChevronLeft, IconChevronRight, IconTable } from '@tabler/icons-react';
@@ -9,14 +12,17 @@ import './list-view-select.css';
 export function ListViewSelect({ label, value, options, onChange }: {
   label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void;
 }) {
+  const reduced = useReducedMotion();
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const trigger = useRef<HTMLButtonElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const typeahead = useRef({ text: '', at: 0 });
   const id = useId();
+  const [highlight,setHighlight]=useState<{x:number;y:number;width:number;height:number}|null>(null);
   const selectedIndex = Math.max(0, options.findIndex(option => option.value === value));
   const active = Math.min(activeIndex, options.length - 1);
+  useEffect(()=>{if(!open){setHighlight(null);return;}const frame=requestAnimationFrame(()=>{const node=optionRefs.current[active];if(node)setHighlight({x:node.offsetLeft,y:node.offsetTop,width:node.offsetWidth,height:node.offsetHeight});});return ()=>cancelAnimationFrame(frame);},[open,active]);
   const reveal = (index = selectedIndex) => { setActiveIndex(index); setOpen(true); typeahead.current.text = ''; };
   const close = () => { setOpen(false); trigger.current?.focus({ preventScroll: true }); };
   const choose = (index: number) => {
@@ -55,11 +61,12 @@ export function ListViewSelect({ label, value, options, onChange }: {
     </button>
     <Popover open={open} onClose={close} anchorRef={trigger} minWidth={224} className="list-view-popover" role="presentation" animated>
       <div id={id} role="listbox" aria-label={label} className="list-view-options">
+        {highlight && <motion.span className="list-view-highlight" initial={false} animate={highlight} transition={reduced ? {duration:0} : motionTokens.spring.morph} aria-hidden="true"/>}
         {options.map((option, index) => <button key={option.value} ref={node => { optionRefs.current[index] = node; }}
           id={`${id}-${index}`} type="button" role="option" tabIndex={-1} aria-selected={value === option.value}
           className={`list-view-option${active === index ? ' is-active' : ''}`}
           onMouseEnter={() => setActiveIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => choose(index)}>
-          <IconTable size={15} aria-hidden="true"/><span>{option.label}</span>{value === option.value && <IconCheck size={13} aria-hidden="true"/>}
+          <><IconTable size={15} aria-hidden="true"/><span>{option.label}</span></>{value === option.value && <IconCheck size={13} aria-hidden="true"/>}
         </button>)}
       </div>
     </Popover>
@@ -77,11 +84,7 @@ export function RecordFooter({ total, page = 1, onPage, pageSize = LIST_PAGE_SIZ
   const pages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
   return <div className="list-footer">
     <span>{total.toLocaleString()} record{total === 1 ? '' : 's'}</span>
-    {onPage && pages > 1 && <div className="record-pagination">
-      <button className="btn-icon" aria-label="Previous page" disabled={page <= 1} onClick={() => onPage(page - 1)}><IconChevronLeft size={14} /></button>
-      <span>Page {page} of {pages}</span>
-      <button className="btn-icon" aria-label="Next page" disabled={page >= pages} onClick={() => onPage(page + 1)}><IconChevronRight size={14} /></button>
-    </div>}
+    {onPage && pages > 1 && <div className="record-pagination"><Pagination page={page} pageCount={pages} onPageChange={onPage} /><span className="visually-hidden">Page {page} of {pages}</span></div>}
     <div className="record-calculation">{children}
       {countVisible && <span role="status">{loaded === undefined ? 'Count all' : 'Count on page'} <strong>{loaded ?? total}</strong></span>}
       <button onClick={() => setCountVisible(value => !value)} aria-expanded={countVisible}>Calculate <IconChevronDown size={12} /></button>

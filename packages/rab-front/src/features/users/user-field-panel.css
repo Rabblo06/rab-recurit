@@ -1,0 +1,44 @@
+.crewflow-field-panel { container-type:inline-size; container-name:staff-fields; }
+.crewflow-field-panel .detail-profile-summary { padding-bottom:18px; gap:14px; }
+.crewflow-field-panel .detail-group { padding:16px 0; }
+.crewflow-field-panel .detail-group-title { font-weight:500; letter-spacing:.025em; margin-bottom:10px; }
+.crewflow-field-panel .detail-info-row { display:grid; grid-template-columns:minmax(112px,43%) minmax(0,1fr); align-items:start; gap:12px; padding:6px 0; min-height:32px; font-size:13px; line-height:1.5; }
+.crewflow-field-panel .detail-info-label { display:flex; align-items:flex-start; gap:8px; min-width:0; color:var(--font-tertiary); padding-top:3px; }
+.crewflow-field-panel .detail-info-label svg { flex-shrink:0; margin-top:2px; }
+.crewflow-field-panel .detail-info-value-group { min-width:0; width:100%; display:flex; align-items:flex-start; gap:3px; }
+.crewflow-field-panel .detail-info-value-box { flex:1; min-width:0; padding:3px 5px; margin-left:-5px; border-radius:5px; }
+.crewflow-field-panel .detail-info-value { min-width:0; text-align:left; white-space:normal; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.crewflow-field-panel .detail-info-value-empty { color:var(--font-light); }
+.crewflow-field-panel .detail-info-value-box:focus-visible { outline:2px solid #4663ed; outline-offset:1px; background:var(--bg-tertiary); }
+.crewflow-field-panel .detail-info-edit-btn { margin-top:3px; flex-shrink:0; }
+.crewflow-field-panel .detail-field-contact-chip { display:inline-block; max-width:100%; border:1px solid var(--border-light); background:var(--bg-secondary); padding:0 7px; border-radius:12px; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; }
+.crewflow-field-panel .detail-contact-value { display:inline; }
+.crewflow-field-panel .detail-field-chips { display:flex; flex-wrap:wrap; gap:4px; }
+.crewflow-field-panel .detail-field-chip { background:var(--status-success-bg); color:var(--status-text); border-radius:4px; padding:1px 6px; font-size:12px; }
+.crewflow-field-panel .detail-info-edit { justify-content:flex-start; min-width:0; width:100%; }
+.crewflow-field-panel .detail-info-edit>*,.crewflow-field-panel .detail-info-edit input,.crewflow-field-panel .detail-info-edit select,.crewflow-field-panel .detail-info-edit textarea { max-width:100%; min-width:0; width:100%; box-sizing:border-box; }
+.crewflow-field-panel .detail-info-edit :is(input,select,textarea) { box-shadow:none; border-color:var(--border-light); background:var(--bg-secondary); }
+.crewflow-field-panel .detail-info-edit :is(input,select,textarea):focus { outline:2px solid #4663ed!important; outline-offset:0; border-color:transparent!important; box-shadow:none!important; }
+.crewflow-field-panel .detail-info-edit textarea { min-height:88px; height:auto; padding:7px; resize:vertical; }
+.crewflow-field-panel .detail-info-error { grid-column:2; }
+.crewflow-field-panel .detail-show-more-toggle { justify-content:flex-start; flex-direction:row-reverse; width:auto; gap:8px; border:0; padding:10px 0; }
+@container staff-fields (max-width:310px) { .crewflow-field-panel .detail-info-row { grid-template-columns:minmax(95px,40%) minmax(0,1fr); gap:8px; font-size:12px; } .crewflow-field-panel .detail-info-label { gap:5px; } }
+@media(hover:none) { .crewflow-field-panel .detail-info-edit-btn { opacity:1; pointer-events:auto; } }
+@media(prefers-reduced-motion:reduce) { .crewflow-field-panel * { transition:none!important; animation:none!important; } }
+
+.crewflow-field-panel .detail-contact-pills { display:block; padding:0 0 14px; }
+
+/* Consistent pill-shaped field values, including read-only and empty cells. */
+.crewflow-field-panel .detail-info-value { display:inline-block; max-width:100%; width:fit-content; padding:1px 7px; border:1px solid var(--border-light); border-radius:12px; background:var(--bg-primary); box-sizing:border-box; }
+.crewflow-field-panel .detail-info-value:has(>.badge) { border:0; padding:0; background:transparent; }
+.crewflow-field-panel .detail-info-value>.badge { border-radius:12px; }
+.crewflow-field-panel .detail-profile-summary { align-items:center; flex-wrap:wrap; }
+.crewflow-field-panel .detail-photo-remove { flex-shrink:0; }
+.crewflow-field-panel .detail-photo-remove:disabled { opacity:.35; cursor:default; }
+
+.crewflow-field-panel .staff-day-picker { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); justify-content:start; gap:5px; }
+.crewflow-field-panel .staff-day-picker .weekday-picker-option { padding:6px 4px; min-width:0; font-size:11px; }
+.crewflow-field-panel .staff-day-picker input { width:1px!important; height:1px; min-height:0; padding:0; border:0; }
+.crewflow-field-panel .staff-day-picker .weekday-picker-option:has(input:disabled) { opacity:.6; cursor:wait; }
+
+.compound-field-value{min-width:0;max-width:100%;width:fit-content;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border,#e2e4e8);border-radius:12px;background:white;color:inherit;padding:2px 9px;font:inherit;text-align:left;cursor:pointer}.compound-field-value:focus-visible{outline:2px solid #5267ff;outline-offset:2px}.compound-field-popover{width:min(350px,calc(100vw - 24px));padding:8px;max-height:calc(100dvh - 24px);overflow:auto}.compound-field-popover fieldset{border:0;padding:0;margin:0;min-width:0}.compound-field-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px}.compound-field-popover .field{margin:0}

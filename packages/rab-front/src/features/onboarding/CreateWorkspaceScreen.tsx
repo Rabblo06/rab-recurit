@@ -14,6 +14,8 @@ import { LOGO_RULE, uploadErrorOptions } from '../../shared/lib/upload';
 import { s, ease, fadeIn } from '../auth/authStyles';
 import { captionSwap, staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced, markSelfServiceWorkspace } from './onboardingMotion';
 import AvatarPicker from './AvatarPicker';
+import SetupStageList from './SetupStageList';
+import { setupStageStates } from './setupStages';
 
 interface SubdomainCheck {
   available: boolean;
@@ -216,7 +218,7 @@ export default function CreateWorkspaceScreen() {
       // rather than stacking an extra history entry that `OnboardingRouteGuard` (App.tsx) would
       // then have to catch. The guard is the actual security boundary regardless; this is history
       // hygiene on top of it, not a substitute for it.
-      nav('/onboarding/profile', { replace: true });
+      nav('/onboarding/preparing', { replace: true });
     } catch (err: any) {
       const body = err?.response?.data;
       if (err?.response?.status === 409 && body?.suggested) {
@@ -231,8 +233,10 @@ export default function CreateWorkspaceScreen() {
     }
   }
 
+
+
   return (
-    <AuthLayout>
+    <><div hidden={submitting}><AuthLayout variant="onboarding" onBack={() => setLeaving(true)}>
         <h1 style={s.title}>Create your workspace</h1>
         <p style={s.subtitle}>Bring your people and shifts together.</p>
 
@@ -379,8 +383,8 @@ export default function CreateWorkspaceScreen() {
             {submitting ? 'Creating…' : 'Create workspace'}
           </motion.button>
         </motion.form>
-      <button type="button" style={s.backBtn} onClick={()=>setLeaving(true)}>← Back to sign in</button>
+
       <LogoutDialog open={leaving} onClose={()=>setLeaving(false)} />
-    </AuthLayout>
+    </AuthLayout></div>{submitting && <div className="workspace-creation-progress" role="status" aria-label="Creating your workspace"><SetupStageList stages={setupStageStates(undefined)} reduceMotion={Boolean(reduceMotion)} /></div>}</>
   );
 }

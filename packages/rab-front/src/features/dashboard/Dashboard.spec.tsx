@@ -93,6 +93,12 @@ describe('Dashboard', () => {
     await waitFor(() => expect(within(card).getByText('7.0')).toBeInTheDocument());
   });
 
+  it('does not flash a dot or initials while the profile is pending', () => {
+    serve(url => url === '/profile' ? new Promise(() => {}) : undefined);
+    mount();
+    expect(document.querySelector('.dash-profile-initials')?.textContent).toBe('');
+  });
+
   it('shows initials when the manager has no photo — never a stock portrait', async () => {
     serve();
     mount();

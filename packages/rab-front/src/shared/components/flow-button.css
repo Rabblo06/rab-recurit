@@ -1,0 +1,12 @@
+/* Explicit opt-in: Continue/Confirm actions; unrelated and destructive buttons retain their styles. */
+button.flow-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:34px; border:1px solid #303030 !important; border-radius:9px !important; background:#333 !important; color:#fff !important; font-weight:600; box-shadow:0 1px 4px rgb(0 0 0 / 16%) !important; opacity:1 !important; transition:background .15s,box-shadow .15s,color .15s; }
+button.flow-button:hover:not(:disabled) { background:#292929 !important; }
+button.flow-button-light { background:#fff !important; border-color:#e5e5e5 !important; color:#333 !important; }
+button.flow-button-light:hover:not(:disabled) { background:#f0f0f0 !important; }
+button.flow-button:disabled:not([aria-busy="true"]) { background:#fafafa !important; border-color:#ededed !important; color:#b8b8b8 !important; box-shadow:none !important; cursor:not-allowed; }
+button.flow-button:focus-visible { outline:2px solid #526bff !important; outline-offset:2px; }
+button.flow-button[aria-busy="true"] { color:#a2a2a2 !important; cursor:wait; }
+button.flow-button[aria-busy="true"]::before { content:''; display:block; width:23px; height:12px; flex-shrink:0; border:1.5px solid currentColor; border-radius:999px; background-image:radial-gradient(circle,currentColor 2px,transparent 2.5px); background-size:7px 100%; background-repeat:no-repeat; animation:flow-button-loading .7s ease-in-out infinite alternate; }
+button.flow-button[aria-busy="true"] > svg { display:none; }
+@keyframes flow-button-loading { from { background-position:0 50%; } to { background-position:100% 50%; } }
+@media(prefers-reduced-motion:reduce) { button.flow-button { transition:none; } button.flow-button[aria-busy="true"]::before { animation:none; background-position:50% 50%; } }

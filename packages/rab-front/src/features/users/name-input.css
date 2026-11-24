@@ -1,0 +1,22 @@
+.person-name-control { border: 1px solid var(--border-light); border-radius: 8px; background: var(--bg-secondary); overflow: hidden; }
+.person-name-control:focus-within { border-color: #6478ff; box-shadow: 0 0 0 1px #6478ff; }
+.person-name-main { display: flex; align-items: center; }
+.person-name-field .person-name-main input { flex: 1; min-width: 0; width: 100%; border: 0; background: transparent; border-radius: 0; margin: 0; }
+.person-name-main button { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; padding: 0; margin-right: 3px; border: 0; border-radius: 5px; background: transparent; color: var(--font-tertiary); cursor: pointer; }
+.person-name-main button:hover { background: var(--bg-tertiary); color: var(--font-primary); }
+.person-name-main button:focus-visible { outline: 2px solid #6478ff; outline-offset: -3px; }
+.person-name-parts:not([hidden]) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; border-top: 1px solid var(--border-light); }
+.person-name-parts label { display: block; margin-bottom: 4px; color: var(--font-tertiary); font-size: 12px; }
+.person-name-field .person-name-parts input { width: 100%; min-width: 0; margin: 0; }
+.person-name-field input:focus, .person-name-field input:focus-visible { outline: none; box-shadow: none; }
+.person-name-field .person-name-parts input:focus { border-color: #6478ff; }
+
+.staff-section-title { margin: 24px 0 12px; padding-top: 16px; border-top: 1px solid var(--border-light); }
+.staff-day-picker { display:flex; gap:5px; flex-wrap:wrap; }
+.staff-day-picker .weekday-picker-option { position:relative; display:flex; align-items:center; justify-content:center; gap:4px; padding:6px 8px; min-height:30px; border:1px solid var(--border-light); border-radius:6px; background:var(--bg-primary); cursor:pointer; transition:background .15s,border-color .15s; }
+.staff-day-picker .weekday-picker-option input { position:absolute; width:1px; height:1px; opacity:0; margin:0; }
+.staff-day-check { display:none; }
+.staff-day-picker .weekday-picker-option:has(input:checked) { background:color-mix(in srgb,var(--color-brand) 18%,var(--bg-primary)); border-color:color-mix(in srgb,var(--color-brand) 25%,var(--border-light)); }
+.staff-day-picker .weekday-picker-option:has(input:checked) .staff-day-check { display:block; }
+.staff-day-picker .weekday-picker-option:has(input:focus-visible) { outline:2px solid var(--color-brand); outline-offset:2px; }
+@media(prefers-reduced-motion:reduce) { .staff-day-picker .weekday-picker-option { transition:none; } }

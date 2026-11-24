@@ -13,7 +13,7 @@
 .sidebar-mode svg { flex-shrink: 0; }
 .sidebar-mode span { display: block; white-space: nowrap; overflow: hidden; }
 .sidebar-mode:hover { background: var(--bg-transparent-light); color: var(--font-primary); }
-.sidebar-mode.active { background: var(--nav-selected); color: var(--font-primary); }
+.sidebar-mode.active { background: transparent; color: var(--font-primary); }
 .sidebar-mode-content { min-width: 0; flex-shrink: 0; }
 .sidebar-mode-content .sidebar-section-label { font-size: 10px; font-weight: 500; padding: 16px 12px 11px; margin: 0; }
 .sidebar-mode-content .nav-item { width: 100%; border: 0; text-align: start; background: transparent; cursor: pointer; font: inherit; white-space: nowrap; transition: background .15s ease, color .15s ease, padding .2s ease; }
@@ -39,7 +39,7 @@
   .sidebar-collapsed .sidebar-modes { display: flex; flex-direction: column; gap: 4px; border: 0; padding: 8px 0; margin-bottom: 12px; }
   .sidebar-collapsed .sidebar-mode { width: 32px; padding: 0; }
   .sidebar-collapsed .sidebar-mode-content .nav-item { padding: 0 8px; gap: 0; }
-  .sidebar-collapsed .nav-item span { max-width: 0; opacity: 0; }
+  .sidebar-collapsed .nav-item span:not([data-navigation-indicator]) { max-width: 0; opacity: 0; }
   .sidebar-collapsed .sidebar-section-label, .sidebar-collapsed .sidebar-priority, .sidebar-collapsed .ai-history-note { display: none; }
   .sidebar-collapsed .sidebar-user { padding: 12px 0; gap: 0; }
   .sidebar-collapsed .sidebar-user-info, .sidebar-collapsed .sidebar-user > svg { width: 0; opacity: 0; overflow: hidden; }
@@ -85,7 +85,7 @@
 .shortcut-list { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
 .shortcut-row { position: relative; display: flex; align-items: center; }
 .shortcut-row .shortcut-item { flex: 1; min-width: 0; width: 100%; border: 0; background: transparent; text-align: left; font: inherit; cursor: pointer; text-decoration: none; padding-right: 30px; }
-.shortcut-row .shortcut-item.shortcut-current { background: var(--nav-selected); color: var(--font-primary); box-shadow: var(--shadow-xs); }
+.shortcut-row .shortcut-item.shortcut-current { background: transparent; color: var(--font-primary); box-shadow: none; }
 .shortcut-ext { margin-left: auto; color: var(--font-tertiary); }
 .shortcut-caret { margin-left: auto; color: var(--font-tertiary); transition: transform var(--motion-hover) var(--ease-out); }
 .shortcut-caret.open { transform: rotate(90deg); }
@@ -124,3 +124,17 @@
 .add-menu-destination { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--font-tertiary); overflow-wrap: anywhere; }
 .add-menu-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 .add-menu-note { font-size: 11px; color: var(--font-tertiary); }
+
+/* Selection surfaces never inherit label clipping, hover transitions or collapsed-label opacity. */
+.sidebar-mode { position:relative; isolation:isolate; border:1px solid transparent; }
+.sidebar-mode-pill { position:absolute; inset:-1px; border:1px solid var(--border-light); z-index:-1; background:var(--nav-selected); border-radius:6px; box-shadow:var(--shadow-xs); pointer-events:none; }
+.sidebar-mode-content [data-navigation-indicator] { max-width:none; opacity:1; transition:none; pointer-events:none; }
+.sidebar-mode-content .nav-item { transition:background-color var(--motion-hover) var(--ease-out), color var(--motion-hover) var(--ease-out); }
+.sidebar-collapsed .folder-expand { display:none; }
+@media(prefers-reduced-motion:reduce) { .sidebar-mode-content .nav-item { transition:none; } }
+
+.sidebar-morph-menu {position:relative;isolation:isolate}
+.sidebar-morph-highlight {position:absolute;top:0;left:0;z-index:-1;pointer-events:none;border-radius:7px;background:var(--bg-secondary)}
+.sidebar-morph-menu .dropdown-item:hover,.sidebar-morph-menu .dropdown-item:focus {background:transparent}
+.sidebar-morph-menu .dropdown-item:active{scale:.98}
+@media(prefers-reduced-motion:reduce){.sidebar-morph-menu .dropdown-item:active{scale:1}}

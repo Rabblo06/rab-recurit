@@ -38,6 +38,21 @@ packages/
 
 The `exports` map selects the build. `dist-cjs/package.json` contains `{"type":"commonjs"}` so Node does not treat those files as ESM. Copy this pattern for any new library shared between server and clients.
 
+The local Docker frontend builds both libraries before starting Vite. The Nx
+`rab-front:start` target also builds its workspace dependencies first. `yarn install`
+alone does not generate these files. If an already-running frontend reports
+`Failed to resolve entry for package "@rab/shared"` after build outputs were removed,
+rebuild them from the repository root:
+
+```sh
+yarn nx run-many -t build -p rab-shared rab-ui --parallel=1
+```
+
+For the existing development container, run the same command with
+`docker exec -e NX_DAEMON=false rab-front-1` before `yarn`, then reload the page.
+Check the container's bind mounts if it serves a different checkout; preserve any
+intentional frontend override rather than replacing that source tree.
+
 ## Backend module shape
 
 Every domain module under `rab-server/src/modules/` uses the same layout:

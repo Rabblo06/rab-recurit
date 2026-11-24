@@ -1,3 +1,5 @@
+import { SearchField } from './arc/search-field/search-field';
+import Popover from './Popover';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { IconCheck, IconChevronDown, IconSearch, IconX } from '@tabler/icons-react';
 
@@ -54,7 +56,6 @@ export function SearchableSelect({
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -65,22 +66,6 @@ export function SearchableSelect({
   }, [options, query]);
 
   useEffect(() => setActiveIndex(0), [query, open]);
-
-  useEffect(() => {
-    if (mode !== 'single' || !open) return;
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (rect) {
-      const width = Math.max(rect.width, 260);
-      // The drawer this almost always lives in is flush against the
-      // viewport's right edge, so a right-column field's popover would
-      // otherwise overflow off-screen — clamp so its right edge never
-      // passes the viewport's right edge (minus a small margin), and its
-      // left edge never goes negative either.
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-      setPos({ top: rect.bottom + 4, left, width });
-    }
-    inputRef.current?.focus();
-  }, [open, mode]);
 
   const selectedOption = mode === 'single' ? options.find((o) => o.id === value) : undefined;
 
@@ -142,7 +127,7 @@ export function SearchableSelect({
       <div>
         <div className="side-panel-input" style={{ border: '1px solid var(--border-medium)', borderRadius: 'var(--radius-sm) var(--radius-sm) 0 0', borderBottom: 'none' }}>
           <IconSearch size={14} style={{ color: 'var(--font-tertiary)', flexShrink: 0 }} />
-          <input
+          <SearchField type="text" label={placeholder}
             placeholder={placeholder}
             value={query}
             disabled={disabled}
@@ -191,18 +176,13 @@ export function SearchableSelect({
         <IconChevronDown size={13} style={{ color: 'var(--font-tertiary)', flexShrink: 0 }} />
       </button>
 
-      {open && pos && (
-        <>
-          <div className="dropdown-overlay" onClick={() => setOpen(false)} />
-          <div className="dropdown-menu" style={{ top: pos.top, left: pos.left, width: pos.width }}>
+      <Popover open={open} anchorRef={triggerRef} onClose={()=>setOpen(false)} onEscape={()=>{setOpen(false);triggerRef.current?.focus();return true;}} minWidth={Math.min(320, typeof window==='undefined'?320:window.innerWidth-16)} className="search-select-popover">
             <div className="side-panel-input" style={{ borderBottom: '1px solid var(--border-light)', padding: '6px 8px' }}>
               <IconSearch size={13} style={{ color: 'var(--font-tertiary)', flexShrink: 0 }} />
-              <input ref={inputRef} placeholder={placeholder} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={handleKeyDown} />
+              <SearchField type="text" label={placeholder} autoFocus ref={inputRef} placeholder={placeholder} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={handleKeyDown} />
             </div>
             {list}
-          </div>
-        </>
-      )}
+      </Popover>
     </>
   );
 }

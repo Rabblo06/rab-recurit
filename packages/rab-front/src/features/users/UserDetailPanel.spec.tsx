@@ -1,3 +1,4 @@
+jest.mock('../../shared/components/arc/hold-to-confirm/hold-to-confirm', () => ({ __esModule:true, default: ({label,onConfirm,disabled,confirmed}:any) => <button disabled={disabled} onClick={onConfirm}>{confirmed ? "Done" : label}</button> }));
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -155,11 +156,11 @@ describe('UserDetailPanel — Staff avatar (Part 3/4)', () => {
     await waitFor(() => expect(mockApi.delete).toHaveBeenCalledWith('/staff/staff-1/avatar'));
   });
 
-  it('does not show "Remove photo" when there is no avatar yet', async () => {
+  it('shows a disabled delete icon when there is no avatar yet', async () => {
     mount();
     openStaffDetail();
     await waitForLoaded('Jordan QA');
-    expect(screen.queryByRole('button', { name: 'Remove photo' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Remove photo' })).toBeDisabled();
   });
 
   it('a Manager record renders the plain, non-interactive avatar — no Manager avatar endpoint exists yet', async () => {
@@ -246,23 +247,58 @@ describe('UserDetailPanel — lifecycle actions match the account state machine'
     expect(screen.getByText('Manager • Initial Manager')).toBeInTheDocument();
   });
 
-  it('Delete sends the actor’s current password and shows the server refusal (never a silent success)', async () => {
-    withManager({ accountStatus: 'active' });
-    mockApi.delete.mockRejectedValue({ response: { status: 403, data: { message: 'Re-enter your current password to continue.' } } });
-    mount();
-    openManagerDetail();
-    await waitForLoaded('Bob Manager');
-    await openMenu();
-    await userEvent.click(screen.getByRole('button', { name: /Delete user/ }));
-    const confirm = screen.getAllByRole('button', { name: 'Delete user' }).at(-1)!;
-    // Owner 0g: a delete keeps the person's history (soft delete); the confirmation says so.
-    expect(screen.getByText(/shifts, attendance and payroll history are kept/)).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('Type DELETE to confirm'), 'DELETE');
-    expect(confirm).toBeDisabled();
-    await userEvent.type(screen.getByLabelText('Your current password'), 'my-own-password');
-    await userEvent.click(confirm);
-    await waitFor(() => expect(mockApi.delete).toHaveBeenCalledWith('/managers/manager-1', { data: { currentPassword: 'my-own-password' } }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Re-enter your current password to continue.'));
+  it('Hold completion deletes without password and reports a server refusal', async () => {
+    withManager({accountStatus:'active'});
+    mockApi.delete.mockRejectedValue({response:{status:403,data:{message:'Permission denied.'}}});
+    mount();openManagerDetail();await waitForLoaded('Bob Manager');await openMenu();
+    expect(screen.queryByLabelText('Your current password')).toBeNull();
+    await userEvent.click(screen.getByRole('button',{name:'Hold to delete user'}));
+    await waitFor(()=>expect(mockApi.delete).toHaveBeenCalledWith('/managers/manager-1'));
+    await waitFor(()=>expect(toast.error).toHaveBeenCalledWith('Permission denied.'));
+  });
+});
+
+
+describe('staff field panel presentation',()=>{
+  it('uses Pending without invite counters and removes Preferred name',async()=>{
+    mockApi.get.mockImplementation((url:string)=>url==='/staff/staff-1'?Promise.resolve({data:staffRecord({accountStatus:'invited',invitationStatus:'pending',pendingInvite:{sendNumber:2}})}):Promise.resolve({data:[]}));
+    mount();openStaffDetail();await waitForLoaded('Jordan QA');
+    expect(screen.getAllByText('Pending',{exact:true})).toHaveLength(2);
+    expect(screen.queryByText(/Pending invite/)).toBeNull();expect(screen.queryByText('Preferred name')).toBeNull();
+  });
+  it('opens a field with the keyboard and Escape cancels without saving',async()=>{
+    mount();openStaffDetail();await waitForLoaded('Jordan QA');
+    const value=screen.getByRole('button',{name:'Edit Name value'});value.focus();await userEvent.keyboard('{Enter}');
+    const input=screen.getByRole('textbox',{name:'First name'});await userEvent.clear(input);await userEvent.type(input,'Unsaved');await userEvent.keyboard('{Escape}');
+    expect(screen.getByRole('button',{name:'Edit Name value'})).toHaveTextContent('Jordan');expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('delete state belongs to its target user', () => {
+  const openMenu = () => userEvent.click(screen.getByRole('button', {name:'More actions'}));
+  it('shows a fresh hold button for another user after a successful delete', async () => {
+    mockApi.get.mockImplementation((url:string)=>Promise.resolve({data:url==='/managers/manager-2'?managerRecord({id:'manager-2',firstName:'Alice'}):url==='/managers/manager-1'?managerRecord():[]}));
+    mockApi.delete.mockResolvedValue({});
+    mount();openManagerDetail();await waitForLoaded('Bob Manager');await openMenu();
+    await userEvent.click(screen.getByRole('button',{name:'Hold to delete user'}));
+    await waitFor(()=>expect(mockApi.delete).toHaveBeenCalledWith('/managers/manager-1'));
+    await waitFor(()=>expect(toast.success).toHaveBeenCalledWith('User deleted.'));
+    openManagerDetail('manager-2');await waitForLoaded('Alice Manager');await waitFor(()=>expect(screen.queryAllByText('Bob Manager')).toHaveLength(0));await openMenu();
+    expect(screen.getByRole('button',{name:'Hold to delete user'})).toBeEnabled();
+    expect(screen.queryByRole('button',{name:'Done'})).toBeNull();
+  });
+  it('a late delete response does not close another user or disable their hold button', async () => {
+    let finish!: (value:unknown)=>void;
+    mockApi.delete.mockImplementation(()=>new Promise(resolve=>{finish=resolve}));
+    mockApi.get.mockImplementation((url:string)=>Promise.resolve({data:url==='/managers/manager-2'?managerRecord({id:'manager-2',firstName:'Alice'}):url==='/managers/manager-1'?managerRecord():[]}));
+    mount();openManagerDetail();await waitForLoaded('Bob Manager');await openMenu();
+    await userEvent.click(screen.getByRole('button',{name:'Hold to delete user'}));
+    openManagerDetail('manager-2');await waitForLoaded('Alice Manager');await waitFor(()=>expect(screen.queryAllByText('Bob Manager')).toHaveLength(0));await openMenu();
+    expect(screen.getByRole('button',{name:'Hold to delete user'})).toBeEnabled();
+    await act(async()=>{finish({});});
+    expect(screen.getByRole('button',{name:'Hold to delete user'})).toBeEnabled();
+    expect(screen.queryByRole('button',{name:'Done'})).toBeNull();
   });
 });
 
