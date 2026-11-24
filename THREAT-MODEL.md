@@ -10525,16 +10525,3 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Tests:** `member-directory.integration.spec.ts` (401, foreign workspace and organisation absent, four fields only,
   paging/organisationId 400, non-admin 403, 42501 with no context and with a foreign workspace bound);
   `admin-panel-routes.integration.spec.ts` (401/403 lists and layer-2 refusal include the new route/service).
-
-## 2026-11-24 — User deletion confirmation change: hold-to-delete replaces current-password step-up (SECURITY TRADE-OFF, owner accept/veto)
-
-At the product owner's explicit request, Staff / Manager / Venue Manager deletion (`DELETE /rest/v1/staff/:id`,
-`/managers/:id`, `/venue-managers/:id`) no longer requires current-password reauthentication (P2.8 step-up removed from
-`StaffService.deleteUser`, `ManagerService.deleteUser` and `ManagerService.deleteVenueManagerUser`). The web UI requires an
-uninterrupted 1.8-second hold, which prevents accidental activation but is not an authentication control. An authorized
-stolen or hijacked live session now has the same delete capability as its owner. Unchanged: route PermissionGuards,
-the service-level permission re-checks (STAFF_DEACTIVATE / MANAGER_MANAGE / VENUE_MANAGER_CREATE), tenant/workspace scope
-(404 outside it), and the protected-account / owned-workspace / operational-history invariants of UserDeletionService.
-Password and MFA checks on every other operation remain (including erase-personal-data). Isolated in its own commit so it
-can be reverted alone. Tests: `user-deletion-abuse-cases.integration.spec.ts` (401 without a session, 404 unknown id,
-204 without a password), `account-invite-abuse-cases`, `venue-manager-venue-assignment`.

@@ -1322,10 +1322,11 @@ export class ManagerService {
    * workspace owner = last admin) and decides soft vs hard: an account with any history is SOFT deleted (row kept,
    * `deleted_at` set, every session and membership revoked); only a never-activated invite with no history is removed.
    *
-   * Hold-to-confirm is client intent only (owner request 2026-11-24, see THREAT-MODEL.md): no current-password step-up.
-   * Server authorization and every deletion invariant below remain mandatory.
+   * P2.8 — step-up reauth checked FIRST, before even loading the target: a hijacked-but-live session alone can never
+   * delete a user.
    */
-  async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+  async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Layer 2 (security review M1): the /managers route's class guard MANAGER_MANAGE, re-checked in the service.
       await this.assertCanManageManagersTx(manager, ctx);
@@ -1337,9 +1338,10 @@ export class ManagerService {
   /**
    * The Venue Manager route's delete: VenueManagerService has already run its own layer-2 check (VENUE_MANAGER_CREATE +
    * the target is a Venue Manager of the caller's own workspace) — a workspace owner may lack MANAGER_MANAGE, so this
-   * variant does not require it. No current-password step-up, like `deleteUser`.
+   * variant does not require it. Step-up reauth first, like `deleteUser`.
    */
-  async deleteVenueManagerUser(ctx: AuthContext, id: string): Promise<void> {
+  async deleteVenueManagerUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     // The own-workspace Venue Manager scope AND the route's venue_manager.create (SF-2 layer 2: no implicit call-order
     // rule on the caller's earlier, separate check) are re-checked inside this transaction.
     const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {

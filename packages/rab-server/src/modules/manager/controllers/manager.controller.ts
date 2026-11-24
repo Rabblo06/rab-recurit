@@ -6,11 +6,11 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
-import { StepUpReauthDto } from '../../../engine/core-modules/auth/dto/step-up-reauth.dto';
 import { AddNoteDto } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
 import { AssignVenueDto } from '../dto/assign-venue.dto';
+import { StepUpReauthDto } from '../../../engine/core-modules/auth/dto/step-up-reauth.dto';
 import { CreateManagerDto } from '../dto/create-manager.dto';
 import { InviteInitialManagerDto } from '../dto/invite-initial-manager.dto';
 import { ListManagersDto } from '../dto/list-managers.dto';
@@ -147,11 +147,11 @@ export class ManagerController {
     return this.managerService.unassignVenue(ctx, id, venueId);
   }
 
-  /** Deletion uses session authorization and protected-account checks. */
+  /** P2.8 — step-up reauth: `currentPassword` is required and verified before anything else runs. */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string) {
-    return this.managerService.deleteUser(ctx, id);
+  deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: StepUpReauthDto) {
+    return this.managerService.deleteUser(ctx, id, dto.currentPassword);
   }
 
   /**

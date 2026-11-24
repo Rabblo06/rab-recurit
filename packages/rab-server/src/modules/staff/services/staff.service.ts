@@ -1369,10 +1369,11 @@ export class StaffService {
    * profile's employment is set to inactive in the same transaction, so the scheduling and offer paths (which check
    * employment status) can no longer pick them. Only a never-activated invite with no history is removed (with its profile).
    *
-   * Hold-to-confirm is client intent only (owner request 2026-11-24, see THREAT-MODEL.md): no current-password step-up.
-   * Server authorization and every deletion invariant below remain mandatory.
+   * P2.8 — step-up reauth checked FIRST, before even loading the target: a hijacked-but-live session alone can never
+   * delete a user.
    */
-  async deleteUser(ctx: AuthContext, id: string): Promise<void> {
+  async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     let deletedUserId: string | null = null;
     await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       // Layer 2 (security review M1): the route's PermissionGuard(STAFF_DEACTIVATE) is re-checked here, so a direct
