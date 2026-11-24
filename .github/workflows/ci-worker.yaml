@@ -57,12 +57,16 @@ jobs:
       # test-database harness below runs on ts-node outside Nx and imports @rab/shared and @rab/emails through their built dist.
       - name: Build the workspace libraries (the migration harness imports them)
         run: npx nx run-many -t build -p rab-shared,rab-emails
-      - run: npx nx run-many -t lint -p rab-worker,rab-server,rab-shared
+      # CI audit S8: rab-server is not linted here again. Its app code is still type-checked in this job (rab-worker's lint
+      # depends on ^build, and rab-server's build is `tsc -p tsconfig.app.json`); its full lint (app + spec configs) runs in
+      # ci-server, whose filter includes every path that can change rab-server (a subset of this workflow's worker filter).
+      - run: npx nx run-many -t lint -p rab-worker,rab-shared
       - uses: ./.github/actions/disposable-postgres
       # Owner-login architecture (owner decision 2026-11-04): the suites run on a database built the way every install is
       # now built: the provider SQL (01-crewflow-owner.sql, psql as the cluster superuser) and Agent 1's migrate child as
       # crewflow_owner, followed by the head-state checks (ledger = chain, 1786721330000 absent, B3, reachability, golden
-      # posture). The legacy restricted-migrator build (CF-41) keeps its own job in ci-migration-security.yaml until PR #9.
+      # posture). The legacy restricted-migrator build (CF-41) keeps its own job in ci-migration-security.yaml until
+      # the separated-mode retirement, Phase X X5.1 / LEGACY-NAMES-PLAN PR F.
       - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db

@@ -9,6 +9,8 @@ struct StaffProfileScreen: View {
     @EnvironmentObject private var store: StaffStore
     @EnvironmentObject private var navigator: StaffNavigator
     @State private var signingOut = false
+    /// D18: asked before logging out while actions are saved on this phone.
+    @State private var confirmSignOut = false
 
     var body: some View {
         let user = session.user
@@ -54,10 +56,23 @@ struct StaffProfileScreen: View {
                         Divider().overlay(ScheduleTokens.border).padding(.leading, 56)
                         row(icon: "shield", label: "Security", identifier: "staff.profile.security") { navigator.push(.security) }
                     }
+                    if !store.savedActions.isEmpty {
+                        sectionLabel("SAVED ON THIS PHONE")
+                        StaffSavedActionsList(
+                            items: store.savedActions,
+                            sending: store.sendingSaved,
+                            onSend: { Task { await store.syncOffline(trigger: .manual) } },
+                            onDismiss: { store.dismissSaved(id: $0) }
+                        )
+                    }
                     Button {
                         guard !signingOut else { return }
-                        signingOut = true
-                        Task { @MainActor in await session.logout() }
+                        // D18: never log out silently over unsent actions.
+                        if store.unsentSavedCount > 0 {
+                            confirmSignOut = true
+                            return
+                        }
+                        signOut()
                     } label: {
                         Text(signingOut ? "Signing out…" : "Log out")
                             .scheduleType(ScheduleType.button.colored(ScheduleTokens.errorText))
@@ -68,6 +83,25 @@ struct StaffProfileScreen: View {
                     .disabled(signingOut)
                     .padding(.top, 24)
                     .accessibilityIdentifier("profile.signOut")
+                    .confirmationDialog(
+                        StaffOfflinePresentation.signOutTitle(store.unsentSavedCount),
+                        isPresented: $confirmSignOut,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Send now") { Task { await store.syncOffline(trigger: .manual) } }
+                        if store.savedQueueUnreadable {
+                            // Never wiped: logging out leaves it on the phone.
+                            Button("Log out and keep them") { signOut() }
+                        } else {
+                            Button("Discard and log out", role: .destructive) {
+                                // Refused (nothing cleared) if it became unreadable.
+                                if store.discardAllSaved() { signOut() }
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text(store.savedQueueUnreadable ? StaffOfflinePresentation.signOutUnreadableMessage : StaffOfflinePresentation.signOutMessage)
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
@@ -76,6 +110,12 @@ struct StaffProfileScreen: View {
         }
         .background(ScheduleTokens.background.ignoresSafeArea())
         .accessibilityIdentifier("staff.profile")
+    }
+
+    private func signOut() {
+        guard !signingOut else { return }
+        signingOut = true
+        Task { @MainActor in await session.logout() }
     }
 
     private func sectionLabel(_ text: String) -> some View {
