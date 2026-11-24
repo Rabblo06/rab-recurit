@@ -589,6 +589,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       const run = new UpgradeRun({
         codeVersion: '0.7.0',
         previousVersions: ['0.4.0', '0.5.0', '0.6.0'],
+        upgradeFrom: { '0.7.0': ['0.6.0'] },
         force: true,
         log,
         registry: { '0-7': [command] },
