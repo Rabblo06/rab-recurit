@@ -233,9 +233,9 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     // Every report goes through renderReportPdf (data-in seam; native only since P5, no browser): record the HTML its
     // data renders to through the shared view-model and the rab-server template, then render the real (native) PDF.
     const originalRenderReportPdf = renderPdf.renderReportPdf;
-    renderDocSpy = jest.spyOn(renderPdf, 'renderReportPdf').mockImplementation(async (doc, env) => {
+    renderDocSpy = jest.spyOn(renderPdf, 'renderReportPdf').mockImplementation(async (doc) => {
       renderedHtml.push(reportHtmlFor(doc));
-      return originalRenderReportPdf(doc, env);
+      return originalRenderReportPdf(doc);
     });
 
     // ---- setup (not numbered): identities ---------------------------------
