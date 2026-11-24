@@ -76,6 +76,13 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+/// This client gave up waiting (CF-19 timeouts): NO response arrived. Distinct from a server or proxy that ANSWERED with
+/// HTTP 408, which is a response like any other (an [ApiException] with statusCode 408). Still a 408 for every existing
+/// caller and message; only the M4 offline queue tells the two apart (`isNoResponseFailure`).
+class ApiTimeoutException extends ApiException {
+  ApiTimeoutException(String message) : super(408, message);
+}
+
 /// The one place API failures become user-facing text.
 abstract final class ApiMessages {
   static const offline = 'Connection lost. Check your internet connection.';
@@ -278,7 +285,7 @@ class ApiClient {
     try {
       res = await http.Response.fromStream(await _http.send(request)).timeout(requestTimeout);
     } on TimeoutException {
-      throw ApiException(408, 'The connection timed out. Check your connection and try again.');
+      throw ApiTimeoutException('The connection timed out. Check your connection and try again.');
     }
     if (res.statusCode == 401 && !retried) {
       final refreshed = generation == _tokenGeneration && await _refreshAccessToken();
@@ -297,7 +304,7 @@ class ApiClient {
         // Deliberately no headers: the presigned URL is its own short-lived authorisation.
         stored = await _http.get(Uri.parse(baseUrl).resolve(location)).timeout(requestTimeout);
       } on TimeoutException {
-        throw ApiException(408, 'The download timed out. Check your connection and try again.');
+        throw ApiTimeoutException('The download timed out. Check your connection and try again.');
       }
       if (stored.statusCode != 200) {
         throw ApiException(stored.statusCode, 'The file could not be fetched from storage. Please try again.');
@@ -318,10 +325,29 @@ class ApiClient {
     final plain = RegExp(r'filename="?([^";]+)"?', caseSensitive: false).firstMatch(cd);
     return plain?.group(1)?.trim();
   }
-  Future<dynamic> post(String path, {Map<String, dynamic>? body}) async {
+  /// [headers]: extra request headers. Allowlist: only `Idempotency-Key` (M4, a punch that may be queued offline, DESIGN
+  /// D17); anything else throws [ArgumentError]. They can never replace the ones this client sets (auth, platform,
+  /// capabilities).
+  static const allowedExtraHeaders = {'Idempotency-Key'};
+
+  Future<dynamic> post(
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, String>? headers,
+  }) async {
+    final unexpected = headers?.keys.where(
+      (k) => !allowedExtraHeaders.contains(k),
+    );
+    if (unexpected != null && unexpected.isNotEmpty) {
+      throw ArgumentError.value(
+        unexpected.join(', '),
+        'headers',
+        'not an allowed extra header',
+      );
+    }
     final pushDeviceId = pushDeviceIdForLogout;
     if (path != '/auth/logout' || pushDeviceId == null) {
-      return _request('POST', path, body: body);
+      return _request('POST', path, body: body, extraHeaders: headers);
     }
     try {
       return await _request(
@@ -369,6 +395,7 @@ class ApiClient {
     int? dispatchGeneration,
     bool rawBytes = false,
     bool background = false,
+    Map<String, String>? extraHeaders,
   }) async {
     // P0.1/#9 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): captured on the FIRST attempt only (a
     // retry passes its own already-captured value through) — before this fix, the 401-retry below
@@ -382,6 +409,7 @@ class ApiClient {
     final token = await getAccessToken();
     final uri = Uri.parse('$baseUrl$path');
     final headers = {
+      ...?extraHeaders,
       'Content-Type': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
       // Web moved its refresh token into an HttpOnly cookie a browser
@@ -408,7 +436,7 @@ class ApiClient {
         _ => _http.post(uri, headers: headers, body: encodedBody),
       }.timeout(requestTimeout);
     } on TimeoutException {
-      throw ApiException(408, 'The connection timed out. Check your connection and try again.');
+      throw ApiTimeoutException('The connection timed out. Check your connection and try again.');
     }
 
     if (res.statusCode == 401 && !retried && _refreshesOn401(path, res.body)) {
@@ -440,6 +468,7 @@ class ApiClient {
           dispatchGeneration: generation,
           rawBytes: rawBytes,
           background: background,
+          extraHeaders: extraHeaders,
         );
       }
       await clearTokens();
@@ -526,7 +555,7 @@ class ApiClient {
           .timeout(refreshTimeout);
     } on TimeoutException {
       // CF-19: an unanswered refresh is a network problem, not an ended session: keep the tokens and let the caller retry.
-      throw ApiException(408, 'The connection timed out. Check your connection and try again.');
+      throw ApiTimeoutException('The connection timed out. Check your connection and try again.');
     }
     if (res.statusCode == 401 || res.statusCode == 403) return false;
     if (res.statusCode >= 400) {
