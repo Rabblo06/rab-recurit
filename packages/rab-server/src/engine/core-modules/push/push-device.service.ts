@@ -14,6 +14,16 @@ export interface RegisterDeviceParams {
 }
 
 /**
+ * C1 review F2: registrations of one provider token are serialised by a transaction-scoped advisory lock (two-key form,
+ * namespace `hashtext('crewflow_push_token_fingerprint')`, second key = SecretEncryptionService.pushTokenLockKey: its own
+ * `push-token-lock` key from APP_SECRET, independent of the active encryption kid, so instances on either side of a kid
+ * switch take the same lock). Two concurrent registrations of the same token by two accounts cannot both stay active. A
+ * collision between two different tokens only serialises them.
+ */
+export const PUSH_TOKEN_LOCK_SQL =
+  "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('crewflow_push_token_fingerprint'), $1::int4)";
+
+/**
  * Device/installation registration — identity (`userId`/`organisationId`) is ALWAYS taken from
  * `ctx` (the verified, server-derived `AuthContext` a guard already produced), never from the
  * request body (Stage 6 §5: "Do not trust userId, organisationId or workspaceId submitted by
@@ -36,6 +46,12 @@ export class PushDeviceService {
   async register(ctx: AuthContext, params: RegisterDeviceParams): Promise<{ id: string }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const encrypted = this.secretEncryption.encrypt(params.pushToken);
+      // C1 review F2: the active-kid fingerprint is stored; the candidates (every configured kid) are matched, so a row
+      // fingerprinted before a key rotation is still found.
+      const fingerprint = this.secretEncryption.pushTokenFingerprint(params.pushToken);
+      const fingerprintCandidates = this.secretEncryption.pushTokenFingerprintCandidates(params.pushToken);
+      // Serialise registrations of this token BEFORE anything is read (see PUSH_TOKEN_LOCK_SQL).
+      await manager.query(PUSH_TOKEN_LOCK_SQL, [this.secretEncryption.pushTokenLockKey(params.pushToken)]);
       const existing = await manager.findOne(PushDevice, { where: { userId: ctx.userId, deviceId: params.deviceId } });
       const now = new Date();
       // CF-35: one physical device delivers for one account at a time. When B signs in on a phone A used, A's
@@ -45,6 +61,23 @@ export class PushDeviceService {
         .update(PushDevice)
         .set({ active: false, deactivatedAt: now, deactivatedReason: 'device_registered_by_another_account' })
         .where('device_id = :deviceId AND user_id <> :userId AND active = true', { deviceId: params.deviceId, userId: ctx.userId })
+        .execute();
+
+      // C1 review F2: the same provider token registered by ANOTHER account of this organisation (a shared or second-hand
+      // phone reinstalled with a new installation id, so the device-id rule above does not match). The provider delivers a
+      // token to one phone, so the other account's row would send its notifications to whoever holds the phone now.
+      // Matched by keyed fingerprint under every configured kid (no decryption). Organisation-scoped twice: the explicit
+      // predicate from the verified context (layer 3) and FORCE RLS (layer 4). A token reused in ANOTHER organisation is not
+      // visible here (residual, THREAT-MODEL).
+      await manager
+        .createQueryBuilder()
+        .update(PushDevice)
+        .set({ active: false, deactivatedAt: now, deactivatedReason: 'token_registered_by_another_account' })
+        .where('organisation_id = :organisationId AND token_fingerprint IN (:...fingerprints) AND user_id <> :userId AND active = true', {
+          organisationId: ctx.organisationId,
+          fingerprints: fingerprintCandidates,
+          userId: ctx.userId,
+        })
         .execute();
 
       // C1b (D5): the SAME user's other active row carrying this exact provider token is the same phone under an older
@@ -70,6 +103,7 @@ export class PushDeviceService {
         await manager.update(PushDevice, { id: existing.id }, {
           platform: params.platform,
           pushTokenEncrypted: encrypted,
+          tokenFingerprint: fingerprint,
           appVersion: params.appVersion ?? null,
           active: true,
           lastSeenAt: now,
@@ -85,6 +119,7 @@ export class PushDeviceService {
         deviceId: params.deviceId,
         platform: params.platform,
         pushTokenEncrypted: encrypted,
+        tokenFingerprint: fingerprint,
         appVersion: params.appVersion ?? null,
         registeredAt: now,
         lastSeenAt: now,

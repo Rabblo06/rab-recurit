@@ -14,6 +14,9 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
+import { PushDeviceService } from '../../engine/core-modules/push/push-device.service';
+import { SecretEncryptionService } from '../../engine/core-modules/secret-encryption/secret-encryption.service';
 
 /**
  * Phase C1b (D5, owner conditions) — push registrations end with the session that made them, server-side, inside the
@@ -25,7 +28,9 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
  *      deactivates every device;
  *  (c) every session revoked (suspension / sign-out-everywhere / password reset) and organisation suspension
  *      deactivate every affected registration;
- *  (d) the same phone re-registering under a new installation id supersedes the old row (no double delivery).
+ *  (d) the same phone re-registering under a new installation id supersedes the old row (no double delivery);
+ *  (e) C1 review F2: the same provider token registered by ANOTHER account of the organisation supersedes the earlier
+ *      account's row (keyed fingerprint, no decryption); another organisation's row is never touched (RLS).
  */
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -238,5 +243,98 @@ describeIfDb('C1b push device deactivation on logout / revocation / suspension (
     expect(await active(staff.userId, legacyHexId)).toBe(false);
     expect(await reason(staff.userId, legacyHexId)).toBe('superseded_by_new_device_id');
     expect(await active(staff.userId, otherPhone)).toBe(true); // a different token = a different phone
+  });
+
+  const fingerprintOf = async (userId: string, deviceId: string) =>
+    (await owner.query(`SELECT token_fingerprint FROM core.push_device WHERE user_id = $1 AND device_id = $2`, [userId, deviceId]))[0]?.token_fingerprint as Buffer | null;
+
+  it('(e) F2: the same provider token registered by another account of the organisation supersedes the first account’s row', async () => {
+    const first = await factory.createStaff(org, { owner: manager, label: 'c1push-e1' });
+    const second = await factory.createStaff(org, { owner: manager, label: 'c1push-e2' });
+    const pushToken = `fcm-${randomUUID()}`;
+    const firstDevice = randomUUID();
+    const secondDevice = randomUUID(); // a reinstall: a new installation id, so the device-id rule (CF-35) does not match
+    expect((await register((await factory.loginTokens(first)).accessToken, firstDevice, pushToken)).status).toBeLessThan(300);
+    expect((await register((await factory.loginTokens(second)).accessToken, secondDevice, pushToken)).status).toBeLessThan(300);
+
+    expect(await active(first.userId, firstDevice)).toBe(false);
+    expect(await reason(first.userId, firstDevice)).toBe('token_registered_by_another_account');
+    expect(await active(second.userId, secondDevice)).toBe(true);
+    // Stored as a 32-byte keyed fingerprint, identical for the same token, never the token itself.
+    const fp = await fingerprintOf(second.userId, secondDevice);
+    expect(fp).toHaveLength(32);
+    expect((await fingerprintOf(first.userId, firstDevice))!.equals(fp!)).toBe(true);
+    expect(fp!.toString('utf8')).not.toContain(pushToken);
+  });
+
+  it('(e) F2: a different token of another account is untouched, and re-registering one’s own device never deactivates it', async () => {
+    const a = await factory.createStaff(org, { owner: manager, label: 'c1push-e3' });
+    const b = await factory.createStaff(org, { owner: manager, label: 'c1push-e4' });
+    const aTokens = await factory.loginTokens(a);
+    const aDevice = randomUUID();
+    const aToken = `fcm-${randomUUID()}`;
+    await register(aTokens.accessToken, aDevice, aToken);
+    await register((await factory.loginTokens(b)).accessToken, randomUUID()); // another token
+    await register(aTokens.accessToken, aDevice, aToken); // a refresh of the same registration
+    expect(await active(a.userId, aDevice)).toBe(true);
+  });
+
+  it('(e) F2 abuse: the same token registered in ANOTHER organisation never touches this organisation’s row (RLS)', async () => {
+    const victim = await factory.createStaff(org, { owner: manager, label: 'c1push-e5' });
+    const other = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'c1push-e-org' });
+    const outsider = await factory.createStaff(other.organisation, { owner: other.managers[0]!, label: 'c1push-e6' });
+    const pushToken = `fcm-${randomUUID()}`;
+    const victimDevice = randomUUID();
+    await register((await factory.loginTokens(victim)).accessToken, victimDevice, pushToken);
+    const outsiderDevice = randomUUID();
+    expect((await register((await factory.loginTokens(outsider)).accessToken, outsiderDevice, pushToken)).status).toBeLessThan(300);
+    expect(await active(victim.userId, victimDevice)).toBe(true);
+    expect(await active(outsider.userId, outsiderDevice)).toBe(true);
+  });
+
+  it('(e) F2 regression (review of #303): a row fingerprinted under the OLD encryption kid is still superseded after the active kid rotates', async () => {
+    const OLD = { kid: 'f2old', secret: 'o'.repeat(40) };
+    const NEW = { kid: 'f2new', secret: 'n'.repeat(40) };
+    const encWith = (entries: Array<{ kid: string; secret: string }>, activeKid: string) => {
+      const values: Record<string, string | undefined> = { APP_SECRET: process.env.APP_SECRET ?? 'a'.repeat(32), APP_ENCRYPTION_KEYRING: JSON.stringify(entries), APP_ENCRYPTION_ACTIVE_KID: activeKid };
+      return new SecretEncryptionService({ get: (key: string) => values[key] } as unknown as EnvironmentService);
+    };
+    const before = new PushDeviceService(tenantContext, encWith([OLD], OLD.kid));
+    const after = new PushDeviceService(tenantContext, encWith([OLD, NEW], NEW.kid));
+    const first = await factory.createStaff(org, { owner: manager, label: 'c1push-e7' });
+    const second = await factory.createStaff(org, { owner: manager, label: 'c1push-e8' });
+    const pushToken = `fcm-${randomUUID()}`;
+    const firstDevice = randomUUID();
+    const secondDevice = randomUUID();
+    await before.register(ctxOf(first), { deviceId: firstDevice, platform: 'android', pushToken });
+    await after.register(ctxOf(second), { deviceId: secondDevice, platform: 'android', pushToken });
+    expect(await active(first.userId, firstDevice)).toBe(false);
+    expect(await reason(first.userId, firstDevice)).toBe('token_registered_by_another_account');
+    expect(await active(second.userId, secondDevice)).toBe(true);
+    // New rows are written under the new kid.
+    expect((await fingerprintOf(second.userId, secondDevice))!.equals((await fingerprintOf(first.userId, firstDevice))!)).toBe(false);
+  });
+
+  it('(e) F2 (review of #303): two accounts registering the same token at the same moment leave exactly one active row', async () => {
+    const pushToken = `fcm-${randomUUID()}`;
+    const accounts = await Promise.all([1, 2, 3].map((i) => factory.createStaff(org, { owner: manager, label: `c1push-race${i}` })));
+    const tokens = await Promise.all(accounts.map((a) => factory.loginTokens(a)));
+    const devices = accounts.map(() => randomUUID());
+    const results = await Promise.all(tokens.map((t, i) => register(t.accessToken, devices[i]!, pushToken)));
+    for (const r of results) expect(r.status).toBeLessThan(300);
+    const states = await Promise.all(accounts.map((a, i) => active(a.userId, devices[i]!)));
+    expect(states.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('(e) F2: a refresh of an existing registration writes the fingerprint on the existing-row path', async () => {
+    const staff = await factory.createStaff(org, { owner: manager, label: 'c1push-e9' });
+    const tokens = await factory.loginTokens(staff);
+    const device = randomUUID();
+    await register(tokens.accessToken, device);
+    await owner.query(`UPDATE core.push_device SET token_fingerprint = NULL WHERE user_id = $1 AND device_id = $2`, [staff.userId, device]); // a pre-migration row
+    expect(await fingerprintOf(staff.userId, device)).toBeNull();
+    await register(tokens.accessToken, device, `fcm-${randomUUID()}`);
+    expect(await fingerprintOf(staff.userId, device)).toHaveLength(32);
+    expect(await active(staff.userId, device)).toBe(true);
   });
 });

@@ -122,8 +122,24 @@ interface TargetAdapter {
   installed(manager: EntityManager): Promise<boolean>;
   writable(manager: EntityManager): Promise<boolean>;
   readBatch(manager: EntityManager, organisationId: string, after: string | null, limit: number): Promise<ReadBatch>;
-  writeIfUnchanged(manager: EntityManager, organisationId: string, rowId: string, expected: Buffer, next: Buffer): Promise<boolean>;
+  /**
+   * `rekey` carries what the adapter may need besides the new ciphertext: the push adapter re-fingerprints the token under
+   * the active kid (C1 review F2), so a row's fingerprint always lives under the same kid as its ciphertext.
+   */
+  writeIfUnchanged(manager: EntityManager, organisationId: string, rowId: string, expected: Buffer, next: Buffer, rekey: RekeyContext): Promise<boolean>;
 }
+
+interface RekeyContext {
+  /** The active-kid push token fingerprint of the row's plaintext (never the plaintext itself). */
+  pushTokenFingerprint: () => Buffer;
+}
+
+/** For SMTP-only writes, which never re-key a push token: calling it is a programming error and fails closed. */
+const NO_PUSH_REKEY: RekeyContext = {
+  pushTokenFingerprint: () => {
+    throw new Error('secret rotation: no push token fingerprint for this write (not a push_token row).');
+  },
+};
 
 const RAB2_MAGIC = Buffer.from([0x52, 0x41, 0x42, 0x32]);
 const DEFAULT_BATCH = 200;
@@ -179,12 +195,13 @@ const PUSH_ADAPTER: TargetAdapter = {
       next: rows.length === limit ? rows[rows.length - 1]!.id : null,
     };
   },
-  async writeIfUnchanged(manager, organisationId, rowId, expected, next) {
+  async writeIfUnchanged(manager, organisationId, rowId, expected, next, rekey) {
+    // C1 review F2: the fingerprint moves to the active kid together with the ciphertext.
     const result = await manager.query(
-      `UPDATE core.push_device SET push_token_encrypted = $1
+      `UPDATE core.push_device SET push_token_encrypted = $1, token_fingerprint = $5
         WHERE id = $2 AND organisation_id = $3 AND push_token_encrypted = $4
         RETURNING id`,
-      [next, rowId, organisationId, expected],
+      [next, rowId, organisationId, expected, rekey.pushTokenFingerprint()],
     );
     return updatedRows(result).length === 1;
   },
@@ -320,8 +337,11 @@ export class SecretRotationService {
               else if (!writable) results.push({ ...base, action: 'skipped-unsupported' });
               else if (options.maxRotations !== undefined && rotations >= options.maxRotations) break;
               else {
-                const next = this.secretEncryption.encrypt(this.secretEncryption.decrypt(row.encrypted));
-                const wrote = await adapter.writeIfUnchanged(manager, organisationId, row.rowId, row.encrypted, next);
+                const plaintext = this.secretEncryption.decrypt(row.encrypted);
+                const next = this.secretEncryption.encrypt(plaintext);
+                const wrote = await adapter.writeIfUnchanged(manager, organisationId, row.rowId, row.encrypted, next, {
+                  pushTokenFingerprint: () => this.secretEncryption.pushTokenFingerprint(plaintext),
+                });
                 if (wrote) rotations += 1;
                 results.push({ ...base, action: wrote ? 'rotated' : 'skipped-concurrent-change' });
               }
@@ -473,7 +493,7 @@ export class SecretRotationService {
   }
 
   private async writeIfUnchanged(organisationId: string, expectedCurrent: Buffer, next: Buffer): Promise<boolean> {
-    return this.runScopedForOrg(organisationId, (manager) => SMTP_ADAPTER.writeIfUnchanged(manager, organisationId, organisationId, expectedCurrent, next));
+    return this.runScopedForOrg(organisationId, (manager) => SMTP_ADAPTER.writeIfUnchanged(manager, organisationId, organisationId, expectedCurrent, next, NO_PUSH_REKEY));
   }
 
   // Local copy of rab-worker's runScopedForOrg helper's exact semantics (actorType 'worker': a system execution context, not
