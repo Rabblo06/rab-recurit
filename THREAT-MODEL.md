@@ -10521,10 +10521,12 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   use the same helper (add them to ACTION_BOUND_STEP_UP_ACTIONS).
 - **Preparers:** whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) is a preparer too.
 - **Database layer (DRAFT, new SQL, PayrollMakerCheckerBackstop1786723020000):** `core.payroll_record_guard()` (the one trigger
-  function of core AND every workspace payroll_record) refuses, at the moment `approved_by` is set, an approver who
-  finalised the report or reviewed the seat (42501; rows approved earlier are never blocked by later updates).
-  `payroll_run_update` on core.payroll_run requires `finalised_by <> prepared_by` for a finalised run (workspace copies with
-  the 0.7.0 chain). Top-up preparers of a run are still checked in the service only, from the insert-only audit row; a
+  function of core AND every workspace payroll_record), whenever `approved_by` changes: a human session may only record
+  itself (`core.current_uid()`) and only once (never replaced or cleared); the record's finalised report and its seat must
+  both be readable (fail closed: hidden or missing refuses); the approver is neither the report's finaliser nor the seat's
+  reviewer (42501; rows approved earlier are never blocked by later updates). `payroll_run_update` on core.payroll_run
+  requires a finalised run's `finalised_by` = the caller and <> `prepared_by` (workspace copies with the 0.7.0 chain);
+  `prepared_by` is not updatable by the runtime role (column grants; the owner-login grant-parity trigger for crewflow_owner). Top-up preparers of a run are still checked in the service only, from the insert-only audit row; a
   real per-line `prepared_by` column needs a workspace structure level and is proposed for the 0.7.0 PR.
 - **Tests:** payroll-approval (11) / (11b): no proof, a sign-in or ordinary grant, a sign-in grant planted under the action
   key, a proof for another action, an un-enrolled approver: all 403; the real step-up with code then exactly one approval,

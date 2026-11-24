@@ -26,6 +26,7 @@ describeIfDb('decision 5: payroll maker-checker in the database (integration, th
   let w: SeededWorkspace;
   const users = { finaliser: '', reviewer: '', approver: '', staff: '' };
   let recordId = '';
+  let unreportedRecordId = '';
   let runId = '';
 
   beforeAll(async () => {
@@ -73,6 +74,27 @@ describeIfDb('decision 5: payroll maker-checker in the database (integration, th
        VALUES ($1, $2, $3, $4, $5, 'pending_approval', 240, 1200, 4800) RETURNING id`,
       [w.org, w.id, attendance, shift, profile],
     );
+    // A second shift whose report was never finalised: its record's preparation cannot be verified (fail closed).
+    const shift2 = await one(
+      `INSERT INTO core.shift (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, status, created_by)
+       VALUES ($1, $2, $3, $4, '2031-02-04T09:00:00Z', '2031-02-04T13:00:00Z', 1, 1200, 'completed', $5) RETURNING id`,
+      [w.org, w.id, venue, role, users.finaliser],
+    );
+    const seat2 = await one(
+      `INSERT INTO core.shift_assignment (organisation_id, workspace_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, period)
+       VALUES ($1, $2, $3, $4, 'completed', 1200, $5, tstzrange('2031-02-04T09:00:00Z', '2031-02-04T13:00:00Z', '[)')) RETURNING id`,
+      [w.org, w.id, shift2, profile, users.finaliser],
+    );
+    const attendance2 = await one(
+      `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status)
+       VALUES ($1, $2, $3, $4, $5, '2031-02-04T09:00:00Z', '2031-02-04T13:00:00Z', 'clocked_out') RETURNING id`,
+      [w.org, w.id, seat2, shift2, profile],
+    );
+    unreportedRecordId = await one(
+      `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+       VALUES ($1, $2, $3, $4, $5, 'pending_approval', 240, 1200, 4800) RETURNING id`,
+      [w.org, w.id, attendance2, shift2, profile],
+    );
     const calendar = await one(`INSERT INTO core.payroll_calendar (organisation_id, year, version, source, created_by) VALUES ($1, 2031, 1, 'mkchk', $2) RETURNING id`, [w.org, w.owner]);
     const period = await one(
       `INSERT INTO core.payroll_calendar_period (organisation_id, calendar_id, period_start, period_end, payday) VALUES ($1, $2, '2031-02-03', '2031-02-16', '2031-02-26') RETURNING id`,
@@ -91,16 +113,21 @@ describeIfDb('decision 5: payroll maker-checker in the database (integration, th
     await admin?.end();
   });
 
-  /** Runs `sql` as the runtime login bound to `user`, in a transaction that is always rolled back; returns the row count. */
-  const as = async (user: string, sql: string, params: unknown[]): Promise<number | null> => {
+  /** Runs the statements as the runtime login bound to `user`, in ONE transaction that is always rolled back; returns the last row count. */
+  const asMany = async (user: string, statements: Array<[string, unknown[]]>): Promise<number | null> => {
     await app.query('BEGIN');
     try {
       await app.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [w.org, w.id, user]);
-      return (await app.query(sql, params)).rowCount;
+      let count: number | null = null;
+      for (const [sql, params] of statements) count = (await app.query(sql, params)).rowCount;
+      return count;
     } finally {
       await app.query('ROLLBACK');
     }
   };
+  const as = (user: string, sql: string, params: unknown[]) => asMany(user, [[sql, params]]);
+  const APPROVE = `UPDATE core.payroll_record SET status = 'approved', approved_at = now(), approved_by = $2, updated_at = now() WHERE id = $1`;
+  const FINALISE = `UPDATE core.payroll_run SET status = 'finalised', finalised_at = now(), finalised_by = $2, updated_at = now() WHERE id = $1`;
   const approve = (user: string) => as(user, `UPDATE core.payroll_record SET status = 'approved', approved_at = now(), approved_by = $2, updated_at = now() WHERE id = $1`, [recordId, user]);
   const finalise = (user: string) => as(user, `UPDATE core.payroll_run SET status = 'finalised', finalised_at = now(), finalised_by = $2, updated_at = now() WHERE id = $1`, [runId, user]);
 
@@ -130,6 +157,27 @@ describeIfDb('decision 5: payroll maker-checker in the database (integration, th
   it('the preparer of a run cannot finalise it (42501); a third manager can', async () => {
     await expect(finalise(users.finaliser)).rejects.toMatchObject({ code: '42501' });
     expect(await finalise(users.approver)).toBe(1);
+  });
+
+  it('review of #335: the caller can only record THEMSELVES as approver, once (42501 otherwise)', async () => {
+    // The finaliser writes a third manager in as the approver.
+    await expect(as(users.finaliser, APPROVE, [recordId, users.approver])).rejects.toMatchObject({ code: '42501' });
+    // The third manager approves, then tries to replace (or clear) the recorded approver in the same transaction.
+    await expect(asMany(users.approver, [[APPROVE, [recordId, users.approver]], [`UPDATE core.payroll_record SET approved_by = $2 WHERE id = $1`, [recordId, users.reviewer]]]))
+      .rejects.toMatchObject({ code: '42501' });
+    await expect(asMany(users.approver, [[APPROVE, [recordId, users.approver]], [`UPDATE core.payroll_record SET approved_by = NULL, approved_at = NULL WHERE id = $1`, [recordId]]]))
+      .rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('review of #335: a record whose finalised report cannot be found is never approvable (fail closed, 42501)', async () => {
+    await expect(as(users.approver, APPROVE, [unreportedRecordId, users.approver])).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('review of #335: the run preparer cannot finalise as someone else, nor move prepared_by (42501)', async () => {
+    await expect(as(users.finaliser, FINALISE, [runId, users.approver])).rejects.toMatchObject({ code: '42501' });
+    await expect(as(users.finaliser, `UPDATE core.payroll_run SET prepared_by = $2 WHERE id = $1`, [runId, users.approver])).rejects.toMatchObject({ code: '42501' });
+    await expect(as(users.finaliser, `UPDATE core.payroll_run SET prepared_by = $2, status = 'finalised', finalised_at = now(), finalised_by = $3 WHERE id = $1`, [runId, users.approver, users.finaliser]))
+      .rejects.toMatchObject({ code: '42501' });
   });
 
   it('nothing was written by any of the above (every case rolled back)', async () => {
