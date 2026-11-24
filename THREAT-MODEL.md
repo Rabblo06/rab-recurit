@@ -10602,8 +10602,18 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual (run facts):** runs finalised before this migration have no `finalised` fact (no back-fill: a migration
   binds no tenant and the workspace payroll tables are FORCE RLS); they stay protected because no `opened` fact can be
   written for a non-prepared run, and a holiday-pay line requires an `approved` record. The "copy the application uses"
-  rule assumes a populated workspace schema is authoritative (HWS on after the C3 cutover); an HWS-off deployment whose
-  workspace schemas hold stale back-filled copies would read the stale copy.
+  rule is now chosen from database state (third review): a cut-over workspace ('verified' in core.hws_cutover_state) is read
+  ONLY in its own schema (its core copy is also fenced read-only), a workspace being cut over is refused, and joining a
+  run additionally needs the run LIVE `prepared` in that copy; locked_at can only be set once its run has a `finalised`
+  fact. Reads share-lock the row, so a concurrent finalise is waited for.
+- **Residual (before the 0.7.0 cutover):** the runtime switch HWS_RUNTIME_ENABLED is an environment setting the database
+  cannot see, so before the cutover a guard reads the workspace schema when it holds the row, otherwise core. A manager
+  with raw runtime-login SQL could plant a prepared run in the copy the application does NOT use and park an approved
+  line there (unpaid, never paid twice). This closes when 0.7.0 activates the cutover (owner: 0.7.0 before any real data).
+- **Residual (inherited, 0.7.0 follow-up with Lane P1):** payroll_run has no status-transition guard (#335 moved its run
+  rule to the 0.7.0 structure follow-up: a trigger on the workspace copies needs the structure chain), so a session with
+  DML on payroll_run could flip prepared/finalised and then write a matching fact. The adjustment guard's live-status
+  check and the finalised-fact requirement for locked_at narrow it; the run guard itself lands with the 0.7.0 follow-up.
 - **Not done here (re-review item 3, follow-up):** staff still read their whole approved adjustment rows through RLS (reason,
   created_by, decided_by included); the API projection returns line fields only. A column-limited staff path needs a
   view or definer, and under FORCE RLS a view's owner is itself subject to the table's policies, so it needs a dedicated

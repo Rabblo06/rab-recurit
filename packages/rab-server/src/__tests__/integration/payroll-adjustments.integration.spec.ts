@@ -335,6 +335,19 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     // Re-review item 1: run facts cannot be forged: an `opened` fact for an invented run is refused (42501).
     await expect(asUser(a.userId, `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, created_by) VALUES ($1, $2, $3, 'opened', $4)`,
       [orgId, a.workspaceId, randomUUID(), a.userId])).rejects.toMatchObject({ code: '42501' });
+    // Third review: once a workspace is cut over ('verified' cutover state), ONLY its own schema counts. A fake prepared
+    // run planted in the stale core copy (fixture write, superuser) cannot get an `opened` fact (42501).
+    const [p3] = await adminDataSource.query(`SELECT id FROM core.payroll_calendar_period WHERE organisation_id = $1 AND period_start = $2::date`, [orgId, periods[3]!.start]);
+    const [fake] = await adminDataSource.query(
+      `INSERT INTO core.payroll_run (organisation_id, workspace_id, period_id, status, prepared_by) VALUES ($1, $2, $3, 'prepared', $4) RETURNING id`, [orgId, a.workspaceId, p3.id, a.userId]);
+    await adminDataSource.query(`INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at) VALUES ($1, $2, 'verified', now())`, [a.workspaceId, orgId]);
+    try {
+      await expect(asUser(a.userId, `INSERT INTO core.payroll_run_event (organisation_id, workspace_id, run_id, event, created_by) VALUES ($1, $2, $3, 'opened', $4)`,
+        [orgId, a.workspaceId, fake.id, a.userId])).rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await adminDataSource.query(`DELETE FROM core.hws_cutover_state WHERE workspace_id = $1`, [a.workspaceId]);
+      await adminDataSource.query(`DELETE FROM core.payroll_run WHERE id = $1`, [fake.id]);
+    }
     // Run facts are insert-only: no UPDATE / DELETE for the runtime (owner) login.
     await expect(asUser(c.userId, `UPDATE core.payroll_run_event SET event = 'opened'`)).rejects.toMatchObject({ code: '42501' });
     await expect(asUser(c.userId, `DELETE FROM core.payroll_run_event`)).rejects.toMatchObject({ code: '42501' });
@@ -366,6 +379,8 @@ describeIfDb('payroll adjustments (integration, owner decision 3)', () => {
     const included = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_run.adjustments_included' AND entity_id = $1`, [runId]);
     expect(included[0].metadata).toMatchObject({ adjustments: 3, carriedForward: 0 });
 
+    // Third review: an included line cannot be locked before its run is finalised (no `finalised` fact yet: 42501).
+    await expect(asUser(c.userId, `UPDATE core.payroll_adjustment SET locked_at = now() WHERE id = $1`, [ids.bonus])).rejects.toMatchObject({ code: '42501' });
     // Re-review item 1: a `finalised` fact cannot be written early for this still-prepared run (it would block the real one),
     // neither with its exact line set nor with an arbitrary record list.
     const [line] = await adminDataSource.query(`SELECT payroll_record_id FROM ${businessTable(a.workspaceId!, 'payroll_run_line')} WHERE run_id = $1`, [runId]);

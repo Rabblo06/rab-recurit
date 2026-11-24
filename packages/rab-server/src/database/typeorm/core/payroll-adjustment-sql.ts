@@ -163,10 +163,32 @@ const IMMUTABLE_COLUMNS = [
 export const PAYROLL_ADJUSTMENT_GUARD_FUNCTION = 'core.payroll_adjustment_guard()';
 export const PAYROLL_ADJUSTMENT_INSERT_GUARD_FUNCTION = 'core.payroll_adjustment_insert_guard()';
 
+/**
+ * Third review: the ONE authoritative business copy, chosen from database state the way the binder's cutover routing does
+ * (engine/core-modules/upgrade/hws-cutover-routing.ts): a workspace whose cutover has started, or any workspace without a
+ * 'verified' state once the cutover is active, is refused ("being upgraded"); a cut-over ('verified') workspace is read
+ * ONLY in its own schema (core is never consulted, and its core copy is fenced read-only by core.hws_cutover_core_fence()).
+ * Before the cutover the database cannot see the runtime switch (HWS_RUNTIME_ENABLED is an environment setting), so the
+ * workspace schema is read when it holds the row, otherwise core: that residual is documented in THREAT-MODEL and closes
+ * when 0.7.0 activates the cutover (the owner's rule: 0.7.0 before any real data). Needs `ws_schema`, `cut_state`, `copies`.
+ */
+export const AUTHORITATIVE_COPIES_SQL = `SELECT s.state INTO cut_state FROM core.hws_cutover_state s WHERE s.workspace_id = NEW.workspace_id;
+  IF cut_state = 'started' OR (cut_state IS DISTINCT FROM 'verified' AND EXISTS (SELECT 1 FROM core.hws_cutover_activation)) THEN
+    RAISE EXCEPTION 'this workspace is being upgraded' USING ERRCODE = '42501';
+  END IF;
+  copies := CASE WHEN cut_state = 'verified' THEN ARRAY[ws_schema] ELSE ARRAY[ws_schema, 'core'] END;`;
+
 const RUN_FACT = (event: 'opened' | 'finalised') => `EXISTS (SELECT 1 FROM core.payroll_run_event e
        WHERE e.run_id = NEW.run_id AND e.organisation_id = NEW.organisation_id AND e.workspace_id = NEW.workspace_id AND e.event = '${event}')`;
 
 export const PAYROLL_ADJUSTMENT_GUARD_FUNCTION_SQL = `CREATE FUNCTION core.payroll_adjustment_guard() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, core AS $fn$
+DECLARE
+  ws_schema text := 'workspace_' || pg_catalog.replace(NEW.workspace_id::text, '-', '');
+  cut_state text;
+  copies text[];
+  sch text;
+  run_found uuid;
+  run_status text;
 BEGIN
   IF OLD.locked_at IS NOT NULL THEN
     RAISE EXCEPTION 'payroll_adjustment % is locked: its payroll run is finalised', OLD.id USING ERRCODE = '42501';
@@ -195,6 +217,21 @@ BEGIN
     IF ${RUN_FACT('finalised')} THEN
       RAISE EXCEPTION 'a payroll adjustment never joins a finalised payroll run' USING ERRCODE = '42501';
     END IF;
+    -- Third review: the run's LIVE status, in the authoritative copy, must still be 'prepared' (not just the facts).
+    ${AUTHORITATIVE_COPIES_SQL}
+    FOREACH sch IN ARRAY copies LOOP
+      CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_run', sch)) IS NULL;
+      EXECUTE pg_catalog.format('SELECT r.id, r.status FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3 FOR SHARE OF r', sch)
+        INTO run_found, run_status USING NEW.run_id, NEW.organisation_id, NEW.workspace_id;
+      EXIT WHEN run_found IS NOT NULL;
+    END LOOP;
+    IF run_found IS NULL OR run_status IS DISTINCT FROM 'prepared' THEN
+      RAISE EXCEPTION 'a payroll adjustment joins only a prepared payroll run' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  -- Third review: locked only by its run's finalisation (a 'finalised' fact for that run must exist).
+  IF NEW.locked_at IS NOT NULL AND OLD.locked_at IS NULL AND NOT ${RUN_FACT('finalised')} THEN
+    RAISE EXCEPTION 'a payroll adjustment is locked only when its payroll run is finalised' USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
 END
@@ -215,6 +252,8 @@ DECLARE
   rec_id uuid;
   rec_staff uuid;
   rec_status text;
+  cut_state text;
+  copies text[];
 BEGIN
   NEW.created_at := pg_catalog.now();
   NEW.updated_at := pg_catalog.now();
@@ -230,8 +269,9 @@ BEGIN
     RAISE EXCEPTION 'payroll_adjustment staff_user_id must be the user of staff_profile_id in this workspace' USING ERRCODE = '23514';
   END IF;
   IF NEW.corrects_payroll_record_id IS NOT NULL THEN
-    -- The copy the application uses: the workspace schema's when it holds the record, otherwise core's.
-    FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP
+    -- The authoritative copy (AUTHORITATIVE_COPIES_SQL).
+    ${AUTHORITATIVE_COPIES_SQL}
+    FOREACH sch IN ARRAY copies LOOP
       CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_record', sch)) IS NULL;
       EXECUTE pg_catalog.format('SELECT pr.id, pr.staff_profile_id, pr.status FROM %I.payroll_record pr WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3', sch)
         INTO rec_id, rec_staff, rec_status USING NEW.corrects_payroll_record_id, NEW.organisation_id, NEW.workspace_id;
@@ -249,8 +289,8 @@ export const PAYROLL_RUN_EVENT_INSERT_GUARD_FUNCTION = 'core.payroll_run_event_i
 
 /**
  * Review 2, item 1: run facts cannot be forged. BEFORE INSERT on core.payroll_run_event, the fact must match the payroll
- * run itself, read in the copy the application uses (the workspace schema's `payroll_run` when it holds the run, otherwise
- * core's; the schema name is derived from the uuid, so `%I` only ever quotes hex):
+ * run itself, read in the ONE authoritative copy (AUTHORITATIVE_COPIES_SQL; the schema name is derived from the uuid, so
+ * `%I` only ever quotes hex), the run row share-locked so a concurrent status change is waited for:
  *   - `opened`: the run exists in this organisation and workspace and is `prepared`;
  *   - `finalised`: the run is `finalised` and payroll_record_ids is EXACTLY its line set (sorted, no extra, none missing).
  * An invented run, an early `finalised` (which would block the real one through the UNIQUE key) or a list of arbitrary
@@ -264,11 +304,14 @@ DECLARE
   run_found uuid;
   run_status text;
   run_records uuid[];
+  cut_state text;
+  copies text[];
 BEGIN
   NEW.created_at := pg_catalog.now();
-  FOREACH sch IN ARRAY ARRAY[ws_schema, 'core'] LOOP
+  ${AUTHORITATIVE_COPIES_SQL}
+  FOREACH sch IN ARRAY copies LOOP
     CONTINUE WHEN pg_catalog.to_regclass(pg_catalog.format('%I.payroll_run', sch)) IS NULL;
-    EXECUTE pg_catalog.format('SELECT r.id, r.status, ARRAY(SELECT l.payroll_record_id FROM %I.payroll_run_line l WHERE l.run_id = r.id ORDER BY l.payroll_record_id) FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3', sch, sch)
+    EXECUTE pg_catalog.format('SELECT r.id, r.status, ARRAY(SELECT l.payroll_record_id FROM %I.payroll_run_line l WHERE l.run_id = r.id ORDER BY l.payroll_record_id) FROM %I.payroll_run r WHERE r.id = $1 AND r.organisation_id = $2 AND r.workspace_id = $3 FOR SHARE OF r', sch, sch)
       INTO run_found, run_status, run_records USING NEW.run_id, NEW.organisation_id, NEW.workspace_id;
     EXIT WHEN run_found IS NOT NULL;
   END LOOP;
