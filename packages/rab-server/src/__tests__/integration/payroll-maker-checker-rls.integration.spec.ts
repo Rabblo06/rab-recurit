@@ -2,7 +2,11 @@ import 'reflect-metadata';
 import { Client } from 'pg';
 
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { PAYROLL_MAKER_CHECKER_HASHES, PAYROLL_MAKER_CHECKER_STATE_SQL } from '../../database/typeorm/workspace-schema/payroll-maker-checker-sql';
+import {
+  PAYROLL_GUARD_PREDEPLOY_COUNT_SQL,
+  PAYROLL_MAKER_CHECKER_HASHES,
+  PAYROLL_MAKER_CHECKER_STATE_SQL,
+} from '../../database/typeorm/workspace-schema/payroll-maker-checker-sql';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
@@ -170,6 +174,45 @@ describeIfDb('decision 5: payroll maker-checker in the database (integration, th
       },
     );
     await expect(approve(users.approver, ids.unaudited)).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('the history must match the live columns: a finaliser re-pointed to someone who never finalised refuses even a third manager', async () => {
+    const reportBy = `UPDATE core.shift_report SET finalised_by = $2 WHERE id = $1`;
+    await withTamper([reportBy, [ids.report, users.staff]], [reportBy, [ids.report, users.finaliser]], async () => {
+      await expect(approve(users.approver)).rejects.toMatchObject({ code: '42501' });
+    });
+  });
+
+  it('forged history naming a colleague plus a re-pointed finalised_by does not let the real finaliser approve (42501)', async () => {
+    // The finaliser re-points the report to the reviewer AND a history row names the reviewer as finaliser: the live columns
+    // and the history now agree on a colleague, but the original insert-only row still names the finaliser.
+    await admin.query(`INSERT INTO core.audit_log (organisation_id, actor_user_id, entity_type, entity_id, action, metadata) VALUES ($1, $2, 'shift_report', $3, 'attendance.report_finalised', '{}')`, [w.org, users.reviewer, ids.report]);
+    const reportBy = `UPDATE core.shift_report SET finalised_by = $2 WHERE id = $1`;
+    await withTamper([reportBy, [ids.report, users.reviewer]], [reportBy, [ids.report, users.finaliser]], async () => {
+      await expect(approve(users.finaliser)).rejects.toMatchObject({ code: '42501' });
+    });
+  });
+
+  it('performance: the history lookups are uuid = uuid, so the audit_log index serves them by (organisation_id, entity_type, entity_id)', async () => {
+    // Sequential scans are switched off so the plan shows whether an index CAN serve the predicate (on a small test table the
+    // planner would otherwise pick a sequential scan whatever the predicate). Before the fix (entity_id::text = $3::text) no
+    // index condition on entity_id was possible.
+    await admin.query('BEGIN');
+    try {
+      await admin.query('SET LOCAL enable_seqscan = off');
+      const plan = (await admin.query(`EXPLAIN SELECT 1 FROM core.audit_log al WHERE al.organisation_id = $1 AND al.entity_type = 'shift_report' AND al.entity_id = $2`, [w.org, ids.report]))
+        .rows.map((r: Record<string, string>) => r['QUERY PLAN']).join(' | ');
+      expect(plan).toMatch(/Index (Only )?Scan|Bitmap Index Scan/);
+      expect(plan).toMatch(/Index Cond: .*entity_id = /);
+      expect(plan).not.toMatch(/Seq Scan/);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+  });
+
+  it('the read-only pre-deploy count runs and counts the record without history', async () => {
+    const [{ blocked_pending_records }] = (await admin.query(PAYROLL_GUARD_PREDEPLOY_COUNT_SQL)).rows;
+    expect(Number(blocked_pending_records)).toBeGreaterThanOrEqual(1);
   });
 
   it('nothing was written by any of the above (every case rolled back)', async () => {

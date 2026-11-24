@@ -9,9 +9,10 @@
  *    (core.current_uid(); no worker exemption — the worker never writes approved_by, and the worker marker is a plain GUC);
  *    the record's finalised shift report and its attendance seat must be readable in the trigger's schema with a non-null
  *    finaliser and reviewer (fail closed); the approver is neither of them; AND, because those live columns are writable by
- *    managers, the insert-only `core.audit_log` must hold the report's finalisation and the seat's review, and no such
- *    history row may name the approver as actor (so re-pointing `finalised_by` / clearing `attendance_reviewed_by` after the
- *    fact does not help);
+ *    managers, the insert-only `core.audit_log` must hold the report's finalisation BY the live finaliser and the seat's
+ *    review BY the live reviewer, and no such history row may name the approver as actor (so re-pointing `finalised_by` /
+ *    the reviewer after the fact does not help). Every lookup is uuid = uuid on (organisation_id, entity_type, entity_id),
+ *    the leading columns of audit_log_timeline_idx;
  *  - outside that move, `approved_by` never changes (42501).
  * Rows approved before this rule are never re-checked (only the move to approved is). The rest of the body is byte-for-byte
  * the 1786719200000 body. The payroll_run finaliser rule (core + workspace copies) ships with the 0.7.0 chain.
@@ -63,13 +64,14 @@ export const PAYROLL_RECORD_GUARD_BLOCK = `  -- Owner decision 5 (maker-checker)
       INTO report_id, finaliser, seat_id, reviewer USING NEW.shift_id, NEW.attendance_id;
     IF report_id IS NULL OR seat_id IS NULL OR finaliser IS NULL OR reviewer IS NULL
        OR finaliser = NEW.approved_by OR reviewer = NEW.approved_by
-       OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id
-                        AND al.action = 'attendance.report_finalised' AND al.entity_type = 'shift_report' AND al.entity_id::text = report_id::text)
-       OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id
-                        AND al.action = 'attendance.reviewed' AND al.entity_type = 'shift_assignment' AND al.entity_id::text = seat_id::text)
-       OR EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id AND al.actor_user_id = NEW.approved_by
-                    AND ((al.action = 'attendance.report_finalised' AND al.entity_type = 'shift_report' AND al.entity_id::text = report_id::text)
-                      OR (al.action = 'attendance.reviewed' AND al.entity_type = 'shift_assignment' AND al.entity_id::text = seat_id::text))) THEN
+       OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id AND al.entity_type = 'shift_report'
+                        AND al.entity_id = report_id AND al.action = 'attendance.report_finalised' AND al.actor_user_id = finaliser)
+       OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id AND al.entity_type = 'shift_assignment'
+                        AND al.entity_id = seat_id AND al.action = 'attendance.reviewed' AND al.actor_user_id = reviewer)
+       OR EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id AND al.entity_type = 'shift_report'
+                    AND al.entity_id = report_id AND al.action = 'attendance.report_finalised' AND al.actor_user_id = NEW.approved_by)
+       OR EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = NEW.organisation_id AND al.entity_type = 'shift_assignment'
+                    AND al.entity_id = seat_id AND al.action = 'attendance.reviewed' AND al.actor_user_id = NEW.approved_by) THEN
       RAISE EXCEPTION 'payroll_record approver prepared these hours, or their preparation cannot be verified' USING ERRCODE = '42501';
     END IF;
   ELSIF NEW.approved_by IS DISTINCT FROM OLD.approved_by THEN
@@ -94,5 +96,27 @@ export const PAYROLL_MAKER_CHECKER_STATE_SQL = `SELECT pg_catalog.md5(coalesce(p
 
 export const PAYROLL_MAKER_CHECKER_HASHES = Object.freeze({
   guardBodyBefore: '6493c13974ec4c47975a703bade22f0a',
-  guardBodyAfter: 'a5117bbbccae1919729e6f86e03d6d07',
+  guardBodyAfter: 'e66cc3313f4f8cbfeef8fcdc84124fa7',
 });
+
+/** The guard's history lookup shape (same predicates), for the index-usage test. $1 org, $2 entity_type, $3 entity_id, $4 action, $5 actor. */
+export const PAYROLL_GUARD_HISTORY_LOOKUP_SQL = `SELECT 1 FROM core.audit_log al WHERE al.organisation_id = $1 AND al.entity_type = $2
+  AND al.entity_id = $3 AND al.action = $4 AND al.actor_user_id = $5`;
+
+/**
+ * Read-only pre-deploy count (owner, before rollout): pending payroll records the new guard would refuse for want of
+ * preparation evidence — no finalised report, no reviewer, or no matching finalisation / review history. Run as the
+ * database owner (RLS-exempt) against `core` (HWS off); substitute a workspace schema for `core.` on the business tables
+ * when HWS is on. Changes nothing.
+ */
+export const PAYROLL_GUARD_PREDEPLOY_COUNT_SQL = `SELECT count(*) AS blocked_pending_records
+  FROM core.payroll_record pr
+  LEFT JOIN core.shift_report sr ON sr.shift_id = pr.shift_id AND sr.status = 'finalised'
+  LEFT JOIN core.attendance a ON a.id = pr.attendance_id
+  LEFT JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id
+ WHERE pr.status = 'pending_approval'
+   AND (sr.id IS NULL OR sr.finalised_by IS NULL OR sa.id IS NULL OR sa.attendance_reviewed_by IS NULL
+     OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = pr.organisation_id AND al.entity_type = 'shift_report'
+                      AND al.entity_id = sr.id AND al.action = 'attendance.report_finalised' AND al.actor_user_id = sr.finalised_by)
+     OR NOT EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id = pr.organisation_id AND al.entity_type = 'shift_assignment'
+                      AND al.entity_id = sa.id AND al.action = 'attendance.reviewed' AND al.actor_user_id = sa.attendance_reviewed_by))`;
