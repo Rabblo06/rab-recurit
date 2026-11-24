@@ -97,6 +97,27 @@ describe('platform-admin MFA in production (owner decision 2, review of #327)', 
       const dev = validate({ REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32), DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', NODE_ENV: 'development' });
       expect(dev.AUTH_MFA_ENFORCE_PLATFORM_ADMIN).toBe(false);
     });
+
+    it('a half-declared production (RAB_RUNTIME_ENV or DB_TARGET says production, NODE_ENV=development) with the switch false refuses', () => {
+      const dev = { REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32), PG_DATABASE_URL: 'postgres://rab:rab@db.example.com:5432/rab?sslmode=verify-full', NODE_ENV: 'development' };
+      const messageOf = (env: Record<string, string>) => {
+        try {
+          validate(env);
+          return '';
+        } catch (error) {
+          return (error as Error).message;
+        }
+      };
+      for (const signal of [{ RAB_RUNTIME_ENV: 'production' }, { DB_TARGET: 'production' }, { RAB_RUNTIME_ENV: ' Production ' }]) {
+        const message = messageOf({ ...dev, ...signal, AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'false' });
+        expect(message).toMatch(/^Invalid environment configuration for production:/);
+        expect(message).toMatch(MFA_REFUSAL);
+        // The switch on: no MFA refusal in that branch.
+        expect(messageOf({ ...dev, ...signal, AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'true' })).not.toMatch(MFA_REFUSAL);
+      }
+      // The override with a reason lets it through this branch as well.
+      expect(messageOf({ ...dev, RAB_RUNTIME_ENV: 'production', AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'false', AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE: REASON })).not.toMatch(MFA_REFUSAL);
+    });
   });
 
   describe('reportPlatformAdminMfaOverride (API start)', () => {

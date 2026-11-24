@@ -11,7 +11,7 @@ import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/pos
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
 import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
 import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
-import { rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
+import { isProductionRuntime, rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
 import { platformAdminMfaProductionProblem } from './platform-admin-mfa-production';
 import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
 import { parseWorkerShutdownTimeoutMs } from '../../worker-shared/worker-shutdown-timeout.contract';
@@ -240,8 +240,10 @@ ${(error as Error).message}`);
   // it is unset, blank or false (throttler/rate-limit-bypass.ts). Production = NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says so,
   // so it is read from the RAW configuration, not the validated schema. The variable name only, never its value.
   const rateLimitBypassProblem = rateLimitBypassProductionProblem(config as Record<string, string | undefined>);
-  // Owner decision 2 + review of #327: platform-admin MFA on, or the audited break-glass override (names only).
-  const platformAdminMfaProblem = platformAdminMfaProductionProblem(validated);
+  // Owner decision 2 + review of #327: platform-admin MFA on, or the audited break-glass override (names only). Production =
+  // ANY of NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET (the same any-signal predicate as the rate-limit rule, read from the RAW
+  // configuration), so a half-declared production cannot start without it.
+  const platformAdminMfaProblem = isProductionRuntime(config as Record<string, string | undefined>) ? platformAdminMfaProductionProblem(validated) : null;
   if (validated.NODE_ENV === 'production') {
     const problems = [
       ...productionConfigurationProblems(validated),
@@ -252,9 +254,10 @@ ${(error as Error).message}`);
     if (problems.length > 0) {
       throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
     }
-  } else if (rateLimitBypassProblem) {
-    // RAB_RUNTIME_ENV or DB_TARGET says production while NODE_ENV does not: still a production runtime for this rule.
-    throw new Error(`Invalid environment configuration for production:\n${rateLimitBypassProblem}`);
+  } else if (rateLimitBypassProblem || platformAdminMfaProblem) {
+    // RAB_RUNTIME_ENV or DB_TARGET says production while NODE_ENV does not: still a production runtime for these rules.
+    const problems = [...(rateLimitBypassProblem ? [rateLimitBypassProblem] : []), ...(platformAdminMfaProblem ? [platformAdminMfaProblem] : [])];
+    throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
   } else if (databaseProblem) {
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }

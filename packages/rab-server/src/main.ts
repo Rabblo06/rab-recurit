@@ -19,6 +19,7 @@ import { runDatabaseBootGates } from './database/boot-checks/database-boot-gates
 import { installSessionRoleResetOnDataSource } from './database/postgres/session-role-reset';
 import { startSecurityPostureMonitoring } from './engine/core-modules/health/security-readiness';
 import { reportPlatformAdminMfaOverride } from './engine/core-modules/environment/platform-admin-mfa-production';
+import { isProductionRuntime } from './engine/core-modules/throttler/rate-limit-bypass';
 import { installHttpFirstShutdown } from './engine/utils/http-first-shutdown';
 
 /** Refuses to start: prints a sanitised reason and exits non-zero before any listener or connection is opened. */
@@ -61,7 +62,8 @@ async function bootstrap(): Promise<void> {
       AUTH_MFA_ENFORCE_PLATFORM_ADMIN: environmentService.get('AUTH_MFA_ENFORCE_PLATFORM_ADMIN'),
       AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE: environmentService.get('AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE'),
     },
-    production: environmentService.get('NODE_ENV') === 'production',
+    // The same any-signal production predicate as env validation (NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET).
+    production: environmentService.get('NODE_ENV') === 'production' || isProductionRuntime(process.env),
     sink: securityMonitoring.sink,
     processLabel: 'api process',
     log: (line) => console.error(line), // eslint-disable-line no-console

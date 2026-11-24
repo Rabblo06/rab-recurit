@@ -10502,7 +10502,8 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   `false`, mobile `exempt`), that the runtime template assigns only the platform-admin switch, and that the lint accepts
   it.
 - **Fail closed at boot (review of #327, Medium):** `env.validation.ts` refuses a production boot (API and Worker share it)
-  with `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` off or missing (`platform-admin-mfa-production.ts`), so a server whose
+  with `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` off or missing (`platform-admin-mfa-production.ts`; production = any of NODE_ENV,
+  RAB_RUNTIME_ENV or DB_TARGET, the rate-limit rule's `isProductionRuntime`, in env validation and in main.ts), so a server whose
   `runtime.env` predates this change, or a platform variable set to false, no longer starts silently without platform-admin
   MFA. The only exception is the break-glass override `AUTH_MFA_PLATFORM_ADMIN_OVERRIDE_UNSAFE=<written reason, 20+
   characters>`: the process starts, and rab-api logs a WARNING line and sends a critical
