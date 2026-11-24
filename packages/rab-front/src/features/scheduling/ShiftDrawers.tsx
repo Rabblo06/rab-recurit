@@ -294,7 +294,6 @@ export default function ShiftDrawers() {
             const settings = { ...body, ...settingsByStaff[staffProfileId] };
             return {
               staffProfileId,
-              jobRoleId: settings.jobRoleId === NEW_ROLE ? jobRoleId : settings.jobRoleId,
               startsAt: new Date(`${body.date}T${settings.startTime}`).toISOString(),
               endsAt: shiftEndDate(body.date, settings.endTime, settings.startTime).toISOString(),
             };
@@ -454,8 +453,8 @@ export default function ShiftDrawers() {
     staff: createStaffIds.size === 0 ? 'Select at least one staff member.' : undefined,
     staffSettings: [...createStaffIds].some(id => {
       const setting = { ...form, ...staffSettings[id] };
-      return !setting.jobRoleId || !setting.startTime || !setting.endTime || setting.startTime === setting.endTime;
-    }) ? 'Choose a role and valid start and end times for every staff member.' : undefined,
+      return !setting.startTime || !setting.endTime || setting.startTime === setting.endTime;
+    }) ? 'Choose valid start and end times for every staff member.' : undefined,
   };
   const canSubmit = !Object.values(errors).some(Boolean);
 
@@ -558,7 +557,7 @@ export default function ShiftDrawers() {
             const update = (values: Partial<typeof setting>) => setStaffSettings(previous => ({ ...previous, [staff.staffProfileId]: { ...previous[staff.staffProfileId], ...values } }));
             const label = `${staff.firstName} ${staff.lastName}`;
             return <div className="staff-assignment-settings">
-              <div className="field"><label>Role</label><SearchableSelect options={form.jobRoleId === NEW_ROLE ? [...roleOptions, { id: NEW_ROLE, label: newRoleName || 'New role' }] : roleOptions} value={setting.jobRoleId} onChange={jobRoleId => update({ jobRoleId })} placeholder="Select role" /></div>
+              {/* A per-recipient role needs AssignmentRole (held: new workspace structure level); every recipient takes the shift's role. */}
               <div className="field"><label>Start</label><TimeInput label={`${label} start time`} value={setting.startTime} onChange={startTime => update({ startTime })} /></div>
               <div className="field"><label>End</label><TimeInput label={`${label} end time`} value={setting.endTime} onChange={endTime => update({ endTime })} />{setting.startTime && setting.endTime && setting.endTime < setting.startTime && <small className="cell-muted">Ends next day</small>}</div>
             </div>;

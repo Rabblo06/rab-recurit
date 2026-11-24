@@ -149,6 +149,7 @@ it('sends individual staff times under one shift without changing another staff 
   expect(url).toBe('/shifts/with-offers');
   expect(payload.staffAssignments).toHaveLength(2);
   expect(payload.staffAssignments.map((row: { staffProfileId: string }) => row.staffProfileId)).toEqual(['Alpha', 'Bravo']);
+  expect(payload.staffAssignments.every((row: Record<string, unknown>) => !('jobRoleId' in row))).toBe(true); // per-recipient role is held (AssignmentRole)
   expect(new Date(payload.staffAssignments[0].startsAt).getHours()).toBe(20);
   expect(new Date(payload.staffAssignments[1].startsAt).getHours()).toBe(9);
   expect(new Date(payload.staffAssignments[0].endsAt).getTime()).toBeGreaterThan(new Date(payload.staffAssignments[0].startsAt).getTime());
