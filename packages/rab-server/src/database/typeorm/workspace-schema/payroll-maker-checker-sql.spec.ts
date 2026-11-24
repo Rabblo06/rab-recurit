@@ -31,7 +31,9 @@ describe('payroll maker-checker backstop SQL (decision 5)', () => {
     expect(PAYROLL_RECORD_GUARD_BLOCK).toContain('NEW.approved_by IS DISTINCT FROM core.current_uid()');
     expect(PAYROLL_RECORD_GUARD_BLOCK).not.toContain('is_worker');
     expect(PAYROLL_RECORD_GUARD_BLOCK).toContain('report_id IS NULL OR seat_id IS NULL OR finaliser IS NULL OR reviewer IS NULL');
-    expect(PAYROLL_RECORD_GUARD_BLOCK).toContain("al.action = 'attendance.report_finalised'");
+    expect(PAYROLL_RECORD_GUARD_BLOCK).toContain("AND al.entity_id = report_id AND al.action = 'attendance.report_finalised' AND al.actor_user_id = finaliser)");
+    expect(PAYROLL_RECORD_GUARD_BLOCK).toContain("AND al.entity_id = seat_id AND al.action = 'attendance.reviewed' AND al.actor_user_id = reviewer)");
+    expect(PAYROLL_RECORD_GUARD_BLOCK).not.toContain('::text');
     expect(PAYROLL_RECORD_GUARD_BLOCK).toContain("al.action = 'attendance.reviewed'");
     expect(PAYROLL_RECORD_GUARD_BLOCK).toContain('ELSIF NEW.approved_by IS DISTINCT FROM OLD.approved_by THEN');
     expect(payrollRecordGuardSql(PAYROLL_RECORD_GUARD_BODY_AFTER)).not.toMatch(/SECURITY DEFINER|OWNER TO|GRANT|REVOKE/);

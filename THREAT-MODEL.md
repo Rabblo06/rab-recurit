@@ -10524,8 +10524,17 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
   function of core AND every workspace payroll_record). On the move to `approved`: `approved_by` must be the signed-in caller
   (no worker exemption: the worker never writes it and the marker is a plain GUC); the record's finalised report and seat
   must be readable with a non-null finaliser and reviewer (fail closed); the approver is neither of them; and because those
-  live columns are writable by managers, the insert-only `core.audit_log` must hold the finalisation and the review, and
-  none of those history rows may name the approver (re-pointing `finalised_by` or the reviewer afterwards does not help).
+  live columns are writable by managers, the insert-only `core.audit_log` must hold the finalisation BY the live finaliser
+  and the review BY the live reviewer, and none of those history rows may name the approver (re-pointing `finalised_by` or
+  the reviewer afterwards, even with a forged history row naming a colleague, does not help). The lookups are uuid = uuid
+  on (organisation_id, entity_type, entity_id), the leading columns of audit_log_timeline_idx (EXPLAIN test).
+- **Rollout note (owner):** records with no finalisation / review history, or a null reviewer, can no longer be approved.
+  Read-only pre-deploy count (run as the database owner; `core` while HWS is off), `PAYROLL_GUARD_PREDEPLOY_COUNT_SQL` in
+  payroll-maker-checker-sql.ts:
+  `SELECT count(*) FROM core.payroll_record pr LEFT JOIN core.shift_report sr ON sr.shift_id = pr.shift_id AND sr.status = 'finalised'
+  LEFT JOIN core.attendance a ON a.id = pr.attendance_id LEFT JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id
+  WHERE pr.status = 'pending_approval' AND (sr.id IS NULL OR sr.finalised_by IS NULL OR sa.id IS NULL OR sa.attendance_reviewed_by IS NULL
+  OR NOT EXISTS (finalisation row by sr.finalised_by) OR NOT EXISTS (review row by sa.attendance_reviewed_by))` (full text in the module).
   Outside that move `approved_by` never changes (so a two-step "set approved_by, then flip status" is refused at step one).
   The service mirrors the same rule (live columns + history, null reviewer refused). The payroll_run finaliser rule (core
   and workspace copies, plus a real per-line `prepared_by`) moves to a follow-up blocked on the 0.7.0 chain; until then the
