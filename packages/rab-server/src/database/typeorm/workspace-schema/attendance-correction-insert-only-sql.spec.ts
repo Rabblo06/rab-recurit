@@ -52,7 +52,15 @@ describe('S11: attendance_correction insert-only guard triggers', () => {
     expect(correctionCommands).toEqual(['AttendanceCorrectionInsertOnly:26']);
     for (const g of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18]) {
       expect(g.filter((l) => l.startsWith('trigger|attendance_correction|attendance_correction_insert_only_'))).toEqual(
-        ['delete', 'truncate', 'update'].map((e) => `trigger|attendance_correction|attendance_correction_insert_only_${e}|enabled=O|core.owner_login_grant_parity_guard()`),
+        // def= (posture #253): md5(tgtype | columns | WHEN | deferrable | initdeferred | args | transition tables) -- the same
+        // statement-level shape as the payroll_run_line parity guards, so the same three hashes.
+        (
+          [
+            ['delete', '4d5b1e343ae5e9db331a17d5115ca1e7'],
+            ['truncate', '0be8c43eadd64a41d76c54566871a3ce'],
+            ['update', '3e05e43d14a5b82dcc02749598e03d79'],
+          ] as const
+        ).map(([e, def]) => `trigger|attendance_correction|attendance_correction_insert_only_${e}|enabled=O|core.owner_login_grant_parity_guard()|def=${def}`),
       );
     }
   });

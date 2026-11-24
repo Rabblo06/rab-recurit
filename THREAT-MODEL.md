@@ -10754,3 +10754,52 @@ This entry covers only what release 0.7.0 adds to switch it on.
 - **Tests.** `ws-attendance-correction-insert-only.integration.spec.ts` (fingerprint measurement, runner, both provisioners,
   runtime refusals, RESTRICT, crewflow_app privileges on core and workspace, zero rows without context, migration guards and a
   rolled-back down/up); `structure-level-26.spec.ts`.
+## CF-23 — notes on the user profile page no longer persist to browser storage (branch fix/cf23-staff-notes-no-browser-storage, 2026-11-21; no SQL, no server change)
+- **Finding (CF-23, LOW):** `packages/rab-front/src/features/users/UserProfile.tsx` (`/users/:id`) kept notes about a
+  person in `localStorage` under `user-notes-<userId>`. Browser storage outlives logout and is shared by every account
+  that signs in on the same browser profile, so a note written by one console user was shown to the next one on a shared
+  device and stayed readable in devtools indefinitely. It was also fake persistence: nothing reached the server.
+- **Control:** notes on that page live in React component memory only, keyed by the profile's user id (a note added on
+  one person's page is never shown on another's), and are lost on navigation or reload. The page says so ("Notes on
+  this page are not saved...") and the button reads "Add note", not "Save note". At app start-up (App.tsx, whatever page
+  opens first) and again when the page mounts, every `user-notes-*` key an older build left in `localStorage` is removed
+  (other keys untouched; `features/users/legacyNotes.ts`); storage errors (private mode,
+  blocked storage) are swallowed because nothing was stored there. No new table, endpoint or SQL.
+- **Assumption (data retention, flagged):** purging the legacy `user-notes-*` keys deletes notes a console user may
+  believe they saved. They existed only on that one browser, never on the server, and keeping them is the leak this
+  finding is about, so they are deleted rather than migrated. Veto if those notes must be kept.
+- **Note:** the server has no `/users/:id` route today (staff and manager notes go through the RLS-scoped
+  `/staff/:id/notes`, `/managers/:id/notes`, `/venue-managers/:id/notes` endpoints used by `UserDetailPanel`), so this
+  page currently renders "User not found" and the notes tab is unreachable in a live console. The fix still applies so
+  the page cannot leak if it is wired up again, and the purge cleans devices used with older builds.
+- **Tests:** `packages/rab-front/src/features/users/UserProfile.spec.tsx`: adding a note shows it while
+  `Storage.prototype.setItem` and `sessionStorage.setItem` are never called and both storages stay empty; notes seeded
+  under `user-notes-*` by an older build are not shown and are removed on mount, an unrelated key survives; a note added
+  on user A's page is not shown after navigating to user B's page. `App.spec.tsx`: rendering `<App>` (the login page) with
+  a seeded `user-notes-x` key removes it and keeps an unrelated key (fails without the start-up purge).
+- **Residual:** notes on this page are not saved at all until a server-side, RLS-scoped notes store backs it (a new
+  table = owner SQL review).
+
+## engine/ stops importing modules/ — identity entities, venue resource scope, entity cache (branches refactor/engine-owns-identity-entities, refactor/engine-modules-scope-and-cache, refactor/engine-modules-venue-summary, 2026-11-21; no migration)
+- **Finding:** CLAUDE.md's "engine/ never imports from modules/" had 24 production violations (ratchet baseline
+  `engine-to-modules`), 20 of them auth, permissions, audit, email, platform-admin and user-deletion services importing
+  identity entities from `modules/identity`. A dependency in that direction lets a domain-module change silently alter
+  platform security code (and a domain module could add an entity relation the auth path then loads).
+- **Control:** the 18 identity/access entities move to `engine/core-modules/identity/entities` (pure file move, re-exported
+  from `modules/identity/entities`); `ManagerVenue` moves to `engine/core-modules/resource-scope/entities`; the by-owner
+  workspace and venue display-cache reads move to `modules/manager-workspace` and `modules/venue` (same cache kinds, keys and
+  projections, through `CoreEntityCacheService.getOrFetch`). The baseline loses the rule entirely, so any new engine ->
+  modules import fails ci-security (`tools/check-import-boundaries.cjs`; owner-dated approvals are the only exception).
+- **Changed read (authorisation input):** `ResourceScopeService.resolveTx`'s venue-manager scope no longer joins the
+  `ManagerProfile` entity; it filters `mv.manager_profile_id IN (SELECT mp.id FROM core.manager_profile mp WHERE mp.user_id
+  = $1)`. Same rows (mp.id is the primary key, so each manager_venue row joined at most one profile), same RLS on both
+  tables, `manager_venue` still schema-qualified by the bound manager, user id still a bound parameter. A venue manager with
+  no assignment still gets `{ kind: 'venue', venueIds: [] }` (sees nothing), never an owner scope.
+- **Tests:** `resource-scope.service.spec.ts` (exact SQL under core routing and a bound workspace schema, parameter binding,
+  empty-assignment fail-closed, non-venue-manager never queries manager_venue); `manager-workspace-display-cache.spec.ts`
+  and `venue-summary-cache.spec.ts` (same cache kind/key, no extra enabled/TTL argument, same projection, null never
+  cached, hit skips the database); `core-entity-cache.integration.spec.ts` follows the moved reads; the live venue scope
+  stays covered by `venue-manager-scoping.integration.spec.ts` (assign -> visible, unassign -> gone, another manager's venue
+  invisible).
+- **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
+  `core.manager_workspace`); the ratchet sees imports, not table names.
