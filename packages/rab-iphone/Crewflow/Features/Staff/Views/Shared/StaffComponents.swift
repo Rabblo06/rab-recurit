@@ -238,16 +238,19 @@ struct StaffGroup<Content: View>: View {
 /// Small initials stack for the clock card's "Your team" link.
 struct StaffAvatarStack: View {
     let names: [String]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: -8) {
             ForEach(Array(names.prefix(4).enumerated()), id: \.offset) { index, name in
                 InitialsAvatar(name: name, size: 28, background: StaffPalette.teamTones[index % StaffPalette.teamTones.count])
                     .overlay(Circle().stroke(Color.white, lineWidth: 2))
+                    .transition(reduceMotion ? .identity : .scale(scale: 0.85).combined(with: .opacity))
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(names.count) \(names.count == 1 ? "person" : "people") on this shift")
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: names)
     }
 }
 
@@ -301,6 +304,7 @@ struct StaffCountdownPanel: View {
         VStack(spacing: 2) {
             Text(text)
                 .font(.system(size: 44, weight: .semibold).monospacedDigit())
+                .modifier(CountdownDigitMotion(value: text))
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
                 .foregroundStyle(color)

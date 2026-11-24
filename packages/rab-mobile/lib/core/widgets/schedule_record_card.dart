@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme/schedule_tokens.dart';
+import '../motion/shift_motion.dart';
 
 class ScheduleAvatarStack extends StatelessWidget {
   const ScheduleAvatarStack({super.key, required this.names});
@@ -18,25 +19,39 @@ class ScheduleAvatarStack extends StatelessWidget {
             for (final name in known.take(3))
               Align(
                 widthFactor: .8,
-                child: Tooltip(
-                  message: name,
-                  child: CircleAvatar(
-                    radius: 13,
-                    backgroundColor: Colors.white,
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(
+                    begin: ShiftMotion.reduced(context) ? 1 : .85,
+                    end: 1,
+                  ),
+                  duration: ShiftMotion.reduced(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 240),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, value, child) => Transform.scale(
+                    scale: value,
+                    child: Opacity(opacity: value, child: child),
+                  ),
+                  child: Tooltip(
+                    message: name,
                     child: CircleAvatar(
-                      radius: 11,
-                      backgroundColor: ScheduleTokens.homeMint,
-                      child: Text(
-                        name
-                            .trim()
-                            .split(RegExp(r'\s+'))
-                            .take(2)
-                            .map((s) => s.characters.first)
-                            .join()
-                            .toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 10,
-                          color: ScheduleTokens.ink,
+                      radius: 13,
+                      backgroundColor: Colors.white,
+                      child: CircleAvatar(
+                        radius: 11,
+                        backgroundColor: ScheduleTokens.homeMint,
+                        child: Text(
+                          name
+                              .trim()
+                              .split(RegExp(r'\s+'))
+                              .take(2)
+                              .map((s) => s.characters.first)
+                              .join()
+                              .toUpperCase(),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: ScheduleTokens.ink,
+                          ),
                         ),
                       ),
                     ),

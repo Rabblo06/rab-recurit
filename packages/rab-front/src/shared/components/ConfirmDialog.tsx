@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
 import ModalFrame from './ModalFrame';
+import { Button } from './arc/button/button';
+import './date-input.css';
 
 /**
  * Small centred confirmation modal — distinct from `Drawer` (a side panel
@@ -44,18 +46,17 @@ export default function ConfirmDialog({
     >
         <h3 id="confirm-dialog-title">{title}</h3>
         {description && <p style={{ fontSize: 13, color: 'var(--font-secondary)' }}>{description}</p>}
-        <div className="modal-actions">
-          <button className="btn btn-outline" onClick={onCancel} disabled={loading}>
+        <div className="modal-actions arc-controls">
+          <Button variant="secondary" onClick={onCancel} disabled={loading}>
             {cancelLabel}
-          </button>
-          <button
-            className="btn btn-dark"
-            style={destructive ? { background: 'var(--color-red)', borderColor: 'var(--color-red)', color: '#fff' } : undefined}
+          </Button>
+          <Button
+            variant={destructive ? 'danger' : 'primary'}
             onClick={onConfirm}
             disabled={loading}
           >
             {loading ? 'Please wait…' : confirmLabel}
-          </button>
+          </Button>
         </div>
     </ModalFrame>
   );

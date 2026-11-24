@@ -293,13 +293,11 @@ describeIfDb('Venue Manager venue assignment inside the Manager\'s own workspace
     expect((await call('patch', t, `/${vmA.profileId}`, { workspaceId: managerB.workspaceId })).status).toBe(400);
   });
 
-  it('delete needs the caller\u2019s own password (step-up): missing is 400, wrong is refused, correct removes only that Venue Manager', async () => {
+  it('delete uses the authorized session without a password and removes only that Venue Manager', async () => {
     const victim = await factory.createVenueManager(org, { owner: managerA, label: 'vmvaDel' });
     const t = await factory.login(managerA);
-    expect((await call('delete', t, `/${victim.profileId}`)).status).toBe(400);
-    expect([401, 403]).toContain((await call('delete', t, `/${victim.profileId}`, { currentPassword: 'not-the-password-1A' })).status);
     expect((await call('get', t, `/${victim.profileId}`)).status).toBe(200);
-    expect((await call('delete', t, `/${victim.profileId}`, { currentPassword: managerA.password })).status).toBeLessThan(300);
+    expect((await call('delete', t, `/${victim.profileId}`)).status).toBeLessThan(300);
     expect((await call('get', t, `/${victim.profileId}`)).status).toBe(404);
     expect((await call('get', t, `/${vmA.profileId}`)).status).toBe(200);
   });

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../motion/shift_motion.dart';
 import '../theme/schedule_tokens.dart';
 import '../theme/tokens.dart';
 
@@ -36,50 +37,56 @@ class SchedulePrimaryButton extends StatelessWidget {
     );
     return Semantics(
       liveRegion: busy,
-      child: SizedBox(
-        width: double.infinity,
-        child: FilledButton(
-          onPressed: busy ? null : onPressed,
-          style: FilledButton.styleFrom(
-            minimumSize: const Size(0, ScheduleTokens.actionHeight),
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-            backgroundColor: light
-                ? Colors.white
-                : (background ?? ScheduleTokens.accent),
-            foregroundColor: foreground,
-            disabledBackgroundColor: light
-                ? Colors.white.withValues(alpha: .6)
-                : const Color(0xFFD9DADF),
-            disabledForegroundColor: ScheduleTokens.muted,
-            side: light
-                ? const BorderSide(color: ScheduleTokens.border)
-                : BorderSide.none,
-            shape: const StadiumBorder(),
-            textStyle: labelStyle,
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (busy)
-                SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: foreground,
+      child: PressFeedback(
+        enabled: !busy && onPressed != null,
+        child: SizedBox(
+          width: double.infinity,
+          child: FilledButton(
+            onPressed: busy ? null : onPressed,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(0, ScheduleTokens.actionHeight),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+              backgroundColor: light
+                  ? Colors.white
+                  : (background ?? ScheduleTokens.accent),
+              foregroundColor: foreground,
+              disabledBackgroundColor: light
+                  ? Colors.white.withValues(alpha: .6)
+                  : const Color(0xFFD9DADF),
+              disabledForegroundColor: ScheduleTokens.muted,
+              side: light
+                  ? const BorderSide(color: ScheduleTokens.border)
+                  : BorderSide.none,
+              shape: const StadiumBorder(),
+              textStyle: labelStyle,
+            ),
+            child: MotionContent(
+              identity: busy,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (busy)
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: foreground,
+                      ),
+                    )
+                  else if (icon != null)
+                    Icon(icon, size: 20),
+                  if (busy || icon != null) const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      busy ? 'Please wait…' : label,
+                      textAlign: TextAlign.center,
+                      style: labelStyle,
+                    ),
                   ),
-                )
-              else if (icon != null)
-                Icon(icon, size: 20),
-              if (busy || icon != null) const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  busy ? 'Please wait…' : label,
-                  textAlign: TextAlign.center,
-                  style: labelStyle,
-                ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),

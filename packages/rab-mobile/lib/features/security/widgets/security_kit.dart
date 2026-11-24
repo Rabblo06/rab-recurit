@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 
+import '../../../core/widgets/schedule_toast.dart';
 import '../security_tokens.dart';
 import 'security_icon.dart';
 
@@ -719,15 +720,5 @@ class SecurityCaption extends StatelessWidget {
 
 /// One-line feedback after a server-confirmed change (never instead of it).
 void showSecuritySnack(BuildContext context, String message) {
-  final c = SecurityColors.of(context);
-  ScaffoldMessenger.maybeOf(context)
-    ?..hideCurrentSnackBar()
-    ..showSnackBar(
-      SnackBar(
-        content: Text(message, style: TextStyle(color: c.onPill)),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: c.pill,
-        duration: const Duration(seconds: 3),
-      ),
-    );
+  ScheduleToast.show(context, message);
 }

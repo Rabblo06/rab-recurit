@@ -9,7 +9,9 @@ import {
   type ToastDetail,
   type ToastVariant,
 } from '../shared/lib/toast';
-import { AnimatePresence, motion } from 'framer-motion';
+import { Toaster, sileo } from 'sileo';
+import './toast.css';
+import { motion } from 'framer-motion';
 import { duration, ease, usePrefersReducedMotion } from '../shared/motion';
 
 const ICONS = { success: IconCircleCheck, error: IconAlertTriangle, warning: IconAlertCircle, info: IconInfoCircle };
@@ -28,7 +30,7 @@ interface ToastItem {
 }
 
 /**
- * Renders `shared/lib/toast` events. White card, variant icon, ✕, and a tinted fill that drains left→right over the
+ * Renders `shared/lib/toast` events. Sileo surface, variant icon, ✕, and a slim countdown line over the
  * toast's display time. The timer lives here (JS), so dismissal never depends on a CSS event that reduced motion or a
  * disabled animation would suppress; the drain is only its picture and pauses with it.
  *
@@ -42,6 +44,7 @@ interface ToastItem {
  */
 export default function ToastHost() {
   const [items, setItems] = useState<ToastItem[]>([]);
+  const [interacting, setInteracting] = useState(false);
   const dismiss = useCallback((id: number) => setItems((prev) => prev.filter((t) => t.id !== id)), []);
 
   useEffect(() => {
@@ -79,31 +82,35 @@ export default function ToastHost() {
     return () => {
       document.removeEventListener(TOAST_EVENT, onToast);
       document.removeEventListener(TOAST_DISMISS_EVENT, onDismiss);
+      sileo.clear();
     };
   }, []);
 
   const visible = items.slice(0, TOAST_MAX_VISIBLE);
   const queued = items.length - visible.length;
 
-  // Always mounted (an empty fixed host has no size) so the last toast can play its exit.
   return (
-    <div className="toast-host" data-queued={queued || undefined}>
-      <AnimatePresence initial={false}>
-        {visible.map((t) => (
-          <ToastCard key={t.id} item={t} onDismiss={dismiss} />
-        ))}
-      </AnimatePresence>
+    <div className="toast-host" data-queued={queued || undefined}
+      onMouseEnter={() => setInteracting(true)} onMouseLeave={() => setInteracting(false)}
+      onFocusCapture={() => setInteracting(true)}
+      onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setInteracting(false); }}>
+      <Toaster position="top-right" offset={{ top: 'max(16px, env(safe-area-inset-top))', right: 16 }} />
+      {visible.map((item) => <ToastCard key={item.id} item={item} onDismiss={dismiss} interacting={interacting} />)}
     </div>
   );
 }
 
-function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: number) => void }) {
+function ToastCard({ item, onDismiss, interacting }: { item: ToastItem; onDismiss: (id: number) => void; interacting: boolean }) {
   const reduced = usePrefersReducedMotion();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [hidden, setHidden] = useState(() => typeof document !== 'undefined' && document.visibilityState === 'hidden');
-  const paused = hovered || focused || hidden;
+  const paused = interacting || hovered || focused || hidden;
   const remaining = useRef(item.duration);
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    contentRef.current?.classList.toggle('is-paused', paused);
+  }, [paused]);
 
   useEffect(() => {
     const onVisibility = () => setHidden(document.visibilityState === 'hidden');
@@ -129,8 +136,9 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
 
   const Icon = ICONS[item.variant];
   const isError = item.variant === 'error';
-  return (
+  const content = (
     <motion.div
+      ref={contentRef}
       role={isError ? 'alert' : 'status'}
       aria-live={isError ? 'assertive' : 'polite'}
       aria-atomic="true"
@@ -138,7 +146,7 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
       data-variant={item.variant}
       data-persistent={item.persistent || undefined}
       layout="position"
-      initial={{ opacity: 0, y: 8 }}
+      initial={false}
       animate={{ opacity: 1, y: 0, transition: { duration: duration.toastIn, ease: ease.out } }}
       exit={{ opacity: 0, y: 4, transition: { duration: 0.16, ease: ease.in } }}
       onMouseEnter={() => setHovered(true)}
@@ -163,6 +171,7 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
         <button
           type="button"
           className="toast-action"
+          data-sileo-button
           onClick={() => {
             onDismiss(item.id);
             item.action?.onClick();
@@ -171,9 +180,23 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
           {item.action.label}
         </button>
       )}
-      <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => onDismiss(item.id)}>
+      <button type="button" data-sileo-button className="toast-close" aria-label="Dismiss notification" onClick={() => onDismiss(item.id)}>
         <IconX size={15} aria-hidden="true" />
       </button>
     </motion.div>
   );
+
+  // Sileo is the only visual host; the existing event bus, queue and display-time
+  // controller stay authoritative. Null disables Sileo's independent countdown.
+  useEffect(() => {
+    sileo[item.variant]({
+      onDismiss: () => onDismiss(item.id),
+      id: String(item.id), title: LABELS[item.variant], description: content,
+      duration: null, roundness: 20, fill: 'var(--bg-primary)',
+      icon: <Icon size={17} aria-hidden="true" />,
+      autopilot: { expand: 0, collapse: 2147483647 },
+    });
+  }, [item, reduced]);
+  useEffect(() => () => sileo.dismiss(String(item.id)), [item.id]);
+  return null;
 }

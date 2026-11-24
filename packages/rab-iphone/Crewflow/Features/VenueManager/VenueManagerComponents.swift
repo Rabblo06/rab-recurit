@@ -443,6 +443,8 @@ struct ReportButton: View {
 
 /// Two/three-way segmented control: the selected segment is a navy pill.
 struct ReportSegments<Value: Hashable>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var highlight
     let values: [Value]
     let label: (Value) -> String
     @Binding var selection: Value
@@ -452,13 +454,21 @@ struct ReportSegments<Value: Hashable>: View {
         HStack(spacing: 0) {
             ForEach(values, id: \.self) { value in
                 let selected = value == selection
-                Button { selection = value } label: {
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.26)) { selection = value }
+                } label: {
                     Text(label(value))
                         .scheduleType((selected ? ScheduleType.bodyStrong : ScheduleType.body).colored(selected ? .white : VMColor.reportMuted))
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(selected ? VMColor.reportNavy : .clear))
+                        .background {
+                            if selected {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(VMColor.reportNavy)
+                                    .matchedGeometryEffect(id: "selection", in: highlight)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .disabled(!enabled)
@@ -722,6 +732,7 @@ struct VMCountdownPanel: View {
         VStack(spacing: 2) {
             Text(text).font(.system(size: 44, weight: .semibold).monospacedDigit()).foregroundStyle(color)
                 .minimumScaleFactor(0.5).lineLimit(1)
+                .modifier(CountdownDigitMotion(value: text))
             Text(unit).scheduleType(ScheduleType.timerLabel.colored(color.opacity(0.8))).lineLimit(1).minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity)

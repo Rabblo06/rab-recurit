@@ -1287,11 +1287,9 @@ export class StaffService {
    * actual safety gate (self-delete, platform admin, owned workspace,
    * protected operational history — shift assignments, offers, attendance).
    *
-   * P2.8 — step-up reauth checked FIRST, before even loading the target:
-   * a hijacked-but-live session alone can never delete a user.
+   * Hold-to-confirm is client intent only; server authorization and deletion invariants remain mandatory.
    */
-  async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
-    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+  async deleteUser(ctx: AuthContext, id: string): Promise<void> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');

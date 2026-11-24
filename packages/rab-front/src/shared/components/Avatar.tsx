@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useState } from 'react';
+import { Blobatar } from '@blobatar/react';
 import { api } from '../api';
 
 /**
@@ -7,7 +8,7 @@ import { api } from '../api';
  * Authorization header actually reaches `GET /files/*`, which a plain
  * `<img src>` never would — a bare `<img>` tag can't attach a bearer token,
  * so it silently 401s and shows nothing render-worthy) and falls back to
- * `label`'s first letter on any failure — never a broken-image icon.
+ * a deterministic local Blobatar on any failure — never a broken-image icon.
  */
 export default function Avatar({
   imageKey,
@@ -64,5 +65,5 @@ export default function Avatar({
     );
   }
   if (fallback) return <div className={className}>{fallback}</div>;
-  return <div className={className}>{(label || '·').trim().split(/\s+/).filter(Boolean).slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('')}</div>;
+  return <div className={className}><Blobatar name={label.trim() || 'Crewflow'} alt={alt ?? label} size={variant === 'xl' ? 96 : 48} style={{ width: '100%', height: '100%' }} /></div>;
 }

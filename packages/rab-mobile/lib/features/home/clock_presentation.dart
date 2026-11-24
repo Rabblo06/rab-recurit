@@ -8,6 +8,7 @@ import '../../core/theme/schedule_tokens.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_nav_header.dart';
 import '../../core/widgets/shift_countdown_panel.dart';
+import '../../core/widgets/rolling_timer_text.dart';
 import 'attendance_provider.dart';
 
 /// Presentation only: eligibility and the opening instant remain server-owned.
@@ -295,23 +296,30 @@ class _ClockShiftTimerState extends State<ClockShiftTimer> {
         FittedBox(
           fit: BoxFit.scaleDown,
           alignment: Alignment.centerLeft,
-          child: Text.rich(
-            TextSpan(
-              children: seconds == null
-                  ? const [TextSpan(text: '—')]
-                  : [
-                      TextSpan(text: _two(h!)),
-                      TextSpan(
-                        text: ':${_two(m!)}:${_two(s!)}',
-                        style: const TextStyle(fontSize: 32),
-                      ),
-                    ],
-            ),
+          child: Semantics(
             key: const ValueKey('clock-timer-value'),
-            semanticsLabel: seconds == null
+            label: seconds == null
                 ? 'Not available'
                 : '$h hours $m minutes $s seconds',
-            style: ScheduleType.timer.copyWith(fontSize: 60),
+            child: ExcludeSemantics(
+              child: seconds == null
+                  ? Text('—', style: ScheduleType.timer.copyWith(fontSize: 60))
+                  : Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        RollingTimerText(
+                          text: _two(h!),
+                          style: ScheduleType.timer.copyWith(fontSize: 60),
+                        ),
+                        RollingTimerText(
+                          text: ':${_two(m!)}:${_two(s!)}',
+                          style: ScheduleType.timer.copyWith(fontSize: 32),
+                        ),
+                      ],
+                    ),
+            ),
           ),
         ),
         const SizedBox(height: 14),

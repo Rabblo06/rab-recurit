@@ -150,9 +150,9 @@ export class VenueManagerService {
     return this.managerService.listEmails(ctx, id);
   }
 
-  async deleteUser(ctx: AuthContext, id: string, currentPassword: string) {
+  async deleteUser(ctx: AuthContext, id: string) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.deleteUser(ctx, id, currentPassword);
+    return this.managerService.deleteUser(ctx, id);
   }
 
   // ------------------------------------------------------------------ Venue Manager teams (owner-assigned Staff)

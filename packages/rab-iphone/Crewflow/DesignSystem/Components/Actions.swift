@@ -90,12 +90,30 @@ public struct PrimaryButton: View {
 
 /// Subtle press feedback without changing layout.
 public struct PressableButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .opacity(configuration.isPressed ? 0.82 : 1)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .opacity(configuration.isPressed && isEnabled ? 0.82 : 1)
+            .scaleEffect(configuration.isPressed && isEnabled && !reduceMotion ? 0.985 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Rolls a changing count on supported OS versions; reduced motion and older
+/// systems keep the same text immediately, without a replacement timer.
+public struct CountdownDigitMotion: ViewModifier {
+    let value: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    public init(value: String) { self.value = value }
+    public func body(content: Content) -> some View {
+        if #available(iOS 17.0, *), !reduceMotion {
+            content.contentTransition(.numericText())
+                .animation(.easeOut(duration: 0.22), value: value)
+        } else {
+            content
+        }
     }
 }
 

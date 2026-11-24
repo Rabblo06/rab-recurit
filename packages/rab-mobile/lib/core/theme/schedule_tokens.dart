@@ -48,13 +48,13 @@ abstract final class ScheduleTokens {
   // Feedback text on the schedule UI's light cards (including tinted cards).
   static const errorText = Color(0xFFC62828);
   static const successText = Color(0xFF18713B);
-  // Temporary feedback (ScheduleToast): white card, thin border, soft shadow,
-  // and a very light semantic fill that drains with the remaining time. Text
-  // stays >= 4.5:1 on both white and the fill.
-  static const toastRadius = 12.0;
+  // Temporary feedback: dark surface, semantic icon badge and timer-only exit.
+  // Semantic tints are used for the badge and slim countdown, never body text.
+  static const toastRadius = 24.0;
   static const toastBorder = Color(0x1F171B19);
   static const toastShadows = [
-    BoxShadow(color: Color(0x1A101828), blurRadius: 16, offset: Offset(0, 6)),
+    BoxShadow(color: Color(0x14101828), blurRadius: 28, offset: Offset(0, 10)),
+    BoxShadow(color: Color(0x08101828), blurRadius: 4, offset: Offset(0, 2)),
   ];
   static const toastErrorFill = Color(0xFFFDECEC);
   static const toastSuccessFill = Color(0xFFE7F6EC);
