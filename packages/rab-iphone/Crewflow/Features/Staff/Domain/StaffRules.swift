@@ -381,6 +381,9 @@ enum StaffClockAction: Equatable {
     case checkIn
     case clockIn
     case clockOut
+    /// Clock-in AND clock-out are saved on this phone (M4 offline): nothing
+    /// more to do until they are sent.
+    case savedOffline
     case back(String)
 
     static func resolve(state: StaffDetailState?, noShift: Bool, live: Bool, needsCheckIn: Bool, completed: Bool, teams: Bool) -> StaffClockAction {

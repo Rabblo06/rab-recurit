@@ -45,7 +45,10 @@ COPY . .
 # dependency graph builds those first automatically, no explicit ordering
 # needed here (verified: rab-worker's package.json declares the dependency,
 # Nx infers the build-order edge from it).
-RUN npx nx run-many -t build -p rab-server,rab-worker,rab-shared,rab-ui
+# @rab/ui is not built (Phase X XM-07): no runtime package depends on it (it is a front-end library) and the runtime stage
+# does not copy it. Its package.json is still copied into deps/worker-modules above: `yarn install --immutable` needs every
+# workspace manifest to match the lockfile.
+RUN npx nx run-many -t build -p rab-server,rab-worker,rab-shared
 # OWNER-DB-ULTIMATE Part B3: the release version (root package.json, MAJOR.MINOR.PATCH) is baked into the image as
 # CREWFLOW_APP_VERSION. A build argument that differs from package.json fails the build (one source of truth).
 ARG CREWFLOW_APP_VERSION

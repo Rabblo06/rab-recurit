@@ -139,7 +139,7 @@ ${(error as Error).message}`);
 
   // PDF renderer P1 (review M-3): the native render threads' heap caps must fit the budget (default half of the Worker's
   // 1536m mem_limit), so concurrent oversized renders kill their own thread, never the whole Worker container. Checked in
-  // every mode (a configuration that would be unsafe once PDF_RENDERER=native is refused now, not on the switch).
+  // every mode (native is the only renderer).
   try {
     assertPdfNativeMemoryFits(
       validated.PDF_NATIVE_CONCURRENCY === undefined ? PDF_NATIVE_CONCURRENCY_DEFAULT : Number(validated.PDF_NATIVE_CONCURRENCY),

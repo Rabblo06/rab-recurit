@@ -1,26 +1,17 @@
 import { validate } from './env.validation';
 
 /**
- * PDF renderer P5 (D10): PDF_RENDERER is kept for one release and accepts only "native" (unset or empty = native).
- * "chromium" refuses to boot: the Worker has no browser, so it can never be a silent choice.
+ * The native PDF renderer's settings. PDF_RENDERER itself is deleted (Phase X X5.4, as owner decision D10 planned for the
+ * release after P5): native is the only renderer, so the schema has nothing to validate for it; the Worker warns at boot
+ * if it is still set (rab-worker render-pdf-switch.spec.ts).
  */
 const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
-describe('PDF_RENDERER environment variable', () => {
-  it('defaults to native', () => {
-    expect(validate({ ...base }).PDF_RENDERER).toBe('native');
-  });
-
-  it('treats an empty value as unset (native)', () => {
-    expect(validate({ ...base, PDF_RENDERER: '' }).PDF_RENDERER ?? 'native').toBe('native');
-  });
-
-  it('accepts exactly native', () => {
-    expect(validate({ ...base, PDF_RENDERER: 'native' }).PDF_RENDERER).toBe('native');
-  });
-
-  it.each(['chromium', 'CHROMIUM', 'Native', ' native', 'native ', ' ', 'chrome', 'pdfkit', 'true', '1'])('refuses to boot with PDF_RENDERER=%p', (value) => {
-    expect(() => validate({ ...base, PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly native/);
+describe('native PDF renderer environment variables', () => {
+  it('PDF_RENDERER is no longer a setting: no default is filled in, and a leftover value is not validated', () => {
+    expect(validate({ ...base })).not.toHaveProperty('PDF_RENDERER');
+    expect(() => validate({ ...base, PDF_RENDERER: 'native' })).not.toThrow();
+    expect(() => validate({ ...base, PDF_RENDERER: 'chromium' })).not.toThrow();
   });
 
   describe('PDF_NATIVE_CONCURRENCY', () => {
@@ -65,7 +56,7 @@ describe('PDF_RENDERER environment variable', () => {
       expect(validate({ ...base }).PDF_NATIVE_MEMORY_BUDGET_MB).toBeUndefined();
       expect(validate({ ...base, PDF_NATIVE_MEMORY_BUDGET_MB: '' }).PDF_NATIVE_MEMORY_BUDGET_MB).toBeUndefined();
       expect(() => validate({ ...base, PDF_NATIVE_CONCURRENCY: '2' })).not.toThrow();
-      expect(() => validate({ ...base, PDF_RENDERER: 'native', PDF_NATIVE_CONCURRENCY: '2', PDF_NATIVE_MEMORY_BUDGET_MB: '768' })).not.toThrow();
+      expect(() => validate({ ...base, PDF_NATIVE_CONCURRENCY: '2', PDF_NATIVE_MEMORY_BUDGET_MB: '768' })).not.toThrow();
     });
 
     it.each([
@@ -75,14 +66,14 @@ describe('PDF_RENDERER environment variable', () => {
       ['4', '1500', 1536, 1500],
       [undefined, '400', 768, 400],
     ])('refuses to boot: PDF_NATIVE_CONCURRENCY=%p with budget %p (%p MB needed > %p MB), naming the numbers and the remedy', (concurrency, budget, needed, limit) => {
-      const env: Record<string, string> = { ...base, PDF_RENDERER: 'native' };
+      const env: Record<string, string> = { ...base };
       if (concurrency !== undefined) env.PDF_NATIVE_CONCURRENCY = concurrency;
       if (budget !== undefined) env.PDF_NATIVE_MEMORY_BUDGET_MB = budget;
       expect(() => validate(env)).toThrow(`= ${needed} MB exceeds PDF_NATIVE_MEMORY_BUDGET_MB=${limit}`);
       expect(() => validate(env)).toThrow(/CREWFLOW_WORKER_MEM_LIMIT/);
     });
 
-    it('is checked with PDF_RENDERER unset too (native is the only renderer on this tree)', () => {
+    it('is checked with only the concurrency set (native is the only renderer on this tree)', () => {
       expect(() => validate({ ...base, PDF_NATIVE_CONCURRENCY: '4' })).toThrow(/exceeds PDF_NATIVE_MEMORY_BUDGET_MB=768/);
     });
 
