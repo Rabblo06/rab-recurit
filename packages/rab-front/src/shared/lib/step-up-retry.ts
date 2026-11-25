@@ -8,7 +8,12 @@ import axios, { type AxiosInstance } from 'axios';
  * `POST /auth/step-up`, and the original request is replayed ONCE. Concurrent refusals (a bulk action) share one
  * prompt. This is UX only: the server re-checks the grant on the replay and on every later call.
  */
-export type StepUpHandler = (challenge: { mfa: boolean }) => Promise<boolean>;
+/**
+ * `action` (owner decision 5): the server names the one approval action the proof is for; the dialog sends it with the
+ * proof, and the server's grant then serves exactly that one replay.
+ */
+export type StepUpChallenge = { mfa: boolean; action?: string };
+export type StepUpHandler = (challenge: StepUpChallenge) => Promise<boolean>;
 
 const STEP_UP_CODES = new Set(['STEP_UP_REQUIRED', 'STEP_UP_MFA_REQUIRED']);
 
@@ -22,11 +27,12 @@ export function registerStepUpHandler(handler: StepUpHandler): () => void {
   };
 }
 
-export function stepUpChallengeOf(error: unknown): { mfa: boolean } | null {
+export function stepUpChallengeOf(error: unknown): StepUpChallenge | null {
   if (!axios.isAxiosError(error) || error.response?.status !== 403) return null;
-  const body = error.response.data as { code?: string; mfa?: boolean } | undefined;
+  const body = error.response.data as { code?: string; mfa?: boolean; action?: unknown } | undefined;
   if (!body?.code || !STEP_UP_CODES.has(body.code)) return null;
-  return { mfa: body.code === 'STEP_UP_MFA_REQUIRED' || body.mfa === true };
+  const mfa = body.code === 'STEP_UP_MFA_REQUIRED' || body.mfa === true;
+  return typeof body.action === 'string' && /^[a-z_.]{1,64}$/.test(body.action) ? { mfa, action: body.action } : { mfa };
 }
 
 /** Installs the step-up replay as a response interceptor (registered BEFORE the 401/refresh interceptor). */

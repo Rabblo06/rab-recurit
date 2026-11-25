@@ -4,6 +4,8 @@ import { ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from '
 import { installSessionRoleResetOnAcquire } from '../../database/postgres/session-role-reset';
 import { readSemanticPosture, semanticDriftFromSnapshot } from '../../database/posture-drift/semantic-posture';
 import { GRANT_PARITY_ORDER_SQL, GRANT_PARITY_TARGETS } from '../../database/typeorm/core/grant-parity-guard-sql';
+import { PAYROLL_ADJUSTMENT_PARITY_TRIGGERS } from '../../database/typeorm/core/payroll-adjustment-sql';
+import { HOLIDAY_PAY_PARITY_TRIGGERS } from '../../database/typeorm/core/payroll-holiday-pay-sql';
 import { PREAUTH_FORCE_TABLES } from '../../database/typeorm/core/preauth-force-sql';
 import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 
@@ -204,7 +206,9 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
         `SELECT count(*)::int AS n FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
           WHERE c.relnamespace = 'core'::regnamespace AND t.tgname LIKE '\\_%\\_grant\\_parity\\_%' AND t.tgenabled = 'O'`,
       );
-      expect(rows[0]!.n).toBe(Object.values(GRANT_PARITY_TARGETS).reduce((n, ops) => n + ops.length, 0));
+      // + the parity triggers later migrations add with the same reviewed function (core.payroll_adjustment, 1786723100000;
+      // core.organisation_payroll_setting and core.payroll_record_holiday_pay, 1786723110000).
+      expect(rows[0]!.n).toBe(Object.values(GRANT_PARITY_TARGETS).reduce((n, ops) => n + ops.length, 0) + PAYROLL_ADJUSTMENT_PARITY_TRIGGERS.length + HOLIDAY_PAY_PARITY_TRIGGERS.length);
     });
 
     it('PAY-1b: an operation crewflow_app lacked entirely is refused per statement, even when RLS leaves no row', async () => {

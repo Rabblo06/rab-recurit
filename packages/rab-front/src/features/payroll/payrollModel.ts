@@ -62,7 +62,7 @@ export interface PayrollPeriod {
 
 export interface BulkApproveResult {
   approved: Array<{ id: string; staffName: string; statement: ShiftStatementRef | null }>;
-  blocked: Array<{ id: string; reason: 'not_found' | 'not_ready' | 'own_hours'; message: string }>;
+  blocked: Array<{ id: string; reason: 'not_found' | 'not_ready' | 'own_hours' | 'prepared_by_you'; message: string }>;
 }
 
 /** Labels for the real stages (no invented statuses). `ready` = payroll record pending approval. */

@@ -1,7 +1,13 @@
 import { createHash } from 'node:crypto';
 
 import { approvedShiftStatementHtmlFromViewModel, renderApprovedShiftStatementHtml } from './approved-shift-statement.html';
-import { ApprovedShiftStatementData, buildApprovedShiftStatementViewModel, TO_BE_CONFIRMED } from './approved-shift-statement.view-model';
+import {
+  ApprovedShiftStatementData,
+  buildApprovedShiftStatementViewModel,
+  holidayPayLabel,
+  rateLabelFromBps,
+  TO_BE_CONFIRMED,
+} from './approved-shift-statement.view-model';
 
 /**
  * Approved Shift Statement view-model (PDF renderer migration, P2). The Chromium template now prints from the shared
@@ -99,5 +105,39 @@ describe('Approved Shift Statement view-model', () => {
     expect(html).not.toContain('<script>alert');
     expect(html).not.toContain('<img src="http');
     expect(html).toContain('&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;');
+  });
+});
+
+describe('Approved Shift Statement: rolled-up holiday pay line (owner decision 4)', () => {
+  it('itemises holiday pay as its own line after the shift earnings, and the total includes it', () => {
+    const vm = buildApprovedShiftStatementViewModel({ ...base, holidayPay: { rateBps: 1207, pence: 1144 } });
+    const labels = vm.details.map((r) => r.label);
+    expect(labels.slice(-2)).toEqual(['Shift earnings', 'Rolled-up holiday pay (12.07%)']);
+    expect(vm.details.at(-2)!.value).toBe('£94.79');
+    expect(vm.details.at(-1)!.value).toBe('£11.44');
+    expect(vm.total).toEqual({ label: 'Approved gross including holiday pay', value: '£106.23' });
+    const html = approvedShiftStatementHtmlFromViewModel(vm);
+    expect(html).toContain('Rolled-up holiday pay (12.07%)');
+  });
+
+  it('a £0.00 holiday line is still itemised when the organisation pays rolled-up holiday pay', () => {
+    const vm = buildApprovedShiftStatementViewModel({ ...base, amountPence: 0, holidayPay: { rateBps: 1207, pence: 0 } });
+    expect(vm.details.at(-1)).toEqual({ label: 'Rolled-up holiday pay (12.07%)', value: '£0.00' });
+  });
+
+  it('provider handles holiday pay (or a record approved before holiday pay existed): no line, the statement is unchanged', () => {
+    const before = buildApprovedShiftStatementViewModel(base);
+    expect(buildApprovedShiftStatementViewModel({ ...base, holidayPay: null })).toEqual(before);
+    expect(before.details.map((r) => r.label)).not.toContain('Shift earnings');
+    expect(before.total).toEqual({ label: 'Approved gross', value: '£94.79' });
+  });
+
+  it('rate labels are exact from basis points', () => {
+    expect(rateLabelFromBps(1207)).toBe('12.07%');
+    expect(rateLabelFromBps(1250)).toBe('12.50%');
+    expect(rateLabelFromBps(5)).toBe('0.05%');
+    expect(rateLabelFromBps(10000)).toBe('100.00%');
+    expect(holidayPayLabel(1207)).toBe('Rolled-up holiday pay (12.07%)');
+    expect(() => rateLabelFromBps(12.07)).toThrow(RangeError);
   });
 });

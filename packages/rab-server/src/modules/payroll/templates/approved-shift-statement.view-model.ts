@@ -1,4 +1,4 @@
-import { formatPence } from '@rab/shared';
+import { assertSafePence, formatPence } from '@rab/shared';
 
 import { fmtDate, fmtDateTime, fmtMinutes, fmtTime } from '../../attendance/templates/adolphus-document';
 
@@ -27,6 +27,12 @@ export interface ApprovedShiftStatementData {
   payableMinutes: number;
   payRatePence: number;
   amountPence: number;
+  /**
+   * Owner decision 4: the record's frozen rolled-up holiday pay (rate in basis points, pence), its own line. Null or absent
+   * when the organisation's payroll provider handles holiday pay, or for a record approved before holiday pay existed:
+   * the statement is then exactly as before (no line).
+   */
+  holidayPay?: { rateBps: number; pence: number } | null;
   approvedAt: string;
   approvedByName: string | null;
   payrollPeriodLabel: string | null;
@@ -40,6 +46,19 @@ export const SHIFT_EARNINGS_APPROVED_LINE = 'Shift earnings approved — payment
 export const STATEMENT_DISCLAIMER =
   'This statement is not a payslip. It shows approved gross earnings for one shift only; it does not show tax, National Insurance or any other deductions.';
 export const TO_BE_CONFIRMED = 'To be confirmed';
+export const SHIFT_EARNINGS_LABEL = 'Shift earnings';
+export const TOTAL_WITH_HOLIDAY_LABEL = 'Approved gross including holiday pay';
+
+/** "12.07%" from basis points, exactly (integer arithmetic). */
+export function rateLabelFromBps(rateBps: number): string {
+  if (!Number.isInteger(rateBps) || rateBps < 0) throw new RangeError(`holiday rate must be integer basis points, got ${rateBps}`);
+  return `${Math.floor(rateBps / 100)}.${String(rateBps % 100).padStart(2, '0')}%`;
+}
+
+/** "Rolled-up holiday pay (12.07%)" */
+export function holidayPayLabel(rateBps: number): string {
+  return `Rolled-up holiday pay (${rateLabelFromBps(rateBps)})`;
+}
 
 export function shiftStatementReference(recordId: string, startsAt: string, timezone: string): string {
   const day = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(startsAt));
@@ -125,8 +144,12 @@ export function buildApprovedShiftStatementViewModel(d: ApprovedShiftStatementDa
       row('Break', breakText),
       row('Verified payable hours', fmtMinutes(d.payableMinutes)),
       row('Approved hourly rate', `${formatPence(d.payRatePence)} per hour`),
+      // Owner decision 4: rolled-up holiday pay is lawful only when itemised, so it is its own line, then the total.
+      ...(d.holidayPay ? [row(SHIFT_EARNINGS_LABEL, formatPence(d.amountPence)), row(holidayPayLabel(d.holidayPay.rateBps), formatPence(d.holidayPay.pence))] : []),
     ],
-    total: row('Approved gross', formatPence(d.amountPence)),
+    total: d.holidayPay
+      ? row(TOTAL_WITH_HOLIDAY_LABEL, formatPence(assertSafePence(d.amountPence + d.holidayPay.pence, 'statement total')))
+      : row('Approved gross', formatPence(d.amountPence)),
     approval: [
       row('Approval date', `${fmtDateTime(d.approvedAt, tz)}${d.approvedByName ? ` by ${d.approvedByName}` : ''}`),
       row('Payroll period', d.payrollPeriodLabel ?? TO_BE_CONFIRMED),

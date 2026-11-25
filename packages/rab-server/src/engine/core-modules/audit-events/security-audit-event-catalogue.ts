@@ -136,6 +136,13 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'payroll_run.exported': c('payroll_approval', 'warning'),
   'payslip.net_recorded': c('payroll_approval', 'warning'),
   'payslip.marked_paid': c('payroll_approval', 'warning'),
+  // Payroll adjustments (owner decision 3): money added after approval, decided by a second person.
+  'payroll_adjustment.created': c('payroll_approval'),
+  'payroll_adjustment.approved': c('payroll_approval', 'warning'),
+  'payroll_adjustment.rejected': c('payroll_approval'),
+  'payroll_run.adjustments_included': c('payroll_approval'),
+  // Holiday pay (owner decision 4): how every later approval is paid.
+  'payroll_setting.holiday_pay_changed': c('payroll_approval', 'warning'),
   // ── account deletion ────────────────────────────────────────────────────────────────────────────────────────────
   'user.deleted': c('account_deletion', 'critical'),
   /** Owner 0g: GDPR erasure of a soft-deleted account's personal fields (the row stays, anonymised). */

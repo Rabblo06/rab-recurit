@@ -1,6 +1,16 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { addPence, assertSafePence, formatPence, multiplyPence, payForMinutes, subtractPence } from './money';
+import {
+  addPence,
+  assertSafePence,
+  formatPence,
+  multiplyPence,
+  payForMinutes,
+  penceToDecimalString,
+  rolledUpHolidayPayPence,
+  subtractPence,
+  UK_ROLLED_UP_HOLIDAY_RATE_BPS,
+} from './money';
 
 describe('money', () => {
   it('adds pence exactly, no float drift', () => {
@@ -186,5 +196,73 @@ describe('formatPence shared cross-platform cases (money-format-cases.json)', ()
       compared++;
     }
     expect(compared).toBeGreaterThan(20);
+  });
+});
+
+describe('penceToDecimalString (payroll provider CSV)', () => {
+  it('prints two decimals with no symbol or separator', () => {
+    expect(penceToDecimalString(0)).toBe('0.00');
+    expect(penceToDecimalString(5)).toBe('0.05');
+    expect(penceToDecimalString(1250)).toBe('12.50');
+    expect(penceToDecimalString(123456789)).toBe('1234567.89');
+  });
+
+  it('keeps the sign of a negative correction', () => {
+    expect(penceToDecimalString(-1)).toBe('-0.01');
+    expect(penceToDecimalString(-1250)).toBe('-12.50');
+  });
+
+  it('is exact at the safe-integer limit and refuses anything beyond it or fractional', () => {
+    expect(penceToDecimalString(Number.MAX_SAFE_INTEGER)).toBe('90071992547409.91');
+    expect(() => penceToDecimalString(Number.MAX_SAFE_INTEGER + 1)).toThrow(RangeError);
+    expect(() => penceToDecimalString(1.5)).toThrow(RangeError);
+  });
+});
+
+describe('rolledUpHolidayPayPence (owner decision 4, A3)', () => {
+  it('the UK default is 12.07% (1207 basis points)', () => {
+    expect(UK_ROLLED_UP_HOLIDAY_RATE_BPS).toBe(1207);
+  });
+
+  it('nearest penny on one shift line: £60.00 at 12.07% = £7.24 (724.2p)', () => {
+    expect(rolledUpHolidayPayPence(6000, 1207)).toBe(724);
+    expect(rolledUpHolidayPayPence(4800, 1207)).toBe(579); // 579.36
+    expect(rolledUpHolidayPayPence(10000, 1207)).toBe(1207);
+  });
+
+  it('a half penny rounds UP (half-up), anything below half rounds down', () => {
+    expect(rolledUpHolidayPayPence(1, 5000)).toBe(1); // 0.5 -> 1
+    expect(rolledUpHolidayPayPence(3, 5000)).toBe(2); // 1.5 -> 2
+    expect(rolledUpHolidayPayPence(4142, 1207)).toBe(500); // 499.9394 -> 500
+    expect(rolledUpHolidayPayPence(4, 1207)).toBe(0); // 0.4828 -> 0
+    expect(rolledUpHolidayPayPence(5, 1207)).toBe(1); // 0.6035 -> 1
+    // An exact half at another configured rate: 4p x 12.50% = 0.5p -> 1p.
+    expect(rolledUpHolidayPayPence(4, 1250)).toBe(1);
+  });
+
+  it('exact integer arithmetic where a float would drift', () => {
+    // 1.005 * 100 style float traps: 201 * 0.5 = 100.5 -> 101 exactly, and a large base stays exact.
+    expect(rolledUpHolidayPayPence(201, 5000)).toBe(101);
+    expect(rolledUpHolidayPayPence(123_456_789, 1207)).toBe(14_901_234); // 14901234.4323
+    expect(rolledUpHolidayPayPence(Number.MAX_SAFE_INTEGER, 1)).toBe(900_719_925_474); // 900719925474.0991
+  });
+
+  it('zero base or zero rate gives zero; a 100% rate returns the base', () => {
+    expect(rolledUpHolidayPayPence(0, 1207)).toBe(0);
+    expect(rolledUpHolidayPayPence(6000, 0)).toBe(0);
+    expect(rolledUpHolidayPayPence(6000, 10000)).toBe(6000);
+  });
+
+  it('rounding happens per line: two lines summed can differ from rounding the total (by design)', () => {
+    const lines = [4, 4].map((p) => rolledUpHolidayPayPence(p, 1207)); // 0.4828 each -> 0 + 0
+    expect(lines.reduce((a, b) => a + b, 0)).toBe(0);
+    expect(rolledUpHolidayPayPence(8, 1207)).toBe(1); // 0.9656 on the total -> 1
+  });
+
+  it('fails closed on a negative or fractional base, a bad rate, or an unsafe base', () => {
+    expect(() => rolledUpHolidayPayPence(-1, 1207)).toThrow(RangeError);
+    expect(() => rolledUpHolidayPayPence(1.5, 1207)).toThrow(RangeError);
+    expect(() => rolledUpHolidayPayPence(Number.MAX_SAFE_INTEGER + 1, 1207)).toThrow(RangeError);
+    for (const bad of [-1, 10001, 12.07, Number.NaN]) expect(() => rolledUpHolidayPayPence(6000, bad)).toThrow(RangeError);
   });
 });

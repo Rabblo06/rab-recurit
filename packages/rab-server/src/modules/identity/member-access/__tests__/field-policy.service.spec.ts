@@ -6,6 +6,7 @@ import { ResourceScope, ResourceScopeService } from '../../../../engine/core-mod
 import { AuthContext } from '../../../../engine/core-modules/tenant/auth-context.interface';
 import { buildPayrollRunCsv, csvCell, RunView } from '../../../payroll/services/payroll-run.service';
 import { FieldPolicyService } from '../field-policy.service';
+import { FIELD_POLICY_OBJECTS } from '../field-policy.registry';
 
 /**
  * Wave 5 — layer-2 field policy for attendance / payroll read DTOs and exports. Pure unit tests: the permission lookup,
@@ -108,24 +109,34 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
   const view: RunView = {
     id: 'run', status: 'finalised', period: { id: 'p', start: '2026-10-01', end: '2026-10-31', payday: '2026-11-05' } as never,
     preparedAt: '', preparedByName: null, finalisedAt: null, finalisedByName: null,
-    totals: { records: 1, staff: 1, minutes: 240, grossPence: 4800, lateCount: 0 },
-    staff: [{ staffProfileId: 's', staffName: '=HYPERLINK("http://evil")', staffRef: 'STAFF 1', records: 1, minutes: 240, grossPence: 4800, lateCount: 0, payslip: null }],
+    totals: { records: 1, staff: 1, minutes: 240, grossPence: 4800, lateCount: 0, holidayPayPence: 579, correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 8463 },
+    staff: [{
+      staffProfileId: 's', staffName: '=HYPERLINK("http://evil")', staffRef: 'STAFF 1', records: 1, minutes: 240, grossPence: 4800, lateCount: 0, holidayPayPence: 579,
+      correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 8463, adjustments: [], payslip: null,
+    }],
   };
   const policy = (hidden: string[]) => ({ object: 'payroll_record' as const, hiddenFields: new Set(hidden), hiddenProperties: new Set<string>() });
 
   it('all columns for a caller whose policy hides nothing', () => {
     const [header, row] = buildPayrollRunCsv(view, policy([])).split('\n');
-    expect(header).toBe('Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Late approvals,Run status');
-    expect(row).toContain('4.00,48.00');
+    expect(header).toBe(
+      'Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Holiday pay (GBP),Corrections (GBP),Bonuses (GBP),Expenses (GBP),Total (GBP),Late approvals,Run status',
+    );
+    // Owner decision 3: a negative correction stays a NUMBER (-1.50), never neutralised like free text ('-1.50).
+    // Owner decision 4: rolled-up holiday pay is its own column, included in the total.
+    expect(row).toContain('4.00,48.00,5.79,-1.50,20.00,12.34,84.63,0,finalised');
   });
 
   it('a hidden field is ABSENT from the header and every row (never an empty column)', () => {
     const csv = buildPayrollRunCsv(view, policy(['amount']));
     const [header, row] = csv.split('\n');
     expect(header).not.toContain('Gross');
+    for (const money of ['Holiday', 'Corrections', 'Bonuses', 'Expenses', 'Total']) expect(header).not.toContain(money);
     expect(header!.split(',')).toHaveLength(9);
     expect(row!.split(',')).toHaveLength(9);
     expect(csv).not.toContain('48.00');
+    expect(csv).not.toContain('84.63');
+    expect(csv).not.toContain('5.79');
     const noHours = buildPayrollRunCsv(view, policy(['amount', 'workedTime']));
     expect(noHours).not.toContain('Hours');
     expect(noHours).not.toContain('4.00');
@@ -139,5 +150,40 @@ describe('payroll-run CSV export (field policy + formula injection)', () => {
     expect(csvCell('Ava, Staff')).toBe('"Ava, Staff"');
     expect(csvCell('Plain')).toBe('Plain');
     expect(buildPayrollRunCsv(view, policy([])).split('\n')[1]).toContain(`"'=HYPERLINK(""http://evil"")"`);
+  });
+});
+
+describe('omitDeep (review fix: hidden money absent at every depth)', () => {
+  const amountHidden = () => {
+    const amount = FIELD_POLICY_OBJECTS.payroll_record.fields.find((f) => f.key === 'amount')!;
+    return { object: 'payroll_record' as const, hiddenFields: new Set(['amount']), hiddenProperties: new Set(amount.properties) };
+  };
+  const pence = (v: unknown): string[] =>
+    Array.isArray(v) ? v.flatMap(pence) : v && typeof v === 'object' ? Object.entries(v).flatMap(([k, x]) => [...(/Pence$/.test(k) ? [k] : []), ...pence(x)]) : [];
+
+  it("a run view with policy(['amount']) keeps no *Pence key anywhere: totals, staff rows, adjustment lines, payslip", () => {
+    const run = {
+      id: 'run', status: 'finalised', period: null, preparedAt: '', preparedByName: null, finalisedAt: null, finalisedByName: null,
+      totals: { records: 1, staff: 1, minutes: 240, grossPence: 4800, lateCount: 0, correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 7884 },
+      staff: [{
+        staffProfileId: 's', staffName: 'A', staffRef: null, records: 1, minutes: 240, grossPence: 4800, lateCount: 0, holidayPayPence: 579,
+        correctionsPence: -150, bonusesPence: 2000, expensesPence: 1234, adjustmentsPence: 3084, totalPence: 7884,
+        adjustments: [{ id: 'a1', kind: 'bonus', amountPence: 2000, correctsPayrollRecordId: null }],
+        payslip: { id: 'p', status: 'paid', version: 1, document: null, netPence: 4000, netSource: 'provider_document', paidAt: null, paymentReference: null },
+      }],
+    };
+    const svc = new FieldPolicyService({} as never, {} as never);
+    const out = svc.omitDeep(amountHidden(), run);
+    expect(pence(out)).toEqual([]);
+    expect(out.staff[0]!.adjustments[0]).toEqual({ id: 'a1', kind: 'bonus', correctsPayrollRecordId: null });
+    expect(out.totals.minutes).toBe(240);
+    expect(pence(run).length).toBeGreaterThan(0); // the input is not mutated
+  });
+
+  it('an adjustment list entry loses its amount; nothing is hidden when the policy hides nothing (same object back)', () => {
+    const svc = new FieldPolicyService({} as never, {} as never);
+    expect(svc.omitDeep(amountHidden(), [{ id: 'x', amountPence: 5, createdAt: '2026' }])).toEqual([{ id: 'x', createdAt: '2026' }]);
+    const v = { a: { amountPence: 1 } };
+    expect(svc.omitDeep({ object: 'payroll_record', hiddenFields: new Set(), hiddenProperties: new Set() }, v)).toBe(v);
   });
 });

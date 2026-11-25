@@ -10609,6 +10609,201 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Payroll approval: maker-checker and a fresh step-up, no override (decision 5, branch feat/payroll-approval-maker-checker, 2026-11-21; no SQL)
+
+- **Who can call this:** a workspace manager holding `payroll.approve` (approve / bulk-approve a payroll record; finalise a
+  run). Venue Managers are refused categorically (unchanged).
+- **Threat:** one person prepares pay and approves it (fraud or an unchecked mistake), or a hijacked-but-live session
+  (stolen cookie / token, unattended machine) approves pay.
+- **Controls (layer 2, in the services, so jobs and direct calls are covered too):**
+  - `PayrollService.approve` / `bulkApprove`: refused when the caller finalised the shift report that created the record
+    (`shift_report.finalised_by`, read under the same row lock; the report finalisation is what prepares a record). 403
+    single; per-id `prepared_by_you` in bulk. An unreadable preparer is refused (409 / `not_ready`), never treated as
+    "someone else". The own-hours refusal is unchanged.
+  - `PayrollRunService.finalise`: refused (403) when the caller created the run (`prepared_by`) or added lines to it through
+    `prepare` (the insert-only `payroll_run.prepared` audit row each prepare writes in the same transaction as its lines,
+    `linesAdded > 0`). A run the check cannot read counts as prepared by the caller (fail closed).
+  - All three need a fresh step-up of THIS session (`StepUpReauthService.assertRecentStepUp`, actions
+    `payroll.record.approve` / `payroll.run.finalise`): password within AUTH_STEP_UP_WINDOW_SECONDS (default 5 min) plus the
+    authenticator code when the approver has 2FA. Checked before the transaction opens (the step-up uses its own short
+    transactions; holding two pool connections is the deadlock class fixed in #323) and before the record is looked up,
+    so an unknown id discloses nothing. Refusals are audited (`auth.step_up_failed` with the action). Admin Inspect is refused.
+  - No override exists; an organisation with one payroll person cannot approve until it adds a second (decision 5's stated
+    consequence).
+- **Not changed:** reject, statement retry, prepare, upload, net and mark-paid need no step-up (decision 5 names approval).
+- **Database layer:** none added. The maker-checker facts live in other tables (shift_report, audit_log), and decision 5
+  says "no SQL unless b is chosen". RLS still refuses own-hours approval (`payroll_record_update` WITH CHECK).
+- **Tests:** payroll-approval (decision-5 case: preparer refused single + bulk with a fresh step-up, stale session refused
+  and audited, another organisation 404 after step-up, second manager approves), payroll-runs (preparer refused, stale
+  session refused, second manager finalises), lane-d step-up adoption (three new routes), and every suite that approves
+  pay now uses a second manager of the workspace (server: realtime-c1b, w5-timeline; worker: shift-statement,
+  shift-statement-wake, phase-d cutover, phase-d two-worker).
+
+**Update after the independent review of #335 (HIGH / MEDIUM / LOW fixed; the trade-off above is withdrawn):**
+- **Fresh 2FA, bound to the action, single use:** approve / bulk-approve / finalise now call
+  `StepUpReauthService.assertFreshSecondFactorForAction(ctx, action)`. An approver with no authenticator factor is refused
+  (403 `STEP_UP_MFA_ENROLMENT_REQUIRED`, audited). The session must hold a grant written by `POST /auth/step-up` with
+  `action` set and a verified TOTP code (key `step-up:<session hash>:action:<action>`); a sign-in grant, the ordinary
+  session grant, or a grant for another action never counts; the grant is read with GETDEL, so one proof serves exactly one
+  approval call. The web dialog receives `action` in the 403 and sends it back with the proof. Lane P2's approval actions
+  use the same helper (add them to ACTION_BOUND_STEP_UP_ACTIONS).
+- **Preparers:** whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) is a preparer too.
+- **Database layer (DRAFT, new SQL, PayrollMakerCheckerBackstop1786723020000):** `core.payroll_record_guard()` (the one trigger
+  function of core AND every workspace payroll_record). On the move to `approved`: `approved_by` must be the signed-in caller
+  (no worker exemption: the worker never writes it and the marker is a plain GUC); the record's finalised report and seat
+  must be readable with a non-null finaliser and reviewer (fail closed); the approver is neither of them; and because those
+  live columns are writable by managers, the insert-only `core.audit_log` must hold the finalisation BY the live finaliser
+  and the review BY the live reviewer, and none of those history rows may name the approver (re-pointing `finalised_by` or
+  the reviewer afterwards, even with a forged history row naming a colleague, does not help). The lookups are uuid = uuid
+  on (organisation_id, entity_type, entity_id), the leading columns of audit_log_timeline_idx (EXPLAIN test).
+- **Rollout note (owner):** records with no finalisation / review history, or a null reviewer, can no longer be approved.
+  Read-only pre-deploy count (run as the database owner; `core` while HWS is off), `PAYROLL_GUARD_PREDEPLOY_COUNT_SQL` in
+  payroll-maker-checker-sql.ts:
+  `SELECT count(*) FROM core.payroll_record pr LEFT JOIN core.shift_report sr ON sr.shift_id = pr.shift_id AND sr.status = 'finalised'
+  LEFT JOIN core.attendance a ON a.id = pr.attendance_id LEFT JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id
+  WHERE pr.status = 'pending_approval' AND (sr.id IS NULL OR sr.finalised_by IS NULL OR sa.id IS NULL OR sa.attendance_reviewed_by IS NULL
+  OR NOT EXISTS (finalisation row by sr.finalised_by) OR NOT EXISTS (review row by sa.attendance_reviewed_by))` (full text in the module).
+  Outside that move `approved_by` never changes (so a two-step "set approved_by, then flip status" is refused at step one).
+  The service mirrors the same rule (live columns + history, null reviewer refused). The payroll_run finaliser rule (core
+  and workspace copies, plus a real per-line `prepared_by`) moves to a follow-up blocked on the 0.7.0 chain; until then the
+  run rule is service-only (creator via `prepared_by`, top-ups via the audit row).
+- **Tests:** payroll-approval (11) / (11b): no proof, a sign-in or ordinary grant, a sign-in grant planted under the action
+  key, a proof for another action, an un-enrolled approver: all 403; the real step-up with code then exactly one approval,
+  a second approval on the same proof 403; a reviewer who did not finalise: service 403 and DB 42501.
+  payroll-maker-checker-rls (core, runtime login): finaliser / reviewer approving 42501, run preparer finalising 42501, a
+  third manager allowed.
+## Payroll adjustments: corrections, bonuses and expenses as separate approved lines (Lane P2, M5, owner decision 3, branch feat/payroll-adjustments, 2026-11-21; NEW SQL: PayrollAdjustmentSchema1786723100000, DRAFT for owner review)
+- **Asset / actors:** money added to a person's pay after their hours were approved. Attackers considered: a payroll
+  manager paying themselves or a friend (insider), a manager approving their own entry, a Venue Manager or a staff member
+  writing pay lines, another organisation reading or approving by id, a stolen but live manager session, a bug or direct
+  SQL changing an approved or already-paid line, and a deduction taken from a worker without consent (Employment Rights
+  Act 1996 s.13).
+- **Controls (five layers):** (1) PermissionGuard: list `payroll.view`, add `payroll.calculate`, approve / reject
+  `payroll.approve`; console only (`@ManagerApplication`). (2) PayrollAdjustmentService re-checks the flag and refuses
+  Venue Managers before any read; nobody adds, approves or rejects a line that pays THEMSELVES (403
+  `PAYROLL_ADJUSTMENT_OWN_PAY`); the creator never approves or rejects their own line (403
+  `PAYROLL_ADJUSTMENT_SAME_PERSON`); approve needs a recent step-up of the session, checked before any read (403
+  `STEP_UP_REQUIRED`, `payroll.adjustment.approve` in STEP_UP_ACTIONS); a correction must point at an approved record of
+  the caller's workspace and takes the staff member from that record, never the body; a reduction can never exceed what
+  the original shift paid. (3) Every query pinned to the session's organisation AND workspace (404 for anything else).
+  (4) RLS tenant predicate, ENABLE + FORCE in the same migration. (5) RLS non-venue, non-archived workspace manager
+  predicate on every write and manager read; staff read only their OWN APPROVED lines. In the database itself: CHECKs
+  for exactly three kinds (no deduction kind exists), only a correction may be negative, a correction names its record,
+  creator != paid person, decider != creator and != paid person; `core.payroll_adjustment_guard()` refuses any change
+  once the run is finalised (locked_at), any change of the figures or authorship, any status change other than
+  pending_approval -> approved | rejected, a decision naming anyone but the session user, and moving a line out of its
+  run; crewflow_app has no DELETE and no UPDATE on the figures; the owner login is held to the same by the reviewed
+  grant-parity guard (UPDATE allow-list, DELETE, TRUNCATE). Every create / approve / reject / run inclusion is audited
+  (shipped as `payroll_approval`).
+- **Payroll lock:** an approved line joins the run of the agency period containing its approval date at prepare; the
+  run's finalise locks it in the same transaction. A line approved after that sits on the next period (carried forward),
+  so a finalised run, its payslips and its export never change. The approved original record is never edited.
+- **Not chosen / trade-off:** a workspace table (owner decision 48's approach: core table, no foreign key to
+  staff_profile / payroll_record / payroll_run, integrity by service checks; those rows are never hard-deleted by the
+  application). Staff do not see the free-text reason (it may name other people); they see kind and amount.
+- **Tests:** `payroll-adjustments.integration.spec.ts` (zero rows without tenant context as the runtime login without
+  BYPASSRLS; HTTP abuse cases: mass assignment of organisationId / status / createdBy / staffUserId / workspaceId = 400,
+  no deduction route, Venue Manager and staff 403, other organisation 404, creator 403, stale session 403 with the
+  refusal audited; RLS per role; CHECK and guard denials as the runtime login; locked rows refused even to the table
+  owner; carry-forward to the next period; staff payslip timeline shows only their own approved lines),
+  `payroll-adjustment.service.spec.ts` (layer 2 without a database), `payroll-adjustment-sql.spec.ts`,
+  `lane-d-step-up-adoption.integration.spec.ts` (the new step-up action), `constraint-regression` (transition table ==
+  DB CHECK), `owner-login-guards` (parity trigger count).
+- **Residual / flagged for the owner:** (a) a reduction is capped at the original shift's pay (assumption, see the PR);
+  (b) holiday pay is not added on adjustments (decision 4 PR states the rule); (c) RESOLVED with #335 merged in: approving
+  an adjustment uses Lane P1's `assertFreshSecondFactorForAction(ctx, 'payroll.adjustment.approve')` (an enrolled
+  authenticator is required; a single-use proof made for this action on this session, burnt on use).
+- **Independent review fixes (24 Nov):** (1) money fields of runs, payslip rows and adjustment lines follow the
+  'payroll_record' amount field at EVERY depth (`FieldPolicyService.omitDeep`, applied to run detail, run list, every run
+  action's response and the adjustment list / actions); (2) insert-only run facts `core.payroll_run_event` (`opened` at
+  prepare, `finalised` with its payroll records at finalise): the guard refuses an adjustment joining a run with no
+  `opened` fact in its own organisation and workspace (foreign or invented) or with a `finalised` fact (locked);
+  (4a) `core.payroll_adjustment_insert_guard()` requires staff_user_id to be the user of staff_profile_id in the bound
+  workspace (core copy and, when present, the workspace schema copy must agree), and sets the row clocks.
+- **Note (4c):** the adjustment REASON text is hidden from staff by the API projection only; RLS returns the staff
+  member's whole approved rows (reason included) to a direct query in their own session. Acceptable today (no staff path
+  runs raw SQL); a column-level split would be needed if staff ever get a generic query surface.
+- **Re-review fixes:** run facts can no longer be forged: `core.payroll_run_event_insert_guard()` (BEFORE INSERT) reads
+  the payroll run in the copy the application uses (workspace schema when it holds the run, else core) and accepts
+  `opened` only for a `prepared` run of the same organisation and workspace and `finalised` only for a `finalised` run
+  with EXACTLY its line set; a correction is bound to an approved record of the SAME staff member (insert guard).
+- **Residual (run facts):** runs finalised before this migration have no `finalised` fact (no back-fill: a migration
+  binds no tenant and the workspace payroll tables are FORCE RLS); they stay protected because no `opened` fact can be
+  written for a non-prepared run, and a holiday-pay line requires an `approved` record. The "copy the application uses"
+  rule is now chosen from database state (third review): a cut-over workspace ('verified' in core.hws_cutover_state) is read
+  ONLY in its own schema (its core copy is also fenced read-only), a workspace being cut over is refused, and joining a
+  run additionally needs the run LIVE `prepared` in that copy; locked_at can only be set once its run has a `finalised`
+  fact. Reads share-lock the row, so a concurrent finalise is waited for.
+- **Residual (before the 0.7.0 cutover):** the runtime switch HWS_RUNTIME_ENABLED is an environment setting the database
+  cannot see, so before the cutover a guard reads the workspace schema when it holds the row, otherwise core. A manager
+  with raw runtime-login SQL could plant a prepared run in the copy the application does NOT use and park an approved
+  line there (unpaid, never paid twice). This closes when 0.7.0 activates the cutover (owner: 0.7.0 before any real data).
+- **Accepted (G-02):** the guards' copy routing and the core fence both read core.hws_cutover_state /
+  core.hws_cutover_activation. The bare runtime login cannot write them (42501, regression test), but a session that can
+  `SET ROLE crewflow` (the owner login's inherited role) could change them and so steer routing or lift the fence. This is
+  the accepted G-02 / BC-01 class (an injected SET ROLE defeats the owner-login guards too); the semantic posture monitor
+  detects the drift afterwards.
+- **Residual (inherited, 0.7.0 follow-up with Lane P1):** payroll_run has no status-transition guard (#335 moved its run
+  rule to the 0.7.0 structure follow-up: a trigger on the workspace copies needs the structure chain), so a session with
+  DML on payroll_run could flip prepared/finalised and then write a matching fact. The adjustment guard's live-status
+  check and the finalised-fact requirement for locked_at narrow it; the run guard itself lands with the 0.7.0 follow-up.
+- **Not done here (re-review item 3, follow-up):** staff still read their whole approved adjustment rows through RLS (reason,
+  created_by, decided_by included); the API projection returns line fields only. A column-limited staff path needs a
+  view or definer, and under FORCE RLS a view's owner is itself subject to the table's policies, so it needs a dedicated
+  NOLOGIN owner role plus a policy branch for it, or a SECURITY DEFINER read function owned by a role that is not
+  `crewflow`. That is new role SQL of its own, so it is logged as a follow-up rather than added to this PR.
+
+## Rolled-up holiday pay: per-organisation setting and a frozen per-record line (Lane P2, M5, owner decision 4 / assumption A3, branch feat/payroll-holiday-pay, 2026-11-21; NEW SQL: PayrollHolidayPay1786723110000, DRAFT for owner review)
+- **Asset / actors:** the holiday pay added to every approved shift, and the rule that decides it. Attackers considered: a
+  manager switching the organisation to "provider handles it" (or a tiny rate) to under-pay staff, or to a high rate to
+  over-pay; a stale or stolen session doing it; a Venue Manager or staff member reading or writing it; another
+  organisation; a later setting change silently repricing approved or already-paid work; a figure stored that does not
+  follow the stated rounding rule.
+- **Controls:** the setting (`core.organisation_payroll_setting`, ENABLE + FORCE RLS) is read by the organisation's
+  non-venue managers and written only by its CURRENT Initial Manager naming themselves (RLS WITH CHECK), the same
+  authority as the agency payment calendar; layer 2 re-checks payroll.calculate, the Venue Manager exclusion and the
+  Initial Manager, after a recent step-up checked FIRST (`payroll.holiday_pay.update`); every change is audited with
+  before / after (shipped as `payroll_approval`, warning). The snapshot (`core.payroll_record_holiday_pay`, ENABLE + FORCE
+  RLS) is written in the APPROVAL transaction by the approving workspace payroll manager, one row per record, INSERT-only
+  for the runtime login (no UPDATE / DELETE grant; the owner login refused by the grant-parity guard), and a CHECK
+  re-derives `holiday_pay_pence = (base * rate + 5000) / 10000` (nearest penny, half up), equal to `@rab/shared`
+  `rolledUpHolidayPayPence` (BigInt, never a float). A setting change only affects later approvals; run views, the export
+  and the staff timeline read the frozen rows, so a finalised run never changes. Staff read only their own rows; the
+  Worker reads them for the statement PDF; Venue Managers and other organisations read nothing.
+- **Payslips:** the Approved Shift Statement itemises "Rolled-up holiday pay (rate)" as its own line and a total including
+  it (rolled-up holiday pay is only lawful when itemised); "provider handles it" prints no line, exactly as before.
+- **Not chosen / trade-off:** a workspace table (owner decision 48's approach); a snapshot at record creation (the
+  finaliser may be a Venue Manager, who must never write pay rows). Records approved before this feature have no row;
+  run prepare back-fills them at the CURRENT setting only under an explicit rolled-up choice (flagged; review fix 3).
+- **Tests:** `payroll-holiday-pay.integration.spec.ts` (zero rows without tenant context on both tables; default 12.07%;
+  non-Initial manager, Venue Manager, other organisation 403; stale session STEP_UP_REQUIRED with nothing written;
+  mass assignment 400; RLS WITH CHECK refusals; snapshot equals the shared function; UPDATE / DELETE refused; a figure
+  breaking the rounding rule refused even to the superuser; per-role reads; provider = zero line; earlier records never
+  recalculated; prepare back-fill; locked run unchanged after a later setting change; staff timeline), worker
+  `shift-statement.integration.spec.ts` (the PDF line), `holiday-pay.service.spec.ts`, `payroll-holiday-pay-sql.spec.ts`,
+  `approved-shift-statement.view-model.spec.ts`, shared `money.spec.ts` (rounding edges), `lane-d-step-up-adoption`.
+- **Residual / flagged for the owner:** decision 4's own caveat (rolled-up pay is lawful only for irregular-hours and
+  part-year workers, leave years from 1 April 2024; to confirm with the payroll adviser); holiday pay is not added to
+  adjustments; the provider's official payslip must itemise it too (outside Crewflow).
+- **Independent review fixes (24 Nov):** (2) a BEFORE INSERT guard (`core.payroll_record_holiday_pay_insert_guard()`)
+  refuses a holiday line for any payroll record a FINALISED run holds (the `finalised` fact of core.payroll_run_event,
+  same organisation and workspace) and sets created_at to the database clock; the run view and the staff timeline also
+  ignore lines created after the run's finalisation, so runs finalised before the facts existed cannot change either.
+  (3) FAIL-SAFE default: no settings row = "provider handles it"; an approval then freezes a zero provider line, and
+  run prepare back-fills pre-ship records ONLY when the organisation has explicitly chosen rolled-up (count audited as
+  `holidayBackfilled` on `payroll_run.prepared`); this follows owner decision 78's recommendation. (4b) UNIQUE per
+  (organisation, workspace, record) and a plain insert: a conflict throws, nothing is silently skipped. (1) holidayPayPence
+  follows the 'payroll_record' amount field at every depth.
+- **Re-review fix (item 2):** the insert guard binds every figure: the record must be `approved` in this organisation
+  and workspace (copy the application uses), with the line's staff_profile_id, staff user and base_pence = its approved
+  gross; mode and rate must equal the organisation's setting (no row = provider). A manager session can no longer insert
+  a line at 100% or on an invented base, or for another person.
+- **Third review:** the record is read in the ONE authoritative copy chosen from the cutover state (no core fallback once a
+  workspace is cut over; same residual before the 0.7.0 cutover as for adjustments) and share-locked (FOR SHARE), so a
+  holiday insert racing a finalise waits, re-reads 'processing' and is refused.
+- **Decision 5 proof (with #335):** changing the setting uses `assertFreshSecondFactorForAction(ctx,
+  'payroll.holiday_pay.update')`: an enrolled authenticator and a single-use proof made for this action on this session.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It

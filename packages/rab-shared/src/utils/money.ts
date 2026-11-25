@@ -96,3 +96,46 @@ export function formatPence(pence: Pence | bigint, currency: 'GBP' = 'GBP'): str
   const grouped = pounds.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return `${negative ? '-' : ''}${symbol}${grouped}.${penny.padStart(2, '0')}`;
 }
+
+/**
+ * Pence as a plain decimal string for machine-read files (payroll provider CSV): `-1234.56`, no currency symbol, no
+ * thousands separator, two decimals. Integer arithmetic only (never `pence / 100` as a float), so every safe integer
+ * prints exactly. A non-safe-integer is refused (assertSafePence).
+ */
+export function penceToDecimalString(pence: Pence): string {
+  assertSafePence(pence, 'penceToDecimalString value');
+  const negative = pence < 0;
+  const abs = Math.abs(pence);
+  const rem = abs % 100;
+  return `${negative ? '-' : ''}${(abs - rem) / 100}.${String(rem).padStart(2, '0')}`;
+}
+
+/**
+ * Owner decision 4 (21 Nov 2026, assumption A3): the UK rolled-up holiday pay rate, 12.07% (5.6 weeks / 46.4 working
+ * weeks), in basis points. The organisation setting may choose another rate, or "our payroll provider handles it".
+ */
+export const UK_ROLLED_UP_HOLIDAY_RATE_BPS = 1207;
+
+/** Basis points in 100%. A rate is an integer number of basis points (12.07% = 1207). */
+export const BASIS_POINTS_PER_UNIT = 10_000;
+
+/**
+ * Rolled-up holiday pay on one approved shift's gross pay, in pence. ROUNDING RULE (the repo's, stated once): the exact
+ * product `basePence × rateBps / 10000` is rounded to the NEAREST penny, a half penny rounding UP (half-up; identical to
+ * multiplyPence / payForMinutes for the non-negative amounts used here). It is computed with BigInt integer arithmetic,
+ * never a float, so `4142 × 1207 / 10000 = 499.9394` gives exactly 500 and a true half (`x.5`) always rounds up. Rounding
+ * happens ONCE per shift line; period and run totals are sums of the rounded lines and are never re-rounded.
+ *
+ * Fails closed (RangeError): a negative or non-integer base (holiday pay accrues on approved shift pay, which is never
+ * negative), a rate that is not an integer between 0 and 10000 basis points, or a result outside the safe-integer range.
+ */
+export function rolledUpHolidayPayPence(basePence: Pence, rateBps: number): Pence {
+  assertSafePence(basePence, 'rolledUpHolidayPayPence base');
+  if (basePence < 0) throw new RangeError(`rolledUpHolidayPayPence base must not be negative, got ${basePence}`);
+  if (!Number.isInteger(rateBps) || rateBps < 0 || rateBps > BASIS_POINTS_PER_UNIT) {
+    throw new RangeError(`rolledUpHolidayPayPence rate must be an integer between 0 and ${BASIS_POINTS_PER_UNIT} basis points, got ${rateBps}`);
+  }
+  const units = BigInt(BASIS_POINTS_PER_UNIT);
+  const rounded = (BigInt(basePence) * BigInt(rateBps) + units / 2n) / units;
+  return assertSafePence(Number(rounded), 'rolledUpHolidayPayPence result');
+}

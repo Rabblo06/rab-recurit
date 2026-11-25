@@ -12,6 +12,7 @@ import { FieldPolicyService } from '../../identity/member-access/field-policy.se
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -25,6 +26,7 @@ import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
 import { ListPayrollRecordsDto } from '../dto/payroll-record.dto';
 import { publicStatementState, ShiftStatementState } from '../constants/shift-statement';
 import { Allocation, allocateRecords, AllocationStatus } from './payroll-allocation';
+import { HolidayPayService } from './holiday-pay.service';
 
 /** Statuses in which the gross pay counts as approved (staff History shows the shift; `payrollApprovedPence` is set). */
 export const PAYROLL_APPROVED_STATUSES: readonly PayrollRecordStatusType[] = [
@@ -83,8 +85,11 @@ export interface PayrollRecordList {
   counts: Partial<Record<PayrollRecordStatusType, number>>;
 }
 
-/** Why one id of a bulk approval was not approved. `not_found` covers unknown AND other-workspace ids alike (no disclosure). */
-export type BulkBlockReason = 'not_found' | 'not_ready' | 'own_hours';
+/**
+ * Why one id of a bulk approval was not approved. `not_found` covers unknown AND other-workspace ids alike (no disclosure).
+ * `prepared_by_you`: the caller finalised the shift report that created the record (owner decision 5, maker-checker).
+ */
+export type BulkBlockReason = 'not_found' | 'not_ready' | 'own_hours' | 'prepared_by_you';
 
 export interface BulkApproveResult {
   approved: PayrollRecordView[];
@@ -258,17 +263,45 @@ interface LockedRecord {
   worked_minutes: number;
   amount_pence: string;
   staff_user_id: string;
+  /** Who finalised the shift report that created this record (`shift_report.finalised_by`); null when not readable. */
+  finalised_by: string | null;
+  /** Who reviewed this record's attendance seat (`shift_assignment.attendance_reviewed_by`); a preparer too (review of #335). */
+  reviewed_by: string | null;
+  /** Everyone the insert-only audit history names as having finalised this report or reviewed this seat (never edited). */
+  history_preparers: string[] | null;
+  /** The history holds the finalisation BY the live finaliser and the review BY the live reviewer (fail closed when not). */
+  has_history: boolean;
 }
 
 const NOT_READY_MESSAGE = 'This payroll record is not ready for approval.';
 const OWN_HOURS_MESSAGE = 'You cannot approve payroll for your own hours.';
+const PREPARED_BY_YOU_MESSAGE = 'You reviewed or finalised the timesheet for these hours, so another payroll approver must approve them.';
+const PREPARER_UNKNOWN_MESSAGE = 'This payroll record cannot be approved because the finalised timesheet it came from could not be found.';
 const NOT_FOUND_MESSAGE = 'Payroll can\'t be approved until verified hours and pay are available.';
+
+/**
+ * Owner decision 5 (2026-11-21), maker-checker, no override: the approver is never the person who prepared the pay. A record
+ * is prepared by finalising its shift report (ShiftReportService.finalise creates it in the same transaction), so its preparer
+ * is `shift_report.finalised_by`; whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) prepared it
+ * too, and so does anyone the insert-only audit history names as finaliser or reviewer (the live columns are writable). An
+ * unknown finaliser or reviewer, or missing history, = refused (fail closed), never "not the caller". The same rule is enforced by the database
+ * (`core.payroll_record_guard()`, PayrollMakerCheckerBackstop1786723020000).
+ */
+function preparerBlock(record: LockedRecord, ctx: AuthContext): { reason: 'prepared_by_you' | 'not_ready'; message: string } | null {
+  const historical = record.history_preparers ?? [];
+  if (record.finalised_by === ctx.userId || record.reviewed_by === ctx.userId || historical.includes(ctx.userId)) {
+    return { reason: 'prepared_by_you', message: PREPARED_BY_YOU_MESSAGE };
+  }
+  if (!record.finalised_by || !record.reviewed_by || !record.has_history) return { reason: 'not_ready', message: PREPARER_UNKNOWN_MESSAGE };
+  return null;
+}
 
 /**
  * Payroll approval (owner rule 2026-10-20). Five layers on every decision:
  *  1. route: `PermissionGuard(payroll.approve)` + `RequireWorkspaceGuard` + `@ManagerApplication()` (no mobile session);
  *  2. here: the permission is re-checked inside the transaction, Venue Managers are refused categorically (403), the
- *     workspace must be bound, and the approver can never be the worker whose hours these are;
+ *     workspace must be bound, the approver can never be the worker whose hours these are, nor the person who finalised
+ *     the timesheet that created the record, and approving needs a fresh step-up (owner decision 5, no override);
  *  3. every query is pinned to `ctx.organisationId` AND `ctx.workspaceId` (records of another workspace are 404);
  *  4. `payroll_record` RLS (tenant, non-venue workspace manager);
  *  5. the tighter RLS predicates: INSERT mirrors an approved attendance exactly, UPDATE refuses own-hours approval and
@@ -285,6 +318,10 @@ export class PayrollService {
   /** C1b realtime outbox — property-injected so the constructor signature is unchanged. */
   @Inject(RealtimeEventService)
   private readonly realtimeEvents!: RealtimeEventService;
+
+  /** Owner decision 4: the holiday pay of each record is frozen in its approval transaction (property-injected). */
+  @Inject(HolidayPayService)
+  private readonly holidayPay!: HolidayPayService;
 
   /**
    * C1b realtime (inside the caller's transaction): payroll.record_changed → ONLY workspace members who may read payroll
@@ -306,6 +343,13 @@ export class PayrollService {
 
   @Inject(FieldPolicyService)
   private readonly fieldPolicy!: FieldPolicyService;
+
+  /**
+   * Owner decision 5: approving needs a fresh step-up of THIS session (password, plus the authenticator code when the approver
+   * has one). Property-injected (constructor signature unchanged) and NOT optional: without it, approval cannot run.
+   */
+  @Inject(StepUpReauthService)
+  private readonly stepUp!: StepUpReauthService;
 
   /**
    * Phase X J1b: after the approving (or retrying) transaction COMMITS, wake the Worker's statement dispatcher. A hint only:
@@ -529,14 +573,23 @@ export class PayrollService {
     });
   }
 
-  /** Single approve: 404 outside the workspace, 409 unless pending_approval, 403 for own hours. */
+  /**
+   * Single approve: fresh step-up first (403 STEP_UP_REQUIRED), then 404 outside the workspace, 409 unless pending_approval,
+   * 403 for own hours, 403 when the caller prepared it (finalised its timesheet), 409 when its preparer cannot be read.
+   * The step-up runs BEFORE the transaction: it opens its own short transactions, and must never hold a second pool
+   * connection while this one is open.
+   */
   async approve(ctx: AuthContext, id: string): Promise<PayrollRecordView> {
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, 'payroll.record.approve');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_APPROVE);
       const [record] = await this.lockRecords(manager, ctx, [id]);
       if (!record) throw new NotFoundException('Payroll record not found.');
       assertTransition(PAYROLL_RECORD_TRANSITIONS, record.status, PayrollRecordStatus.APPROVED);
       if (record.staff_user_id === ctx.userId) throw new ForbiddenException(OWN_HOURS_MESSAGE);
+      const prepared = preparerBlock(record, ctx);
+      if (prepared?.reason === 'prepared_by_you') throw new ForbiddenException(prepared.message);
+      if (prepared) throw new ConflictException(prepared.message);
       await this.applyApproval(manager, ctx, [record], false);
       const [view] = await this.views(manager, ctx, [id]);
       return view!;
@@ -551,6 +604,8 @@ export class PayrollService {
    * `not_found` deliberately does not distinguish "unknown" from "another workspace's record".
    */
   async bulkApprove(ctx: AuthContext, ids: string[]): Promise<BulkApproveResult> {
+    // Decision 5: one fresh step-up covers the whole batch; before the transaction (see approve()).
+    await this.stepUp.assertFreshSecondFactorForAction(ctx, 'payroll.record.approve');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_APPROVE);
       const found = new Map((await this.lockRecords(manager, ctx, ids)).map((r) => [r.id, r]));
@@ -563,6 +618,8 @@ export class PayrollService {
           blocked.push({ id, reason: 'not_ready', message: NOT_READY_MESSAGE }); continue;
         }
         if (record.staff_user_id === ctx.userId) { blocked.push({ id, reason: 'own_hours', message: OWN_HOURS_MESSAGE }); continue; }
+        const prepared = preparerBlock(record, ctx);
+        if (prepared) { blocked.push({ id, ...prepared }); continue; }
         assertTransition(PAYROLL_RECORD_TRANSITIONS, record.status, PayrollRecordStatus.APPROVED);
         eligible.push(record);
       }
@@ -582,6 +639,8 @@ export class PayrollService {
       [ids, ctx.workspaceId, PayrollRecordStatus.APPROVED, ctx.userId, PayrollRecordStatus.PENDING_APPROVAL],
     )) as [unknown, number];
     if (updated !== ids.length) throw new ConflictException('Payroll changed while you were approving it. Refresh and try again.');
+    // Owner decision 4: freeze each record's holiday pay (organisation setting now, nearest penny half up), same transaction.
+    await this.holidayPay.snapshotRecords(manager, ctx, ids, 'approval');
     // J1b: registered now, published only after the outermost commit (never on rollback); one per transaction.
     this.statementWake?.afterCommit(manager);
     // C1b realtime (review F8): the payroll audience is the same for every record of this workspace — resolved at most
@@ -672,8 +731,25 @@ export class PayrollService {
   private async lockRecords(manager: EntityManager, ctx: AuthContext, ids: string[]): Promise<LockedRecord[]> {
     const t = businessTables(manager);
     return manager.query(
-      `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.amount_pence, sp.user_id AS staff_user_id
+      `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.amount_pence, sp.user_id AS staff_user_id,
+              r.finalised_by, s.reviewed_by, h.history_preparers,
+              COALESCE(h.finaliser_in_history AND h.reviewer_in_history, false) AS has_history
          FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
+         LEFT JOIN LATERAL (SELECT sr.id AS report_id, sr.finalised_by FROM ${t.shift_report} sr WHERE sr.shift_id = pr.shift_id AND sr.status = 'finalised' LIMIT 1) r ON true
+         LEFT JOIN LATERAL (
+           SELECT sa.id AS seat_id, sa.attendance_reviewed_by AS reviewed_by
+             FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id WHERE a.id = pr.attendance_id
+         ) s ON true
+         LEFT JOIN LATERAL (
+           -- Insert-only history; uuid = uuid on (organisation_id, entity_type, entity_id), the leading columns of audit_log_timeline_idx.
+           SELECT array_agg(DISTINCT al.actor_user_id) FILTER (WHERE al.actor_user_id IS NOT NULL) AS history_preparers,
+                  bool_or(al.entity_type = 'shift_report' AND al.actor_user_id = r.finalised_by) AS finaliser_in_history,
+                  bool_or(al.entity_type = 'shift_assignment' AND al.actor_user_id = s.reviewed_by) AS reviewer_in_history
+             FROM core.audit_log al
+            WHERE al.organisation_id = pr.organisation_id
+              AND ((al.entity_type = 'shift_report' AND al.entity_id = r.report_id AND al.action = 'attendance.report_finalised')
+                OR (al.entity_type = 'shift_assignment' AND al.entity_id = s.seat_id AND al.action = 'attendance.reviewed'))
+         ) h ON true
         WHERE pr.id = ANY($1::uuid[]) AND pr.organisation_id = $2 AND pr.workspace_id = $3
         ORDER BY pr.id
         FOR UPDATE OF pr`,

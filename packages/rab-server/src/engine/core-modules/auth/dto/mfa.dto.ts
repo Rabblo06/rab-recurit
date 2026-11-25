@@ -1,5 +1,7 @@
 import { Transform } from 'class-transformer';
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+
+import { ACTION_BOUND_STEP_UP_ACTIONS, ActionBoundStepUpAction } from '../services/step-up-reauth.service';
 
 /**
  * Wave 4 lane MFA DTOs. `forbidNonWhitelisted` (main.ts) turns any extra field — a userId, organisationId, secret,
@@ -56,6 +58,16 @@ export class MfaStepUpDto {
   @MinLength(6)
   @MaxLength(64)
   code?: string;
+}
+
+/**
+ * `POST /auth/step-up` only: the proof, plus (owner decision 5) the one approval action it is for. With `action`, a verified
+ * code also records a single-use grant bound to this session and that action (an unknown action is a 400).
+ */
+export class MfaStepUpNowDto extends MfaStepUpDto {
+  @IsOptional()
+  @IsIn(ACTION_BOUND_STEP_UP_ACTIONS)
+  action?: ActionBoundStepUpAction;
 }
 
 /**

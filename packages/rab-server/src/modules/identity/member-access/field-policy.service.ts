@@ -88,4 +88,20 @@ export class FieldPolicyService {
     for (const [key, value] of Object.entries(record)) if (!policy.hiddenProperties.has(key)) out[key] = value;
     return out as T;
   }
+
+  /**
+   * `omit` at every depth: plain objects and arrays are walked, so a hidden property is absent from nested rows too (a
+   * run's staff rows, their adjustment lines, their payslip). Dates and other class instances are kept as they are.
+   */
+  omitDeep<T>(policy: FieldPolicy, value: T): T {
+    if (policy.hiddenProperties.size === 0) return value;
+    const walk = (v: unknown): unknown => {
+      if (Array.isArray(v)) return v.map(walk);
+      if (v === null || typeof v !== 'object' || Object.getPrototypeOf(v) !== Object.prototype) return v;
+      const out: Record<string, unknown> = {};
+      for (const [key, inner] of Object.entries(v as Record<string, unknown>)) if (!policy.hiddenProperties.has(key)) out[key] = walk(inner);
+      return out;
+    };
+    return walk(value) as T;
+  }
 }
