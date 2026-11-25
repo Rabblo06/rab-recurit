@@ -1,17 +1,13 @@
 # Isolated staging environment runbook (owner decision R4)
 
-> **Upgrade gate (Phase X U-1, 2026-11-11):** N1 applies only to the legacy CF-41 layout; owner-login deployments use the
-> upgrade floor (`OWNER-LOGIN-DEPLOYMENT.md` §3.2a).
-
-> **OUTDATED for deploying (2026-11-11).** Production now deploys exactly like Twenty: one image variable,
-> `CREWFLOW_IMAGE_TAG` (a `sha256:` digest), and one command. **Deploy the API and Worker together, from the same image
-> tag, with `docker compose pull && docker compose up -d`. The API starts first and migrates; the Worker starts when the
-> API is healthy. Never update the API alone while an older Worker keeps running. Take a provider snapshot/restore point
-> before each production deploy.** Rollback: `CREWFLOW_IMAGE_TAG=<previous digest>`, then the same command. Any
-> per-service `up -d --no-deps rab-api` / `rab-worker`, `rab-migrate` or `CREWFLOW_IMAGE_DIGEST` step below is superseded;
-> follow `OWNER-LOGIN-DEPLOYMENT.md` section 3.
-
-> **Owner login (2026-11-04).** The deployment files now run ONE `crewflow_owner` login. Staging uses the shared templates in `packages/rab-docker/env/` (`database.env`, `runtime.env`, `compose.env`, Redis ACL) with staging-only values. The per-service `api.env` / `worker.env` / `migrate.env` / `.env.migrate` below are **superseded**; their templates (`staging/env/{api,worker,migrate}.env.example`) were removed in X5.1, so the sections below that use them are historical. Where this runbook names `crewflow_app`, `crewflow`, `crewflow_migrator` or `DB_TARGET`, follow `OWNER-LOGIN-DEPLOYMENT.md` instead (sections 2–5). Since DB-SETUP (2026-11-12) the database is one setting (or the bundled `db`): `PG_DATABASE_PASSWORD` (bundled db only), or `PG_ADMIN_URL` (staging's admin URL) or `PG_DATABASE_URL` (an existing `crewflow_owner` URL; never an admin URL since 2026-11-17) live in `compose.env`, never in `database.env`, and the one-shot `db-setup` service creates staging's own `crewflow_owner` (PR #125: rab-api / rab-worker never receive `PG_DATABASE_URL`). No SQL or `psql` step is part of the staging install; the `psql` commands below are checks.
+> **Owner login, one image, migrate on start (rewritten 2026-11-24, X5.1 / decision 35 F2).** Staging runs exactly the
+> production deployment: `docker-compose.image.yml` plus `staging/docker-compose.staging.yml` (project name and storage
+> prefix only), ONE `crewflow_owner` login, the shared templates in `packages/rab-docker/env/` (`compose.env`,
+> `database.env`, `runtime.env`, `redis-users.acl`) filled with staging-only values, one image variable
+> `CREWFLOW_IMAGE_TAG` (a `sha256:` index digest) and one command (`docker compose pull && docker compose up -d`): the API
+> migrates on start, the Worker starts when the API is healthy. The separated-mode release step (`rab-migrate`,
+> `.env.migrate`, phases A/B, `crewflow_migrator`, per-service `api.env` / `worker.env`, `staging/env/*.example`) no
+> longer exists and is no longer described here. Upgrades use the floor in `OWNER-LOGIN-DEPLOYMENT.md` §3.2a.
 
 Status: **PLAN, 2026-11-03. Nothing is provisioned.** This runbook creates no host, database, bucket, DNS record or secret.
 Every numbered phase below needs its own owner approval. The temporary OpenShip/Neon deployment is not touched by any
@@ -105,30 +101,37 @@ Generate each value on the operator's machine or on the VM. Never reuse a produc
 
 | Secret | Generate | Lives in |
 |---|---|---|
-| `crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`, `rab_owner` and bootstrap passwords | `openssl rand -hex 32` (URL-safe: the passwords go straight into `postgresql://` URLs; any other generator's output must be percent-encoded there) | the secret store; the env files (0600) |
-| `APP_SECRET` | `openssl rand -hex 48` | `api.env`, `worker.env` |
-| Redis `crewflow` password | `openssl rand -hex 32`; the ACL file stores only its SHA-256: `printf '%s' "$P" \| sha256sum` | `REDIS_URL` in `api.env`/`worker.env`; the hash in `redis-users.acl` |
-| S3 key pair | provider console, scoped to the staging bucket | `api.env`, `worker.env` |
+| Bundled db superuser password `PG_DATABASE_PASSWORD` (bundled db only) and the `crewflow_owner` password `PG_DATABASE_APP_PASSWORD` | `openssl rand -hex 32` each | `compose.env` (0600); with your own database, `PG_ADMIN_URL` / `PG_DATABASE_URL` instead (`env/compose.env.example`, modes a-c) |
+| `APP_SECRET` | `openssl rand -hex 48` | `runtime.env` |
+| Redis `crewflow` password | `openssl rand -hex 32`; the ACL file stores only its SHA-256: `printf '%s' "$P" \| sha256sum` | `REDIS_URL` in `runtime.env`; the hash in `redis-users.acl` |
+| S3 key pair | provider console, scoped to the staging bucket | `runtime.env` |
 | Docker Hub token | Docker Hub, **read-only** scope | the operator's prompt only (§3.4) |
-| PostgreSQL CA + server key | private staging CA (offline CA key); server certificate SAN `postgres.crewflow-staging.internal` | CA certificate at `/etc/crewflow-staging/pg-ca.crt`; the server key only in the PostgreSQL TLS directory |
+| PostgreSQL CA (own database only) | the provider's CA, or a private staging CA; server certificate SAN = the host Crewflow dials | `/etc/crewflow-staging/pg-ca.crt` (`CREWFLOW_PG_CA_FILE`); the bundled db makes its own CA |
 
 ```bash
-sudo cp release/packages/rab-docker/staging/env/compose.env.example /etc/crewflow-staging/compose.env
-# database.env / runtime.env: copy packages/rab-docker/env/{database,runtime}.env.example (owner login, see the note at the top).
-sudo cp release/packages/rab-docker/hosting/redis/users.acl.example /etc/crewflow-staging/secrets/redis-users.acl
-sudo chmod 0600 /etc/crewflow-staging/compose.env /etc/crewflow-staging/secrets/*
-sudo chmod 0644 /etc/crewflow-staging/secrets/redis-users.acl   # read by the redis user (uid 999); holds hashes only
-sudoedit /etc/crewflow-staging/compose.env                       # the two release digests + the Redis digest (release record)
-sudoedit /etc/crewflow-staging/secrets/api.env                   # fill every <placeholder>; never via echo/cat
-sudoedit /etc/crewflow-staging/secrets/worker.env                # fill every <placeholder> (same shared staging values)
-sudoedit /etc/crewflow-staging/secrets/redis-users.acl           # replace both #<sha256-...> placeholders with real hashes
+T=/opt/crewflow-staging/release/packages/rab-docker/env
+sudo cp $T/compose.env.example  /etc/crewflow-staging/compose.env
+sudo cp $T/database.env.example /etc/crewflow-staging/secrets/database.env
+sudo cp $T/runtime.env.example  /etc/crewflow-staging/secrets/runtime.env
+sudo cp $T/redis-users.acl.example /etc/crewflow-staging/secrets/redis-users.acl
+sudo chmod 0600 /etc/crewflow-staging/compose.env /etc/crewflow-staging/secrets/*.env
+sudoedit /etc/crewflow-staging/compose.env              # image + Redis digests, CREWFLOW_SECRETS_DIR=/etc/crewflow-staging/secrets, db mode
+sudoedit /etc/crewflow-staging/secrets/database.env     # PG_EXPECTED_DATABASE_NAME; CREWFLOW_DEPLOYMENT_ID=<fresh staging UUID> (§2)
+sudoedit /etc/crewflow-staging/secrets/runtime.env      # fill every <placeholder>; never via echo/cat
+sudoedit /etc/crewflow-staging/secrets/redis-users.acl  # the SHA-256 of the Redis password; ownership as OWNER-LOGIN-DEPLOYMENT.md §2
 ```
 
-The preflight in §5 refuses any `<placeholder>` left in `api.env` or `worker.env`, a missing required name, a
-migration/ops credential and a database login other than the allowed one per service.
+Lint all three before any start (names only, never values):
+
+```bash
+cd /opt/crewflow-staging/release/packages/rab-docker
+node scripts/compose-owner-login.cjs --lint-env-file compose  /etc/crewflow-staging/compose.env
+node scripts/compose-owner-login.cjs --lint-env-file database /etc/crewflow-staging/secrets/database.env
+node scripts/compose-owner-login.cjs --lint-env-file runtime  /etc/crewflow-staging/secrets/runtime.env
+```
 
 Rotation:
-- database logins: `ALTER ROLE ... PASSWORD` from a `\password` prompt, update the env file, rolling restart;
+- the `crewflow_owner` password: `OWNER-LOGIN-DEPLOYMENT.md` §7, "Rotate the crewflow_owner password";
 - Redis: new hash in the ACL file, then `ACL LOAD` as the `ops` user, enabled for that session only;
 - S3 / SMTP / Docker Hub: rotate at the provider.
 
@@ -136,95 +139,53 @@ Rotate everything after any suspected exposure and at teardown.
 
 ## 5. First install (each step is an owner-approved window)
 
-> **SUPERSEDED (O3, owner decisions C1-C5, 2026-11-05; and the owner login since #72).** Steps 3-5 and 7 below describe
-> the separated-mode release step (`rab-migrate`, `.env.migrate`, phases A/B, `crewflow_migrator`), which no longer
-> exists: the API migrates on start and there is no `rab-migrate`. For a staging install or upgrade follow
-> [`OWNER-LOGIN-DEPLOYMENT.md`](OWNER-LOGIN-DEPLOYMENT.md) section 2 (fresh install) and section 3 (back up first, then
-> stop-then-start), with `staging/docker-compose.staging.yml`. The text below is kept until this runbook is rewritten.
-
-Shortcut: `C` is the compose command, run from `/opt/crewflow-staging/release/packages/rab-docker`.
+Follow `OWNER-LOGIN-DEPLOYMENT.md` section 2 (fresh install) with the staging files. `C` is the compose command, run from
+`/opt/crewflow-staging/release/packages/rab-docker`:
 
 ```bash
 cd /opt/crewflow-staging/release/packages/rab-docker
 C="sudo docker compose --env-file /etc/crewflow-staging/compose.env -f docker-compose.image.yml -f staging/docker-compose.staging.yml"
 sudo node staging/verify-image-compose.cjs --environment --env-file /etc/crewflow-staging/compose.env \
   --compose staging/docker-compose.staging.yml        # images by digest + every runtime control + env-file names
-$C config --quiet --no-env-resolution                 # renders without reading env files (.env.migrate may not exist yet)
+$C config --quiet                                     # renders the stack
 ```
 
-1. **PostgreSQL**: the Infrastructure agent's self-hosted template, with `CREWFLOW_BOOTSTRAP_PHASE_D=true`. It creates
-   `rab_owner` (LOGIN, owns the database and `core`), `rab_app` (NOLOGIN), `crewflow_bootstrap` (SUPERUSER, NOLOGIN until
-   phase B), `crewflow_app`, and `crewflow_worker` with the reviewed shape. Then:
-   - verify its summary line;
-   - run the role checks (MIGRATION-AND-ROLLBACK-PLAN.md §4.2; generated inventory L4/L5);
-   - verify TLS: `psql "sslmode=verify-full sslrootcert=/etc/crewflow-staging/pg-ca.crt host=postgres.crewflow-staging.internal ..." -c 'SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()'`.
-2. **Redis**: `$C up -d --wait rab-redis`, then check that:
+1. **Redis**: `$C up -d --wait rab-redis`, then check that:
    - `redis-cli ping` (no auth) returns `NOAUTH`;
    - `--user healthcheck` PING returns `PONG`;
    - `--user crewflow` `CONFIG GET` returns `NOPERM`;
    - `INFO` shows `maxmemory_policy:noeviction` and `aof_enabled:1`.
-> **UNREHEARSED (steps 3–5 and the identity, TLS and production-refusal parts of 7).** The local rehearsal
-> (MIGRATION-AND-ROLLBACK-PLAN.md §8) proved the exit codes, the token flow and the phase split only with
-> `DB_TARGET=local`, no TLS and no identity bind. Under `DB_TARGET=production` the following are untested until the
-> first approved staging window, which is their rehearsal:
-> - N1 (it also needs the N1 code change);
-> - `verify-full`;
-> - the bootstrap flag and `db:bind-identity`;
-> - the production configuration refusals.
-
-3. **Phase A**: create `.env.migrate` with `rab_owner` and `CREWFLOW_MIGRATION_PHASE=A` (0600; its template
-   was removed in X5.1: this separated-mode section is historical).
-   - `$C run --rm rab-migrate` returns exit 3, the list of **all 250**, and a token.
-   - Owner approval, then `$C run --rm -e CREWFLOW_MIGRATION_APPROVED=<token> rab-migrate`. Expected: the run stops at
-     the role split, which refuses `rab_owner` (exit 1 after the 128 phase A migrations).
-4. **Phase B + bind**, in one supervised step:
-   - Enable the bootstrap login for this run: `ALTER ROLE crewflow_bootstrap LOGIN PASSWORD` from `\password`.
-   - Switch `.env.migrate` to it, with `CREWFLOW_MIGRATION_PHASE=B`, the two bootstrap passwords,
-     `CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP=unbound-production-database` and `PG_EXPECTED_DATABASE_NAME`.
-   - Check run (exit 3, 122 pending), owner review, then the apply run with the new token (exit 0, "post-checks passed").
-   - Immediately run `db:bind-identity --environment production --deployment-id <staging UUID> ...`
-     (MIGRATION-AND-ROLLBACK-PLAN.md §4.1).
-   - Remove the bootstrap flag.
-   - `ALTER ROLE crewflow_bootstrap NOLOGIN`.
-5. **Hardening**: `crewflow_migrator` from the reviewed production script (Infrastructure templates, `sql/20-...`), and
-   the post-bootstrap hardening (`sql/30-...`: NOLOGIN for the bootstrap identities, rotation of the passwords the
-   role-split migrations set). Point `.env.migrate` at `crewflow_migrator`; `$C run --rm rab-migrate` must exit 0.
-6. **Posture**: from a trusted operator checkout of `<APPROVED_SHA>`, through an SSH tunnel:
-   - the golden posture check (`check-db-security-posture.ts`);
-   - `tools/check-rls-coverage.ts` as `crewflow_app` (exit 0, `rolbypassrls = false`);
-   - the generated inventory (`applied 250`, nothing else).
-7. **Services**: `$C up -d --wait rab-api`. Compose first runs the `rab-migrate` dependency (one check run; exit 0),
-   then the API. Then the Worker: `$C up -d --wait rab-worker`. After the window, delete `.env.migrate`. From then on,
-   restart or replace the services with `$C up -d --no-deps rab-api` / `rab-worker`: the API and Worker refuse pending
-   migrations on their own, so the dependency run is not needed between releases. A plain `up` without `--no-deps`
-   needs `.env.migrate` again. **OWNER DECISION:** keep `.env.migrate` (0600, root) on the host permanently, as
-   docker-compose.production.yml assumes, or only during windows (recommended; `crewflow_migrator` can then be NOLOGIN
-   between releases). Required log lines:
+2. **Start**: `$C up -d --wait --wait-timeout 1200`. `db` (bundled mode) becomes healthy first, the one-shot `db-setup`
+   creates staging's own `crewflow_owner`, rab-api migrates on start and becomes healthy, then rab-worker starts. No SQL
+   or `psql` step is part of the install. Required log lines (`OWNER-LOGIN-DEPLOYMENT.md` §2 step 5 and §7):
    - `api-prestart: runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only ... mode=enforce`;
-   - `[worker-bundle] runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4/4 ... mode=enforce`;
-   - `[worker-bundle] live identity probes agree ... (jobs=crewflow_app, provisioner=crewflow)`.
+   - `[worker-isolation] runtime isolation as declared: ... mode=enforce`.
 
    **A missing `mode=enforce` means the image predates the enforce mode: STOP** (§9).
-8. **First admin**: the existing one-off `bootstrap-admin` operator command (the API image's
-   `packages/rab-server/dist/command/main.js bootstrap-admin`, run once as the `crewflow` login with production command
-   authority and the staging identity; database runbook "bootstrap-admin"). It is a one-off run of the API image, the
-   same way the three operations commands run (`OWNER-LOGIN-DEPLOYMENT.md` section 7, "Operations commands"); there is
-   no separate operations container. Then run the smoke tests on synthetic accounts only:
-   - sign-in;
+3. **Posture**: from a trusted operator checkout of `<APPROVED_SHA>`, through an SSH tunnel, the checks named in
+   `OWNER-LOGIN-DEPLOYMENT.md` §2 (golden posture, RLS coverage, the migration ledger equals the release chain).
+4. **First admin**: `BOOTSTRAP_ADMIN_EMAIL=<synthetic admin address>` for rab-api in `compose.env`, with
+   `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true` in `runtime.env` (the template's line; owner decision 2), then `$C up -d`. One
+   activation email goes to that address; remove the variable once the admin has signed in and enrolled MFA
+   (`OWNER-LOGIN-DEPLOYMENT.md` §2 step 6). Then run the smoke tests on synthetic accounts only:
+   - sign-in (with MFA enrolment for the platform admin);
    - a shift publish and offer;
    - an email to the sandbox;
    - a pre-shift report PDF stored in the bucket and downloaded through its presigned URL;
    - a cross-tenant denial (404).
-9. **Backups on** (MIGRATION-AND-ROLLBACK-PLAN.md §5). The first restore rehearsal must happen within 7 days.
+5. **Backups on** (MIGRATION-AND-ROLLBACK-PLAN.md §5). The first restore rehearsal must happen within 7 days.
+
+Upgrades: `OWNER-LOGIN-DEPLOYMENT.md` section 3 (back up first, then the same one command with the new
+`CREWFLOW_IMAGE_TAG`).
 
 ## 6. Phase D activation order (Phase D runbook §11, in this order, each step separately approved)
 
 | # | Step | Staging specifics |
 |---|---|---|
-| 1 | `crewflow_worker` created (§3) | Done at step 5.1 on a fresh install (pre-created, reviewed shape). Verify with the §3.3 query. |
-| 2 | The five Phase D migrations (§4) | Part of the fresh chain (step 5.4). **The 14-day clock starts here.** Therefore install staging only once #26 (#24 fix) is merged and in the release image, or record an owner exception for staging. |
-| 3 | Readiness in per_scope (§5.1) | Switch the Worker's `PG_DATABASE_URL` in `worker.env` to the `crewflow_worker` URL, keeping `WORKER_CLAIM_MODE` unset (per_scope). Restart the Worker. Check every §5.1 item, including at least one full 900 s reconcile interval. **HARD BLOCKER: #24 merged and verified.** |
-| 4 | Global + poll (§5.2) | Add `WORKER_CLAIM_MODE=global` to `worker.env`; rolling restart. Within 14 days of step 2. |
+| 1 | A separate Worker login | **Not available under the owner login**: rab-api and rab-worker both run as `crewflow_owner` (owner decision 2026-11-04). A Worker login, and with it global claims, waits for the owner's J5/D5 decision (decision 34). |
+| 2 | The five Phase D migrations (§4) | Part of the release chain the API applies on start (§5 step 2). |
+| 3 | Readiness in per_scope (§5.1) | The default (`WORKER_CLAIM_MODE` unset). Check every §5.1 item, including at least one full 900 s reconcile interval. |
+| 4 | Global + poll (§5.2) | **Not available**: `WORKER_CLAIM_MODE` / `WORKER_DISPATCH_MODE` are refused by the runtime.env lint and by env validation in production until the owner's J5 decision. |
 | 5 | First sweep watch (§5.3) and monitoring (§7) | At least one full business day. |
 | 6 | Staging measurements (closure criteria) | Idle and loaded PostgreSQL load against the per_scope baseline; sweep duration at staging volume; the F2 write-cost benchmark on this uncontended host; durations of the full migration chain and of the Phase D `down()`s on a production-sized copy. |
 | 7 | Rollback drills (required before production, §1) | Global → per_scope (§8.1); credential rollback (§8.2); image rollback (§8.3, jobs-only, documented as the production owner exception); migration rollback (§8.4) on a **restored copy**, not on the live staging database. |
@@ -284,7 +245,7 @@ Worker bundle launcher that first carried it is retired):
 - in `enforce`, any missing control refuses to start, with exit 64 (API) or the Worker's start-up refusal (exit 1).
 
 Release images built before that change ignore the variable and only warn. **Do not deploy this variant with such an
-image.** The start line must contain `mode=enforce` (§5 step 7).
+image.** The start line must contain `mode=enforce` (§5 step 2).
 
 ## 10. Teardown (owner-approved; staging data is synthetic)
 
