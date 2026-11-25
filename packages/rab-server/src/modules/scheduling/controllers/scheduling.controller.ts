@@ -20,12 +20,18 @@ import { SubmitShiftRequestDto } from '../dto/submit-shift-request.dto';
 import { SetRequestedStaffDto } from '../dto/set-requested-staff.dto';
 import { UpdateDraftShiftDto } from '../dto/update-draft-shift.dto';
 import { SchedulingService } from '../services/scheduling.service';
+import { DraftShiftBatchService } from '../services/draft-shift-batch.service';
+import { CopyPreviousWeekDto } from '../dto/copy-previous-week.dto';
+import { ShiftPatternDto } from '../dto/shift-pattern.dto';
 import { MobileApplication } from '../../../engine/core-modules/auth/guards/mobile-application.decorator';
 
 @Controller('rest/v1')
 @UseGuards(JwtAuthGuard)
 export class SchedulingController {
-  constructor(private readonly schedulingService: SchedulingService) {}
+  constructor(
+    private readonly schedulingService: SchedulingService,
+    private readonly draftBatch: DraftShiftBatchService,
+  ) {}
 
   @MobileApplication('venue_manager_app')
 
@@ -145,6 +151,35 @@ export class SchedulingController {
   @UseGuards(PermissionGuard(PermissionFlag.STAFFING_REQUEST_APPROVE))
   removeRequestedStaff(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Param('staffProfileId') staffProfileId: string) {
     return this.schedulingService.removeRequestedStaff(ctx, id, staffProfileId);
+  }
+
+  // Static paths before `shifts/:id/...`. Named actions (never a status): preview writes nothing; confirm creates DRAFTs.
+  @Post('shifts/copy-previous-week/preview')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
+  previewCopyPreviousWeek(@AuthUser() ctx: AuthContext, @Body() dto: CopyPreviousWeekDto) {
+    return this.draftBatch.previewCopyPreviousWeek(ctx, dto);
+  }
+
+  @Post('shifts/copy-previous-week')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
+  copyPreviousWeek(@AuthUser() ctx: AuthContext, @Body() dto: CopyPreviousWeekDto) {
+    return this.draftBatch.copyPreviousWeek(ctx, dto);
+  }
+
+  @Post('shifts/pattern/preview')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
+  previewShiftPattern(@AuthUser() ctx: AuthContext, @Body() dto: ShiftPatternDto) {
+    return this.draftBatch.previewShiftPattern(ctx, dto);
+  }
+
+  @Post('shifts/pattern')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE), PermissionGuard(PermissionFlag.SCHEDULE_BULK), RequireWorkspaceGuard)
+  generateShiftPattern(@AuthUser() ctx: AuthContext, @Body() dto: ShiftPatternDto) {
+    return this.draftBatch.generateShiftPattern(ctx, dto);
   }
 
   @Post('shifts')

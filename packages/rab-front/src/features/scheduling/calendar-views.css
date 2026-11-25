@@ -286,3 +286,16 @@
     --calendar-gutter: 40px;
   }
 }
+
+/* The copy button takes the free space; the view switch then sits right after it. */
+.walnut-calendar .calendar-head .calendar-copy-week {
+  margin-left: auto;
+}
+
+.walnut-calendar .calendar-head .calendar-pattern {
+  margin-left: 0;
+}
+
+.walnut-calendar .calendar-head .calendar-copy-week ~ .calendar-view-switch {
+  margin-left: 0;
+}
