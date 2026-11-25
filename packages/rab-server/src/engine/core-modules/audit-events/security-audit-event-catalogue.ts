@@ -211,6 +211,7 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   'shift.archived',
   'shift.restored',
   'shift.created',
+  'shift.headcount_increased',
   'shift.published',
   'venue.photo_updated',
   'venue_role_rate.created',

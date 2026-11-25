@@ -308,6 +308,21 @@ function throwIfEveryRecipientPastDeadline(results: BulkOfferResult['results']):
   }
 }
 
+/**
+ * Per-recipient windows on the Manager send paths (sendBulk, createShiftAndSend) must sit INSIDE the shift's own window
+ * (its original bounds): a window starting before it or ending after it is a 400, and the shift is never extended by
+ * them — scheduled hours and the estimated pay can only shrink, never grow, from an individual time. FLAGGED pay
+ * assumption for the owner (security review, 2026-11-24). The Venue-Manager request path keeps its own, wider rule
+ * (venue-manager-scoping.integration.spec.ts), so this is not in the shared validateAssignmentTime helper.
+ */
+function assertWindowInsideShift(shift: Shift, window: ScheduledWindow): ScheduledWindow {
+  const bounds = defaultAssignmentTime(shift);
+  if (window.startsAt.getTime() < bounds.startsAt.getTime() || window.endsAt.getTime() > bounds.endsAt.getTime()) {
+    throw new BadRequestException('Each staff member’s time must be within the shift.');
+  }
+  return window;
+}
+
 @Injectable()
 export class OfferService {
   constructor(
@@ -801,9 +816,12 @@ export class OfferService {
    * recipient can't poison a batch-mate's successful insert.
    */
   async sendBulk(ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<BulkOfferResult> {
+    const resizing = dto.requiredCount !== undefined || dto.expectedRequiredCount !== undefined;
+    if (resizing && dto.mode === 'replacement') throw new BadRequestException('Headcount changes cannot be combined with replacement offers.');
     if (dto.mode === 'replacement') return this.sendReplacementBulk(ctx, shiftId, dto); // re-checks offer.send itself
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND);
+      if (resizing) await this.increaseHeadcountTx(manager, ctx, shiftId, dto);
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
@@ -811,7 +829,7 @@ export class OfferService {
       const windows = new Map<string, ScheduledWindow & { breakMinutes?: number | null }>();
       for (const row of dto.staffAssignments ?? []) {
         if (!dto.staffProfileIds.includes(row.staffProfileId) || windows.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
-        windows.set(row.staffProfileId, { ...validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift)), breakMinutes: row.breakMinutes });
+        windows.set(row.staffProfileId, { ...assertWindowInsideShift(shift, validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift))), breakMinutes: row.breakMinutes });
       }
       // Whole-batch availability pre-check BEFORE any recipient is processed: an unacknowledged conflict returns one 409
       // listing every affected recipient, and nothing is sent — never a silently thinned batch.
@@ -833,12 +851,51 @@ export class OfferService {
         }
       }
 
+      // Throwing rolls back the headcount change and its audit row too when no offer was sent.
+      if (resizing && !results.some((r) => r.ok)) throw new ConflictException('No offers were sent; headcount was not changed. Check staff eligibility and try again.');
+
       if (shift.status === ShiftStatus.OPEN && results.some((r) => r.ok)) {
         assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OFFERED);
         await manager.update(Shift, shiftId, { status: ShiftStatus.OFFERED });
       }
 
       return { batchId, results };
+    });
+  }
+
+  /**
+   * Adds places to an existing shift as part of one send action (never an increment: an absolute `requiredCount` paired
+   * with the `expectedRequiredCount` the client last saw, so a retry or a concurrent edit is a 409, not a double resize).
+   * Layer 2 re-checks offer.send AND schedule.create; the shift must be the caller's own in the caller's workspace (404
+   * otherwise), active, published and not yet ended. A full shift reopens to partially_filled through assertTransition.
+   * Runs in the caller's transaction, so a send with no successful offer rolls the resize back.
+   */
+  private async increaseHeadcountTx(manager: EntityManager, ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<void> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND)) || !(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE))) {
+      throw new ForbiddenException('Permission required.');
+    }
+    const current = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
+    if (!current || current.organisationId !== ctx.organisationId || !ctx.workspaceId || current.workspaceId !== ctx.workspaceId || current.createdBy !== ctx.userId) {
+      throw new NotFoundException('Shift not found.');
+    }
+    const requiredCount = dto.requiredCount;
+    if (requiredCount === undefined || dto.expectedRequiredCount === undefined || !Number.isInteger(requiredCount) || requiredCount < 1 || requiredCount > 1000 || requiredCount <= current.requiredCount) {
+      throw new BadRequestException('The new headcount must be greater than the current headcount.');
+    }
+    if (current.requiredCount !== dto.expectedRequiredCount) throw new ConflictException('Headcount changed. Reload the shift before adding staff.');
+    const [{ now }] = await manager.query('SELECT clock_timestamp() AS now');
+    const resizable: string[] = [ShiftStatus.OPEN, ShiftStatus.OFFERED, ShiftStatus.PARTIALLY_FILLED, ShiftStatus.FULLY_FILLED, ShiftStatus.CONFIRMED];
+    if (current.archivedAt || new Date(current.endsAt).getTime() <= new Date(now).getTime() || !resizable.includes(current.status)) {
+      throw new ConflictException('Only an active, published shift can accept additional places.');
+    }
+    const full: string[] = [ShiftStatus.FULLY_FILLED, ShiftStatus.CONFIRMED];
+    const nextStatus = full.includes(current.status) ? ShiftStatus.PARTIALLY_FILLED : current.status;
+    if (nextStatus !== current.status) assertTransition(SHIFT_TRANSITIONS, current.status, nextStatus);
+    await manager.update(Shift, shiftId, { requiredCount, status: nextStatus });
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_HEADCOUNT_INCREASED, {
+      entityType: 'shift',
+      entityId: shiftId,
+      metadata: { previousRequiredCount: current.requiredCount, requiredCount },
     });
   }
 
@@ -1034,18 +1091,24 @@ export class OfferService {
       const shiftLabel = await this.getShiftLabel(manager, shift.id);
       const batchId = randomUUID();
 
+      // Per-recipient windows, validated exactly like sendBulk's (inside the parent shift, one row per selected recipient).
+      const windows = new Map<string, ScheduledWindow & { breakMinutes?: number | null }>();
+      for (const row of dto.staffAssignments ?? []) {
+        if (!dto.staffProfileIds.includes(row.staffProfileId) || windows.has(row.staffProfileId)) throw new BadRequestException('Invalid or duplicate staff assignment.');
+        windows.set(row.staffProfileId, { ...assertWindowInsideShift(shift, validateAssignmentTime(shift, { startsAt: new Date(row.startsAt), endsAt: new Date(row.endsAt) }, effectiveAssignmentBreakMinutes(row, shift))), breakMinutes: row.breakMinutes });
+      }
       // Same whole-batch pre-check as sendBulk; a 409 here also rolls back the just-inserted shift row.
       const acknowledgements = dto.acknowledgedAvailabilityConflicts ?? [];
       await assertStaffAvailabilityAcknowledged(
         manager,
-        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...defaultAssignmentTime(shift) })),
+        dto.staffProfileIds.map((staffProfileId) => ({ staffProfileId, ...(windows.get(staffProfileId) ?? defaultAssignmentTime(shift)) })),
         acknowledgements,
       );
       const results: BulkOfferResult['results'] = [];
       for (const staffProfileId of dto.staffProfileIds) {
         await manager.query('SAVEPOINT sp_create_and_send');
         try {
-          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements);
+          const offer = await this.sendOne(manager, ctx, shift, shiftLabel, staffProfileId, dto.expiresInHours, batchId, acknowledgements, windows.get(staffProfileId));
           results.push({ staffProfileId, ok: true, offerId: offer.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_create_and_send');

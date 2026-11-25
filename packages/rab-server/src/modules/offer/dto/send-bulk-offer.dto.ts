@@ -8,6 +8,19 @@ export const SEND_OFFER_MODES = ['standard', 'replacement'] as const;
 export type SendOfferMode = (typeof SEND_OFFER_MODES)[number];
 
 export class SendBulkOfferDto extends WithAvailabilityAcknowledgementsDto {
+  /** Explicit total headcount, paired with a stale-write guard. Never an increment. Standard mode only. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  requiredCount?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  expectedRequiredCount?: number;
+
   @ArrayUnique()
   @IsUUID('4', { each: true })
   @ArrayMinSize(1)

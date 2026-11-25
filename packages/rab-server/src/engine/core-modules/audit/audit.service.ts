@@ -140,6 +140,8 @@ export const AuditAction = {
   SHIFT_QR_ROTATED: 'shift.qr_rotated',
   /** Wave 5: the shift lifecycle's first two steps, recorded by SchedulingService.create / publish (timeline read model). */
   SHIFT_CREATED: 'shift.created',
+  /** OfferService.sendBulk with requiredCount: places added to an existing shift as part of one send action. */
+  SHIFT_HEADCOUNT_INCREASED: 'shift.headcount_increased',
   SHIFT_PUBLISHED: 'shift.published',
   /** One-off repair (owner decision 2026-11-06, Q3): `shift:complete-settled --apply` completed a settled in_progress shift. Actor: an active platform admin. */
   SHIFT_COMPLETED_BY_REPAIR: 'shift.completed_by_repair',

@@ -1,6 +1,10 @@
 import { WithAvailabilityAcknowledgementsDto } from '../../staff/dto/availability-acknowledgement.dto';
 import { Type } from 'class-transformer';
+import { RequestedStaffTimeDto } from '../../scheduling/dto/submit-shift-request.dto';
 import {
+  ArrayUnique,
+  IsArray,
+  ValidateNested,
   ArrayMaxSize,
   ArrayMinSize,
   IsDateString,
@@ -53,10 +57,19 @@ export class CreateShiftAndSendDto extends WithAvailabilityAcknowledgementsDto {
   @IsString()
   notes?: string;
 
+  @ArrayUnique()
   @IsUUID('4', { each: true })
   @ArrayMinSize(1)
   @ArrayMaxSize(100)
   staffProfileIds!: string[];
+
+  /** Optional per-recipient scheduled window inside the new shift (same shape and rules as SendBulkOfferDto). */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => RequestedStaffTimeDto)
+  staffAssignments?: RequestedStaffTimeDto[];
 
   @IsOptional()
   @Type(() => Number)
