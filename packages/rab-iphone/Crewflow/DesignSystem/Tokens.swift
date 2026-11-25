@@ -116,7 +116,7 @@ public enum ScheduleTokens {
     public static let actionHeight: CGFloat = 54
     public static let actionInset: CGFloat = 20
     public static let contentMaxWidth: CGFloat = 520
-    public static let toastRadius: CGFloat = 12
+    public static let toastRadius: CGFloat = 24
 
     // Floating tab bar
     public static let navigationWidthFactor: CGFloat = 0.90

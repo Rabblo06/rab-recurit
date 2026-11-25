@@ -641,6 +641,7 @@ struct StaffHeroTimer: View {
                 .foregroundColor(ScheduleTokens.ink)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
+                .modifier(CountdownDigitMotion(value: clock))
                 .accessibilityLabel("\(seconds / 3600) hours \((seconds / 60) % 60) minutes \(seconds % 60) seconds")
         } else {
             Text("—")
