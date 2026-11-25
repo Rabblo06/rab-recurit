@@ -10609,6 +10609,70 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Payroll approval: maker-checker and a fresh step-up, no override (decision 5, branch feat/payroll-approval-maker-checker, 2026-11-21; no SQL)
+
+- **Who can call this:** a workspace manager holding `payroll.approve` (approve / bulk-approve a payroll record; finalise a
+  run). Venue Managers are refused categorically (unchanged).
+- **Threat:** one person prepares pay and approves it (fraud or an unchecked mistake), or a hijacked-but-live session
+  (stolen cookie / token, unattended machine) approves pay.
+- **Controls (layer 2, in the services, so jobs and direct calls are covered too):**
+  - `PayrollService.approve` / `bulkApprove`: refused when the caller finalised the shift report that created the record
+    (`shift_report.finalised_by`, read under the same row lock; the report finalisation is what prepares a record). 403
+    single; per-id `prepared_by_you` in bulk. An unreadable preparer is refused (409 / `not_ready`), never treated as
+    "someone else". The own-hours refusal is unchanged.
+  - `PayrollRunService.finalise`: refused (403) when the caller created the run (`prepared_by`) or added lines to it through
+    `prepare` (the insert-only `payroll_run.prepared` audit row each prepare writes in the same transaction as its lines,
+    `linesAdded > 0`). A run the check cannot read counts as prepared by the caller (fail closed).
+  - All three need a fresh step-up of THIS session (`StepUpReauthService.assertRecentStepUp`, actions
+    `payroll.record.approve` / `payroll.run.finalise`): password within AUTH_STEP_UP_WINDOW_SECONDS (default 5 min) plus the
+    authenticator code when the approver has 2FA. Checked before the transaction opens (the step-up uses its own short
+    transactions; holding two pool connections is the deadlock class fixed in #323) and before the record is looked up,
+    so an unknown id discloses nothing. Refusals are audited (`auth.step_up_failed` with the action). Admin Inspect is refused.
+  - No override exists; an organisation with one payroll person cannot approve until it adds a second (decision 5's stated
+    consequence).
+- **Not changed:** reject, statement retry, prepare, upload, net and mark-paid need no step-up (decision 5 names approval).
+- **Database layer:** none added. The maker-checker facts live in other tables (shift_report, audit_log), and decision 5
+  says "no SQL unless b is chosen". RLS still refuses own-hours approval (`payroll_record_update` WITH CHECK).
+- **Tests:** payroll-approval (decision-5 case: preparer refused single + bulk with a fresh step-up, stale session refused
+  and audited, another organisation 404 after step-up, second manager approves), payroll-runs (preparer refused, stale
+  session refused, second manager finalises), lane-d step-up adoption (three new routes), and every suite that approves
+  pay now uses a second manager of the workspace (server: realtime-c1b, w5-timeline; worker: shift-statement,
+  shift-statement-wake, phase-d cutover, phase-d two-worker).
+
+**Update after the independent review of #335 (HIGH / MEDIUM / LOW fixed; the trade-off above is withdrawn):**
+- **Fresh 2FA, bound to the action, single use:** approve / bulk-approve / finalise now call
+  `StepUpReauthService.assertFreshSecondFactorForAction(ctx, action)`. An approver with no authenticator factor is refused
+  (403 `STEP_UP_MFA_ENROLMENT_REQUIRED`, audited). The session must hold a grant written by `POST /auth/step-up` with
+  `action` set and a verified TOTP code (key `step-up:<session hash>:action:<action>`); a sign-in grant, the ordinary
+  session grant, or a grant for another action never counts; the grant is read with GETDEL, so one proof serves exactly one
+  approval call. The web dialog receives `action` in the 403 and sends it back with the proof. Lane P2's approval actions
+  use the same helper (add them to ACTION_BOUND_STEP_UP_ACTIONS).
+- **Preparers:** whoever reviewed the attendance seat (`shift_assignment.attendance_reviewed_by`) is a preparer too.
+- **Database layer (DRAFT, new SQL, PayrollMakerCheckerBackstop1786723020000):** `core.payroll_record_guard()` (the one trigger
+  function of core AND every workspace payroll_record). On the move to `approved`: `approved_by` must be the signed-in caller
+  (no worker exemption: the worker never writes it and the marker is a plain GUC); the record's finalised report and seat
+  must be readable with a non-null finaliser and reviewer (fail closed); the approver is neither of them; and because those
+  live columns are writable by managers, the insert-only `core.audit_log` must hold the finalisation BY the live finaliser
+  and the review BY the live reviewer, and none of those history rows may name the approver (re-pointing `finalised_by` or
+  the reviewer afterwards, even with a forged history row naming a colleague, does not help). The lookups are uuid = uuid
+  on (organisation_id, entity_type, entity_id), the leading columns of audit_log_timeline_idx (EXPLAIN test).
+- **Rollout note (owner):** records with no finalisation / review history, or a null reviewer, can no longer be approved.
+  Read-only pre-deploy count (run as the database owner; `core` while HWS is off), `PAYROLL_GUARD_PREDEPLOY_COUNT_SQL` in
+  payroll-maker-checker-sql.ts:
+  `SELECT count(*) FROM core.payroll_record pr LEFT JOIN core.shift_report sr ON sr.shift_id = pr.shift_id AND sr.status = 'finalised'
+  LEFT JOIN core.attendance a ON a.id = pr.attendance_id LEFT JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id
+  WHERE pr.status = 'pending_approval' AND (sr.id IS NULL OR sr.finalised_by IS NULL OR sa.id IS NULL OR sa.attendance_reviewed_by IS NULL
+  OR NOT EXISTS (finalisation row by sr.finalised_by) OR NOT EXISTS (review row by sa.attendance_reviewed_by))` (full text in the module).
+  Outside that move `approved_by` never changes (so a two-step "set approved_by, then flip status" is refused at step one).
+  The service mirrors the same rule (live columns + history, null reviewer refused). The payroll_run finaliser rule (core
+  and workspace copies, plus a real per-line `prepared_by`) moves to a follow-up blocked on the 0.7.0 chain; until then the
+  run rule is service-only (creator via `prepared_by`, top-ups via the audit row).
+- **Tests:** payroll-approval (11) / (11b): no proof, a sign-in or ordinary grant, a sign-in grant planted under the action
+  key, a proof for another action, an un-enrolled approver: all 403; the real step-up with code then exactly one approval,
+  a second approval on the same proof 403; a reviewer who did not finalise: service 403 and DB 42501.
+  payroll-maker-checker-rls (core, runtime login): finaliser / reviewer approving 42501, run preparer finalising 42501, a
+  third manager allowed.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It
