@@ -3,6 +3,7 @@ import { EmploymentStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
+import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
@@ -13,6 +14,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { OfferService } from '../../modules/offer/services/offer.service';
 import { SchedulingService } from '../../modules/scheduling/services/scheduling.service';
+import { PAY_RATE_REQUIRED_CODE, PAY_RATE_REQUIRED_MESSAGE } from '../../modules/scheduling/utils/pay-rate-rules';
 import { VenueService } from '../../modules/venue/services/venue.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
@@ -24,8 +26,12 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * explicit rate → venue role rate in force at the shift start (latest effective_from wins; a rate not yet in force or
  * already ended is ignored) → job role default. Then the snapshot rule: once a seat is confirmed, adding, changing or
  * deleting venue rates and changing the job role default never changes that shift's rate or the seat's
- * `pay_rate_snapshot_pence`; only shifts created afterwards see the new rate. (The staff role rate step does not exist
- * yet: no per-staff rate table.)
+ * `pay_rate_snapshot_pence`; only shifts created afterwards see the new rate. (The staff role rate is applied per seat:
+ * PR #311.)
+ *
+ * Owner decisions (decided 2026-11-22): 39 — a shift whose rate resolves to £0 is refused on create, publish and
+ * create-and-send (409 PAY_RATE_REQUIRED, "Set a pay rate for this role first."); 40 — a rate period is judged on the shift
+ * start's ORGANISATION-LOCAL date (core.organisation.timezone), end date inclusive.
  */
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -147,5 +153,125 @@ describeIfDb('Rate resolution and the confirmation snapshot (integration)', () =
     expect(await shiftRate(shift.id)).toBe('2100');
     expect(await seat()).toEqual({ status: 'confirmed', pay_rate_snapshot_pence: '2100' });
     expect(await shiftRate((await newShift(role)).id)).toBe('2600'); // a shift created now resolves the new rate
+  });
+
+  // ---------------------------------------------------------------------------------------------- decision 39 (£0 refused)
+
+  it('decision 39: creating a shift whose rate resolves to £0 is refused (service and HTTP 409 PAY_RATE_REQUIRED); nothing is inserted', async () => {
+    const role = await newRole(0);
+    await expect(newShift(role)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE, message: PAY_RATE_REQUIRED_MESSAGE } });
+    await expect(newShift(await newRole(1400), { payRatePence: 0 })).rejects.toMatchObject({ status: 409 }); // an explicit 0 too
+    const start = new Date(Date.now() + 40 * 86_400_000);
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/shifts')
+      .set('Authorization', `Bearer ${await factory.login(a)}`)
+      .send({ venueId, jobRoleId: role, startsAt: start.toISOString(), endsAt: new Date(start.getTime() + 4 * 3_600_000).toISOString(), requiredCount: 1 });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: PAY_RATE_REQUIRED_CODE, message: PAY_RATE_REQUIRED_MESSAGE });
+    // A venue rate for the role fixes it: the same create now succeeds at that rate.
+    await venues.createRoleRate(ctxA, venueId, { jobRoleId: role, payRatePence: 1650, effectiveFrom: day(-10) } as never);
+    expect(await shiftRate((await newShift(role)).id)).toBe('1650');
+    const shiftTable = siblingTable(await businessTableOf(admin, 'venue', venueId), 'shift');
+    expect(Number((await admin.query(`SELECT count(*)::int AS n FROM ${shiftTable} WHERE job_role_id = $1`, [role]))[0].n)).toBe(1);
+  });
+
+  it('decision 39: create-and-send with a £0 rate is refused before any shift or offer exists', async () => {
+    const role = await newRole(0);
+    const start = new Date(Date.now() + 41 * 86_400_000);
+    await expect(
+      offers.createShiftAndSend(ctxA, {
+        venueId,
+        jobRoleId: role,
+        startsAt: start.toISOString(),
+        endsAt: new Date(start.getTime() + 4 * 3_600_000).toISOString(),
+        requiredCount: 1,
+        staffProfileIds: [worker.profileId!],
+      } as never),
+    ).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    const shiftTable = siblingTable(await businessTableOf(admin, 'venue', venueId), 'shift');
+    expect(Number((await admin.query(`SELECT count(*)::int AS n FROM ${shiftTable} WHERE job_role_id = $1`, [role]))[0].n)).toBe(0);
+  });
+
+  it('decision 39: a draft priced at £0 (written before the rule) is never published (409); it stays a draft', async () => {
+    const draft = await newShift(await newRole(1400));
+    const shiftTable = await businessTableOf(admin, 'shift', draft.id);
+    await admin.query(`UPDATE ${shiftTable} SET pay_rate_pence = 0 WHERE id = $1`, [draft.id]);
+    await expect(scheduling.publish(ctxA, draft.id)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    expect((await admin.query(`SELECT status FROM ${shiftTable} WHERE id = $1`, [draft.id]))[0].status).toBe('draft');
+  });
+
+  it('decision 39 (review): an already-open shift priced at £0 can be neither offered nor confirmed; nothing changes', async () => {
+    // Offer refused: a shift published, then priced at £0 the way a pre-rule row would be.
+    const open = await newShift(await newRole(1400));
+    await scheduling.publish(ctxA, open.id);
+    const table = await businessTableOf(admin, 'shift', open.id);
+    await admin.query(`UPDATE ${table} SET pay_rate_pence = 0 WHERE id = $1`, [open.id]);
+    await expect(offers.send(ctxA, open.id, { staffProfileId: worker.profileId! } as never)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    const seats = siblingTable(table, 'shift_assignment');
+    expect(await admin.query(`SELECT 1 FROM ${seats} WHERE shift_id = $1`, [open.id])).toHaveLength(0);
+
+    // Confirmation refused: the offer was sent and accepted at a real rate, then the shift was priced at £0.
+    const shift = await newShift(await newRole(1400));
+    await scheduling.publish(ctxA, shift.id);
+    const offer = await offers.send(ctxA, shift.id, { staffProfileId: worker.profileId! } as never);
+    await offers.staffAccept(ctxOf(worker), offer.id);
+    await admin.query(`UPDATE ${table} SET pay_rate_pence = 0 WHERE id = $1`, [shift.id]);
+    await expect(offers.managerConfirm(ctxA, offer.id)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    const [seat] = await admin.query(`SELECT status, pay_rate_snapshot_pence FROM ${seats} WHERE shift_id = $1`, [shift.id]);
+    expect(seat).toEqual({ status: 'staff_accepted', pay_rate_snapshot_pence: '1400' }); // rolled back: not confirmed
+    expect((await admin.query(`SELECT filled_count FROM ${table} WHERE id = $1`, [shift.id]))[0].filled_count).toBe(0);
+  });
+
+  it('decision 39 (review): approving a Venue Manager request priced at £0 is refused; the request stays pending', async () => {
+    const request = await newShift(await newRole(1400));
+    const table = await businessTableOf(admin, 'shift', request.id);
+    // A pending request priced at £0, as one submitted before the rule would be.
+    await admin.query(`UPDATE ${table} SET status = 'pending_manager_approval', requested_by = $2, pay_rate_pence = 0 WHERE id = $1`, [request.id, a.userId]);
+    await expect(offers.approveShiftRequest(ctxA, request.id, {} as never)).rejects.toMatchObject({ status: 409, response: { code: PAY_RATE_REQUIRED_CODE } });
+    expect((await admin.query(`SELECT status FROM ${table} WHERE id = $1`, [request.id]))[0].status).toBe('pending_manager_approval');
+  });
+
+  // ---------------------------------------------------------------------------------------------- decision 40 (org-local, inclusive)
+
+  /** A UTC instant `daysAhead` days from now at hh:mm UTC, and the UTC calendar date of that day. */
+  const utcAt = (daysAhead: number, hh: number, mm: number) => {
+    const d = new Date(Date.now() + daysAhead * 86_400_000);
+    d.setUTCHours(hh, mm, 0, 0);
+    return { iso: d.toISOString(), day: d.toISOString().slice(0, 10), next: new Date(d.getTime() + 86_400_000).toISOString().slice(0, 10) };
+  };
+  const shiftAt = async (jobRoleId: string, iso: string) =>
+    scheduling.create(ctxA, { venueId, jobRoleId, startsAt: iso, endsAt: new Date(new Date(iso).getTime() + 3 * 3_600_000).toISOString(), requiredCount: 1 } as never);
+  const withOrgTimezone = async <T>(tz: string, fn: () => Promise<T>): Promise<T> => {
+    const [{ timezone: before }] = await admin.query(`SELECT timezone FROM core.organisation WHERE id = $1`, [a.organisationId]);
+    await admin.query(`UPDATE core.organisation SET timezone = $2 WHERE id = $1`, [a.organisationId, tz]);
+    try {
+      return await fn();
+    } finally {
+      await admin.query(`UPDATE core.organisation SET timezone = $2 WHERE id = $1`, [a.organisationId, before]);
+    }
+  };
+
+  it('decision 40: the end date is inclusive — a shift late on day D uses the rate that ends on D', async () => {
+    const role = await newRole(1400);
+    const late = utcAt(60, 22, 0); // 22:00 UTC on D, still D in a UTC organisation
+    await venues.createRoleRate(ctxA, venueId, { jobRoleId: role, payRatePence: 2100, effectiveFrom: day(-10), effectiveTo: late.day } as never);
+    await venues.createRoleRate(ctxA, venueId, { jobRoleId: role, payRatePence: 2900, effectiveFrom: late.next } as never);
+    await withOrgTimezone('UTC', async () => {
+      expect(await shiftRate((await shiftAt(role, late.iso)).id)).toBe('2100');
+    });
+  });
+
+  it('decision 40: the day is the organisation-local date — 23:30 UTC on D is D+1 in a +1 zone and takes the next rate', async () => {
+    const role = await newRole(1400);
+    const t = utcAt(61, 23, 30);
+    await venues.createRoleRate(ctxA, venueId, { jobRoleId: role, payRatePence: 2100, effectiveFrom: day(-10), effectiveTo: t.day } as never);
+    await venues.createRoleRate(ctxA, venueId, { jobRoleId: role, payRatePence: 2900, effectiveFrom: t.next } as never);
+    // Africa/Lagos is UTC+1 all year (no daylight saving), so the expectation never depends on the test date.
+    await withOrgTimezone('Africa/Lagos', async () => {
+      expect(await shiftRate((await shiftAt(role, t.iso)).id)).toBe('2900');
+    });
+    await withOrgTimezone('UTC', async () => {
+      expect(await shiftRate((await shiftAt(role, t.iso)).id)).toBe('2100');
+    });
   });
 });

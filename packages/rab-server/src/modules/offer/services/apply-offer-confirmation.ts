@@ -25,6 +25,7 @@ import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { JobOffer } from '../entities/job-offer.entity';
 import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
 import { confirmationDeadlineSql } from '../../scheduling/utils/assignment-time';
+import { assertPayRateSet } from '../../scheduling/utils/pay-rate-rules';
 import { NO_VACANCY_MESSAGE, OfferKind } from '../constants/offer-kind';
 import { occupiedSeatSql } from './shift-vacancy';
 
@@ -208,7 +209,8 @@ export async function applyOfferConfirmation(
       // Snapshotted at confirmation, not at send or staff-accept (§1 A6) —
       // re-read from the shift row just locked by the UPDATE above, in
       // case the rate changed since the offer was sent.
-      payRateSnapshotPence: assertSafePence(Number(row.pay_rate_pence), 'shift.pay_rate_pence'),
+      // Owner decision 39: never confirmed at £0 (a shift priced before the rule); the throw rolls the claims above back.
+      payRateSnapshotPence: assertPayRateSet(assertSafePence(Number(row.pay_rate_pence), 'shift.pay_rate_pence')),
     });
   } catch (error) {
     if (isExclusionViolation(error)) {
