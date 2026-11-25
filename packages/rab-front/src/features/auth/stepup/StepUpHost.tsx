@@ -6,6 +6,8 @@ import { getApiErrorMessage } from '../../../shared/lib/apiError';
 
 interface Pending {
   mfa: boolean;
+  /** Owner decision 5: the approval action the server asked a proof for (sent back with the proof). */
+  action?: string;
   resolve: (ok: boolean) => void;
 }
 
@@ -60,11 +62,11 @@ export default function StepUpHost() {
   useEffect(
     () =>
       registerStepUpHandler(
-        ({ mfa }) =>
+        ({ mfa, action }) =>
           new Promise<boolean>((resolve) => {
             // Only one prompt at a time; `shared/api.ts` already shares it between concurrent refusals.
             pendingRef.current?.resolve(false);
-            const next = { mfa, resolve };
+            const next: Pending = action ? { mfa, action, resolve } : { mfa, resolve };
             pendingRef.current = next;
             setPassword('');
             setCode('');
@@ -133,8 +135,9 @@ export default function StepUpHost() {
     setErrorField(null);
     try {
       // No password: the code completes a fresh provider re-authentication of this session (server-checked).
-      const body = usesPassword ? (needsCode ? { currentPassword, code: trimmed } : { currentPassword }) : { code: trimmed };
-      await api.post('/auth/step-up', body);
+      const proofBody = usesPassword ? (needsCode ? { currentPassword, code: trimmed } : { currentPassword }) : { code: trimmed };
+      const action = pendingRef.current?.action;
+      await api.post('/auth/step-up', action ? { ...proofBody, action } : proofBody);
       finish(true);
     } catch (err) {
       const status = (err as { response?: { status?: number; data?: { code?: string } } }).response;

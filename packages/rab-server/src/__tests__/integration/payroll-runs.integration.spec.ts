@@ -18,6 +18,8 @@ import { OFFICIAL_CALENDAR_2026 } from '../../modules/payroll/constants/official
 import { periodForInstant } from '../../modules/payroll/services/payroll-allocation';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { approvalGrant, ApprovalAction, dropApprovalGrant, enrolTotp } from './helpers/step-up-kit';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -57,6 +59,20 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
   let tokenA: string;
   let tokenB: string;
   let tokenVm: string;
+  // Owner decision 5 (maker-checker): C is a second Internal Manager of A's workspace; A finalises timesheets and prepares
+  // runs, C approves records and finalises runs.
+  let c: TestIdentity;
+  let tokenC: string;
+  let redis: AuthCacheRedisClientProvider;
+  /** Approvers must have 2FA (decision 5): enrolled once on the suite's session; each approval gets a single-use proof. */
+  const enrolled = new Set<string>();
+  const stepped = async (token: string, who: TestIdentity, action: ApprovalAction = 'payroll.record.approve'): Promise<string> => {
+    if (!enrolled.has(who.userId)) {
+      await enrolTotp(app, token, who.password);
+      enrolled.add(who.userId);
+    }
+    return approvalGrant(redis, token, who.userId, action);
+  };
   let tokenPlain: string;
   let staffTokens: string[];
   let venueId: string;
@@ -82,6 +98,9 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     for (let i = 0; i < 6; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `runs-s${i}` }));
     await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     [tokenA, tokenB] = [await factory.login(a), await factory.login(b)];
+    c = await factory.createWorkspaceCoManager(seeded.organisation, a, { label: 'runs-c' });
+    tokenC = await factory.login(c);
+    redis = moduleRef.get(AuthCacheRedisClientProvider);
     staffTokens = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
     const venue = await http().post('/rest/v1/venues').set(auth(tokenA)).send({ name: `Runs Venue ${randomUUID().slice(0, 6)}`, type: 'hotel' });
@@ -141,7 +160,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
     await scheduleAt(shiftId, scheduledAt);
     const [row] = await adminDataSource.query(`SELECT id FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
-    if (approve) expect((await http().post(`/rest/v1/payroll/records/${row.id}/approve`).set(auth(tokenA))).status).toBe(200);
+    if (approve) expect((await http().post(`/rest/v1/payroll/records/${row.id}/approve`).set(auth(await stepped(tokenC, c)))).status).toBe(200);
     rec[`s${i}`] = { recordId: row.id, attendanceId: out.body.id };
     return row.id as string;
   }
@@ -235,11 +254,17 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
 
   it('concurrent approval of the same record: exactly one 200, one 409', async () => {
     const id = await recordFor(0, false);
+    await stepped(tokenC, c);
     const [r1, r2] = await Promise.all([
-      http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenA)),
-      http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenA)),
+      http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenC)),
+      http().post(`/rest/v1/payroll/records/${id}/approve`).set(auth(tokenC)),
     ]);
-    expect([r1.status, r2.status].sort()).toEqual([200, 409]);
+    // Exactly one approval: the other call loses either the single-use proof (403) or the row race (409).
+    const statuses = [r1.status, r2.status].sort();
+    expect(statuses[0]).toBe(200);
+    expect([403, 409]).toContain(statuses[1]);
+    const approvals = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payroll_record.approved' AND entity_id::text = $1`, [id]);
+    expect(approvals[0].n).toBe(1);
   });
 
   it('prepare a run: snapshot of the approved records of the period; idempotent; a record can be in one run only (DB constraint)', async () => {
@@ -263,13 +288,14 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     const csv = await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenA));
     expect(csv.status).toBe(200);
     expect(csv.headers['content-type']).toContain('text/csv');
-    expect(csv.text.split('\n')[0]).toBe('Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Late approvals,Run status');
+    // Owner decision 3: one column per adjustment kind, then the total (0.00 here: this run has no adjustments).
+    expect(csv.text.split('\n')[0]).toBe('Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Corrections (GBP),Bonuses (GBP),Expenses (GBP),Total (GBP),Late approvals,Run status');
     expect(csv.text.split('\n')).toHaveLength(4);
   });
 
   it('another workspace manager (same org) gets 404 on every run action; Venue Manager / staff are refused', async () => {
     expect((await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenB))).status).toBe(404);
-    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(tokenB))).status).toBe(404);
+    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await stepped(tokenB, b, 'payroll.run.finalise')))).status).toBe(404);
     expect((await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenB))).status).toBe(404);
     expect((await http().post(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/mark-paid`).set(auth(tokenB)).send({})).status).toBe(404);
     expect((await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenVm))).status).toBe(403);
@@ -281,14 +307,27 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
   it('upload before finalise is refused; finalise locks the run, moves records to processing and creates payslips', async () => {
     const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(200, 0x20)]);
     expect((await http().post(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/document`).set(auth(tokenA)).attach('file', pdf, { filename: 'p.pdf', contentType: 'application/pdf' })).status).toBe(409);
-    const fin = await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(tokenA));
+    // Decision 5: A prepared the run, so A may not finalise it, even with a fresh step-up (403, nothing changes).
+    const byPreparer = await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await stepped(tokenA, a, 'payroll.run.finalise')));
+    expect({ status: byPreparer.status, message: byPreparer.body.message }).toEqual({ status: 403, message: 'You prepared this payroll run, so another payroll approver must finalise it.' });
+    expect((await adminDataSource.query(`SELECT status FROM ${businessTable(a.workspaceId!, 'payroll_run')} WHERE id = $1`, [runId]))[0].status).toBe('prepared');
+    // C without a finalise proof (a record-approval proof does not count): 403 STEP_UP_REQUIRED, nothing changes.
+    await dropApprovalGrant(redis, tokenC, 'payroll.run.finalise');
+    await stepped(tokenC, c, 'payroll.record.approve');
+    const stale = await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(tokenC));
+    expect({ status: stale.status, code: stale.body.code, action: stale.body.action }).toEqual({ status: 403, code: 'STEP_UP_REQUIRED', action: 'payroll.run.finalise' });
+    await dropApprovalGrant(redis, tokenC, 'payroll.record.approve');
+    // The database refuses a finalise written directly by the run's preparer (payroll_run_update WITH CHECK) — on the core
+    // copy; the workspace copies follow with the 0.7.0 chain, so this suite (HWS on) checks the service refusal above.
+    expect((await adminDataSource.query(`SELECT status FROM ${businessTable(a.workspaceId!, 'payroll_run')} WHERE id = $1`, [runId]))[0].status).toBe('prepared');
+    const fin = await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await stepped(tokenC, c, 'payroll.run.finalise')));
     expect(fin.status).toBe(200);
     expect(fin.body.status).toBe('finalised');
     expect(fin.body.staff.every((s: { payslip: { status: string } }) => s.payslip.status === 'processing')).toBe(true);
     expect((await adminDataSource.query(`SELECT status FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = $1`, [rec.s1!.recordId]))[0].status).toBe('processing');
     const history = await http().get('/rest/v1/attendance/me/history').set(auth(staffTokens[1]!));
     expect(history.body.find((h: { id: string }) => h.id === rec.s1!.attendanceId)).toMatchObject({ payrollStatus: 'processing' });
-    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(tokenA))).status).toBe(409);
+    expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(await stepped(tokenC, c, 'payroll.run.finalise')))).status).toBe(409);
     expect((await http().post('/rest/v1/payroll/runs/prepare').set(auth(tokenA)).send({ periodId })).status).toBe(409);
     const mine = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[1]!));
     expect(mine.body.data[0]).toMatchObject({ runId, status: 'processing', payday: '2026-11-04', document: null, netPence: null, paidAt: null });

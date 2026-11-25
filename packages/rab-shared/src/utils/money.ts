@@ -96,3 +96,16 @@ export function formatPence(pence: Pence | bigint, currency: 'GBP' = 'GBP'): str
   const grouped = pounds.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return `${negative ? '-' : ''}${symbol}${grouped}.${penny.padStart(2, '0')}`;
 }
+
+/**
+ * Pence as a plain decimal string for machine-read files (payroll provider CSV): `-1234.56`, no currency symbol, no
+ * thousands separator, two decimals. Integer arithmetic only (never `pence / 100` as a float), so every safe integer
+ * prints exactly. A non-safe-integer is refused (assertSafePence).
+ */
+export function penceToDecimalString(pence: Pence): string {
+  assertSafePence(pence, 'penceToDecimalString value');
+  const negative = pence < 0;
+  const abs = Math.abs(pence);
+  const rem = abs % 100;
+  return `${negative ? '-' : ''}${(abs - rem) / 100}.${String(rem).padStart(2, '0')}`;
+}
