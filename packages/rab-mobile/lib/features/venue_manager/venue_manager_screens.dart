@@ -278,7 +278,14 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
               VmError(message: p.error!, retry: p.refresh)
             else ...[
               if (p.refreshFailed) const StaleRefreshNotice(),
-              if (_mySpace) ..._personal(p) else ..._organization(p),
+              MotionContent(
+                identity: _mySpace,
+                reverse: !_mySpace,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: _mySpace ? _personal(p) : _organization(p),
+                ),
+              ),
             ],
           ],
         ),
@@ -538,32 +545,37 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
       ),
   ];
   Widget _overview(String title, int? count, IconData icon, Widget page) =>
-      ListTile(
-        leading: Icon(icon, size: 20),
-        title: Text(title, style: ScheduleTokens.body),
-        trailing: Text(count?.toString() ?? '—'),
-        onTap: () => vmPush(context, page),
+      PressFeedback(
+        child: ListTile(
+          leading: Icon(icon, size: 20),
+          title: Text(title, style: ScheduleTokens.body),
+          trailing: MotionCount(value: count),
+          onTap: () => vmPush(context, page),
+        ),
       );
 }
 
 Widget _row(String title, int? count, IconData icon, VoidCallback? onTap) =>
     Padding(
       padding: const EdgeInsets.only(bottom: 10),
-      child: Material(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
-        child: ListTile(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
+      child: PressFeedback(
+        enabled: onTap != null,
+        child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
+          child: ListTile(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(ScheduleTokens.rowRadius),
+            ),
+            leading: Icon(icon, size: 20),
+            title: Text(title, style: ScheduleTokens.body),
+            trailing: count == null
+                ? (onTap == null
+                      ? null
+                      : const Icon(Icons.chevron_right, size: 18))
+                : Text('$count'),
+            onTap: onTap,
           ),
-          leading: Icon(icon, size: 20),
-          title: Text(title, style: ScheduleTokens.body),
-          trailing: count == null
-              ? (onTap == null
-                    ? null
-                    : const Icon(Icons.chevron_right, size: 18))
-              : Text('$count'),
-          onTap: onTap,
         ),
       ),
     );

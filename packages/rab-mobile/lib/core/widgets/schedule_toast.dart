@@ -345,7 +345,6 @@ class _ToastLifecycleState extends State<_ToastLifecycle>
       title: widget.data.title,
       kind: widget.data.kind,
       remaining: remaining,
-      onDismiss: _dismiss,
     );
     Widget child = Listener(
       onPointerDown: (_) => _pause(),
@@ -387,7 +386,6 @@ class ScheduleToastCard extends StatelessWidget {
     required this.kind,
     this.title,
     this.remaining = 1,
-    this.onDismiss,
   });
   final String message;
 
@@ -395,7 +393,6 @@ class ScheduleToastCard extends StatelessWidget {
   final String? title;
   final ScheduleMessageKind kind;
   final double remaining;
-  final VoidCallback? onDismiss;
 
   static (Color fill, IconData icon, Color iconColor, Color text, String label)
   styleFor(ScheduleMessageKind kind) => switch (kind) {
@@ -431,7 +428,7 @@ class ScheduleToastCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (fill, icon, iconColor, textColor, label) = styleFor(kind);
+    final (fill, icon, iconColor, _, label) = styleFor(kind);
     final radius = BorderRadius.circular(ScheduleTokens.toastRadius);
     return Semantics(
       key: ValueKey('schedule-toast-${kind.name}'),
@@ -441,16 +438,20 @@ class ScheduleToastCard extends StatelessWidget {
         type: MaterialType.transparency,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: ScheduleTokens.surface,
+            color: const Color(0xFF111113),
             borderRadius: radius,
-            border: Border.all(color: ScheduleTokens.toastBorder),
+            border: Border.all(color: const Color(0xFF343438)),
             boxShadow: ScheduleTokens.toastShadows,
           ),
           child: ClipRRect(
             borderRadius: radius,
             child: Stack(
               children: [
-                Positioned.fill(
+                Positioned(
+                  bottom: 0,
+                  left: 20,
+                  right: 20,
+                  height: 3,
                   child: FractionallySizedBox(
                     alignment: AlignmentDirectional.centerStart,
                     widthFactor: remaining.clamp(0.0, 1.0),
@@ -458,14 +459,22 @@ class ScheduleToastCard extends StatelessWidget {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsetsDirectional.fromSTEB(14, 0, 0, 0),
+                  padding: const EdgeInsetsDirectional.fromSTEB(14, 0, 16, 0),
                   child: Row(
                     children: [
-                      Icon(
-                        icon,
-                        size: 22,
-                        color: iconColor,
-                        semanticLabel: label,
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: fill,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          icon,
+                          size: 21,
+                          color: iconColor,
+                          semanticLabel: label,
+                        ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -475,44 +484,23 @@ class ScheduleToastCard extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              if (title != null)
-                                Text(
-                                  title!,
-                                  style: ScheduleType.bodyStrong.copyWith(
-                                    fontSize: 14.5,
-                                  ),
+                              Text(
+                                title ?? label,
+                                style: ScheduleType.bodyStrong.copyWith(
+                                  fontSize: 14.5,
+                                  color: Colors.white,
                                 ),
+                              ),
                               Text(
                                 message,
                                 style: ScheduleType.body.copyWith(
-                                  fontSize: title == null ? 14.5 : 14,
-                                  fontWeight: title == null
-                                      ? FontWeight.w500
-                                      : FontWeight.w400,
-                                  // Owner reference: neutral dark text; the
-                                  // icon and fill carry the semantic colour.
-                                  color: title == null
-                                      ? ScheduleTokens.ink
-                                      : ScheduleTokens.muted,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w400,
+                                  color: const Color(0xFFE4E4E7),
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                      ),
-                      IconButton(
-                        key: const ValueKey('schedule-toast-dismiss'),
-                        onPressed: onDismiss,
-                        tooltip: 'Dismiss',
-                        constraints: const BoxConstraints.tightFor(
-                          width: ScheduleTokens.touchTarget,
-                          height: ScheduleTokens.touchTarget,
-                        ),
-                        padding: EdgeInsets.zero,
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          size: 18,
-                          color: ScheduleTokens.muted,
                         ),
                       ),
                     ],

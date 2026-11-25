@@ -339,7 +339,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(f.postedShift, 'shift-clock');
       expect(find.text('LIVE SHIFT'), findsOneWidget);
-      expect(find.textContaining('01:42:', findRichText: true), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is Semantics &&
+              (w.properties.label ?? '').startsWith('1 hours 42 minutes'),
+        ),
+        findsOneWidget,
+      );
       expect(find.text('Clock out'), findsNWidgets(2));
       await shot(tester, 'live');
     },
@@ -373,7 +380,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(f.outs, 2);
       expect(find.text('COMPLETED'), findsOneWidget);
-      expect(find.text('01:42:00', findRichText: true), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is Semantics &&
+              w.properties.label == '1 hours 42 minutes 0 seconds',
+        ),
+        findsOneWidget,
+      );
       expect(primary, findsNothing);
       await shot(tester, 'completed');
     },
@@ -411,7 +425,14 @@ void main() {
         await tester.tap(find.text('Refresh worked time'));
         await tester.pumpAndSettle();
         expect(find.text('Updating worked time…'), findsNothing);
-        expect(find.text('01:27:00', findRichText: true), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (w) =>
+                w is Semantics &&
+                w.properties.label == '1 hours 27 minutes 0 seconds',
+          ),
+          findsOneWidget,
+        );
         expect(f.outs, 1);
       },
     );
@@ -756,7 +777,14 @@ void main() {
       provider.serverNow = starts.add(const Duration(seconds: 5));
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('Clock-in overdue'), findsOneWidget);
-      expect(find.text('00:00:05', findRichText: true), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is Semantics &&
+              w.properties.label == '0 hours 0 minutes 5 seconds',
+        ),
+        findsOneWidget,
+      );
       expect(find.text('Clocked In'), findsNothing);
       expect(f.ins, 0);
     },
@@ -775,7 +803,14 @@ void main() {
           .read<AttendanceProvider>();
       provider.serverNow = DateTime.parse('2030-10-27T02:30:00Z');
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text('02:00:00', findRichText: true), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is Semantics &&
+              w.properties.label == '2 hours 0 minutes 0 seconds',
+        ),
+        findsOneWidget,
+      );
       expect(primary.hitTestable(), findsOneWidget);
       expect(find.text('Clocked Out'), findsNothing);
     },

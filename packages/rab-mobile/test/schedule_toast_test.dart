@@ -115,7 +115,7 @@ void main() {
       ),
     ]) {
       testWidgets(
-        '${kind.name}: icon, text colour, fill, dismiss, live region',
+        '${kind.name}: dark surface, readable text, timer-only dismissal, live region',
         (tester) async {
           final context = await _mount(tester);
           expect(
@@ -132,7 +132,7 @@ void main() {
           );
           final text = tester.widget<Text>(find.text('Saved ${kind.name}'));
           // Text stays neutral (owner reference); icon + fill carry the kind.
-          expect(text.style!.color, ScheduleTokens.ink);
+          expect(text.style!.color, const Color(0xFFE4E4E7));
           expect(textColor, isNotNull);
           expect(
             tester
@@ -144,9 +144,14 @@ void main() {
           );
           expect(tester.widget<Semantics>(card).properties.liveRegion, isTrue);
           final dismiss = find.byKey(const ValueKey('schedule-toast-dismiss'));
-          expect(tester.getSize(dismiss).height, greaterThanOrEqualTo(48));
-          expect(tester.getSize(dismiss).width, greaterThanOrEqualTo(48));
-          await tester.tap(dismiss);
+          expect(dismiss, findsNothing);
+          expect(
+            find.descendant(of: card, matching: find.byType(IconButton)),
+            findsNothing,
+          );
+          await tester.tap(find.text('Saved ${kind.name}'));
+          await tester.pump();
+          expect(_cards, findsOneWidget);
           await tester.pumpAndSettle();
           expect(_cards, findsNothing);
         },
@@ -210,7 +215,14 @@ void main() {
   ) async {
     final context = await _mount(tester);
     for (var i = 1; i <= 5; i++) {
-      expect(ScheduleToast.show(context, 'Message $i'), isTrue);
+      expect(
+        ScheduleToast.show(
+          context,
+          'Message $i',
+          duration: Duration(seconds: i == 1 ? 1 : 7),
+        ),
+        isTrue,
+      );
     }
     await tester.pump();
     await tester.pump(ScheduleToast.appearDuration);
@@ -221,9 +233,7 @@ void main() {
       tester.getTopLeft(find.text('Message 1')).dy,
       lessThan(tester.getTopLeft(find.text('Message 2')).dy),
     );
-    await tester.tap(
-      find.byKey(const ValueKey('schedule-toast-dismiss')).first,
-    );
+    await tester.pump(const Duration(seconds: 1));
     await _exit(tester);
     expect(find.text('Message 1'), findsNothing);
     expect(find.text('Message 4'), findsOneWidget);

@@ -144,7 +144,6 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
         ? 'afternoon'
         : 'evening';
     final loading = offers.isLoading || attendance.isLoadingActive;
-    final reduced = ShiftMotion.reduced(context);
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.dark.copyWith(
         statusBarColor: Colors.transparent,
@@ -193,22 +192,11 @@ class _ScheduleHomeScreenState extends State<ScheduleHomeScreen> {
                   onChanged: (value) => setState(() => _mySpace = value),
                 ),
                 const SizedBox(height: ScheduleTokens.homeSectionGap),
-                AnimatedSwitcher(
-                  duration: reduced
-                      ? Duration.zero
-                      : ScheduleTokens.styleMotion,
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  transitionBuilder: (child, animation) => FadeTransition(
-                    opacity: animation,
-                    child: SlideTransition(
-                      position: Tween<Offset>(
-                        begin: const Offset(0, .015),
-                        end: Offset.zero,
-                      ).animate(animation),
-                      child: child,
-                    ),
-                  ),
+                MotionContent(
+                  identity: offers.loadError != null && offers.offers.isEmpty
+                      ? 'error'
+                      : _mySpace,
+                  reverse: !_mySpace,
                   child: offers.loadError != null && offers.offers.isEmpty
                       ? Column(
                           children: [

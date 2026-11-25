@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../motion/shift_motion.dart';
 
 import '../theme/schedule_tokens.dart';
 import 'venue_photo.dart';
@@ -59,19 +60,38 @@ class ShiftCountdownPanel extends StatelessWidget {
     final m = value == null ? null : value ~/ 60 % 60;
     final s = value == null ? null : value % 60;
     final digits = warning ? CountdownPalette.red : CountdownPalette.green;
+    Widget number(String text) => Text(
+      text,
+      key: ValueKey(text),
+      style: ScheduleType.timer.copyWith(
+        fontSize: 44,
+        fontWeight: FontWeight.w600,
+        color: digits,
+      ),
+    );
     Widget cell(String text, String unit) => Expanded(
       child: Column(
         children: [
           FittedBox(
             fit: BoxFit.scaleDown,
-            child: Text(
-              text,
-              style: ScheduleType.timer.copyWith(
-                fontSize: 44,
-                fontWeight: FontWeight.w600,
-                color: digits,
-              ),
-            ),
+            child: ShiftMotion.reduced(context)
+                ? number(text)
+                : AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    transitionBuilder: (child, animation) => FadeTransition(
+                      opacity: animation,
+                      child: SlideTransition(
+                        position: Tween<Offset>(
+                          begin: const Offset(0, .18),
+                          end: Offset.zero,
+                        ).animate(animation),
+                        child: child,
+                      ),
+                    ),
+                    child: number(text),
+                  ),
           ),
           const SizedBox(height: 2),
           FittedBox(

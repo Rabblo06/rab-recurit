@@ -1,4 +1,5 @@
 import '../../core/api/api_client.dart';
+import '../../core/motion/shift_motion.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -736,7 +737,9 @@ class _SquareCheck extends StatelessWidget {
   final bool checked;
   @override
   Widget build(BuildContext context) => AnimatedContainer(
-    duration: const Duration(milliseconds: 120),
+    duration: ShiftMotion.reduced(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 160),
     width: 22,
     height: 22,
     decoration: BoxDecoration(
@@ -744,9 +747,12 @@ class _SquareCheck extends StatelessWidget {
       borderRadius: BorderRadius.circular(6),
       border: Border.all(color: checked ? staffNavy : _checkboxOff, width: 1.6),
     ),
-    child: checked
-        ? const Icon(Icons.check, size: 16, color: Colors.white)
-        : null,
+    child: MotionContent(
+      identity: checked,
+      child: checked
+          ? const Icon(Icons.check, size: 16, color: Colors.white)
+          : const SizedBox.shrink(),
+    ),
   );
 }
 
@@ -854,6 +860,18 @@ class _TagChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
+              AnimatedSize(
+                duration: ShiftMotion.reduced(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 200),
+                curve: Curves.easeOutCubic,
+                child: selected && !removable
+                    ? const Padding(
+                        padding: EdgeInsets.only(right: 5),
+                        child: Icon(Icons.check, size: 14, color: Colors.white),
+                      )
+                    : const SizedBox.shrink(),
+              ),
               Text(
                 label,
                 style: TextStyle(
