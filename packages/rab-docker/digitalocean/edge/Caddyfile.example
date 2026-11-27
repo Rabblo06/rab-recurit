@@ -1,0 +1,82 @@
+# DIGITALOCEAN edge: Caddy on the droplet HOST (the Debian/Ubuntu `caddy` package, its systemd unit, user `caddy`), in front
+# of rab-api on 127.0.0.1:3000. Needs Caddy 2.8 or later (the `trust_pool file` syntax). Template only: copy to
+# /etc/caddy/Caddyfile and replace <api-host>. Runbook: packages/rab-docker/docs/deploy/DIGITALOCEAN.md §4.9.
+# Check it: `caddy validate --config /etc/caddy/Caddyfile` and
+#   node packages/rab-docker/digitalocean/verify-digitalocean.cjs --lint-caddyfile /etc/caddy/Caddyfile
+#
+# WHAT PROVES A REQUEST CAME THROUGH *OUR* CLOUDFLARE ZONE (security review of #332, MEDIUM): only the per-hostname client
+# certificate below. The other two checks prove "some Cloudflare edge", nothing more:
+#   - the DigitalOcean Cloud Firewall (443/80 from Cloudflare's ranges) and the `remote_ip` rule below admit EVERY
+#     Cloudflare customer's traffic: another customer can point their own proxied zone at this droplet's IP;
+#   - the origin-pull certificate CLOUDFLARE provides (global, and zone-level unless you upload your own) is SHARED by all
+#     customers, so trusting its CA would also admit that other customer (with a Host/SNI override) and let them skip our
+#     zone's WAF, rate-limit and bot rules.
+# Therefore: PER-HOSTNAME Authenticated Origin Pulls with OUR OWN client certificate (a leaf signed by our own CA, uploaded
+# to Cloudflare for <api-host> only), and Caddy trusts ONLY our CA (trust_pool). `strict_sni_host on` makes the TLS SNI and
+# the Host header agree, so a handshake for one name cannot carry a request for another. The firewall and remote_ip stay as
+# cheap outer filters.
+# Only then is Cloudflare's CF-Connecting-IP header trustworthy, and rab-api believes it only from 172.16.30.1 (the Docker
+# bridge gateway Caddy's loopback connection arrives from; runtime.env TRUSTED_PROXY_CIDRS=172.16.30.1/32). Any OTHER
+# process on the host that connects to 127.0.0.1:3000 also arrives as 172.16.30.1 and is trusted the same way: run nothing
+# else on the droplet that could send requests to it (runbook §9).
+#
+# Files (runbook §4.9):
+#   /etc/caddy/tls/origin.crt          Cloudflare ORIGIN CA certificate for <api-host> (Full (strict))   root:caddy 0640
+#   /etc/caddy/tls/origin.key          its private key                                                 root:caddy 0640
+#   /etc/caddy/tls/crewflow-aop-ca.pem OUR client-auth CA (never Cloudflare's shared origin-pull CA)    root:caddy 0644
+# No ACME, no port 80 challenge: Caddy never asks a public CA for a certificate.
+{
+	# No automatic HTTPS: the certificate is the Origin CA one above; nothing listens for an ACME challenge.
+	auto_https off
+	# The admin API stays on the host's loopback (Caddy's default), never on the network.
+	admin localhost:2019
+	servers {
+		# HTTP/1.1 and HTTP/2 to Cloudflare; no HTTP/3 (UDP 443 stays closed in the firewall).
+		protocols h1 h2
+		# The TLS server name and the HTTP Host header must match (no request for another name over this handshake).
+		strict_sni_host on
+	}
+}
+
+(cloudflare_only) {
+	# Cloudflare's published ranges, snapshot 2026-11-21 from https://www.cloudflare.com/ips-v4 and /ips-v6. Refresh with
+	# the same lists as the droplet firewall (runbook §4.5): a missing new range only refuses Cloudflare traffic (fails
+	# closed), it never lets anyone else in. This proves "a Cloudflare edge", not "our zone" (see above).
+	@not_cloudflare not remote_ip 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+	abort @not_cloudflare
+}
+
+https://<api-host> {
+	tls /etc/caddy/tls/origin.crt /etc/caddy/tls/origin.key {
+		protocols tls1.2 tls1.3
+		client_auth {
+			# Every handshake must present a client certificate that chains to OUR CA (Cloudflare presents it for <api-host>
+			# only, from per-hostname Authenticated Origin Pulls). No certificate, or Cloudflare's shared one: no handshake.
+			mode require_and_verify
+			trust_pool file /etc/caddy/tls/crewflow-aop-ca.pem
+		}
+	}
+	import cloudflare_only
+	# No body-size cap here: the API enforces its own upload limits (storage/upload-limits.ts); Cloudflare Free caps
+	# request bodies at 100 MB.
+	reverse_proxy 127.0.0.1:3000 {
+		# CF-Connecting-IP passes through unchanged (our-zone mTLS makes it Cloudflare's, set by our zone). Caddy trusts no
+		# incoming X-Forwarded-* header (no trusted_proxies is configured), so it REPLACES X-Forwarded-For with the
+		# Cloudflare edge address; rab-api prefers CF-Connecting-IP from its one trusted peer.
+		header_up Host {host}
+	}
+	log {
+		output file /var/log/caddy/api-access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format json
+	}
+}
+
+# Port 80: Cloudflare's "Always Use HTTPS" redirects browsers before they reach the origin, so nothing legitimate arrives
+# here. Answer only Cloudflare, and only with a redirect (no request reaches rab-api over plain HTTP).
+http://<api-host> {
+	import cloudflare_only
+	redir https://{host}{uri} permanent
+}

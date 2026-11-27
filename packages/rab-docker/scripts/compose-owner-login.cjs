@@ -20,6 +20,7 @@
  *                                                               CREWFLOW_BUNDLED_DB=0, Twenty's Helm db.enabled=false,
  *                                                               and NO PG_DATABASE_PASSWORD / PG_DATABASE_APP_PASSWORD)
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
+ *   docker-compose.image.yml + digitalocean/docker-compose.digitalocean.yml   (b with CREWFLOW_BUNDLED_DB=0; decisions 24/25)
  * from sentinel env files only (no real .env, compose.env or secret of this machine is read; CREWFLOW_* / COMPOSE_* /
  * PG_DATABASE_* / PG_ADMIN_* are removed from the child environment because they would win over --env-file), and asserts on
  * each rendered model:
@@ -107,6 +108,8 @@ const DOCKER_DIR = path.resolve(__dirname, '..');
 const FILES = Object.freeze({
   image: path.join(DOCKER_DIR, 'docker-compose.image.yml'),
   staging: path.join(DOCKER_DIR, 'staging/docker-compose.staging.yml'),
+  // Owner decisions 24 / 25 (2026-11-21): the DigitalOcean shape (Managed PostgreSQL; the bundled db pinned to 0 replicas).
+  digitalocean: path.join(DOCKER_DIR, 'digitalocean/docker-compose.digitalocean.yml'),
 });
 /** The OpenShip production file: only databaseExpressionProblems here (the other gates own its other rules). */
 const PRODUCTION_FILE = path.join(DOCKER_DIR, 'docker-compose.production.yml');
@@ -131,6 +134,10 @@ const COMBOS = Object.freeze([
   { name: 'external-no-db', files: ['image'], external: 'admin', staging: false, bundledDb: 0 },
   { name: 'pass-through-no-db', files: ['image'], external: 'owner', staging: false, bundledDb: 0 },
   { name: 'staging', files: ['image', 'staging'], external: false, staging: true },
+  // Owner decisions 24 / 25 (2026-11-21): DigitalOcean Managed PostgreSQL is mode (b) with the bundled db off; the override
+  // also pins db to 0 replicas, so only the -no-db rendering is a supported DigitalOcean combination. Every rule above applies
+  // unchanged (digitalocean/verify-digitalocean.cjs adds the DigitalOcean-specific ones).
+  { name: 'digitalocean', files: ['image', 'digitalocean'], external: 'admin', staging: false, bundledDb: 0 },
 ]);
 const STATIC_COMBO = Object.freeze({ name: 'static:image', files: ['image'], external: false });
 

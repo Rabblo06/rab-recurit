@@ -1,0 +1,45 @@
+# DIGITALOCEAN production override for docker-compose.image.yml (owner decisions 24, 25, 26 and 53, accepted 2026-11-21:
+# DigitalOcean Managed PostgreSQL in London, the full hardened compose file under plain `docker compose`, runtime isolation
+# enforce, Redis with a password, a Cloudflare-only firewall; managed daily backups + 7-day point-in-time restore + a weekly
+# restore drill). Runbook: packages/rab-docker/docs/deploy/DIGITALOCEAN.md. Templates: digitalocean/env/*.example.
+#
+#   C="docker compose --env-file /etc/crewflow/compose.env -f docker-compose.image.yml -f digitalocean/docker-compose.digitalocean.yml"
+#   node digitalocean/verify-digitalocean.cjs --environment --env-file /etc/crewflow/compose.env     # before every deploy
+#   $C pull && $C up -d
+#
+# What it changes, and NOTHING else (every runtime security key, the image, the entrypoints, the env files, the dependency
+# conditions and CREWFLOW_RUNTIME_ISOLATION=enforce come from docker-compose.image.yml unchanged; verify-digitalocean.cjs,
+# compose-owner-login.cjs and compose-one-image.cjs render this combination and refuse any weakening):
+#   - the bundled `db` is OFF for good (deploy.replicas 0): the database is the managed cluster (decision 24 a). compose.env
+#     must also say CREWFLOW_BUNDLED_DB=0 (the gates and db-setup read that value); a compose.env that forgets it fails
+#     closed (db-setup waits for a bundled db that never starts and exits 70; rab-api never starts).
+#   - the default network gets a FIXED subnet, so the address rab-api sees for the host's edge proxy is known before the
+#     first start: the host-side Caddy connects to 127.0.0.1:${CREWFLOW_API_HOST_PORT}, Docker forwards that connection
+#     from the bridge gateway 172.16.30.1, and runtime.env's TRUSTED_PROXY_CIDRS is exactly 172.16.30.1/32 (the only peer
+#     whose CF-Connecting-IP / X-Forwarded-For rab-api believes). CAUTION: EVERY process on the host (and any container
+#     with network_mode: host, e.g. a monitoring agent) that connects to 127.0.0.1:${CREWFLOW_API_HOST_PORT} also arrives
+#     as 172.16.30.1 and is trusted the same way; run nothing else on the droplet that sends requests to rab-api.
+#     172.16.30.0/24 is outside Docker's default address pools (172.17.0.0/16-172.31.0.0/16 and 192.168.0.0/16), so Docker
+#     never hands it to another network, and outside DigitalOcean's VPC ranges (10.x). Change it only together with
+#     TRUSTED_PROXY_CIDRS and the gate (verify-digitalocean.cjs EDGE_SUBNET).
+#
+# NOT here, on purpose:
+#   - no edge/proxy container: only rab-api publishes, on loopback (the gates refuse any other published port). The TLS
+#     edge is Caddy on the host (digitalocean/edge/Caddyfile.example) behind Cloudflare, Full (strict), with a Cloudflare
+#     Origin CA certificate and PER-HOSTNAME Authenticated Origin Pulls with our own client CA;
+#   - no PostgreSQL setting: JIT is turned off per tenant transaction in the application (decision 49 a), never by ALTER
+#     ROLE (the semantic-posture boot gate refuses an unreviewed role setting); the pool sizes are runtime.env values;
+#   - no secret, no host name, no password: every value is a compose.env / secret-directory value on the server.
+name: rab-production
+
+services:
+  db:
+    deploy:
+      replicas: 0
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.16.30.0/24
+          gateway: 172.16.30.1

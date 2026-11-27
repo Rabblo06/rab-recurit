@@ -294,6 +294,15 @@ jobs:
           docker compose version || { echo "::error::docker compose is required to verify the image compose variant"; exit 1; }
           node --test packages/rab-docker/staging/verify-image-compose.test.cjs
           node packages/rab-docker/staging/verify-image-compose.cjs
+      # Owner decisions 24, 25, 26 and 53 (2026-11-21): the DigitalOcean shape (docker-compose.image.yml + the DigitalOcean
+      # override, Managed PostgreSQL verify-full on the direct port, isolation enforce, Redis with a password, the fixed edge
+      # subnet). Renders with `docker compose config` only; needs no secret and starts nothing.
+      - name: DigitalOcean deployment shape (self-tests, then the templates and the rendered shape)
+        run: |
+          set -euo pipefail
+          docker compose version || { echo "::error::docker compose is required to verify the DigitalOcean shape"; exit 1; }
+          node --test packages/rab-docker/digitalocean/verify-digitalocean.test.cjs
+          node packages/rab-docker/digitalocean/verify-digitalocean.cjs
       # X1.9 (S10 / DEAD-08): the check needs the declared root devDependency `yaml`; without it, it fails (exit 1), never skips.
       - name: Compose credential isolation fails closed without its YAML parser (X1.9)
         run: node --test packages/rab-docker/scripts/compose-credential-isolation.test.cjs

@@ -31,6 +31,7 @@ on:
       - packages/rab-docker/docker-compose*.yml
       - packages/rab-docker/staging/docker-compose.staging.yml
       - packages/rab-docker/staging/rehearsal/docker-compose.image-rehearsal.yml
+      - packages/rab-docker/digitalocean/**
       - packages/rab-docker/env/**
       - packages/rab-docker/local-db/**
       - packages/rab-docker/postgres-init/owner-login/**
@@ -50,6 +51,7 @@ on:
       - packages/rab-docker/docker-compose*.yml
       - packages/rab-docker/staging/docker-compose.staging.yml
       - packages/rab-docker/staging/rehearsal/docker-compose.image-rehearsal.yml
+      - packages/rab-docker/digitalocean/**
       - packages/rab-docker/env/**
       - packages/rab-docker/local-db/**
       - packages/rab-docker/postgres-init/owner-login/**
@@ -125,6 +127,10 @@ jobs:
             echo "docker compose config: $I ($e, no PG_DATABASE_PASSWORD / PG_DATABASE_APP_PASSWORD)"
             docker compose --env-file "$t/$e" --project-directory "$t/project" -f "$I" config -q
           done
+          # Owner decisions 24 / 25 (2026-11-21): the DigitalOcean shape is mode (b) with the bundled db off.
+          DO="$D/digitalocean/docker-compose.digitalocean.yml"
+          echo "docker compose config: $I $DO (compose-own-admin.env)"
+          docker compose --env-file "$t/compose-own-admin.env" --project-directory "$t/project" -f "$I" -f "$DO" config -q
           # Fail closed: a missing required interpolation value must refuse to render. PG_DATABASE_PASSWORD is no longer a
           # compose `:?` (it is required only while the bundled db runs): the db entrypoint, db-setup and the compose.env lint
           # refuse it instead, and the lint is checked here on a bundled compose.env without it.
