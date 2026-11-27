@@ -11,7 +11,7 @@ import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/pos
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
 import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
 import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
-import { rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
+import { isProductionRuntime, rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
 import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
 import { parseWorkerShutdownTimeoutMs } from '../../worker-shared/worker-shutdown-timeout.contract';
 
@@ -239,6 +239,9 @@ ${(error as Error).message}`);
   // it is unset, blank or false (throttler/rate-limit-bypass.ts). Production = NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says so,
   // so it is read from the RAW configuration, not the validated schema. The variable name only, never its value.
   const rateLimitBypassProblem = rateLimitBypassProductionProblem(config as Record<string, string | undefined>);
+  // M4 HARD RULE (security review of #308): the same runtime signals, so RAB_RUNTIME_ENV / DB_TARGET = production with NODE_ENV
+  // development or unset still refuses OFFLINE_ATTENDANCE_ENABLED=true.
+  const offlineProblem = offlineAttendanceRuntimeProblem(validated, config as Record<string, string | undefined>);
   if (validated.NODE_ENV === 'production') {
     const problems = [
       ...productionConfigurationProblems(validated),
@@ -248,9 +251,9 @@ ${(error as Error).message}`);
     if (problems.length > 0) {
       throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
     }
-  } else if (rateLimitBypassProblem) {
-    // RAB_RUNTIME_ENV or DB_TARGET says production while NODE_ENV does not: still a production runtime for this rule.
-    throw new Error(`Invalid environment configuration for production:\n${rateLimitBypassProblem}`);
+  } else if (rateLimitBypassProblem || offlineProblem) {
+    // RAB_RUNTIME_ENV or DB_TARGET says production while NODE_ENV does not: still a production runtime for these rules.
+    throw new Error(`Invalid environment configuration for production:\n${[rateLimitBypassProblem, offlineProblem].filter((p) => p).join('\n')}`);
   } else if (databaseProblem) {
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }
@@ -286,6 +289,18 @@ export const WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED = false as boolean;
  */
 export const WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false as boolean;
 
+const OFFLINE_ATTENDANCE_PRODUCTION_PROBLEM =
+  'OFFLINE_ATTENDANCE_ENABLED=true is not allowed in production: offline clock-in stays off until M5 payroll adjustments exist and /attendance/me/sync has been pen-tested (owner rule 2026-11-21, ROLLOUT-CHECKLIST.md). Set OFFLINE_ATTENDANCE_ENABLED=false (or leave it unset).';
+
+/**
+ * M4 HARD RULE for a production runtime NODE_ENV does not announce (security review of #308): RAB_RUNTIME_ENV, DB_TARGET or the
+ * database URL policy saying production is a production runtime too (isProductionRuntime, the rate-limit switch's signals).
+ * Reads the RAW configuration for the signals and the validated value for the switch.
+ */
+export function offlineAttendanceRuntimeProblem(validated: EnvironmentVariables, raw: Record<string, string | undefined>): string | null {
+  return validated.OFFLINE_ATTENDANCE_ENABLED === true && isProductionRuntime(raw) ? OFFLINE_ATTENDANCE_PRODUCTION_PROBLEM : null;
+}
+
 /** Exported for its unit test. Pure: reads only the validated configuration. */
 export function productionConfigurationProblems(env: EnvironmentVariables): string[] {
   const problems: string[] = [];
@@ -295,6 +310,12 @@ export function productionConfigurationProblems(env: EnvironmentVariables): stri
     problems.push(
       'WORKER_INVITE_AUTO_DELETE_ENABLED=true would let the Worker automatically delete user accounts, and the owner has not approved a retention policy for that (grace period, eligibility, audit wording, rollback/monitoring). Missing owner approval: set WORKER_INVITE_AUTO_DELETE_ENABLED=false (or leave it unset) in production.',
     );
+  }
+  // M4 HARD RULE (owner, 2026-11-21): offline clock-in stays OFF in production until M5 payroll adjustments exist and
+  // /attendance/me/sync is pen-tested. There is deliberately NO approval constant here: the owner-set release flag that would
+  // allow it is built later, in its own reviewed change (docs/plans/m4-offline/ROLLOUT-CHECKLIST.md section B).
+  if (env.OFFLINE_ATTENDANCE_ENABLED === true) {
+    problems.push(OFFLINE_ATTENDANCE_PRODUCTION_PROBLEM);
   }
   // O3 C2: the interval timers are off the production path (unset already defaults to bullmq in production).
   if (env.WORKER_SCHEDULER === 'interval') {
