@@ -1,0 +1,106 @@
+name: ci-perf-smoke
+
+# M9 load-test SMOKE (NOT a required gate). A small version of the ibox load test
+# (packages/rab-docker/docs/hardening/LOAD-TEST.md): the built API (dist/main.js) on a disposable PostgreSQL built the
+# owner-login way, the live E2E fixture seed plus a reduced volume seed (300 staff, 3,000 shifts), then two minutes of the
+# same open-model mix (staff reads, check-in / clock-in / clock-out, offers, manager scheduling, payroll) at reduced rates.
+# It catches a broken load path (a 5xx, a refused flow, a latency cliff) on every PR that touches the server or the perf
+# scripts; it is not the capacity measurement (shared runners are too noisy for that) and it must never be made required.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/rab-server/src/**'
+      - 'packages/rab-shared/src/**'
+      - 'packages/rab-e2e-testing/system/perf/**'
+      - 'packages/rab-e2e-testing/live/seed-live-e2e.ts'
+      - '.github/workflows/ci-perf-smoke.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-perf-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  perf-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      redis:
+        # redis:7-alpine index digest, equal to .github/ci-images/redis and ci-e2e.yaml web-live (Dependabot renews them)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+        ports: ['127.0.0.1:6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DB_TARGET: local
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries and the API (the smoke runs dist/main.js, as deployed)
+        run: |
+          npx nx run-many -t build -p rab-shared,rab-emails,rab-ui
+          npx nx build rab-server
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the database the owner-login way (provider SQL, migrate child, head-state checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
+        env:
+          NODE_ENV: test
+          TWENTY_PG_CONTAINER: disposable-postgres
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/perf-smoke-database.env
+      - name: Seed (live fixture + reduced volume), start the API, run the smoke mix
+        env:
+          WORK: ${{ runner.temp }}/perf-smoke
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/perf-smoke-database.env"; set +a
+          eval "$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
+          mkdir -p "$WORK"
+          NODE_ENV=test HWS_RUNTIME_ENABLED=false REDIS_URL=redis://127.0.0.1:6379/3 E2E_LIVE_OUT="$WORK" PG_DATABASE_URL='' DATABASE_URL='' DATABASE_URL_UNPOOLED='' \
+            node node_modules/ts-node/dist/bin.js --transpile-only -P packages/rab-server/tsconfig.spec.json packages/rab-e2e-testing/live/seed-live-e2e.ts > "$WORK/seed-live.log" 2>&1 \
+            || { tail -40 "$WORK/seed-live.log"; exit 1; }
+          # shellcheck disable=SC1091
+          source "$WORK/live.env"
+          echo "::add-mask::${E2E_SEED_PASSWORD}"
+          PERF_ADMIN_URL="$TEST_DATABASE_ADMIN_URL" node packages/rab-e2e-testing/system/perf/seed-volume.mjs --staff 300 --shifts 3000 --live-bookings 0 --pending-offers 0 --out "$WORK/volume.json"
+          PERF_ADMIN_URL="$TEST_DATABASE_ADMIN_URL" node packages/rab-e2e-testing/system/perf/seed-volume.mjs --batch live --staff 300 --live-bookings 120 --pending-offers 120 \
+            --live-start "$(date -u -d '+12 minutes' +%FT%TZ)" --live-minutes 4 --out "$WORK/work.json"
+          (cd "$WORK" && exec env -u DATABASE_URL -u DATABASE_DIRECT_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_ADMIN_URL -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u MIGRATION_SECURITY_ADMIN_URL -u DB_TARGET \
+            NODE_ENV=development RAB_RUNTIME_ENV=development PG_DATABASE_URL="$TEST_DATABASE_URL" REDIS_URL=redis://127.0.0.1:6379/1 APP_SECRET="$APP_SECRET" PORT=3490 \
+            APP_URL=http://127.0.0.1:5173 ACCOUNTS_URL=http://127.0.0.1:5173 CORS_ORIGINS=http://127.0.0.1:5173 TRUSTED_PROXY_CIDRS=127.0.0.1/32 HWS_RUNTIME_ENABLED=false \
+            EMAIL_DRIVER=LOGGER STORAGE_DRIVER=LOCAL STORAGE_LOCAL_ROOT="$WORK/storage" SENTRY_DSN= \
+            node "$GITHUB_WORKSPACE/packages/rab-server/dist/main.js") > "$WORK/api.log" 2>&1 &
+          for _ in $(seq 1 180); do curl -s -o /dev/null --max-time 2 http://127.0.0.1:3490/healthz && break; sleep 1; done
+          curl -sf --max-time 5 http://127.0.0.1:3490/healthz > /dev/null || { tail -60 "$WORK/api.log"; exit 1; }
+          PERF_API=http://127.0.0.1:3490 PERF_ORIGIN=http://127.0.0.1:5173 PERF_PASSWORD="$E2E_SEED_PASSWORD" PERF_APP_SECRET="$APP_SECRET" PERF_WORK="$WORK/work.json" \
+            PERF_PHASES=smoke:120:0.25 PERF_MANAGER_SESSIONS=2 PERF_STAFF_READERS=100 PERF_PAYROLL_RUN_AT=60 \
+            node packages/rab-e2e-testing/system/perf/load-mix.mjs "$WORK/load.json"
+          node packages/rab-e2e-testing/system/perf/check-thresholds.mjs "$WORK/load.json" --phase smoke --p95 1500 --p99 3000 --error-rate 1
+      # load.json only: the API and seed logs are not uploaded (EMAIL_DRIVER=LOGGER writes whole e-mail bodies, with their
+      # links, to the API log), and neither are the seeded identities.
+      - name: Collect the smoke results (load.json only)
+        if: always()
+        run: |
+          mkdir -p test-results/perf-smoke
+          cp "${RUNNER_TEMP}"/perf-smoke/load.json test-results/perf-smoke/ 2> /dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-smoke
+          path: test-results/perf-smoke/
+          retention-days: 14
+          if-no-files-found: ignore
+      - uses: ./.github/actions/save-cache
+        if: always()
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
