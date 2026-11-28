@@ -23,6 +23,8 @@ import {
   stepLabels,
 } from './calendarViews';
 import './calendar-views.css';
+import CopyWeekDialog from './CopyWeekDialog';
+import ShiftPatternDialog from './ShiftPatternDialog';
 
 interface Shift {
   id: string;
@@ -189,6 +191,8 @@ export default function Calendar() {
   const openCreate = () => document.dispatchEvent(new CustomEvent('open-create-placement'));
 
   const [view, setView] = useState<CalendarView>('month');
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [patternOpen, setPatternOpen] = useState(false);
   // A date inside the period on screen (month/list: day 1 of the month; week: its Monday; day: that day).
   const [anchor, setAnchor] = useState(() => startOfMonth(new Date()));
   // Direction of the last period change (+1 next / -1 previous): the new period slides in from that side.
@@ -294,6 +298,8 @@ export default function Calendar() {
             <button className="btn-icon" aria-label={labels.previous} onClick={() => goTo(stepAnchor(view, anchor, -1))}><IconChevronLeft size={16} /></button>
             <button className="btn-icon" aria-label={labels.next} onClick={() => goTo(stepAnchor(view, anchor, 1))}><IconChevronRight size={16} /></button>
           </div>
+          <button className="btn btn-outline calendar-copy-week" onClick={() => setCopyOpen(true)}>Copy previous week</button>
+          <button className="btn btn-outline calendar-pattern" onClick={() => setPatternOpen(true)}>Repeating shifts</button>
           <div className="calendar-view-switch" role="group" aria-label="Calendar view">
             {CALENDAR_VIEWS.map(({ id, label }) => (
               <button key={id} type="button" aria-pressed={view === id} className={view === id ? 'active' : undefined} onClick={() => changeView(id)}>{label}</button>
@@ -315,6 +321,9 @@ export default function Calendar() {
           </aside>
         </div>
       </div>
+      {/* The target week is the week on screen (week view) or the week of the selected day. */}
+      <CopyWeekDialog open={copyOpen} weekStart={dayKey(startOfWeek(view === 'week' ? anchor : selectedDate))} onClose={() => setCopyOpen(false)} />
+      <ShiftPatternDialog open={patternOpen} defaultStartDate={selectedKey} onClose={() => setPatternOpen(false)} />
     </div>
   );
 }

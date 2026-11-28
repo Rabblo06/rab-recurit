@@ -10609,6 +10609,85 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Copy previous week — preview + confirm, new DRAFT shifts only (branch feat/scheduling-copy-previous-week, 2026-11-21; no SQL)
+- **Feature:** `POST /rest/v1/shifts/copy-previous-week/preview` and `POST /rest/v1/shifts/copy-previous-week`
+  (`DraftShiftBatchService`) copy the 7 days before an organisation-local `weekStart` into that week as new DRAFT
+  shifts, optionally for one venue. Preview writes nothing; confirm recomputes the plan server-side and writes in one
+  transaction.
+- **Threats and controls:** (1) Creating shifts without the right: PermissionGuard(SCHEDULE_CREATE) +
+  RequireWorkspaceGuard + ManagerApplication on both routes, and SCHEDULE_CREATE re-checked first inside the service
+  transaction (403 before any row is read). (2) Reading or cloning another manager's / organisation's rota: source rows
+  come only from `applyShiftReadScope` (the caller's own scope, no pending-request widening) under workspace RLS; a
+  `venueId` outside scope is a 404 (`assertVenueAccessibleTx`), never a 403. (3) Mass assignment: the DTO declares
+  only `weekStart`, `venueId`, `sourceShiftIds`; organisationId / status / pay / createdBy in the body → 400. (4)
+  Copying people or money decisions: only shift rows are inserted, through `SchedulingService.insertNewShiftTx` (venue
+  + job role scope and archive rules re-checked per target, `shift.created` audit row per shift). Assignments, offers,
+  requested staff, publication, QR and recurrence are never copied. The pay rate is resolved again for the new date
+  (`resolvePayRate`); a manual rate on the source is not carried, and no pay value appears in a preview or result.
+  (5) Unbounded work: a source week over 500 shifts is refused (400, copy per venue).
+- **Flagged assumptions (owner):** pay is re-resolved, not copied (a source's manual override is dropped so a stale
+  rate is never repeated after a rate change); the charge rate, break, notes, address and required count are copied;
+  a shift moves by 7 organisation-local days (09:00 stays 09:00 across a clock change, duration kept exactly); a live
+  shift at the same venue, role, start and end makes a row `already_exists` (a cancelled/declined one does not).
+- **Tests:** `draft-batch-plan.spec.ts` (windows in organisation time, clock-change move, every skip reason, fail
+  closed on an unchecked target); `copy-previous-week.integration.spec.ts` (flag revoked → service 403 and HTTP 403,
+  nothing written; another manager copies nothing of mine and gets 404 for my venue; another organisation's venue
+  404; Venue Manager 403; organisationId/status/pay/createdBy → 400; bad dates → 400; new rows are DRAFT with no
+  offer, seat, publication or recurrence, pay re-resolved, audited; second confirm creates nothing).
+
+## Copy previous week — security review fixes (branch feat/scheduling-copy-previous-week, 2026-11-24; no SQL)
+- **Findings fixed (independent review of #281):** (M) the routes and the service checked only SCHEDULE_CREATE; bulk and
+  recurring scheduling is its own capability (§5, `schedule.bulk`). Both routes now need PermissionGuard(SCHEDULE_CREATE)
+  AND PermissionGuard(SCHEDULE_BULK), and `DraftShiftBatchService` re-checks both first (403). (M) No throttle on an
+  EXPENSIVE action: new `ExpensiveActionRateLimitService` (engine/core-modules/rate-limit) debits a per-user (10/min) and
+  a per-organisation (30/min) Redis token bucket atomically, from the service (layer 2), on preview and confirm; 429 when
+  short, 503 when Redis is unavailable (fail closed); skipped only through `isRateLimitBypassEnabled` (never in
+  production). The per-call cap is now 200 shifts (§5.5). (L) Two concurrent confirms could both plan before either
+  committed and create every draft twice; confirm now takes `pg_advisory_xact_lock` per organisation + workspace before
+  planning, and duplicates are detected against every live shift at the candidates' venues in the workspace (not only
+  the caller's read scope), so a delegated member's earlier drafts count too. Only slot keys are read for that check.
+- **Tests:** schedule.bulk revoked → 403 at both routes and in the service, nothing written; two parallel confirms → N
+  drafts, not 2N; the 11th call in a minute → 429; limiter unit spec (both buckets and capacities, hashed keys, 429 retry
+  hint, 503 on a Redis error or bad reply, bypass switch).
+
+## Recurring shift pattern — server-generated DRAFTs sharing shift.recurrence_group_id (branch feat/scheduling-shift-patterns, 2026-11-21; no SQL)
+- **Feature:** `POST /rest/v1/shifts/pattern/preview` and `POST /rest/v1/shifts/pattern` (`DraftShiftBatchService`)
+  turn a pattern (venue, job role, organisation-local date range of at most 92 days, weekdays, local start/end time,
+  every 1–4 weeks, people needed, break, notes) into DRAFT shifts. Confirm stamps every created shift with one
+  server-generated `recurrence_group_id` (the column existed since SchedulingSchema and was never written). No pattern
+  is stored, so there is no new table.
+- **Threats and controls:** the same layers as copy previous week (PermissionGuard(SCHEDULE_CREATE) +
+  RequireWorkspaceGuard + ManagerApplication → SCHEDULE_CREATE re-checked first in the service → venue 404 before any
+  occurrence is built → each target through `resolveDraftTargetsTx` → `insertNewShiftTx` → workspace RLS).
+  `recurrence_group_id` is never accepted from a client: the DTO doesn't declare it (400), and `insertNewShiftTx` takes
+  it as a separate server-only argument, so no client DTO passed as `input` can carry it. The whole definition is
+  validated in the service too (a direct caller never passes the ValidationPipe): real dates, range ≤ 92 days, ≤ 500
+  occurrences, valid weekdays/times, a break shorter than the shift. The set-wide pre-check skips occurrences in the
+  past, identical live shifts already in scope and duplicates in the set. Staff are never assigned, so the staff
+  double-booking exclusion (`shift_assignment_no_double_booking`) cannot be bypassed here; it still applies when the
+  drafts are later offered.
+- **Flagged assumptions (owner):** times are the organisation's wall clock (18:00 stays 18:00 across a clock change; a
+  wall time inside the spring-forward gap resolves an hour later); an end time at or before the start time ends the
+  next day; "every N weeks" counts Monday-first weeks from the week containing the start date; pay is resolved per
+  occurrence date from the current rates.
+- **Tests:** `shift-pattern-plan.spec.ts` (local wall time across both clock changes, weekdays, every-other-week,
+  overnight, every refusal); `shift-pattern.integration.spec.ts` (flag revoked → service 403, nothing written; another
+  manager's venue and another organisation's venue 404; Venue Manager 403; recurrenceGroupId / status / pay /
+  organisationId / createdBy in the body → 400; bad definitions → 400; one recurrence group across all created DRAFTs,
+  pay resolved, no offers; second run creates nothing; dates subset).
+
+## Recurring shift pattern — security review fixes (branch feat/scheduling-shift-patterns, 2026-11-24; no SQL)
+- **Findings fixed (independent review of #284):** inherits the #281 fixes (SCHEDULE_CREATE AND SCHEDULE_BULK at both
+  pattern routes and in the service; the EXPENSIVE per-user/per-organisation limit on preview and generate; the 200
+  cap; the per-workspace advisory lock on generate; workspace-wide duplicate detection). (L) Spring clock change: a
+  01:00–02:00 occurrence on 29 March (Europe/London) resolved to startsAt == endsAt, the preview said "create" and the
+  confirm failed on `shift_time_order` (500 for the whole pattern); the break check used wall-clock minutes. Every
+  occurrence (and every copied shift) is now checked on its REAL instants: no length → skipped `invalid_local_time`;
+  a break not shorter than the real length → skipped `break_too_long`. Nothing reaches the insert that the database
+  would refuse.
+- **Tests:** unit test for 29 March 2026 (zero-length gap skipped, the hour-short night skipped for its break, the same
+  pattern a week later created); schedule.bulk revoked → 403 at the route and in the service.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It
