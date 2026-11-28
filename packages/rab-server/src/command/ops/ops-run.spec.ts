@@ -1,7 +1,7 @@
 import { currentPgProcessRole, resolvePgEnvironment, RETIRED_OPS_ENV_NAMES, setPgProcessRole } from '../../database/postgres/pg-config';
 import { resolveHwsRuntimeEnabled } from '../../engine/core-modules/environment/hws-runtime-default';
 import { isProductionRuntime } from '../../engine/core-modules/throttler/rate-limit-bypass';
-import { assertHwsApplyAllowed } from './hws-cutover-policy';
+import { assertHwsApplyAllowed, hwsCutoverCopyRefusal } from './hws-cutover-policy';
 import {
   assertOpsPlacement,
   assertOpsRun,
@@ -296,5 +296,15 @@ describe('hws:backfill --apply while HWS is off', () => {
     expect(() => assertHwsApplyAllowed({ mode: 'apply', hwsRuntimeEnabled: true, hwsCutover: false, production: true })).not.toThrow();
     expect(() => assertHwsApplyAllowed({ mode: 'dry-run', hwsRuntimeEnabled: false, hwsCutover: false, production: true })).not.toThrow();
     expect(() => assertHwsApplyAllowed({ mode: 'verify', hwsRuntimeEnabled: false, hwsCutover: true, production: false })).toThrow(/applies only to --apply/);
+  });
+});
+
+describe('hws:backfill --apply --hws-cutover copies only a workspace whose cutover is in progress', () => {
+  it("'started' may copy; no state, 'verified' or anything else is refused with a reason", () => {
+    expect(hwsCutoverCopyRefusal('started')).toBeNull();
+    expect(hwsCutoverCopyRefusal(null)).toMatch(/has not started.*stale snapshot/);
+    expect(hwsCutoverCopyRefusal(undefined)).toMatch(/has not started/);
+    expect(hwsCutoverCopyRefusal('verified')).toMatch(/already verified.*must not be re-copied/);
+    expect(hwsCutoverCopyRefusal('unexpected')).toMatch(/has not started/);
   });
 });

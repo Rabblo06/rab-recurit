@@ -16,7 +16,7 @@ import { EnvironmentService } from '../engine/core-modules/environment/environme
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { isProductionRuntime } from '../engine/core-modules/throttler/rate-limit-bypass';
 import { verifyOpsAppSession } from './ops/elevated-ops-session';
-import { assertHwsApplyAllowed } from './ops/hws-cutover-policy';
+import { assertHwsApplyAllowed, hwsCutoverCopyRefusal } from './ops/hws-cutover-policy';
 import { OpsCommandRunner, opsLabelFlagsOf } from './ops/ops-command-runner';
 import { assertOpsRun, describeOpsLabel, opsAuditMetadata, OpsLabelFlags } from './ops/ops-run';
 
@@ -198,6 +198,17 @@ export class HwsBackfillCommand extends OpsCommandRunner {
       try {
         report.apply = [];
         for (const ctx of candidates) {
+          // An approved cutover step copies only a workspace whose cutover is in progress ('started'); see hwsCutoverCopyRefusal.
+          if (options.hwsCutover === true) {
+            const rows: Array<{ state: string }> = await this.tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: null, userId: '', role: '' }, (m) =>
+              m.query('SELECT state FROM core.hws_cutover_state WHERE workspace_id = $1 AND organisation_id = $2', [ctx.workspaceId, ctx.organisationId]));
+            const refusal = hwsCutoverCopyRefusal(rows[0]?.state ?? null);
+            if (refusal) {
+              // eslint-disable-next-line no-console
+              console.error(`  workspace=${ctx.workspaceId} REFUSED: ${refusal}`);
+              continue;
+            }
+          }
           try {
             const result = await this.backfill.apply(ctx);
             report.apply.push(result);
