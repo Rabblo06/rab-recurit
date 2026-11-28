@@ -37,9 +37,11 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * (inAppEnabled)` and would otherwise let two replicas both pass the
  * status check and both flip/notify/audit redundantly. The
  * `Attendance.status` write is still a secondary, independent guard against
- * a THIRD scan from ever re-selecting this row at all (`WHERE a.status =
- * 'clocked_in'` below no longer matches it), kept for defense in depth.
+ * a THIRD scan from ever re-selecting this row at all (`WHERE a.status IN
+ * ('clocked_in', 'on_break')` below no longer matches it), kept for defense in depth.
  */
+/** The open attendance states the monitor flags past the grace (M4: on_break too, design §8.2 / A10 fail closed). */
+export const OPEN_ATTENDANCE_STATUSES: readonly string[] = [AttendanceStatus.CLOCKED_IN, AttendanceStatus.ON_BREAK];
 // Single policy shared with the staff member's own clock-out window and the manager's forgotten clock-out recovery
 // (missing-clock-out-policy.ts): flag only strictly AFTER the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES, the
 // value every caller passes in (`clockOutGraceMinutes`) from the validated environment.
@@ -76,7 +78,7 @@ export async function discoverAttendanceMonitorScopes(manager: EntityManager): P
         SELECT DISTINCT a.organisation_id, a.workspace_id
         FROM ${t.attendance} a
         JOIN ${t.shift} s ON s.id = a.shift_id
-        WHERE a.status = 'clocked_in'
+        WHERE a.status IN ('clocked_in', 'on_break')
           AND a.clock_out_at IS NULL
           AND s.status != 'cancelled'
 
@@ -116,7 +118,7 @@ export async function processAttendanceMonitorScopes(
         FROM ${t.attendance} a
         JOIN ${t.shift} s ON s.id=a.shift_id
         JOIN ${t.shift_assignment} sa ON sa.id=a.shift_assignment_id
-        WHERE a.status='clocked_in' AND a.clock_out_at IS NULL
+        WHERE a.status IN ('clocked_in', 'on_break') AND a.clock_out_at IS NULL
           AND s.status!='cancelled'
           AND ${assignmentTimeSql().end} < now() - make_interval(mins => $1::int)
         ORDER BY ${assignmentTimeSql().end}, a.id LIMIT 500
@@ -139,7 +141,9 @@ export async function processAttendanceMonitorScopes(
 /** One overdue attendance row, inside the caller's scoped transaction (re-check, claim, status label, notify, audit). */
 export async function flagMissingClockOutCandidate(manager: EntityManager, deps: AttendanceMonitorDeps, candidate: AttendanceMonitorCandidate): Promise<boolean> {
   const attendance = await manager.findOne(Attendance, { where: { id: candidate.attendance_id } });
-  if (!attendance || attendance.status !== AttendanceStatus.CLOCKED_IN || attendance.clockOutAt) return false;
+  // M4 (design §8.2, A10): an attendance left ON A BREAK past the grace is flagged exactly like one left clocked in; the
+  // open break (once breaks exist) stays as it is for the manager's missing-clock-out recovery.
+  if (!attendance || !OPEN_ATTENDANCE_STATUSES.includes(attendance.status) || attendance.clockOutAt) return false;
   const shift = await manager.findOne(Shift, { where: { id: attendance.shiftId } });
   const assignment = await manager.findOne(ShiftAssignment, { where: { id: attendance.shiftAssignmentId } });
   if (!shift || !assignment || !isPastClockOutGrace(effectiveAssignmentTime(assignment, shift).endsAt, deps.clockOutGraceMinutes, new Date())) return false;

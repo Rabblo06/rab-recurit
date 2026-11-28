@@ -251,6 +251,9 @@ describeIfDb('constraint + state regression in core and every workspace schema (
       { name: 'PAYROLL_RECORD_TRANSITIONS', table: 'payroll_record', column: 'status', transitions: shared.PAYROLL_RECORD_TRANSITIONS },
       { name: 'SHIFT_TRANSITIONS', table: 'shift', column: 'status', transitions: shared.SHIFT_TRANSITIONS },
       { name: 'SHIFT_ASSIGNMENT_TRANSITIONS', table: 'shift_assignment', column: 'status', transitions: shared.SHIFT_ASSIGNMENT_TRANSITIONS },
+      // M4 D6: the offline-sync-only table (one edge, no_show -> confirmed) is over the same persisted column, so its keys must
+      // equal the same CHECK list and its one target must be a valid status.
+      { name: 'OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS', table: 'shift_assignment', column: 'status', transitions: shared.OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS },
       { name: 'VENUE_TRANSITIONS', table: 'venue', column: 'status', transitions: shared.VENUE_TRANSITIONS },
       // AI Phase 1: assistant-turn state (`ai_message_status_check`; user messages hold NULL). Core-only table.
       { name: 'AI_TURN_TRANSITIONS', table: 'ai_message', column: 'status', transitions: shared.AI_TURN_TRANSITIONS, coreOnly: true },

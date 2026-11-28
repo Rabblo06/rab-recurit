@@ -722,6 +722,48 @@ describeIfDb('worker event idempotency (integration)', () => {
       expect(result.clockOutAt).toBeNull();
     });
 
+    // M4 (design §8.2, A10 fail closed): an attendance left ON A BREAK past the staff member's own end + grace is flagged
+    // exactly like one left clocked in (new edge on_break -> missing_clock_out); before, the monitor matched only clocked_in
+    // and such an attendance would have stayed open for ever. One still on a break inside the grace is not flagged.
+    it('M4: an attendance left on a break past the grace is flagged missing_clock_out; inside the grace it is not', async () => {
+      const fx = await seedOrgFixture('mcoonbreak');
+      const ctx = { organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId };
+      const overdue = await seedConfirmedAssignment(fx, new Date(Date.now() - 5 * 3600_000), new Date(Date.now() - 150 * 60_000));
+      const attendance = await withContext(ctx, (m) =>
+        m.save(Attendance, {
+          organisationId: fx.organisationId,
+          workspaceId: fx.workspaceId,
+          shiftId: overdue.shiftId,
+          shiftAssignmentId: overdue.assignmentId,
+          staffProfileId: fx.staffProfileId,
+          clockInAt: new Date(Date.now() - 5 * 3600_000),
+          status: AttendanceStatus.ON_BREAK,
+        }),
+      );
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
+      expect((await workerEventStatus(fx, `missing-clock-out:${attendance.id}`))?.status).toBe('completed');
+      const flagged = await withContext(ctx, (m) => m.findOneByOrFail(Attendance, { id: attendance.id }));
+      expect(flagged.status).toBe(AttendanceStatus.MISSING_CLOCK_OUT);
+      expect(flagged.clockOutAt).toBeNull();
+      // Same staff member, a later shift still inside its grace (the first attendance is no longer open, so the one-open-
+      // attendance-per-staff index allows it): an open break there is left alone.
+      const recent = await seedConfirmedAssignment(fx, new Date(Date.now() - 2 * 3600_000), new Date(Date.now() - 30 * 60_000));
+      const fresh = await withContext(ctx, (m) =>
+        m.save(Attendance, {
+          organisationId: fx.organisationId,
+          workspaceId: fx.workspaceId,
+          shiftId: recent.shiftId,
+          shiftAssignmentId: recent.assignmentId,
+          staffProfileId: fx.staffProfileId,
+          clockInAt: new Date(Date.now() - 2 * 3600_000),
+          status: AttendanceStatus.ON_BREAK,
+        }),
+      );
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
+      expect(await workerEventStatus(fx, `missing-clock-out:${fresh.id}`)).toBeNull();
+      expect((await withContext(ctx, (m) => m.findOneByOrFail(Attendance, { id: fresh.id }))).status).toBe(AttendanceStatus.ON_BREAK);
+    });
+
     // WORK-02 §25 — same adversarial regression as no-show above, for
     // missing-clock-out: the OLD `staffProfile.createdBy ?? user.id`
     // fallback would have notified the onboarding owner (or the staff
