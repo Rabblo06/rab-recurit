@@ -32,7 +32,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { OrgBoundContext, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
-import { businessSchema, businessTableOf } from './helpers/hws-fixtures';
+import { businessSchema, businessTable, businessTableOf } from './helpers/hws-fixtures';
 
 /**
  * Phase 5.5 — same-organisation manager isolation. Real Postgres, RLS on,
@@ -329,7 +329,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
   // E. Replacement — the PHASE 5.5 fix under direct test
   // ===================================================================
   describe('E. replacement isolation (Phase 5.5 fix)', () => {
-    async function seedReplacement(fx: Fixture, venueId: string, jobRoleId: string, candidateProfileId: string) {
+    async function seedReplacement(fx: Fixture, venueId: string, jobRoleId: string, candidateProfileId: string, extraCandidateIds: string[] = []) {
       const shift = await seedOpenShift(fx, venueId, jobRoleId);
       const declining = await factory.createStaff(fx.organisation, { owner: fx.managerA, label: 'declE' });
       const declinedOffer = await offerService.send(ctxOf(fx.managerA), shift.id, { staffProfileId: declining.profileId! });
@@ -342,7 +342,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,
           status: ReplacementRequestStatus.AWAITING_APPROVAL,
-          candidatesSnapshot: [{ staffProfileId: candidateProfileId, firstName: 'Cand', lastName: 'Idate', score: 10, reasons: [] }],
+          candidatesSnapshot: [candidateProfileId, ...extraCandidateIds].map((staffProfileId, i) => ({ staffProfileId, firstName: 'Cand', lastName: `Idate${i}`, eligible: true, reasons: [] })),
         }),
       );
       return { shift, request };
@@ -371,6 +371,50 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       // Positive control: Manager A can still approve their own request.
       const approved = await replacementRequestService.approve(ctxOf(fx.managerA), request.id, { staffProfileId: candidate.profileId! });
       expect(approved.status).toBe(ReplacementRequestStatus.OFFER_SENT);
+    });
+
+    it('E-scope (security review, decision 8): Manager B\'s staff never appear in Manager A\'s request, and cannot be approved from it', async () => {
+      const fx = await seedFixture('replEScope');
+      const { venueId, jobRoleId } = await seedVenueAndRole(fx);
+      const own = await factory.createStaff(fx.organisation, { owner: fx.managerA, label: 'candOwn' });
+      const others = await factory.createStaff(fx.organisation, { owner: fx.managerB, label: 'candOther' });
+      await activateStaff(own.profileId!);
+      await activateStaff(others.profileId!);
+      // A snapshot that (as a legacy or tampered row could) lists another manager's staff member.
+      const { request } = await seedReplacement(fx, venueId, jobRoleId, own.profileId!, [others.profileId!]);
+
+      const seen = await replacementRequestService.get(ctxOf(fx.managerA), request.id);
+      expect(seen.candidatesSnapshot.map((c) => c.staffProfileId)).toEqual([own.profileId]);
+      const listed = (await replacementRequestService.list(ctxOf(fx.managerA))).find((r) => r.id === request.id)!;
+      expect(listed.candidatesSnapshot.map((c) => c.staffProfileId)).toEqual([own.profileId]);
+
+      await expect(replacementRequestService.approve(ctxOf(fx.managerA), request.id, { staffProfileId: others.profileId! })).rejects.toThrow(/not part of this request/);
+      const untouched = await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(ReplacementRequest, { id: request.id }));
+      expect(untouched.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
+      const offers = await withContext(ctxOf(fx.managerA), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [others.profileId]));
+      expect(Number(offers[0]!.count)).toBe(0);
+    });
+
+    it('E-scope (security review): a Venue Manager sees only the candidates in their own team pool (the staff list rule)', async () => {
+      const fx = await seedFixture('replEVm');
+      const { venueId, jobRoleId } = await seedVenueAndRole(fx);
+      const inTeam = await factory.createStaff(fx.organisation, { owner: fx.managerA, label: 'candTeam' });
+      const notInTeam = await factory.createStaff(fx.organisation, { owner: fx.managerA, label: 'candNoTeam' });
+      await activateStaff(inTeam.profileId!);
+      await activateStaff(notInTeam.profileId!);
+      const vm = await factory.createVenueManager(fx.organisation, { owner: fx.managerA, venueIds: [venueId], label: 'replEVm-vm' });
+      await adminDataSource.manager.query(
+        `INSERT INTO ${businessTable(fx.managerA.workspaceId!, 'venue_manager_staff')} (organisation_id, workspace_id, manager_profile_id, staff_profile_id) VALUES ($1, $2, $3, $4)`,
+        [fx.organisation.id, fx.managerA.workspaceId, vm.profileId, inTeam.profileId],
+      );
+      const { request } = await seedReplacement(fx, venueId, jobRoleId, inTeam.profileId!, [notInTeam.profileId!]);
+
+      const seen = await replacementRequestService.get(ctxOf(vm), request.id);
+      expect(seen.candidatesSnapshot.map((c) => c.staffProfileId)).toEqual([inTeam.profileId]);
+      // The owner still sees both (both are their own staff).
+      expect((await replacementRequestService.get(ctxOf(fx.managerA), request.id)).candidatesSnapshot.map((c) => c.staffProfileId).sort()).toEqual(
+        [inTeam.profileId, notInTeam.profileId].sort(),
+      );
     });
 
     it('E-race: Manager B cannot win/consume the atomic approval claim even transiently — Manager A\'s own concurrent approval still succeeds', async () => {

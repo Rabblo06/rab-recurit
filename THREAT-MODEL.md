@@ -10523,6 +10523,49 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## Replacement staff — eligible staff with the reasons shown, no score, no ranking (owner decision 8, branch feat/replacement-eligible-with-reasons, 2026-11-21; no SQL)
+- **Finding (rule, not an exploit):** the replacement-staff Worker job (`replacement-staff.job.ts`) gave each candidate a
+  point score (role +50, worked this venue +20, skill text +10, few commitments up to +9), sorted named people by it
+  and kept only the top 5. That is a machine ranking of named people for work, which the AI rules and UK GDPR Art. 22
+  forbid (losing shifts affects income), and the top-5 cut meant a lower-scored eligible person was never shown.
+- **Control:** `buildReplacementCandidates` (`replacement-candidates.ts`) lists every person in the population
+  (ACTIVE employment + ACTIVE account in the organisation, never the decliner) as `eligible: true` with plain reasons,
+  or `eligible: false` with every reason why (role, London weekday availability, a confirmed overlapping shift, already
+  offered this shift). Order is by name only (last, first, id), eligible first. No score field is written; the eligible
+  list is never cut (the not-eligible part is capped at 200 to bound the stored row). The manager always chooses.
+- **Approval:** `ReplacementRequestService.approve` refuses a listed `eligible: false` person with 409 inside the claim
+  transaction, so the claim rolls back and no offer exists (`sendOneWithManager` still re-runs the canonical
+  `assertStaffEligibleForOffer` for eligible picks). Rows written before the change have no `eligible` field and held
+  eligible people only, so they stay approvable. The API (`list`/`get`/`approve`/`reject`) drops any legacy `score`
+  before returning; stored rows are left as written.
+- **Assumptions flagged for the owner:** "has the role" is now an eligibility rule for replacement suggestions (it was
+  a +50 score before). "Right to Work valid" and "under the hours limit" from decision 8 are NOT checked: there is no
+  staff document model on main yet (Lane D) and no configured hours limit (48 h is a report warning only). Distance
+  sorting is not offered: no staff location data exists. The suggestion population is organisation-wide, not the
+  shift owner's private staff (unchanged from before; now also visible for not-eligible people) — see open question
+  in the PR.
+- **Tests:** `replacement-candidates.spec.ts` (no score on any entry; name order whatever the input order; the old score
+  facts cannot change the order; stable id tie-break; 50 eligible all listed; reasons; not-eligible after eligible with
+  every reason; London weekday; legacy rows approvable; API view drops a legacy score);
+  `replacement-staff-workflow.integration.spec.ts` B4-B7 (not-eligible listed with the reason), C1 (no role → listed
+  not eligible; approving them is refused 409, claim released, zero offers), C2 (the old +20 fact favours the
+  alphabetically last person, who still comes last; no score in DB or API), C3 (all 7 eligible listed), C4 (legacy
+  scored row shown without the score and still approvable).
+
+## Replacement suggestions — candidates limited to the shift owner's staff and the caller's scope (security review of decision 8, branch feat/replacement-eligible-with-reasons, 2026-11-22; no SQL)
+- **Finding (High, review of #334):** the Worker loaded the suggestion population by organisation only, so a request (and,
+  with decision 8, its not-eligible list) named staff created by other managers of the organisation, outside the caller's
+  staff list; a Venue Manager saw names outside their team pool.
+- **Control:** the Worker loads only the shift owner's own staff (`sp.created_by = shift.created_by`). The API
+  (`ReplacementRequestService` list / get / approve / reject) re-derives the caller's scope per request and returns only
+  candidates the caller could see in their staff list: an owner-scoped manager their resolved owner's staff, a Venue Manager
+  their saved team pool (the rule `assertVenueTeamSelection` applies to every send). A candidate outside that scope cannot be
+  approved (409, same as "not on the shortlist"; the claim rolls back, no offer). Stored rows are not rewritten.
+- **Tests:** `replacement-staff-workflow.integration.spec.ts` C5 (staff created by another user are never listed);
+  `same-org-manager-isolation.integration.spec.ts` E-scope (Manager B's staff in Manager A's snapshot are hidden from A's
+  list / get and refused at approve, zero offers; a Venue Manager sees only their team-pool candidate, the owner both).
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

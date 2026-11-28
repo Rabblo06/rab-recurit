@@ -1,4 +1,4 @@
-import { PermissionFlag, ReplacementRequestStatus, ShiftStatus } from '@rab/shared';
+import { PermissionFlag, ReplacementCandidateSnapshot, ReplacementRequestStatus, ShiftStatus, isEligibleReplacementCandidate, withoutCandidateScores } from '@rab/shared';
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { AvailabilityAcknowledgement } from '../../staff/services/staff-availability';
@@ -71,6 +71,49 @@ export class ReplacementRequestService {
     await this.assertShiftOwned(manager, ctx, shift);
   }
 
+  /**
+   * Owner decision 8 + security review: of the given staff ids, the ones THIS caller may see, by the staff list's own rule
+   * (re-derived per request, never trusted from the stored snapshot): an owner-scoped manager their resolved owner's staff
+   * (`created_by`); a Venue Manager only their saved team pool (the rule `assertVenueTeamSelection` applies to every send).
+   */
+  private async visibleStaffIds(manager: EntityManager, ctx: AuthContext, ids: readonly string[]): Promise<Set<string>> {
+    if (!ids.length) return new Set();
+    const scope = await this.resourceScope.resolveTx(manager, ctx);
+    const t = businessTables(manager);
+    const rows: Array<{ id: string }> =
+      scope.kind === 'venue'
+        ? await manager.query(
+            `SELECT t.staff_profile_id AS id FROM ${t.venue_manager_staff} t
+               JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+               JOIN ${t.staff_profile} sp ON sp.id = t.staff_profile_id
+              WHERE t.organisation_id = $1 AND mp.user_id = $2 AND t.workspace_id = $3 AND sp.workspace_id = t.workspace_id
+                AND t.staff_profile_id = ANY($4::uuid[])`,
+            [ctx.organisationId, ctx.userId, ctx.workspaceId, [...ids]],
+          )
+        : await manager.query(
+            `SELECT sp.id FROM ${t.staff_profile} sp WHERE sp.organisation_id = $1 AND sp.created_by = $2 AND sp.id = ANY($3::uuid[])`,
+            [ctx.organisationId, scope.ownerUserId, [...ids]],
+          );
+    return new Set(rows.map((r) => r.id));
+  }
+
+  /**
+   * The request as this caller may see it: no score (decision 8) and only candidates inside the caller's own staff scope
+   * (security review: the stored list is the shift owner's staff; a Venue Manager sees only their team pool of it).
+   */
+  private async presentRequests(manager: EntityManager, ctx: AuthContext, requests: ReplacementRequest[]): Promise<ReplacementRequest[]> {
+    const ids = [...new Set(requests.flatMap((r) => (r.candidatesSnapshot ?? []).map((c) => c.staffProfileId)))];
+    const visible = await this.visibleStaffIds(manager, ctx, ids);
+    for (const r of requests) {
+      r.candidatesSnapshot = withoutCandidateScores((r.candidatesSnapshot ?? []).filter((c: ReplacementCandidateSnapshot) => visible.has(c.staffProfileId)));
+    }
+    return requests;
+  }
+
+  private async presentRequest(manager: EntityManager, ctx: AuthContext, request: ReplacementRequest): Promise<ReplacementRequest> {
+    return (await this.presentRequests(manager, ctx, [request]))[0]!;
+  }
+
   async list(ctx: AuthContext): Promise<ReplacementRequest[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
@@ -89,7 +132,7 @@ export class ReplacementRequestService {
       } else {
         qb.where('s.createdBy = :createdBy', { createdBy: ctx.userId });
       }
-      return qb.getMany();
+      return this.presentRequests(manager, ctx, await qb.getMany());
     }, { useReplica: true });
   }
 
@@ -104,7 +147,7 @@ export class ReplacementRequestService {
       // below throws the identical NotFoundException either way.
       if (!request) throw new NotFoundException('Replacement request not found.');
       await this.assertRequestOwned(manager, ctx, request);
-      return request;
+      return this.presentRequest(manager, ctx, request);
     });
   }
 
@@ -189,9 +232,18 @@ export class ReplacementRequestService {
       // is treated as retryable (throw -> rollback -> claim released):
       // this is a malformed/stale request from the caller, not evidence
       // the vacancy itself is gone.
-      const inSnapshot = request.candidatesSnapshot.some((c) => c.staffProfileId === dto.staffProfileId);
-      if (!inSnapshot) {
+      const listed = request.candidatesSnapshot.find((c) => c.staffProfileId === dto.staffProfileId);
+      if (!listed) {
         throw new ConflictException("That candidate is not part of this request's shortlist.");
+      }
+      // Owner decision 8: not-eligible people are listed with their reasons so the manager sees why, but they are
+      // never approvable from the list (retryable like any other stale pick: the claim rolls back).
+      // Security review: a candidate outside the caller's own staff scope is treated exactly like one not listed at all.
+      if (!(await this.visibleStaffIds(manager, ctx, [listed.staffProfileId])).has(listed.staffProfileId)) {
+        throw new ConflictException("That candidate is not part of this request's shortlist.");
+      }
+      if (!isEligibleReplacementCandidate(listed)) {
+        throw new ConflictException('That staff member is not eligible for this shift. Choose someone from the eligible list.');
       }
 
       // Row lock — serialises this transaction against a concurrent
@@ -241,7 +293,7 @@ export class ReplacementRequestService {
         entityId: id,
         metadata: { staffProfileId: dto.staffProfileId, offerId: offer.id },
       });
-      const finalRequest = await manager.findOneByOrFail(ReplacementRequest, { id });
+      const finalRequest = await this.presentRequest(manager, ctx, await manager.findOneByOrFail(ReplacementRequest, { id }));
       return { ok: true as const, request: finalRequest };
     });
 
@@ -293,7 +345,7 @@ export class ReplacementRequestService {
         metadata: {},
       });
 
-      return manager.findOneByOrFail(ReplacementRequest, { id });
+      return this.presentRequest(manager, ctx, await manager.findOneByOrFail(ReplacementRequest, { id }));
     });
   }
 

@@ -34,10 +34,34 @@ export const ReplacementRequestStatus = {
 } as const;
 export type ReplacementRequestStatusType = (typeof ReplacementRequestStatus)[keyof typeof ReplacementRequestStatus];
 
+/**
+ * One person in a replacement request's candidate list (owner decision 8: "eligible staff, with the reasons shown").
+ * No score and no rank: the list is in name order, eligible first, and the manager chooses.
+ */
 export interface ReplacementCandidateSnapshot {
   staffProfileId: string;
   firstName: string;
   lastName: string;
-  score: number;
+  /**
+   * `false` = listed so the manager can see why not (`reasons`); never approvable. Absent on rows written before
+   * decision 8, which held eligible people only.
+   */
+  eligible?: boolean;
+  /** Plain-language facts: why this person is eligible, or every reason they are not. */
   reasons: string[];
+  /**
+   * @deprecated Rows written before decision 8 carried a point score. Never written now, never returned by the API,
+   * never used for ordering.
+   */
+  score?: number;
+}
+
+/** Approvable = eligible. A row written before decision 8 has no `eligible` field and held eligible people only. */
+export function isEligibleReplacementCandidate(c: Pick<ReplacementCandidateSnapshot, 'eligible'>): boolean {
+  return c.eligible !== false;
+}
+
+/** The candidate list as the API returns it: any pre-decision-8 `score` removed, order unchanged. */
+export function withoutCandidateScores(list: readonly ReplacementCandidateSnapshot[] | null | undefined): ReplacementCandidateSnapshot[] {
+  return (list ?? []).map(({ score: _score, ...rest }) => rest);
 }

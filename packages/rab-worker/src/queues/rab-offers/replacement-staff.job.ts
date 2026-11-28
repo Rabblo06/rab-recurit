@@ -1,4 +1,4 @@
-import { EmploymentStatus, NotificationType, ReplacementCandidateSnapshot, ReplacementRequestStatus, ShiftStatus, UserStatus, getLondonDateParts } from '@rab/shared';
+import { EmploymentStatus, NotificationType, ReplacementCandidateSnapshot, ReplacementRequestStatus, ShiftStatus, UserStatus, isEligibleReplacementCandidate } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -11,6 +11,7 @@ import { toTstzRange } from '@rab/server/modules/scheduling/utils/tstzrange';
 import { runScopedForOrg } from '../../core/database/scoped-job';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { resolveResponsibleManager } from '../../core/domain/resolve-responsible-manager';
+import { CandidateFacts, buildReplacementCandidates } from './replacement-candidates';
 
 /**
  * Replacement-staff automation. Fires from EITHER a staff decline
@@ -24,8 +25,9 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
  * event, no fire-and-forget signal to lose).
  *
  * THE WORKER NEVER SENDS AN OFFER. It only ever creates a
- * `replacement_request` row, ranks eligible candidates into
- * `candidates_snapshot`, and notifies the manager. Only an authenticated
+ * `replacement_request` row, lists the eligible staff (and the not-eligible
+ * ones, with the reasons why) into `candidates_snapshot`, and notifies the
+ * manager. Only an authenticated
  * manager's `POST /replacement-requests/:id/approve` (rab-server's
  * `ReplacementRequestController`) can move a request to `offer_sent`, and
  * that endpoint re-validates the selected candidate fresh before calling
@@ -43,26 +45,14 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
  * other operational job's own lock — it is not, by itself, what prevents
  * the duplicate; the UNIQUE constraint is.
  *
- * ELIGIBILITY — every criterion below maps to a real, existing column;
- * nothing here is invented:
- *  - `user.status = 'active'` / `staff_profile.employment_status = 'active'`
- *    — the same "active account" gate `OfferService.sendOne()` itself uses.
- *  - excluded: the staff member who just declined/let it expire.
- *  - excluded: anyone already offered this exact shift (a real row in
- *    `shift_assignment` for this `shift_id`).
- *  - excluded: anyone with a CONFIRMED/COMPLETED assignment whose `period`
- *    overlaps this shift's `period` — the exact GiST-constraint condition
- *    `sendOne()` already checks proactively, reused verbatim here.
- *  - excluded: `staff_profile.available_days` (if the staff member has
- *    ever set it) not containing the shift's weekday.
- *  - NOT used, because no such field/table exists in this schema: "venue
- *    favourites." Flagged explicitly rather than invented — see the
- *    ranking function below.
- *
- * RANKING is a small, deterministic, fully-explainable point score (never
- * an opaque model, never a protected-characteristic input) — see
- * `scoreCandidate()`. A tie or an all-zero field never hides a candidate;
- * it only affects sort order within the eligible set.
+ * ELIGIBILITY AND ORDER — owner decision 8 (21 Nov 2026): "eligible staff,
+ * with the reasons shown". No score, no ranking, no shortlist cut by rank;
+ * the list is in name order and the manager chooses. The rules and their
+ * columns are in `replacement-candidates.ts`. This file only loads the
+ * population: the SHIFT OWNER's own staff (`created_by`, the staff list's
+ * rule; security review), ACTIVE employment + ACTIVE account, never the staff
+ * member who just declined/let it expire. The API then narrows the list to
+ * the caller's own scope (a Venue Manager: their team pool).
  */
 export interface ReplacementStaffResult {
   created: number;
@@ -75,68 +65,6 @@ interface ScanCandidate {
   shift_id: string;
   organisation_id: string;
   workspace_id: string | null;
-}
-
-interface EligibilityRow {
-  staff_profile_id: string;
-  first_name: string;
-  last_name: string;
-  job_role_id: string | null;
-  available_days: string[] | null;
-  other_skills: string | null;
-  worked_venue_before: boolean;
-  no_overlap: boolean;
-  not_already_offered: boolean;
-  pending_commitments: string; // bigint comes back as string via pg
-}
-
-const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const MAX_SHORTLIST_SIZE = 5;
-
-/**
- * PHASE 4 fix: `startsAt.getUTCDay()` gave the wrong weekday for any shift
- * whose UTC-vs-Europe/London date differs from its local one — every shift
- * starting between midnight UTC and 01:00 BST (April–October) rolled to the
- * PREVIOUS UTC calendar day, silently excluding staff who were genuinely
- * available. `getLondonDateParts().weekday` is ISO 1(Mon)-7(Sun); converting
- * to this file's existing `WEEKDAY_NAMES[0..6]` (Sun-Sat, matching
- * `Date.getUTCDay()`'s indexing, kept for backward-compatible column values)
- * via `% 7` maps Sun(7)->0 and Mon(1)->1..Sat(6)->6.
- */
-function isAvailableOnDay(availableDays: string[] | null, startsAt: Date): boolean {
-  if (!availableDays || availableDays.length === 0) return true; // no preference recorded — never penalise unknown data
-  const londonWeekdayIndex = getLondonDateParts(startsAt).weekday % 7;
-  return availableDays.includes(WEEKDAY_NAMES[londonWeekdayIndex]!);
-}
-
-/**
- * Explainable, deterministic score — every point is traceable to a real
- * field, listed in `reasons` so a manager sees exactly why each name is
- * ranked where it is. Never uses age/sex/nationality/health or any other
- * protected characteristic; none of those fields even exist on
- * `StaffProfile`.
- */
-function scoreCandidate(row: EligibilityRow, shift: Shift, jobRoleName: string | null): { score: number; reasons: string[] } {
-  let score = 0;
-  const reasons: string[] = [];
-  if (row.job_role_id && row.job_role_id === shift.jobRoleId) {
-    score += 50;
-    reasons.push('Exact job-role match');
-  }
-  if (row.worked_venue_before) {
-    score += 20;
-    reasons.push('Previously worked at this venue');
-  }
-  if (jobRoleName && row.other_skills && row.other_skills.toLowerCase().includes(jobRoleName.toLowerCase())) {
-    score += 10;
-    reasons.push('Listed skill mentions this role');
-  }
-  const pending = Number(row.pending_commitments);
-  // Fewer existing commitments is a tie-breaker, not a gate — worth at most
-  // 9 points total (never enough to outrank an exact role-match candidate).
-  score += Math.max(0, 9 - pending);
-  if (pending === 0) reasons.push('No other pending/confirmed commitments');
-  return { score, reasons };
 }
 
 export async function runReplacementStaffCycle(
@@ -193,14 +121,9 @@ export async function runReplacementStaffCycle(
       const jobRoleName: string | null = roleRows[0]?.name ?? null;
       const venueName: string = venueRows[0]?.name ?? 'the venue';
 
-      const eligibilityRows = await manager.query<EligibilityRow[]>(
+      const eligibilityRows = await manager.query<CandidateFacts[]>(
         `
-        SELECT sp.id AS staff_profile_id, u.first_name, u.last_name, sp.job_role_id, sp.available_days, sp.other_skills,
-          EXISTS (
-            SELECT 1 FROM ${t.shift_assignment} sa2
-            JOIN ${t.shift} s2 ON s2.id = sa2.shift_id
-            WHERE sa2.staff_profile_id = sp.id AND sa2.status IN ('confirmed', 'completed') AND s2.venue_id = $2
-          ) AS worked_venue_before,
+        SELECT sp.id AS staff_profile_id, u.first_name, u.last_name, sp.job_role_id, sp.available_days,
           NOT EXISTS (
             -- period (a denormalised tstzrange snapshot) lives on
             -- shift_assignment itself, not shift -- matching the identical
@@ -209,35 +132,27 @@ export async function runReplacementStaffCycle(
             -- shift_assignment_no_double_booking it proactively mirrors.
             -- No join to shift is needed for this check at all.
             SELECT 1 FROM ${t.shift_assignment} sa3
-            WHERE sa3.staff_profile_id = sp.id AND sa3.status IN ('confirmed', 'completed') AND sa3.period && $3::tstzrange
+            WHERE sa3.staff_profile_id = sp.id AND sa3.status IN ('confirmed', 'completed') AND sa3.period && $2::tstzrange
           ) AS no_overlap,
           NOT EXISTS (
             SELECT 1 FROM ${t.shift_assignment} sa4 WHERE sa4.staff_profile_id = sp.id AND sa4.shift_id = $1
-          ) AS not_already_offered,
-          (SELECT count(*) FROM ${t.shift_assignment} sa5 WHERE sa5.staff_profile_id = sp.id AND sa5.status IN ('offered', 'staff_accepted', 'confirmed')) AS pending_commitments
+          ) AS not_already_offered
         FROM ${t.staff_profile} sp
         JOIN core."user" u ON u.id = sp.user_id
-        WHERE sp.organisation_id = $4
-          AND sp.employment_status = $5
-          AND u.status = $6
-          AND sp.id != $7
+        WHERE sp.organisation_id = $3
+          AND sp.employment_status = $4
+          AND u.status = $5
+          AND sp.id != $6
+          -- Security review: the shift owner's own staff only (the staff list's rule), never another manager's staff in
+          -- the organisation. A Venue Manager additionally sees only their team pool of these (ReplacementRequestService).
+          AND sp.created_by = $7
         `,
-        [candidate.shift_id, shift.venueId, toTstzRange(shift.startsAt, shift.endsAt), candidate.organisation_id, EmploymentStatus.ACTIVE, UserStatus.ACTIVE, declinedAssignment.staffProfileId],
+        [candidate.shift_id, toTstzRange(shift.startsAt, shift.endsAt), candidate.organisation_id, EmploymentStatus.ACTIVE, UserStatus.ACTIVE, declinedAssignment.staffProfileId, shift.createdBy],
       );
 
-      const eligible = eligibilityRows.filter((r) => r.no_overlap && r.not_already_offered);
-      const shortlist: ReplacementCandidateSnapshot[] = eligible
-        .filter((r) => isAvailableOnDay(r.available_days, shift.startsAt))
-        .map((r) => {
-          const { score, reasons } = scoreCandidate(r, shift, jobRoleName);
-          return { staffProfileId: r.staff_profile_id, firstName: r.first_name, lastName: r.last_name, score, reasons };
-        })
-        // Deterministic tie-break: score DESC, then staffProfileId ASC — two
-        // candidates with identical scores must always sort the same way on
-        // every run, never depend on unstable input/insertion order (and
-        // never a protected characteristic).
-        .sort((a, b) => b.score - a.score || a.staffProfileId.localeCompare(b.staffProfileId))
-        .slice(0, MAX_SHORTLIST_SIZE);
+      // Decision 8: everyone in the population is listed, eligible first, each group in NAME order. No score, no cut.
+      const candidateList: ReplacementCandidateSnapshot[] = buildReplacementCandidates(eligibilityRows, shift, jobRoleName);
+      const eligibleCount = candidateList.filter(isEligibleReplacementCandidate).length;
 
       // Canonical manager-resolution helper (assignedBy -> shift.createdBy
       // fallback, org/ACTIVE/workspace-validated) — the same one
@@ -250,14 +165,15 @@ export async function runReplacementStaffCycle(
       await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.REPLACEMENT_REQUEST_CREATED, {
         entityType: 'replacement_request',
         entityId: requestId,
-        metadata: { shiftId: shift.id, declinedAssignmentId: declinedAssignment.id, candidateCount: shortlist.length },
+        metadata: { shiftId: shift.id, declinedAssignmentId: declinedAssignment.id, candidateCount: eligibleCount, listedCount: candidateList.length },
         actorUserId: null,
       });
 
-      if (shortlist.length === 0) {
+      if (eligibleCount === 0) {
+        // The not-eligible people (with their reasons) are still stored so the manager can see why nobody fits.
         await manager.query(
-          `UPDATE ${t.replacement_request} SET status = $1, notified_user_id = $2, updated_at = now() WHERE id = $3`,
-          [ReplacementRequestStatus.NO_CANDIDATES, recipientUserId ?? null, requestId],
+          `UPDATE ${t.replacement_request} SET status = $1, candidates_snapshot = $2::jsonb, notified_user_id = $3, updated_at = now() WHERE id = $4`,
+          [ReplacementRequestStatus.NO_CANDIDATES, JSON.stringify(candidateList), recipientUserId ?? null, requestId],
         );
         if (recipientUserId) {
           await notificationService.notify(manager, {
@@ -275,7 +191,7 @@ export async function runReplacementStaffCycle(
 
       await manager.query(
         `UPDATE ${t.replacement_request} SET candidates_snapshot = $1::jsonb, notified_user_id = $2, updated_at = now() WHERE id = $3`,
-        [JSON.stringify(shortlist), recipientUserId ?? null, requestId],
+        [JSON.stringify(candidateList), recipientUserId ?? null, requestId],
       );
       if (recipientUserId) {
         await notificationService.notify(manager, {
@@ -283,7 +199,7 @@ export async function runReplacementStaffCycle(
           userId: recipientUserId,
           type: NotificationType.REPLACEMENT_REQUIRED,
           title: 'Replacement staff needed',
-          message: `A staff member declined the ${jobRoleName ?? 'shift'} at ${venueName}. ${shortlist.length} eligible replacement staff ${shortlist.length === 1 ? 'is' : 'are'} available. Review replacements.`,
+          message: `A staff member declined the ${jobRoleName ?? 'shift'} at ${venueName}. ${eligibleCount} eligible replacement staff ${eligibleCount === 1 ? 'is' : 'are'} available. Review them and choose.`,
           relatedEntityType: 'shift',
           relatedEntityId: shift.id,
         });
