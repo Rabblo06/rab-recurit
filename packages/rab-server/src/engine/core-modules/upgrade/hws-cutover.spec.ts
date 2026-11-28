@@ -38,9 +38,9 @@ describe('C3 HWS cutover: frozen lists stay equal to their sources', () => {
     expect(hwsCutoverBlockMarker('bad class; DROP')).toBe(upgradeBlockMarker(HWS_CUTOVER_NAME, 'badclassDROP'));
   });
 
-  it('is provisional: in the 0-7 folder, NOT in the active registry (activation is a release decision)', () => {
+  it('is registered by release 0.7.0 (owner decision Q8: C3 switched on in its own release), as its only instance command', () => {
     expect(UPGRADE_COMMANDS_0_7.map((c) => c.name)).toEqual([HWS_CUTOVER_NAME]);
-    expect(Object.keys(UPGRADE_COMMANDS)).not.toContain('0-7');
+    expect(UPGRADE_COMMANDS['0-7']).toBe(UPGRADE_COMMANDS_0_7);
     expect(commandStepName('0.7.0', createHwsCutoverCommand())).toBe('0.7.0_HwsCutover_1786721540100');
   });
 

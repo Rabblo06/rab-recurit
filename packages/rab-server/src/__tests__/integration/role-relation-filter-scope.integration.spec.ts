@@ -14,6 +14,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { provisionTypeScript } from './helpers/workspace-fixtures';
+import { withCutoverInactive } from './helpers/hws-fixtures';
 
 /**
  * Security review F4 (0b branch): RoleService.assertRelationsInScopeTx validates the venue / job-role ids of a member role's
@@ -30,6 +31,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 
 describeIfDb('member role record filters: relation ids are checked in the routed workspace table (F4)', () => {
+  let restoreCutover: (() => Promise<void>) | undefined;
   const { adminUrl } = RUN ? integrationTestDatabase() : ({} as never);
   let app: INestApplication;
   let owner: DataSource;
@@ -73,6 +75,10 @@ describeIfDb('member role record filters: relation ids are checked in the routed
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();
+    // Release 0.7.0, why pre-cutover: the suite's HWS-OFF case is the legacy routing (venue / job role written into the core
+    // copies), which only exists before the cutover (an activated database fences core; an HWS-off API refuses to boot there).
+    // Removed for this suite only, before its workspaces exist; restored after.
+    restoreCutover = await withCutoverInactive(owner);
     factory = new TestIdentityFactory({
       app,
       dataSource: moduleRef.get(DataSource),
@@ -91,6 +97,7 @@ describeIfDb('member role record filters: relation ids are checked in the routed
 
   afterAll(async () => {
     hwsOn = false;
+    await restoreCutover?.();
     await app?.close();
     await owner?.destroy();
   });

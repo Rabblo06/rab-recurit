@@ -639,6 +639,11 @@ services:
       # EXTERNAL database only: the CA of your provider's server certificate (PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt in
       # database.env). Unset = an empty file (the bundled db and providers in the system CA store need none).
       - ${CREWFLOW_PG_CA_FILE:-/dev/null}:/run/crewflow/pg-ca.crt:ro
+      # Release 0.7.0, HWS cutover backup (owner rule: no cutover without a verified backup of THIS database, <= 24 h old,
+      # dump re-hashed in full): the operator's backup directory (pre-cutover.dump + marker.json, runbook
+      # docs/release/MIGRATION-AND-ROLLBACK-PLAN.md §4.7), read-only. Unset = an empty file: no marker can be read there, so a
+      # start with anything to copy refuses (NO_BACKUP, nothing copied, those workspaces answer 503) — fail closed.
+      - ${CREWFLOW_HWS_CUTOVER_BACKUP_DIR:-/dev/null}:/run/crewflow/hws-cutover-backup:ro
       # The OpenShip IMPORT GUARD: OpenShip refuses a long-form `type: tmpfs` volume as blocking, so this file can never be
       # imported there (and silently lose the isolation keys). It moved here from the removed operations service (PR 2 of
       # that removal; before that from rab-migrate, O3); staging/verify-image-compose.cjs requires it. image.yml ONLY:
@@ -666,6 +671,10 @@ services:
       BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
       BOOTSTRAP_ADMIN_ORG_SLUG: ${BOOTSTRAP_ADMIN_ORG_SLUG:-}
       BOOTSTRAP_ADMIN_ORG_NAME: ${BOOTSTRAP_ADMIN_ORG_NAME:-}
+      # Release 0.7.0: where the HWS cutover reads the backup marker (the read-only mount above). Committed, rab-api only (the
+      # migrate child runs there); the marker itself is checked by the cutover (fields, this database + cluster, age by the
+      # database clock, dump size + sha256).
+      CREWFLOW_HWS_CUTOVER_BACKUP_MARKER: /run/crewflow/hws-cutover-backup/marker.json
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       # AI (owner decision 2026-11-20: AI wanted in production, Anthropic only; it replaces the former 'false' pin): OFF unless
@@ -675,6 +684,9 @@ services:
       # Turned on, AI also needs ANTHROPIC_API_KEY and the budgets in runtime.env, a platform admin switching the
       # organisation on in Settings -> AI (every organisation starts OFF), and a model the build approves for production.
       AI_ENABLED: ${AI_ENABLED:-false}
+      # Stays "false" here (security review of the 0.7.0 release PR, M1): it flips to "true" only in the deploy change that
+      # also bumps the production digest to the published 0.7.0 image (the release that runs the HWS cutover), and
+      # staging/verify-image-compose.cjs refuses "true" on an image older than 0.7.0. Runbook: MIGRATION-AND-ROLLBACK-PLAN.md §4.7.
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
@@ -811,6 +823,9 @@ services:
       RAB_RUNTIME_ENV: production
       # AI: compose.env's AI_ENABLED, default false, the same expression as rab-api (see there).
       AI_ENABLED: ${AI_ENABLED:-false}
+      # Stays "false" here (security review of the 0.7.0 release PR, M1): it flips to "true" only in the deploy change that
+      # also bumps the production digest to the published 0.7.0 image (the release that runs the HWS cutover), and
+      # staging/verify-image-compose.cjs refuses "true" on an image older than 0.7.0. Runbook: MIGRATION-AND-ROLLBACK-PLAN.md §4.7.
       HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production

@@ -1,3 +1,5 @@
+import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
+
 /**
  * Security finding S11 / architecture §5.7 (owner decision 2026-11-21: "make attendance_correction insert-only in the
  * database"). DRAFT — NEW SQL, owner SQL review FIRST; never edited after merge once approved.
@@ -5,7 +7,7 @@
  * THE statements, in one place, for every copy of `attendance_correction`:
  *   - `core.attendance_correction` (HWS off: production today): migration AttendanceCorrectionInsertOnly1786722110000;
  *   - every `workspace_<hex>.attendance_correction` (HWS on): the 0.7.0 workspace command that follows the 0.7.0 release
- *     chain (#175 / #177 / #243), importing this sibling file. No command object lives here yet (nothing registered).
+ *     chain (#175 / #177 / #243), the level-26 command object at the end of this file.
  *
  * The gap: a correction row is itself audit evidence (architecture §11: "original values are never overwritten in place"),
  * but the runtime could UPDATE or DELETE it:
@@ -70,3 +72,62 @@ export function attendanceCorrectionInsertOnlyDownSql(schema: string): string {
     // sql-injection-reviewed: t is built from the validated schema above; g.name is a constant of this file.
     (g) => `DROP TRIGGER IF EXISTS ${g.name} ON ${t}`).join(';\n');
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Release 0.7.0, workspace structure level 26 (lead allocation). DRAFT — NEW SQL, owner SQL review FIRST. The core copy got
+// the triggers (AttendanceCorrectionInsertOnly1786722110000, #306) and the RESTRICT key (AttendanceCorrectionEvidenceRestrict
+// 1786722115000, owner decision 46). This command applies to every existing READY workspace schema, in order:
+//   1. `REVOKE UPDATE, DELETE ... FROM crewflow_app` (the copied-grant drift; core is revoked in the same release by
+//      WorkspaceAttendanceCorrectionInsertOnly1786722130000, so check-rls-coverage's "workspace grants = core grants" holds);
+//   2. the same three guard triggers as core (created only when missing);
+//   3. `attendance_correction_attendance_id_fkey` ON DELETE CASCADE -> RESTRICT (only when it is still CASCADE).
+// It drops and re-adds a constraint, so `mayDrop` is declared. Idempotent: REVOKE of a privilege not held is a no-op, the
+// triggers and the key change are guarded. WorkspaceAttendanceCorrectionInsertOnly1786722130000 folds the same SQL into
+// core.provision_workspace so new workspaces are built at level 26.
+
+export const ATTENDANCE_CORRECTION_INSERT_ONLY_TIMESTAMP = 1786722130000;
+
+/** The level-26 statements for one workspace schema. */
+export function workspaceCorrectionInsertOnlySql(schema: string): string {
+  const s = checkedSchema(schema);
+  const t = `"${s}".attendance_correction`;
+  // sql-injection-reviewed: s is a regex-validated schema name; the constraint, column and table names are constants.
+  const restrict = `DO $correction_restrict$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid = '${t}'::pg_catalog.regclass
+              AND k.conname = 'attendance_correction_attendance_id_fkey' AND k.contype = 'f' AND k.confdeltype = 'c') THEN
+    ALTER TABLE ${t}
+      DROP CONSTRAINT attendance_correction_attendance_id_fkey,
+      ADD CONSTRAINT attendance_correction_attendance_id_fkey FOREIGN KEY (attendance_id) REFERENCES "${s}".attendance(id) ON DELETE RESTRICT;
+  END IF;
+END
+$correction_restrict$`;
+  // sql-injection-reviewed: t is built from the validated schema s; the REVOKE names constants only.
+  return [`REVOKE UPDATE, DELETE ON ${t} FROM crewflow_app`, attendanceCorrectionInsertOnlySql(s), restrict].join(';\n');
+}
+
+/**
+ * Expected `core.workspace_schema_fingerprint_v2` of a level-26 workspace per PostgreSQL major. Measured, never derived
+ * (ws-attendance-correction-insert-only.integration.spec.ts `[l26-fp]`; the fingerprints ci run prints `MISMATCH (measured …)`).
+ * PLACEHOLDERS until CI measures them (fail closed).
+ */
+export const ATTENDANCE_CORRECTION_INSERT_ONLY_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
+  16: '0000000000000000000000000000000000000000000000000000000000000026',
+  17: '0000000000000000000000000000000000000000000000000000000000000027',
+  18: '0000000000000000000000000000000000000000000000000000000000000028',
+});
+
+export const ATTENDANCE_CORRECTION_INSERT_ONLY_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceAttendanceCorrectionInsertOnly1786722130000';
+
+export const ATTENDANCE_CORRECTION_INSERT_ONLY: WorkspaceUpgradeCommand = Object.freeze({
+  kind: 'workspace',
+  name: 'AttendanceCorrectionInsertOnly',
+  timestamp: ATTENDANCE_CORRECTION_INSERT_ONLY_TIMESTAMP,
+  sql: workspaceCorrectionInsertOnlySql,
+  structure: Object.freeze({
+    level: 26,
+    mayDrop: true,
+    fingerprints: ATTENDANCE_CORRECTION_INSERT_ONLY_FINGERPRINTS_V2,
+    provisionFunctionLiteral: ATTENDANCE_CORRECTION_INSERT_ONLY_PROVISION_LITERAL,
+  }),
+});

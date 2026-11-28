@@ -68,7 +68,9 @@ describeIfDb('M1 / E2: standard objects synced into metadata (integration)', () 
       ...o,
       workspaceRegistry: o.workspaceRegistry ? { ...WORKSPACE_UPGRADE_COMMANDS, ...o.workspaceRegistry } : undefined,
     }).run(session);
-  const adopt = (ids: string[]) => runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: ids });
+  // The 0.6.0 adoption run with 0.6.0's own workspace commands: release 0.7.0's (C3 Q3's level 23 in the Q3 branch) were not
+  // part of 0.6.0, so they are emptied here (a 0.6.0 run that knew them would refuse its workspaces as STRUCTURE_BEHIND).
+  const adopt = (ids: string[]) => runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: ids, workspaceRegistry: { '0-7': [] } });
   const logbook = async (ws: SeededWorkspace) =>
     (await admin.query(`SELECT name, status, attempt FROM core.upgrade_migration WHERE workspace_id = $1 ORDER BY created_at, attempt`, [ws.id])).rows as Array<{ name: string; status: string; attempt: number }>;
   /** Every metadata row of the workspace (incl. updated_at and xmin, so an unchanged re-run is provable). */
@@ -178,7 +180,7 @@ describeIfDb('M1 / E2: standard objects synced into metadata (integration)', () 
 
     // A crash after COMMIT, before the logbook row: the row is lost, the step runs again on the next start and writes nothing.
     await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id = $1 AND name = $2`, [a.id, SYNC_STEP]);
-    const again = await runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: [a.id] });
+    const again = await runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: [a.id], workspaceRegistry: { '0-7': [] } });
     expect(again.failures).toEqual([]);
     expect((await logbook(a)).filter((r) => r.name === SYNC_STEP)).toEqual([{ name: SYNC_STEP, status: 'completed', attempt: 1 }]);
     expect(await snapshot(a)).toEqual(before);

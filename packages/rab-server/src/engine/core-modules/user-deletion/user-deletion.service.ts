@@ -429,6 +429,12 @@ export class UserDeletionService {
       ['job_role_created_by', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
       ['venue_created_by', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
       ['payroll_decision_actor', `SELECT 1 FROM ${t.payroll_record} WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
+      // M4 §11 (security review of #305): attendance is visible only to its staff member, the workspace's managers, the
+      // shift's Venue Managers and the Worker, so a caller who is not a manager of this scope may not see every on-behalf
+      // punch here. That cannot hide one: this path runs only for a NEVER-ACTIVATED invite (status invited / invite_expired,
+      // last_login_at IS NULL, see deleteUser), and punching someone in or out on their behalf needs a signed-in session, so
+      // such a target can never be clock_in_by / clock_out_by. Its own staff history is caught through shift_assignment
+      // (tenant-wide visible; every attendance has one) by staffWithHistory / historyLost.
       ['attendance_on_behalf_actor', `SELECT 1 FROM ${t.attendance} WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
       ['job_offer_actor', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
       ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],

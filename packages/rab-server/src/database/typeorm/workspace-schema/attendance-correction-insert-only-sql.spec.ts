@@ -47,8 +47,9 @@ describe('S11: attendance_correction insert-only guard triggers', () => {
     expect(coreCorrectionGuardProblems(ok, undefined)).toHaveLength(1);
   });
 
-  it('no workspace command is registered by this change; the goldens pin the three core triggers', () => {
-    for (const commands of Object.values(WORKSPACE_UPGRADE_COMMANDS)) for (const c of commands) expect(c.name).not.toMatch(/correction/i);
+  it('the workspace copies are the 0.7.0 level-26 command only; the goldens pin the three core triggers', () => {
+    const correctionCommands = Object.values(WORKSPACE_UPGRADE_COMMANDS).flat().filter((c) => /correction/i.test(c.name)).map((c) => `${c.name}:${c.structure?.level}`);
+    expect(correctionCommands).toEqual(['AttendanceCorrectionInsertOnly:26']);
     for (const g of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18]) {
       expect(g.filter((l) => l.startsWith('trigger|attendance_correction|attendance_correction_insert_only_'))).toEqual(
         // def= (posture #253): md5(tgtype | columns | WHEN | deferrable | initdeferred | args | transition tables) -- the same
