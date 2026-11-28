@@ -10523,6 +10523,29 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## db-setup W1 also names a debug log_min_messages and auto_explain.log_verbose; F6 a on a grant-only run documented (branch feat/db-setup-w1-debug-and-verbose, 2026-11-21; one read-only SQL change, owner review)
+- **Finding (HANDOFF 20 Nov follow-up to #266):** W1, the read of server logging settings right before the plain-text
+  fallback sends the crewflow_owner password, did not name two settings that can put the value in the server log: a
+  debug-level `log_min_messages` (Q1 raises it to warning only for a superuser admin, so a non-superuser admin's session
+  can still log at debug1-debug5), and `auto_explain.log_verbose = on` (a verbose plan prints the statement's expressions,
+  where a custom plan has folded in the bound value, even with `auto_explain.log_parameter_max_length = 0`).
+- **Control:** W1 (`OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS`) also reads `current_setting('log_min_messages')` and
+  `current_setting('auto_explain.log_verbose', true)` (NULL when auto_explain is not loaded); `plainLoggingRisks` adds
+  `log_min_messages` when debug1-debug5 appears anywhere in the value (case-insensitive; also a list form such as
+  `warning,backend:debug1`) and `auto_explain.log_verbose` when it is on while
+  `auto_explain.log_min_duration >= 0`. Unchanged: names only, never a value, never a refusal (owner decision F1 a); an
+  unreadable W1 still prints the "unknown" warning. Still a fixed, parameterless, read-only SELECT.
+- **Docs:** OWNER-LOGIN-DEPLOYMENT.md lists the two settings, and says that F6 a also applies to a grant-only run: with
+  `CREWFLOW_ROTATE_APP_PASSWORD=1` left set and a password that already logs in but a missing database grant, db-setup
+  commits the grant and then refuses (64), so the API and Worker do not start on that deploy.
+- **Tests:** `owner-bootstrap.spec.ts`: debug1 / DEBUG5 warn, notice / null do not; verbose auto_explain warns with
+  parameters off, not when auto_explain is off or verbose is off; the all-at-once order; W1 contains both new reads; a
+  grant-only run with the opt-in sends the GRANT (in the DO block) between BEGIN and COMMIT, no ROLLBACK after it and no
+  plain form, and then exits 64.
+- **Residual:** other debug-style settings (`debug_print_parse`, `debug_print_plan`, `log_parser_stats`) are not named;
+  they print parse/plan trees at LOG level and could carry the value too.
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

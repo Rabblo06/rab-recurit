@@ -483,7 +483,10 @@ export const OWNER_BOOTSTRAP_P0_PLAIN_SESSION_GUARDS = `SELECT pg_catalog.set_co
  * count; owner decision 2026-11-20, F1 a "send anyway, but warn by name"): the settings that decide whether the server logs
  * or stores the bound value or the nested role statement. Extension settings through current_setting(name, true) (NULL when
  * the module is not loaded). owner-bootstrap.ts plainLoggingRisks names the risky ones in one fixed line (never a value) and
- * never refuses. Fixed text, no input.
+ * never refuses. log_min_messages and auto_explain.log_verbose (HANDOFF 20 Nov follow-up): Q1 raises a debug level only for
+ * a superuser, so a non-superuser admin's session can still log at debug1-debug5; and a verbose auto_explain plan prints
+ * the statement's expressions, which can carry the value even with auto_explain.log_parameter_max_length = 0. Fixed text,
+ * no input.
  */
 // sql-injection-reviewed: fixed text, no interpolation and no parameter; read-only current_setting calls on code-constant names.
 export const OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS = `SELECT pg_catalog.current_setting('log_statement') AS log_statement,
@@ -494,7 +497,9 @@ export const OWNER_BOOTSTRAP_W1_LOGGING_SETTINGS = `SELECT pg_catalog.current_se
        pg_catalog.current_setting('auto_explain.log_min_duration', true) AS auto_explain_log_min_duration,
        pg_catalog.current_setting('auto_explain.log_parameter_max_length', true) AS auto_explain_log_parameter_max_length,
        pg_catalog.current_setting('pg_stat_statements.track', true) AS pg_stat_statements_track,
-       pg_catalog.current_setting('pgaudit.log_parameter', true) AS pgaudit_log_parameter;`;
+       pg_catalog.current_setting('pgaudit.log_parameter', true) AS pgaudit_log_parameter,
+       pg_catalog.current_setting('log_min_messages') AS log_min_messages,
+       pg_catalog.current_setting('auto_explain.log_verbose', true) AS auto_explain_log_verbose;`;
 
 /** Below this deadlock_timeout (ms) the plain path is refused (review F2): L1 could not stay strictly below it. */
 export const PLAIN_MIN_DEADLOCK_TIMEOUT_MS = 2;
