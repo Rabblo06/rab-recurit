@@ -19,6 +19,7 @@ import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
 import { useFeedbackMutation } from '../../shared/hooks/useFeedbackMutation';
 import ShiftTimelinePanel from './ShiftTimelinePanel';
+import MultiShiftOfferDialog from './MultiShiftOfferDialog';
 
 interface Venue { id: string; name: string; status: string }
 interface JobRole { id: string; name: string; defaultRatePence: number }
@@ -129,7 +130,17 @@ export default function Shifts() {
     queryFn: async () => { const { data } = await api.get<{ data: Shift[]; total: number }>('/shifts', { params }); return data; },
   });
   const shifts = data?.data ?? [];
-  const selection = useRecordSelection(shifts.map(row=>row.id));
+  const [offerShiftIds, setOfferShiftIds] = useState<string[] | null>(null);
+  // Venue Managers never send offers (no offer.send); the server refuses them anyway.
+  const selection = useRecordSelection(shifts.map(row=>row.id), {
+    actions: (ids) => isVenueManager ? [] : [{
+      key: 'offer-to-staff',
+      label: 'Offer to staff',
+      icon: <IconSend size={14} />,
+      onClick: () => setOfferShiftIds(ids),
+      title: 'Offer every selected open shift to the same staff, all or nothing',
+    }],
+  });
   const total = data?.total ?? 0;
 
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '–';
@@ -305,6 +316,15 @@ export default function Shifts() {
       </div>
 <RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />
       {shiftArchive.dialog}
+      <MultiShiftOfferDialog
+        open={offerShiftIds !== null}
+        shifts={(offerShiftIds ?? []).flatMap((id) => {
+          const s = shifts.find((row) => row.id === id);
+          return s ? [{ id: s.id, startsAt: s.startsAt, endsAt: s.endsAt, status: s.status, venueName: venueName(s.venueId), roleName: roleName(s.jobRoleId) }] : [];
+        })}
+        onClose={() => setOfferShiftIds(null)}
+        onSent={() => { setOfferShiftIds(null); selection.clear(); }}
+      />
       <ShiftTimelinePanel
         shiftId={timelineFor?.id ?? null}
         title={timelineFor ? `${venueName(timelineFor.venueId)} · ${fmtDate(timelineFor.startsAt)}` : undefined}

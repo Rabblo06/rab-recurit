@@ -10609,6 +10609,42 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Multi-shift offer send — many shifts in one all-or-nothing transaction (branch feat/offers-multi-shift-send, 2026-11-21; no SQL)
+- **Feature:** `POST /rest/v1/offers/send-to-shifts` (`OfferService.sendOffersToShifts`): `{ items: [{ shiftId,
+  staffProfileIds[] }], expiresInHours?, acknowledgedAvailabilityConflicts? }`, up to 50 shifts and 200 offers. The
+  Shifts list gets an "Offer to staff" bulk action. Offers stay pending until the staff member accepts and a manager
+  confirms, as for a single send.
+- **Threats and controls:** (1) Sending without the right: PermissionGuard(OFFER_SEND) + ManagerApplication, and
+  OFFER_SEND re-checked first in the service (403 before any row is read). (2) Offering on someone else's shift: every
+  shift goes through `loadSendableShift` (own shift only; anything else reads "Shift not found.", identical for an
+  unknown id) under workspace RLS. (3) Bypassing eligibility, double-booking or the rate snapshot: every offer is
+  created by the same private `sendOne` a single send uses (team scope, DOM-01 eligibility incl. the confirmed-overlap
+  read of the GiST rule, confirmation deadline, availability, `pay_rate_snapshot_pence` from the shift, audit,
+  notification, realtime outbox), all in the one transaction. New here: the same person on two overlapping shifts of
+  the batch is refused before anything is sent. (4) Partial batches: all or nothing. Any failed row rolls back the
+  whole transaction (offers, seats, audit, notifications and outbox rows included; offer-expiry triggers arm only after
+  commit) and the 409 `BULK_OFFER_REJECTED` lists every row with its reason. (5) Mass assignment: no status, kind, time,
+  rate or organisation field exists in the DTO (400). (6) Deadlocks between concurrent batches: shift rows are locked in
+  id order.
+- **Flagged assumptions (owner):** pending offers for overlapping shifts to one person are refused inside one batch
+  (today two separate sends allow it, and the GiST exclusion only stops the second confirmation); each shift keeps
+  its own `offer_batch_id`; per-staff custom times are not offered in the multi-shift form (each offer uses its shift's
+  times).
+- **Tests:** `multi-shift-send-plan.spec.ts`; `multi-shift-offer-send.integration.spec.ts` (happy path with per-shift
+  batches and the shift's pay snapshot; one ineligible recipient → 409 and zero seats on every shift, statuses
+  unchanged; overlapping shifts for one person → 409, nothing sent; another manager's shift → "Shift not found.", nothing
+  sent; OFFER_SEND revoked → service 403; organisationId / status / pay / kind / times in the body → 400; duplicate
+  shifts → 400; a repeat send → 409); `MultiShiftOfferDialog.spec.tsx`.
+
+## Multi-shift offer send — security review nits fixed (branch feat/offers-multi-shift-send, 2026-11-24; no SQL)
+- **Fixed (independent review of #294):** (L) raw database errors (constraint names) could reach the per-row 409 report:
+  a row's reason is now only the message of an HttpException the code threw on purpose; anything else is logged with a
+  correlation id and shown as "This offer could not be sent (reference …)". (L) No throttle: the service debits the
+  EXPENSIVE class (`ExpensiveActionRateLimitService`, 10/min per user, 30/min per organisation, fail closed). No
+  extra per-IP cap (re-review: managers behind one office NAT would share it). (I) The acknowledgement list now accepts up to 200 entries, matching the
+  200-offer batch cap (it inherited 100). New test: another organisation's shift and staff ids read exactly like
+  ids that do not exist, and nothing is sent.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It

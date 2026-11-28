@@ -5,6 +5,7 @@ import { VenueOfferPipelineController } from './controllers/venue-offer-pipeline
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../../engine/core-modules/auth/auth.module';
+import { RateLimitModule } from '../../engine/core-modules/rate-limit/rate-limit.module';
 import { RealtimeEventModule } from '../../engine/core-modules/realtime/realtime-event.module';
 import { NotificationModule } from '../notification/notification.module';
 import { SchedulingModule } from '../scheduling/scheduling.module';
@@ -16,7 +17,7 @@ import { OfferService } from './services/offer.service';
 import { ReplacementRequestService } from './services/replacement-request.service';
 
 @Module({
-  imports: [IdentityModule, AttendanceModule, AuthModule, RealtimeEventModule, NotificationModule, SchedulingModule, VenueModule],
+  imports: [IdentityModule, AttendanceModule, AuthModule, RealtimeEventModule, NotificationModule, SchedulingModule, VenueModule, RateLimitModule],
   controllers: [VenueOfferPipelineController, OfferController, ReplacementRequestController],
   providers: [VenueOfferPipelineService, OfferService, ReplacementRequestService, OfferAssistantService],
   // AI Phase 1: the read-only `get_offer_status` tool calls OfferService.assistantOfferStatusCounts (modules/ai).

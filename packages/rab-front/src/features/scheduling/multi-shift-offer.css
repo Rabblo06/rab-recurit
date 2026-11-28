@@ -1,0 +1,75 @@
+/* Offer several shifts to staff at once (MultiShiftOfferDialog.tsx). */
+
+.modal.multi-shift-offer {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.multi-shift-offer__intro {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--font-secondary);
+  margin-bottom: 12px;
+}
+
+.multi-shift-offer__shifts {
+  margin: 0 0 14px;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--font-secondary);
+  max-height: 120px;
+  overflow: auto;
+}
+
+.multi-shift-offer__skip {
+  color: var(--font-tertiary);
+}
+
+.multi-shift-offer__search {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--font-secondary);
+  margin-bottom: 8px;
+}
+
+.multi-shift-offer__people {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+}
+
+.multi-shift-offer__people label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.multi-shift-offer__rejection {
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.multi-shift-offer__rejection table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+}
+
+.multi-shift-offer__rejection th,
+.multi-shift-offer__rejection td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.multi-shift-offer__rejection th {
+  color: var(--font-tertiary);
+  font-weight: 400;
+}
