@@ -331,6 +331,20 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     fileV2 = slip2.document.fileId;
     const notes = await adminDataSource.query(`SELECT title FROM core.notification WHERE user_id = $1 AND type = 'payslip_available' ORDER BY created_at`, [staff[1]!.userId]);
     expect(notes.map((n: { title: string }) => n.title)).toEqual(['Your payslip is available', 'Your payslip was updated']);
+    // Decision 7: one email per new version, a pointer only: no attachment, no file id, no pay figures; sign in to the app.
+    const mails = await adminDataSource.query(
+      `SELECT job_type, rendered_subject, rendered_text, rendered_html, attachment_file_id, attachment_key FROM core.email_outbox WHERE target_user_id = $1 AND rendered_subject LIKE 'Your payslip%' ORDER BY created_at`,
+      [staff[1]!.userId],
+    );
+    expect(mails.map((e: { rendered_subject: string }) => e.rendered_subject)).toEqual(['Your payslip is available', 'Your payslip was updated']);
+    for (const e of mails) {
+      expect(e).toMatchObject({ job_type: 'NOTIFICATION', attachment_file_id: null, attachment_key: null });
+      expect(e.rendered_text).toContain('Open the Crewflow app and sign in to view it.');
+      for (const leak of [fileV1, slip2.document.fileId, '%PDF', '£', 'http']) {
+        expect(e.rendered_text).not.toContain(leak);
+        expect(e.rendered_html).not.toContain(leak);
+      }
+    }
     const docs = await adminDataSource.query(`SELECT d.version FROM ${businessTable(a.workspaceId!, 'payslip_document')} d JOIN ${businessTable(a.workspaceId!, 'payslip')} p ON p.id = d.payslip_id WHERE p.staff_profile_id = $1 ORDER BY d.version`, [staff[1]!.profileId]);
     expect(docs).toEqual([{ version: 1 }, { version: 2 }]);
     const audits = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payslip.uploaded' AND organisation_id = $1`, [orgId]);

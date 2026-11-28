@@ -10609,6 +10609,34 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Payslip email is a pointer only; payslips kept 6 years (decision 7, branch feat/payslip-email-link-only, 2026-11-21; no SQL)
+
+- **What:** when a provider payslip is uploaded (new version), the staff member gets the existing in-app notice AND now an
+  email through the existing email outbox (`NotificationService.notify`, `forceEmail`: sent unless the staff member saved
+  "email off" for payslip notices). The email says the payslip for <period> (payday <date>) is ready, "Open the Crewflow
+  app and sign in to view it", and that payslips are never attached to emails.
+- **What the email never carries:** the PDF (no `attachment_file_id` / `attachment_key`), a link to the file, a token, a
+  file id, or any amount (gross or net). Opening the payslip needs a signed-in staff session; the PDF then opens through
+  the short-lived file link checked by `PayslipFilePolicy` (own current version only). A mailbox compromise therefore
+  discloses that a payslip exists and its pay dates, nothing else.
+- **Whose data:** the staff member's. Sent only to the account's live address (read under RLS at send time, SC-01).
+- **Tests:** `payslip-email.spec.ts` (text has no link / token / file id / money); payroll-runs upload test: one email per
+  new version, NOTIFICATION, no attachment, no file id, no pay figures, the sign-in sentence.
+
+**Retention (decision 7: "keep payslips and payroll records 6 years", matching A11).** Policy, not yet a job: nothing in
+Crewflow can reach 6 years before 2032 (the first payslips date from 2026), so no deletion code ships now. Recorded so the
+job is built to this rule, with these owner calls first:
+1. **6 years from what:** the payslip's payday, the upload date, or the end of the UK tax year the payday falls in (HMRC's
+   own minimum is 3 years after the tax year)? Recommended: end of the tax year of the payday + 6 years.
+2. **What is deleted:** recommended: the payslip PDF files (`payslip_document` versions and their stored files) are
+   deleted; the `payslip` / `payroll_run_line` / `payroll_record` rows (money snapshot, paid confirmation) are kept or
+   anonymised under A11, never silently dropped (they are the financial record; audit_log is insert-only).
+3. **A deletion request inside the 6 years:** A11 says anonymise personal details, keep the financial record. The payslip
+   PDF itself contains personal details (name, NI number on the provider's document): keep until the retention date, or
+   delete on request? Needs the owner's / payroll adviser's call.
+When built, the job runs in the Worker per organisation with the worker marker, deletes files only through FileService
+(audited, one audit row per deleted version), never touches a payslip inside its period, and gets its own entry here.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It

@@ -16,6 +16,7 @@ import { payrollAudience } from '../../../engine/core-modules/realtime/realtime-
 import { NotificationService } from '../../notification/services/notification.service';
 import { FieldPolicy, FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
+import { payslipEmailText } from '../constants/payslip-email';
 import { activePeriods, allocateRecords, PeriodRef, periodsById } from './payroll-allocation';
 
 type Flag = typeof PermissionFlag.PAYROLL_VIEW | typeof PermissionFlag.PAYROLL_CALCULATE | typeof PermissionFlag.PAYROLL_APPROVE | typeof PermissionFlag.PAYROLL_MARK_PAID;
@@ -291,6 +292,11 @@ export class PayrollRunService {
         title: version === 1 ? 'Your payslip is available' : 'Your payslip was updated',
         message: `Payslip for ${run.period_start} – ${run.period_end} (payday ${run.payday}).`,
         relatedEntityType: 'payslip_document', relatedEntityId: doc.id,
+        // Owner decision 7: the staff member is also emailed (unless they turned this email off), and the email only POINTS
+        // to the payslip: no attachment, no pay figures, no file link, no token. Viewing needs a signed-in session, then the
+        // PDF opens through the short-lived file link (payslip-file.policy.ts).
+        forceEmail: true,
+        emailMessage: payslipEmailText(run, version),
       });
       return this.view(m, ctx, runId);
     });
