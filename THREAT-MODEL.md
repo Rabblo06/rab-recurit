@@ -10609,6 +10609,31 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## OpenAPI document generated at build time as a CI artefact, contract tests for the Staff app endpoints (branch test/openapi-contract, Lane E, 2026-11-21, revised 2026-11-24 per owner decision 71; no SQL, no runtime code, no new dependency)
+
+- **Threat:** a published API description is reconnaissance material (every route, parameter and body field in one
+  place), and a docs route left on in production is a classic exposure. The repository is PUBLIC, so a committed
+  document would be published to everyone. A third-party OpenAPI library is also supply-chain surface: the first
+  version used `@nestjs/swagger`, which pulls in `swagger-ui-dist` → `@scarf/scarf`, an install script that reports
+  installs to a third party.
+- **Control:** the generator is the repository's own code (`packages/rab-server/src/__tests__/contract/openapi/`,
+  outside the app build). It reads routes, parameters and request bodies from the controllers' Nest metadata, and
+  request schemas from the class-validator rules the global ValidationPipe enforces, so the document cannot advertise
+  a field the pipe would refuse. No package was added (yarn.lock unchanged). The document is never committed: ci-server
+  `openapi` generates it and uploads it as a workflow artefact. The generator fails on a dangling schema reference, a
+  contract response for a missing route, two handlers on one route, or two builds that differ.
+  `openapi-build-time-only.spec.ts` pins the rest:
+  - no OpenAPI/Swagger library is imported in rab-server or rab-worker, nor a dependency of any workspace;
+  - only `src/__tests__` imports the generator;
+  - neither `main.ts` mentions swagger/openapi/redoc;
+  - no `*openapi.json|yaml` is committed under `packages/`.
+- **Control (contract):** `openapi-contract.integration.spec.ts` builds the document in-process. It fails when the
+  document and the live AppModule route table differ, and when a Staff-app endpoint's live response stops matching the
+  schema the app parses.
+- **Residual:** the CI artefact is visible to anyone who can see the repository's Actions runs (public). It contains
+  nothing beyond what the public source already shows, and every route keeps its own guards. Response schemas exist
+  only for the contract endpoints; other responses are undocumented, not unprotected.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It

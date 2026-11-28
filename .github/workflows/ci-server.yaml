@@ -111,6 +111,32 @@ jobs:
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
 
+  # The OpenAPI document of the API, generated from the code by the repository's own build-time generator
+  # (packages/rab-server/src/__tests__/contract/openapi/; no third-party OpenAPI library) and uploaded as the `openapi`
+  # artefact. Never committed, never served (src/__tests__/static/openapi-build-time-only.spec.ts). The generator fails on
+  # a dangling schema reference, a contract response for a missing route, two handlers on one route, or two builds that
+  # differ. The live side (document = live route table; Staff app responses match the contract schemas) runs in the test
+  # job (openapi-contract.integration.spec.ts), on the same in-process build.
+  openapi:
+    needs: changed
+    if: needs.changed.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - name: Build the workspace libraries the server imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - name: Generate the OpenAPI document from the code
+        run: npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/__tests__/contract/openapi/generate-openapi.ts --out "${RUNNER_TEMP}/openapi/crewflow-api.openapi.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openapi
+          path: ${{ runner.temp }}/openapi/crewflow-api.openapi.json
+          if-no-files-found: error
+
   # Part C1 (OWNER-DB-ULTIMATE.md Part C): HWS runtime routing is ON by default outside production, so the job above runs
   # it on. This job keeps the legacy OFF mode (business rows in the core copies, production's mode until C3) covered until
   # C4 deletes the off path. Same database build; only HWS_RUNTIME_ENABLED differs.
@@ -230,7 +256,7 @@ jobs:
   # filter output(s) (server) said there was nothing to run; when the filter said run, every job must succeed.
   ci-server-gate:
     name: ci-server gate
-    needs: [changed, test, test-hws-off, test-search-path-trap]
+    needs: [changed, test, openapi, test-hws-off, test-search-path-trap]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
