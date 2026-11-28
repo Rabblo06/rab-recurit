@@ -10523,6 +10523,24 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## Attendance list — exact total on page 1 only, "of many" afterwards (owner decision 60, branch perf/attendance-total-first-page, 2026-11-21; no SQL)
+- **Change:** `GET /attendance` (manager list, `AttendanceService.list`) runs its `count(*)` only when `page` is 1 (or
+  absent). Page 2+ answers `total: null`. Every page now carries `hasMore`, answered by fetching one row more than the
+  page size and dropping it. Counting every matching row was 9% of database time at the load-test spike.
+- **Controls unchanged:** the permission check (`attendance.view`, layer 2), the resource scope as the first WHERE
+  condition (owner's own staff / Venue Manager's venues), the field policy (no filtering or sorting on hidden money)
+  and RLS all run before either query; the count and the page use the same WHERE. The extra row is never returned
+  (the page is sliced back to `limit`), so a caller cannot read one row past the page.
+- **Disclosure:** `hasMore` reveals no more than `total` already did on page 1 (whether rows exist past this page,
+  inside the caller's own scope).
+- **Client:** `fetchAllPages` (rab-front, Dashboard) treats a non-number total as unknown and stops on a short page or
+  `hasMore: false`, so a later page's `null` never ends the walk early or loops. No console attendance table exists in
+  rab-front today, so no footer changes here (the shared `RecordFooter` is left to the offers lane).
+- **Tests:** `c1-keyset-paging.integration.spec.ts` (page 1 total, page 2/3 null, hasMore true/false, every row once,
+  filtered page 1 count; the shared offset-walk helper no longer relies on `total` after page 1);
+  `pagination.spec.ts` (null total on later pages walks to the end, stops on `hasMore: false`).
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

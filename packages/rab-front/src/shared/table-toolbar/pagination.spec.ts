@@ -36,6 +36,25 @@ it('stops on a full last page whose total is reached (no extra empty request)', 
   expect(get).toHaveBeenCalledTimes(1);
 });
 
+it('a total on page 1 only (null afterwards, owner decision 60) still walks every page and stops on hasMore false', async () => {
+  const all = rows(400);
+  get.mockImplementation(async (_url: string, { params }: { params: { page: number; limit: number } }) => {
+    const data = all.slice((params.page - 1) * params.limit, params.page * params.limit);
+    return { data: { data, total: params.page === 1 ? all.length : null, hasMore: params.page * params.limit < all.length } };
+  });
+  expect(await fetchAllPages('/attendance')).toHaveLength(400);
+  // Exactly two requests: the full second page carries hasMore false, so no empty third request.
+  expect(get).toHaveBeenCalledTimes(2);
+});
+
+it('page 2+ with total null and no hasMore keeps walking until a short page', async () => {
+  const all = rows(450);
+  get.mockImplementation(async (_url: string, { params }: { params: { page: number; limit: number } }) => ({
+    data: { data: all.slice((params.page - 1) * params.limit, params.page * params.limit), total: params.page === 1 ? 450 : null },
+  }));
+  expect(await fetchAllPages('/attendance')).toHaveLength(450);
+});
+
 it('fails loudly instead of truncating a list too large to walk', async () => {
   get.mockImplementation(async () => ({ data: { data: rows(MAX_PAGE_SIZE) } }));
   await expect(fetchAllPages('/attendance')).rejects.toBeInstanceOf(ListTooLargeError);
