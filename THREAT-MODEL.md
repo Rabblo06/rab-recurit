@@ -10523,6 +10523,49 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## Auth refresh, password reset and report-PDF access no longer take a second pool connection inside their transaction (branch fix/auth-refresh-pool-deadlock, 2026-11-21; no SQL)
+
+**Security finding (§5.8).** Found by the load test (open PR #313, `packages/rab-docker/docs/hardening/LOAD-TEST.md` §4.3).
+
+```
+[HIGH] (availability; §5.8 has no availability row: ranked by blast radius, every tenant of an API instance)
+Failure:      any holder of a valid refresh token (also ordinary devices refreshing together) → concurrent
+              refreshes could exhaust the connection pool → every connection is held by a transaction waiting for
+              one more connection → the whole API instance (all tenants) returns 500 / times out until pg-pool's
+              connection timeout, and again on the next such burst
+Actor:        any authenticated staff-app session; no special role
+Location:     packages/rab-server/src/engine/core-modules/auth/token/services/refresh-token.service.ts:247
+              (was :238); the same pattern on rarer paths: auth.service.ts resetPassword (:1123, was :1109, and the
+              organisation password-flag read behind passwordProviderPermits, :999) and
+              modules/attendance/files/report-file.policy.ts:34 (was :32, report-PDF download; actor narrowed to a
+              holder of report.view)
+Root cause:   a method running inside a transaction (holding that connection, and in rotate() the token's row lock)
+              asked a question through a helper that opens its OWN transaction on a second pool connection:
+              PlatformAdminService.isPlatformAdmin() (rotate, resetPassword),
+              OrganisationAuthProvidersService.getEffective() (resetPassword) and
+              PermissionsService.userHasPermission() (ReportFilePolicy.canRead, inside FilesController's transaction).
+              With enough concurrent callers each holds one connection and waits for another: a pool deadlock
+              broken only by the connection timeout.
+Fix:          service layer: every such lookup runs on the open transaction's own manager:
+              isPlatformAdminTx(manager, { userId }) in rotate() and resetPassword(); the new
+              OrganisationAuthProvidersService.getEffectiveTx(manager, organisationId) (getEffective delegates to it);
+              userHasPermissionTx(manager, ctx, REPORT_VIEW) in ReportFilePolicy. core.is_active_platform_admin(uuid)
+              is SECURITY DEFINER on an explicit user id, so its answer does not depend on the caller's tenant GUCs;
+              the organisation flags and the permission are read under the same tenant context as before. Same
+              results, same denials, no second connection. No SQL changed.
+Regression:   auth.service.single-connection.spec.ts and
+              modules/attendance/__tests__/report-file-policy.single-connection.spec.ts (the real services over a
+              fake one-connection pool that throws on any checkout while a transaction is open; the existing denials
+              are re-asserted: suspended organisation, platform-admin exemption, CF-06, report.view / venue scope →
+              404 + audit); refresh-token.service.spec.ts (rotate() uses its own manager);
+              refresh-pool-deadlock.integration.spec.ts (real Postgres with a deliberately small pool: a concurrent
+              refresh burst completes with no 5xx and the API keeps serving).
+```
+
+- **Residual:** the rule "a method handed a `manager` never opens its own transaction" is enforced by these tests for
+  the three paths, not by a lint. A heuristic scan of rab-server and rab-worker for the pattern found no other site.
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

@@ -128,7 +128,7 @@ function harness(opts: { user?: Record<string, unknown> } = {}) {
     { resolveForUser: jest.fn(async () => 'workspace-1') } as never,
     undefined as never,
     undefined as never,
-    { systemEnabled: () => ({ password: true }), getEffective: async () => ({ password: true }) } as never,
+    { systemEnabled: () => ({ password: true }), getEffective: async () => ({ password: true }), getEffectiveTx: async () => ({ password: true }) } as never,
     securityVersion as never,
     undefined as never,
     undefined as never,

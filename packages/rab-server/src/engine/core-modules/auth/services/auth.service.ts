@@ -984,10 +984,21 @@ export class AuthService {
    * CF-06: whether password authentication may be used by this identity right now. The deployment switch
    * (AUTH_PASSWORD_ENABLED) is absolute; an organisation's switch has the mobile-workforce exemption
    * (`passwordExemptForMobileWorkforce`). Fails closed: an error reading the flags propagates (no sign-in).
+   * `manager`: the caller's open tenant transaction for `ctx`, when there is one — the flags are then read on it, never
+   * through a second pooled transaction (load-test §4.3).
    */
-  private async passwordProviderPermits(ctx: AuthContext, roles: readonly string[], isPlatformAdmin: boolean, target: ApplicationTarget | 'recovery' | null): Promise<boolean> {
+  private async passwordProviderPermits(
+    ctx: AuthContext,
+    roles: readonly string[],
+    isPlatformAdmin: boolean,
+    target: ApplicationTarget | 'recovery' | null,
+    manager?: EntityManager,
+  ): Promise<boolean> {
     if (!this.organisationAuthProviders.systemEnabled().password) return false;
-    if ((await this.organisationAuthProviders.getEffective(ctx)).password) return true;
+    const effective = manager
+      ? await this.organisationAuthProviders.getEffectiveTx(manager, ctx.organisationId!)
+      : await this.organisationAuthProviders.getEffective(ctx);
+    if (effective.password) return true;
     return passwordExemptForMobileWorkforce(roles, isPlatformAdmin, target);
   }
 
@@ -1105,9 +1116,12 @@ export class AuthService {
       const user = await manager.findOneOrFail(User, { where: { id: consumed.userId } });
       // CF-06: a password the identity may not sign in with is never set through a recovery link (the first-time setup
       // link is exempt: it activates the account, and sign-in itself is still refused). Throwing rolls the consume back.
+      // Load-test §4.3: both lookups run on THIS transaction's connection (never a second pooled transaction opened while
+      // this one holds its connection and the consumed token row). Same answers: is_active_platform_admin(uuid) is
+      // SECURITY DEFINER on an explicit user id, and the organisation flags are read under the same tenant context.
       if (consumed.purpose !== PasswordResetTokenPurpose.INITIAL_SETUP) {
-        const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: user.id });
-        if (!(await this.passwordProviderPermits(ctx, await this.rolesForUserTx(manager, user.id), isPlatformAdmin, 'recovery'))) {
+        const isPlatformAdmin = await this.platformAdmin.isPlatformAdminTx(manager, { userId: user.id });
+        if (!(await this.passwordProviderPermits(ctx, await this.rolesForUserTx(manager, user.id), isPlatformAdmin, 'recovery', manager))) {
           throw new BadRequestException('This reset link is invalid or has expired.');
         }
       }

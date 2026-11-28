@@ -93,8 +93,16 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
   }
 
   async getEffective(ctx: AuthContext): Promise<EffectiveAuthProviders> {
-    const org = await this.tenantContext.runInTenantContext(ctx, (manager) => this.getOrganisationFlags(manager, ctx.organisationId!));
-    return this.effectiveFrom(this.systemEnabled(), org);
+    return this.tenantContext.runInTenantContext(ctx, (manager) => this.getEffectiveTx(manager, ctx.organisationId!));
+  }
+
+  /**
+   * Same answer as `getEffective`, for a caller already inside its own tenant transaction for that organisation: reads on
+   * the caller's connection instead of opening a second transaction on a second pool connection (load-test §4.3: a
+   * transaction that waits for another pooled connection can deadlock the pool under concurrency).
+   */
+  async getEffectiveTx(manager: EntityManager, organisationId: string): Promise<EffectiveAuthProviders> {
+    return this.effectiveFrom(this.systemEnabled(), await this.getOrganisationFlags(manager, organisationId));
   }
 
   /**

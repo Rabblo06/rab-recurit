@@ -235,7 +235,16 @@ export class RefreshTokenService {
     // login, now enforced here too: a session minted BEFORE suspension must not be able to mint
     // itself an indefinite stream of fresh access tokens via refresh. Platform admin exempt, same
     // reasoning as login's own check.
-    if (!(await this.platformAdmin.isPlatformAdmin({ userId: existing.userId }))) {
+    //
+    // Load-test §4.3 (pool deadlock): asked on THIS transaction's own connection, never through
+    // `isPlatformAdmin()`, which opens a second transaction on a second pool connection while this
+    // one still holds its connection and the row lock. With pool-size concurrent refreshes each held
+    // one connection and waited for another until the pool timeout, and every request on the
+    // instance (all tenants) failed. `core.is_active_platform_admin(uuid)` is SECURITY DEFINER and
+    // takes the user id explicitly, so the answer does not depend on this transaction's tenant
+    // GUCs: same result, no second connection. Rule: a method handed a `manager` never opens its
+    // own transaction.
+    if (!(await this.platformAdmin.isPlatformAdminTx(manager, { userId: existing.userId }))) {
       const [org] = await manager.query<Array<{ suspended_at: string | null }>>(
         `SELECT suspended_at FROM core.organisation WHERE id = $1`,
         [existing.organisationId],
