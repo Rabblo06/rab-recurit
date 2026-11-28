@@ -18,7 +18,6 @@ import { preloadPhoneInput } from '../features/users/LazyPhoneInput';
  */
 export const AiChatPage = lazyWithPreload(() => import('../features/ai/AiChatPage'));
 export const Users = lazyWithPreload(() => import('../features/users/Users'));
-export const UserProfile = lazyWithPreload(() => import('../features/users/UserProfile'));
 export const Shifts = lazyWithPreload(() => import('../features/scheduling/Shifts'));
 export const Offers = lazyWithPreload(() => import('../features/offers/Offers'));
 export const VenueOffers = lazyWithPreload(() => import('../features/scheduling/VenueOffers'));

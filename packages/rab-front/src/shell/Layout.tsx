@@ -195,7 +195,6 @@ function LayoutContent() {
   }, [navigate]);
   const { data: profile } = useCurrentProfile();
   const displayName = [profile?.firstName, profile?.lastName].filter(Boolean).join(' ') || 'Account';
-  const isUserProfile = location.pathname.startsWith('/users/') && location.pathname !== '/users';
   const realtimeStatus = useRealtimeStatus();
 
   // Same `['me']` query key `OnboardingGate` (one level up in the tree) already populated with a
@@ -416,12 +415,6 @@ function LayoutContent() {
               <button className="btn-icon" aria-label="New chat" title="New chat" onClick={chat.newChat}><IconPencilPlus size={17}/></button>
               <button className="btn-icon" aria-label="Continue chat beside workspace" title="Continue chat beside workspace" onClick={continueInPanel}><IconLayoutSidebarRightExpand size={17}/></button>
             </> : aiEligible && <button className="btn-icon ask-ai-trigger" aria-label="Ask AI" aria-keyshortcuts={isApplePlatform() ? 'Meta+J' : 'Control+J'} title={`Ask AI (${askAiShortcutLabel()})`} onClick={openAskAi}><IconSparkles size={17}/></button>}
-            {isUserProfile && (
-              <button className="btn btn-outline" style={{ gap: 6 }} onClick={() => document.dispatchEvent(new CustomEvent('trigger-send-email'))}>
-                <IconMail size={14}/>
-                Send Email
-              </button>
-            )}
             {realtimeStatus === 'reconnecting' && (
               // Subtle and non-alarming on purpose: a brief drop/backoff reconnect is routine
               // (see `realtime-client.ts`'s bounded jittered backoff), never worth a banner. Shown
