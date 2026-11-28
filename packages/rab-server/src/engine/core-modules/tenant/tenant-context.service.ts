@@ -99,10 +99,13 @@ export interface BindExtras {
 /**
  * T-1: the one binding statement. The GUC names and the `'on'` literal are constants; every request-derived value is a
  * bound parameter ($1-$5, and $6 = the search_path when it is folded in). Exported for the exact-text tests.
+ * `jit = off` (M9 load test §4.1, owner decision 49): the RLS sub-plans push list queries past jit_above_cost, and PostgreSQL
+ * then JIT-compiles them on every execution (up to 7 s of an 11 s attendance page; it saturated the 2 database CPUs).
+ * Transaction-local like every GUC here, so it never outlives the transaction on a pooled connection.
  */
 export function bindGucsSql(extras: BindExtras = {}): string {
   return (
-    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), set_config('rab.upgrade_scope', '', true), ` +
+    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), set_config('rab.upgrade_scope', '', true), set_config('jit', 'off', true), ` +
     (extras.searchPath !== undefined ? `set_config('search_path', $6, true), ` : '') +
     (extras.readOnly ? `set_config('transaction_read_only', 'on', true), ` : '') +
     `current_user::text AS cu, session_user::text AS su`
