@@ -10609,6 +10609,29 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Permission matrix: every authenticated route x every role, live in CI (branch test/permission-matrix, Lane E, 2026-11-21; tests only, no SQL, no runtime code)
+
+- **Threat:** a route whose guard chain silently lets in a role §7 says it must not: a new endpoint without its
+  `PermissionGuard`, a mobile-allowed decorator on a console route, a role default that grows a flag. Per-route abuse
+  suites catch the routes someone thought to test; nothing caught the routes nobody thought about.
+- **Control:** `permission-matrix.integration.spec.ts` discovers the live route table from the real AppModule. It
+  requires a row for every route that runs JwtAuthGuard in `permission-matrix/permission-matrix.data.ts`: five
+  columns (platform admin, CEO, Internal Manager, Venue Manager, Staff), cells `ok` / `403` / `404`. A new endpoint
+  fails CI until it is classified there. Each role signs in for real (production role defaults, its own application)
+  and every route is requested as every role. The probe never lets a mutation reach its handler: a record route gets
+  a malformed id (UuidPathParamsInterceptor 404 after the guards); a validated body or query gets an undeclared
+  property (ValidationPipe 400); the 14 mutations with neither are listed with a decision. Whether a request got past
+  the guards is observed (a marker set by the global UuidPathParamsInterceptor, which runs only after every guard), and a
+  boundary probe that got past them must get exactly its boundary answer: a probe that reached a handler fails the
+  suite instead of reading as `ok`. Static checks on the
+  matrix data pin §7 invariants: `/admin/**` is platform-admin only; Venue Managers and Staff never reach the payroll
+  console (Staff only `/payroll/me/*`); clock-in/out is Staff-only; Staff never reach audit, roles or manager admin.
+  A guard class the probe does not model fails the suite.
+- **Scope:** a cell pins layer 1 (the guard chain) plus what a GET answers for the fixture identity. Per-record
+  404-not-403 (another tenant, workspace, venue or person) stays with the abuse-case suites.
+- **Residual:** AI routes are pinned in the default state (organisation AI switch off: 404 for everyone), not with AI
+  on. The Internal Manager column is a plain `manager` system role, not the organisation's Initial Manager.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It
