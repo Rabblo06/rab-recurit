@@ -8,3 +8,4 @@ export * from './hostname';
 export * from './geo';
 export * from './availability';
 export * from './location-evidence';
+export * from './offline-punch-time';

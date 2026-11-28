@@ -121,6 +121,8 @@ export const SHIFT_ASSIGNMENT_TRANSITIONS: Record<ShiftAssignmentStatusType, Shi
   staff_accepted: ['confirmed', 'rejected', 'cancelled'], // confirmed: manager only; rejected: manager reject or the deadline
   confirmed: ['cancelled', 'no_show', 'completed'],
   no_show: ['completed'], // a provisional no-show superseded by recorded attendance
+  // M4 D6 (owner-approved 2026-11-21): offline sync ONLY may supersede a still-provisional no-show with no_show -> confirmed,
+  // through the separate OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS table (@rab/shared), never through this one.
   declined: [],
   rejected: [],
   withdrawn: [],
@@ -134,7 +136,7 @@ export const ATTENDANCE_TRANSITIONS: Record<
 > = {
   scheduled: ['clocked_in', 'absent'],
   clocked_in: ['on_break', 'clocked_out', 'missing_clock_out'],
-  on_break: ['clocked_in', 'clocked_out'],
+  on_break: ['clocked_in', 'clocked_out', 'missing_clock_out'], // M4: the monitor flags an abandoned break too (A10)
   clocked_out: ['under_review', 'approved'],
   missing_clock_out: ['clocked_out', 'disputed'],
   late: ['clocked_out', 'under_review'],

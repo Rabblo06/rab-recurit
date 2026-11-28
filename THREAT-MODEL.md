@@ -10523,6 +10523,41 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## M4 shared rules: break-aware worked time, offline punch time bounds, two transition edges (branch feat/m4-shared-duration-bounds, 2026-11-21; no SQL; owner-approved design D3 / D4 / D5 / D6 / D7 / D9)
+- **What changed (`@rab/shared`, the one place these rules live).**
+  - `duration.ts` (D9): recorded breaks are clamped to [clockIn, clockOut], overlapping breaks throw `RangeError` (two
+    breaks at once is bad data, never a double deduction), break milliseconds are summed and rounded once.
+    `computeWorkedDuration` returns milliseconds; `computeWorkedMinutes` is built on it, so a live total and the payslip
+    come from the same code. With no recorded break the result is unchanged (proved by a seconds-level test).
+  - D7: `minimumUnpaidBreakMinutes` makes the deduction max(recorded unpaid, minimum), so an offline break can never
+    lower the deduction below the scheduled break.
+  - `offline-punch-time.ts` (D2 / D3 / D4 / D5): `boundOfflinePunchTime` derives the anchored punch time C = ticket issue
+    time (server) + boot-clock elapsed, trusted only within the capture age, with C <= arrival and a non-decreasing
+    sequence; a late sync is `too_late`. `applyOfflinePunchTime` is the pay-safe table: clock-in never before the
+    scheduled start, clock-out never after the scheduled end, an untrusted clock-out never applied, untrusted breaks
+    refused. `offlinePunchFlags` raises clock_skew / clock_changed / late_sync / clamped_to_schedule and never moves a time.
+    The phone's wall clock is never an input to pay.
+  - Transitions: `on_break -> missing_clock_out` (A10: an abandoned break is flagged like a missing clock-out, never left
+    open); `no_show -> confirmed` only in the separate `OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS` table (D6), so no manager action
+    or job can use it; the general assignment table still refuses it (tested).
+- **Abuse cases covered by unit tests.** Backdating / forward-dating: C > arrival is untrusted with no tolerance; a reboot,
+  a missing ticket, a negative or too-long elapsed time and a backwards sequence are untrusted; a 73 h sync is SYNC_TOO_LATE;
+  an exhaustive grid proves S <= clockIn <= clockOut <= E for every applied trusted pair (pay can never exceed the
+  schedule); overlapping breaks throw; a short offline break still deducts the scheduled break.
+- **Assumption flagged for the owner.** An UNTRUSTED offline clock-in is also raised to the scheduled start (DESIGN §4.4 says
+  "R if R is in the window"); this keeps D3 for both trust levels and can only lower pay.
+- **Not changed.** No endpoint, no SQL, no app behaviour: nothing calls the offline functions yet and offline mode stays OFF
+  (HARD RULE, DESIGN.md / ROLLOUT-CHECKLIST.md).
+- **Security review fixes (2026-11-21).** The D7 floor no longer depends on the caller: `BreakRecordInput.source`
+  ('offline' when a break's start or end was recorded offline) makes duration.ts itself deduct max(recorded unpaid,
+  scheduled break); the caller-supplied `minimumUnpaidBreakMinutes` option is removed. A manager-confirmed break
+  (`confirmedBreakMinutes`) beats recorded breaks and the schedule (D7 precedence). A negative or fractional
+  `scheduledBreakMinutes` / `confirmedBreakMinutes` throws `RangeError` (a negative break used to inflate worked time).
+  Worked time is rounded once and the break figure is derived, so gross − break = worked exactly in whole minutes.
+  `OFFLINE_SYNC_ASSIGNMENT_TRANSITIONS` is deep-frozen and a static test allows importing it only from
+  `modules/attendance/services/offline-sync.service.ts`.
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager
