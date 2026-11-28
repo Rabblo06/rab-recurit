@@ -27,6 +27,7 @@ export const Calendar = lazyWithPreload(() => import('../features/scheduling/Cal
 export const Payroll = lazyWithPreload(() => import('../features/payroll/Payroll'));
 export const Venues = lazyWithPreload(() => import('../features/venues/Venues'));
 export const AuditLog = lazyWithPreload(() => import('../features/audit/AuditLog'));
+export const Reports = lazyWithPreload(() => import('../features/reports/Reports'));
 export const HelpCenter = lazyWithPreload(() => import('../features/help/HelpCenter'));
 export const Support = lazyWithPreload(() => import('../features/help/Support'));
 export const SettingsLayout = lazyWithPreload(() => import('../features/settings/layout/SettingsLayout'));
@@ -78,6 +79,7 @@ export const NAV_TARGETS: Record<string, NavTarget> = {
   '/venues': { pages: [Venues] },
   '/venue-offers': { pages: [VenueOffers] },
   '/audit': { pages: [AuditLog] },
+  '/reports': { pages: [Reports], prefetch: (qc) => void qc.prefetchQuery(capabilitiesQuery) },
   '/help': { pages: [HelpCenter] },
   '/support': { pages: [Support] },
   '/settings/profile': { pages: [SettingsLayout, ProfilePage], prefetch: (qc) => void qc.prefetchQuery(sessionsQuery) },

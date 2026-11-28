@@ -36,6 +36,7 @@ import {
   Payroll,
   Venues,
   AuditLog,
+  Reports,
   HelpCenter,
   Support,
   SettingsLayout,
@@ -420,6 +421,7 @@ export default function App() {
             <Route path="payroll" element={<Payroll />} />
             <Route path="venues" element={<Venues />} />
             <Route path="audit" element={<AuditLog />} />
+            <Route path="reports" element={<Reports />} />
             <Route path="help" element={<HelpCenter />} />
             <Route path="support" element={<Support />} />
             <Route path="settings" element={<SettingsLayout />}>
