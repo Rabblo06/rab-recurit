@@ -10609,6 +10609,28 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** engine still names domain tables in raw SQL in several places (e.g. `core.manager_profile`,
   `core.manager_workspace`); the ratchet sees imports, not table names.
 
+## Payroll: the database refuses writes to one's own payslip (decision 51, database half; branch fix/payroll-own-pay-rls-core, 2026-11-21; DRAFT, new SQL)
+
+- **What:** migration `PayslipOwnPayRls1786723000000` narrows two core policies by one conjunct each, WITH CHECK only:
+  `payslip_update` (version bump on upload, net set/clear, mark paid) and `payslip_document_insert` (the document of an
+  upload) refuse a row whose payslip's staff profile belongs to `core.current_uid()`. The service refusal is the other PR
+  (fix/payroll-own-pay-upload-net); this is the RLS layer under it, so a bug, a job or a direct query cannot bypass it.
+- **Why WITH CHECK, not USING:** a USING filter would make the own-payslip UPDATE match zero rows silently, and the
+  service would audit a write that never happened. WITH CHECK raises 42501.
+- **What the sub-selects can see:** the caller's own staff profile (readable to its owner) and the payslip row (the
+  policy already requires the caller to be a payroll manager of the workspace, who reads every payslip). So a hidden row
+  cannot turn the NOT EXISTS into a false "not own".
+- **Scope:** core copies only (production uses them while HWS is off). The `workspace_*` copies need a 0.7.0 workspace
+  structure level and wait for the 0.7.0 chain (#175 / #177 / #243); until then, with HWS on, only the service refuses.
+- **Migration safety:** one transaction; per policy only a known expression is replaced (semantic-golden hashes, before or
+  after for a re-run), USING / command / PERMISSIVE / TO PUBLIC re-checked after; secure-owner invariants; down() restores
+  the old expressions. No grant, table, function, trigger or data change.
+- **Tests:** `payslip-own-pay-rls.integration.spec.ts` as the runtime login (asserted not SUPERUSER / BYPASSRLS): own
+  net set / clear / version / paid 42501, own document 42501; the same manager can still write another staff member's
+  payslip (document INSERT passes RLS, fails only on the fake file FK); another manager can write the first manager's
+  payslip; a non-manager staff member writes nothing; no tenant context reads nothing. `payslip-own-pay-rls-sql.spec.ts`
+  (static): builders equal the deparsed text, hashes, goldens, one appended conjunct, no grant/role/DDL.
+
 ## iPhone offline punch queue, encrypted at rest, off by construction (branch feat/iphone-offline-queue, 2026-11-21; M4 Lane B iPhone 1/3; no SQL, no server code)
 - **Surface:** the native iPhone Staff app can now hold attendance actions (check-in, clock-in, break start/end,
   clock-out) on the phone for a later `POST /attendance/me/sync` (DESIGN `docs/plans/m4-offline/DESIGN.md` §3). It

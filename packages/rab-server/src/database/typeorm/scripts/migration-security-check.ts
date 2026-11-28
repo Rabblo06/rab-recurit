@@ -54,6 +54,7 @@ import { DataSourceOptions } from 'typeorm';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
 import { METADATA_TABLES } from '../core/metadata-tables-sql';
+import { CORE_PAYSLIP_OWN_PAY_REVIEWED_DRIFT } from '../workspace-schema/payslip-own-pay-rls-sql';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
 import {
   PHASE_0B_MIGRATION_TIMESTAMP,
@@ -235,6 +236,11 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // Decision 51 (DRAFT, owner SQL review pending): core.payslip's payslip_update and core.payslip_document's
+  // payslip_document_insert change ONLY their WITH CHECK, each the old expression plus one conjunct refusing the caller's own
+  // payslip. Same table, name, command, PERMISSIVE, TO PUBLIC, USING; no grant, no new policy. The migration replaces only a
+  // known expression (semantic-golden hashes). The lines quote the deparsed policies (payslip-own-pay-rls-sql.ts).
+  '1786723000000-PayslipOwnPayRls': CORE_PAYSLIP_OWN_PAY_REVIEWED_DRIFT,
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
