@@ -10523,6 +10523,31 @@ or RLS change. Owner decision: the iPhone (`Money.formatPence`, `ValueFormatting
 - **Residual:** anyone with write access can push a `rab/v*` tag (no tag ruleset). On a commit of `main` that only
   drafts a release; a publish still needs a person to publish it and a `release` reviewer's approval.
 
+## Front Referrer-Policy at the final edge (X6.2b, branch fix/x62b-referrer-policy-edge; no SQL, no server code)
+- **Gap:** `Referrer-Policy` was set only by `packages/rab-front/vercel.json` (the temporary deploy). The final front
+  edge (Cloudflare static assets) and any other host sent none, so the browser default applied: an older browser
+  (`no-referrer-when-downgrade`) sends the full page URL, query string included, to every third-party request
+  (fonts.googleapis.com, fonts.gstatic.com). XA-08: the forgot-password page carries the email address in its query.
+- **Control:** two layers, the same value. `index.html` `<meta name="referrer" content="strict-origin-when-cross-origin">`
+  (before any stylesheet or script, holds on every host) and `public/_headers` `Referrer-Policy:
+  strict-origin-when-cross-origin` for `/*` (Cloudflare reads it from the build output). A cross-origin Referer is the
+  origin only, never a path or query.
+- **Why not `no-referrer` (vercel.json):** under it a browser sends `Origin: null` on every non-CORS POST (Fetch, "append
+  a request Origin header"), including the cross-origin step-up re-authentication form POST (`StepUpHost.tsx` →
+  `POST /auth/<provider>/reauthenticate`), whose server-side Origin check refuses `null`. (`same-origin` would null only
+  cross-origin non-CORS POSTs, which that form is; the dev-only same-origin `/rest` proxy is unaffected either way.)
+- **Where it applies today:** nothing in this repository deploys `public/_headers` to an edge yet, so the meta tag is the
+  effective control; `_headers` takes effect once Cloudflare static assets / Pages serve the build.
+- **Finding for the temporary deploy (not changed, the Vercel deploy is out of scope):** `vercel.json` sends
+  `Referrer-Policy: no-referrer`, so on that deploy the step-up re-authentication form POST carries `Origin: null`. The
+  new meta tag now overrides the header there too (a later `<meta name="referrer">` updates the document's policy).
+- **Tests:** `rab-front/src/shared/lib/referrer-policy.spec.ts`: exactly one meta with the value, before fonts and
+  scripts; `_headers` has `/*` with exactly that policy; `no-referrer`, `same-origin`, `unsafe-url`,
+  `no-referrer-when-downgrade` refused in both files, and fixtures carrying each of them prove the parsers detect it.
+- **Residual:** the API's own responses keep helmet's default (`no-referrer`); they are JSON, not documents, so no
+  subresource request inherits it.
+
+
 ## attendance_correction insert-only in the database, core copy (branch fix/attendance-correction-insert-only-core, 2026-11-21; DRAFT: new SQL, owner review first)
 - **Finding closed (security finding format, §5.8; S11 / architecture §5.7).** Severity: Medium (integrity of pay evidence).
   Actor: any code path, CLI or injected statement running as the runtime login with a tenant bound (for example a Manager

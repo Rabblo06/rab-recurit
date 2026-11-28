@@ -6,6 +6,9 @@
     <link rel="manifest" href="/manifest.json" />
     <meta name="theme-color" content="#171717" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- X6.2b: set by the page itself so it holds on every host (Cloudflare, DigitalOcean, Vercel, a same-origin proxy).
+         strict-origin-when-cross-origin, not no-referrer: see public/_headers. -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
