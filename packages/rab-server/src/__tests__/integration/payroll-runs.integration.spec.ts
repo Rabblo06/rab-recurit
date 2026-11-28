@@ -263,7 +263,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     const csv = await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenA));
     expect(csv.status).toBe(200);
     expect(csv.headers['content-type']).toContain('text/csv');
-    expect(csv.text.split('\n')[0]).toBe('Staff reference,Staff name,Period start,Period end,Payday,Shifts,Hours,Gross (GBP),Late approvals,Run status');
+    expect(csv.text.split('\n')[0]).toBe('"Staff reference","Staff name","Period start","Period end","Payday","Shifts","Hours","Gross (GBP)","Late approvals","Run status"');
     expect(csv.text.split('\n')).toHaveLength(4);
   });
 

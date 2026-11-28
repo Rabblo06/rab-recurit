@@ -60,13 +60,34 @@ export interface StaffPayslipEntry {
 
 const iso = (v: unknown): string | null => (v ? new Date(v as string).toISOString() : null);
 
+/** Characters a spreadsheet skips before reading a formula: whitespace (incl. NBSP and the other Unicode spaces), controls, format characters. */
+const CSV_LEADING_IGNORABLE = /^[\s\u00a0\u1680\u2000-\u200f\u2028-\u202f\u205f\u2060\u3000\ufeff\p{Cc}\p{Cf}]+/u;
+/** A formula trigger at the start of a value, or of any piece a `,` / `;` / tab / line break could split it into. */
+const CSV_FORMULA_START = /^[=+\-@\t\r]/;
+const CSV_SPLITTERS = /[,;\t\r\n]/;
+
+/** A plain decimal number (`-12.34`, `7`, `0.5`): a negative amount is data, not a formula, so it is never prefixed. */
+const CSV_PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+
+function startsFormula(piece: string): boolean {
+  const text = piece.normalize('NFKC').replace(CSV_LEADING_IGNORABLE, '');
+  return CSV_FORMULA_START.test(text) && !CSV_PLAIN_NUMBER.test(text);
+}
+
 /**
- * One CSV cell: quoted when needed, and spreadsheet formula injection neutralised (a staff name such as
- * `=HYPERLINK(...)` is exported as text, never evaluated). Wave 5.
+ * One CSV cell, formula injection neutralised (a staff name such as `=HYPERLINK(...)` is exported as text, never evaluated).
+ * Wave 5, hardened after the decision-29 security review:
+ *  - the value is read the way a spreadsheet would: NFKC-normalised (a fullwidth equals sign is `=`), leading whitespace /
+ *    NBSP / control and format characters skipped, and every piece a `,` `;` tab or line break could split it into is
+ *    checked too (`a;=1+1` in a semicolon-separated locale);
+ *  - a value with a trigger (`=` `+` `-` `@` tab CR) is prefixed with `'` (the original text is kept, never rewritten),
+ *    except a value (or piece) that is entirely a plain decimal number such as `-12.34`, which stays a number;
+ *  - EVERY cell is quoted (`"` doubled), so no separator inside a value starts a new cell in any locale.
  */
 export function csvCell(value: string): string {
-  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  const dangerous = startsFormula(value) || value.split(CSV_SPLITTERS).some((piece) => startsFormula(piece));
+  const text = dangerous ? `'${value}` : value;
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 interface RunCsvColumn {
