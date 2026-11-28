@@ -65,6 +65,15 @@ export class RealtimeConnectionRegistryService {
     return count;
   }
 
+  /** Connections of one organisation on this instance (review F7: the per-organisation share of the instance pool). */
+  countForOrganisation(organisationId: string): number {
+    let count = 0;
+    for (const record of this.connections.values()) {
+      if (record.organisationId === organisationId) count++;
+    }
+    return count;
+  }
+
   /** Total connections across every user — used only for observability/benchmarking, never an authorization decision. */
   get size(): number {
     return this.connections.size;

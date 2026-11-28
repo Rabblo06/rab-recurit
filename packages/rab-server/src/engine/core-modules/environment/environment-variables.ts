@@ -1967,13 +1967,43 @@ export class EnvironmentVariables {
   @Min(5_000)
   REALTIME_HEARTBEAT_INTERVAL_MS: number = 30_000;
 
-  /** Bounds one authenticated user's own fan-out (e.g. several open browser tabs) — never a cross-user limit. A connection beyond this is refused, not queued. */
+  /**
+   * Bounds one authenticated user's own fan-out (e.g. several open browser tabs) — never a cross-user limit. A connection beyond this is refused, not queued.
+   * C1 review F7: counted PER API INSTANCE (in-memory registry), so with N API instances one user can hold up to N × this value.
+   */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(20)
   REALTIME_MAX_CONNECTIONS_PER_USER: number = 3;
+
+  /**
+   * C1 review F7: the most open SSE streams ONE API instance holds, across every user (429 + Retry-After beyond it, before
+   * the stream opens). The per-user cap above is per instance, so this is the bound that holds whatever a user, or many
+   * users, open against one process: memory, file descriptors and heartbeat queries stay bounded per instance. Not a
+   * cluster-wide count (that would need a shared Redis counter on the connect path). Default 1000 is an operational
+   * assumption, not a measured capacity; REALTIME_ENABLED is false in production.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000)
+  REALTIME_MAX_CONNECTIONS_PER_INSTANCE: number = 1_000;
+
+  /**
+   * C1 review F7 (review of #301): the most streams ONE organisation holds on one API instance, so a single tenant's
+   * accounts can never take the whole instance pool and starve realtime for every other tenant there (at the defaults one
+   * organisation can hold at most a quarter of the pool). Applied as min(this, REALTIME_MAX_CONNECTIONS_PER_INSTANCE).
+   * Per instance, like the other two caps. Default 250 is an operational assumption, not a measured capacity.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100_000)
+  REALTIME_MAX_CONNECTIONS_PER_ORGANISATION: number = 250;
 
   /**
    * Stage 6 durable push delivery. Defaults to `false` — same "disabled until its own exit gate
